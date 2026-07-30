@@ -1,6 +1,7 @@
 import type { CodexSession } from "../session/createCodexSession";
 import { Composer } from "./Composer";
 import { Timeline } from "./Timeline";
+import { TurnProgress } from "./TurnProgress";
 
 interface ChatPageProps {
   session: CodexSession;
@@ -11,6 +12,10 @@ export function ChatPage(props: ChatPageProps) {
   return (
     <section class="chat-page">
       <Timeline busy={props.session.busy()} entries={props.session.timeline()} />
+      <TurnProgress
+        busy={props.session.busy()}
+        progress={props.session.turnProgress()}
+      />
       <Composer
         busy={props.session.busy()}
         config={props.session.config()}

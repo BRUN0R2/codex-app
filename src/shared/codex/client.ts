@@ -154,6 +154,10 @@ export function inspectAttachments(paths: string[]): Promise<Attachment[]> {
   return invoke("attachment_inspect", { paths });
 }
 
+export function readAttachmentImage(path: string): Promise<ArrayBuffer> {
+  return invoke("attachment_read_image", { path });
+}
+
 export function savePastedImage(dataBase64: string): Promise<Attachment> {
   return invoke("attachment_save_pasted_image", {
     request: { dataBase64 },

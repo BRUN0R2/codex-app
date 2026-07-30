@@ -49,30 +49,17 @@ import {
   type RuntimeStartResponse,
   type RuntimeStatus,
 } from "../../shared/codex/types";
+import { createTimeline } from "../chat/createTimeline";
+import {
+  createTurnProgress,
+  type TurnProgressSummary,
+} from "../chat/createTurnProgress";
+import type { MessageEntry, TimelineEntry } from "../chat/timelineTypes";
 import { createProjectWorkspace } from "../projects/createProjectWorkspace";
 import { createThreadLibrary } from "../projects/createThreadLibrary";
 import { pathsEqual, type ProjectRecord } from "../projects/projectStore";
 import { threadTitle, type ThreadLibraryState } from "../projects/threadLibrary";
 
-export interface MessageEntry {
-  type: "message";
-  id: string;
-  role: "assistant" | "user";
-  text: string;
-  attachments: Attachment[];
-  phase: string | null;
-  status: "complete" | "failed" | "streaming";
-}
-
-export interface ActivityEntry {
-  type: "activity";
-  id: string;
-  label: string;
-  detail: string;
-  status: string;
-}
-
-export type TimelineEntry = ActivityEntry | MessageEntry;
 export type ApprovalDecision = "accept" | "acceptForSession" | "cancel" | "decline";
 export type CompatibilityContextState = "failed" | "idle" | "loading" | "ready";
 
@@ -98,6 +85,7 @@ export interface CodexSession {
   threadsNextCursor: Accessor<string | null>;
   currentThreadTitle: Accessor<string>;
   timeline: Accessor<TimelineEntry[]>;
+  turnProgress: Accessor<TurnProgressSummary | null>;
   workspace: Accessor<string | null>;
   chooseWorkspace: () => Promise<void>;
   clearError: () => void;
@@ -153,7 +141,6 @@ export function createCodexSession(): CodexSession {
   const [activeTurnId, setActiveTurnId] = createSignal<string | null>(null);
   const [openingThreadId, setOpeningThreadId] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
-  const [timeline, setTimeline] = createSignal<TimelineEntry[]>([]);
   const [approvalQueue, setApprovalQueue] = createSignal<CodexServerRequest[]>([]);
   const [compatibilityContextState, setCompatibilityContextState] =
     createSignal<CompatibilityContextState>("idle");
@@ -167,6 +154,10 @@ export function createCodexSession(): CodexSession {
   const signedIn = createMemo(() => isSignedInAccount(account()));
   const workspace = projectWorkspace.path;
   let disposed = false;
+  const timeline = createTimeline({
+    reportProtocolError: (message) => addDiagnostic("stderr", message),
+  });
+  const turnProgress = createTurnProgress();
   const threadLibrary = createThreadLibrary({
     isDisposed: () => disposed,
     reportDiagnostic: (message) => addDiagnostic("stderr", message),
@@ -183,7 +174,7 @@ export function createCodexSession(): CodexSession {
         return threadTitle(current);
       }
     }
-    const firstUserMessage = timeline().find(
+    const firstUserMessage = timeline.entries().find(
       (entry): entry is MessageEntry => entry.type === "message" && entry.role === "user",
     );
     return firstUserMessage?.text.trim() || "Nova tarefa";
@@ -433,7 +424,8 @@ export function createCodexSession(): CodexSession {
       resetCompatibilityContext();
       threadLibrary.reset();
       setThreadId(null);
-      setTimeline([]);
+      timeline.reset();
+      turnProgress.reset();
       await refreshAccount();
     } catch (reason) {
       setError(describeCommandError(reason));
@@ -534,23 +526,19 @@ export function createCodexSession(): CodexSession {
   function resetConversation() {
     setThreadId(null);
     setActiveTurnId(null);
-    setTimeline([]);
+    timeline.reset();
+    turnProgress.reset();
     setApprovalQueue([]);
   }
 
   function hydrateThread(thread: CodexThread) {
     setThreadId(thread.id);
-    setTimeline([]);
     setApprovalQueue([]);
+    turnProgress.reset();
 
     let resumedTurnId: string | null = null;
+    timeline.hydrate(thread.turns.flatMap((turn) => turn.items));
     for (const turn of thread.turns) {
-      for (const value of turn.items) {
-        const item = asObject(value);
-        if (item !== undefined) {
-          handleItem({ item }, true);
-        }
-      }
       if (turn.status === "inProgress") {
         resumedTurnId = turn.id;
       }
@@ -631,15 +619,7 @@ export function createCodexSession(): CodexSession {
     }
 
     const clientUserMessageId = crypto.randomUUID();
-    upsertEntry({
-      type: "message",
-      id: clientUserMessageId,
-      role: "user",
-      text,
-      attachments,
-      phase: null,
-      status: "streaming",
-    });
+    timeline.addOptimisticUserMessage(clientUserMessageId, text, attachments);
     setBusy(true);
     setError(null);
 
@@ -659,15 +639,11 @@ export function createCodexSession(): CodexSession {
         attachments: attachments.map(({ path }) => ({ path })),
       });
       setActiveTurnId(response.turn.id);
-      updateEntry(clientUserMessageId, (entry) =>
-        entry.type === "message" ? { ...entry, status: "complete" } : entry,
-      );
+      timeline.markUserMessage(clientUserMessageId, "complete");
       return true;
     } catch (reason) {
       setBusy(false);
-      updateEntry(clientUserMessageId, (entry) =>
-        entry.type === "message" ? { ...entry, status: "failed" } : entry,
-      );
+      timeline.markUserMessage(clientUserMessageId, "failed");
       setError(describeCommandError(reason));
       return false;
     }
@@ -802,6 +778,7 @@ export function createCodexSession(): CodexSession {
         break;
       case "turn/started": {
         const turn = asObject(params?.turn);
+        turnProgress.reset();
         setActiveTurnId(readString(turn, "id") ?? null);
         setBusy(true);
         break;
@@ -818,12 +795,39 @@ export function createCodexSession(): CodexSession {
         threadLibrary.refreshInBackground();
         break;
       }
+      case "turn/diff/updated":
+        turnProgress.updateDiff(params);
+        break;
+      case "turn/plan/updated":
+        turnProgress.updatePlan(params);
+        break;
       case "item/started":
       case "item/completed":
-        handleItem(params, notification.method === "item/completed");
+        timeline.handleItem(
+          params?.item,
+          notification.method === "item/completed",
+        );
         break;
       case "item/agentMessage/delta":
-        appendAgentDelta(params);
+        timeline.appendAgentDelta(params);
+        break;
+      case "item/commandExecution/outputDelta":
+        timeline.appendCommandOutputDelta(params);
+        break;
+      case "item/commandExecution/terminalInteraction":
+        timeline.appendTerminalInteraction(params);
+        break;
+      case "item/fileChange/patchUpdated":
+        timeline.updateFileChangePatch(params);
+        break;
+      case "item/plan/delta":
+        timeline.appendPlanDelta(params);
+        break;
+      case "item/reasoning/summaryTextDelta":
+        timeline.appendReasoningSummaryDelta(params);
+        break;
+      case "item/reasoning/textDelta":
+        timeline.appendReasoningTextDelta(params);
         break;
       case "error": {
         const eventError = asObject(params?.error);
@@ -852,114 +856,6 @@ export function createCodexSession(): CodexSession {
 
   function addDiagnostic(stream: RuntimeDiagnostic["stream"], message: string) {
     setDiagnostics((current) => [...current.slice(-19), { stream, message }]);
-  }
-
-  function handleItem(params: JsonObject | undefined, completed: boolean) {
-    const item = asObject(params?.item);
-    if (item === undefined) {
-      return;
-    }
-    const itemType = readString(item, "type");
-    const id = readString(item, "id");
-    if (itemType === undefined || id === undefined) {
-      return;
-    }
-
-    if (itemType === "agentMessage") {
-      const text = readString(item, "text") ?? "";
-      upsertEntry({
-        type: "message",
-        id,
-        role: "assistant",
-        text,
-        attachments: [],
-        phase: readString(item, "phase") ?? null,
-        status: completed ? "complete" : "streaming",
-      });
-      return;
-    }
-    if (itemType === "userMessage") {
-      const parsed = parseUserMessage(id, item);
-      const optimistic = timeline().find(
-        (entry) => entry.type === "message" && entry.role === "user" && entry.status === "streaming",
-      );
-      if (optimistic?.type === "message" && optimistic.id !== id) {
-        replaceEntryId(optimistic.id, parsed);
-      } else {
-        upsertEntry(parsed);
-      }
-      return;
-    }
-
-    const status = readString(item, "status") ?? (completed ? "completed" : "inProgress");
-    const detail = activityDetail(itemType, item);
-    upsertEntry({
-      type: "activity",
-      id,
-      label: activityLabel(itemType),
-      detail,
-      status,
-    });
-  }
-
-  function appendAgentDelta(params: JsonObject | undefined) {
-    const id = readString(params, "itemId");
-    const delta = readString(params, "delta");
-    if (id === undefined || delta === undefined) {
-      return;
-    }
-    const exists = timeline().some((entry) => entry.id === id);
-    if (!exists) {
-      upsertEntry({
-        type: "message",
-        id,
-        role: "assistant",
-        text: delta,
-        attachments: [],
-        phase: null,
-        status: "streaming",
-      });
-      return;
-    }
-    updateEntry(id, (entry) =>
-      entry.type === "message"
-        ? { ...entry, text: `${entry.text}${delta}`, status: "streaming" }
-        : entry,
-    );
-  }
-
-  function upsertEntry(entry: TimelineEntry) {
-    setTimeline((current) => {
-      const index = current.findIndex(({ id }) => id === entry.id);
-      if (index < 0) {
-        return [...current, entry];
-      }
-      const existing = current[index];
-      const next = [...current];
-      if (
-        existing?.type === "message" &&
-        entry.type === "message" &&
-        existing.attachments.length > 0 &&
-        entry.attachments.length === 0
-      ) {
-        next[index] = { ...entry, attachments: existing.attachments };
-      } else {
-        next[index] = entry;
-      }
-      return next;
-    });
-  }
-
-  function updateEntry(id: string, update: (entry: TimelineEntry) => TimelineEntry) {
-    setTimeline((current) =>
-      current.map((entry) => (entry.id === id ? update(entry) : entry)),
-    );
-  }
-
-  function replaceEntryId(previousId: string, replacement: TimelineEntry) {
-    setTimeline((current) =>
-      current.map((entry) => (entry.id === previousId ? replacement : entry)),
-    );
   }
 
   function removeServerRequest(id: JsonValue) {
@@ -991,7 +887,8 @@ export function createCodexSession(): CodexSession {
     threadLibraryState: threadLibrary.state,
     threads: threadLibrary.threads,
     threadsNextCursor: threadLibrary.nextCursor,
-    timeline,
+    timeline: timeline.entries,
+    turnProgress: turnProgress.summary,
     workspace,
     chooseWorkspace,
     clearError: () => setError(null),
@@ -1034,89 +931,4 @@ function asObject(value: JsonValue | undefined): JsonObject | undefined {
 
 function extractModels(response: ModelListResponse): CodexModel[] {
   return response.data ?? response.models ?? [];
-}
-
-function parseUserMessage(id: string, item: JsonObject): MessageEntry {
-  const content = item.content;
-  const text: string[] = [];
-  const attachments: Attachment[] = [];
-  if (Array.isArray(content)) {
-    content.forEach((value, index) => {
-      const input = asObject(value);
-      const inputType = readString(input, "type");
-      if (inputType === "text") {
-        text.push(readString(input, "text") ?? "");
-      } else if (inputType === "localImage") {
-        const path = readString(input, "path") ?? "";
-        attachments.push({
-          id: `${id}-${index}`,
-          name: fileName(path),
-          path,
-          kind: "image",
-          size: 0,
-          mediaType: null,
-        });
-      } else if (inputType === "mention") {
-        const path = readString(input, "path") ?? "";
-        attachments.push({
-          id: `${id}-${index}`,
-          name: readString(input, "name") ?? fileName(path),
-          path,
-          kind: "file",
-          size: 0,
-          mediaType: null,
-        });
-      }
-    });
-  }
-  return {
-    type: "message",
-    id,
-    role: "user",
-    text: text.join("\n"),
-    attachments,
-    phase: null,
-    status: "complete",
-  };
-}
-
-function fileName(path: string): string {
-  return path.split(/[\\/]/).at(-1) ?? path;
-}
-
-function activityLabel(type: string): string {
-  switch (type) {
-    case "commandExecution":
-      return "Comando";
-    case "fileChange":
-      return "Alteração de arquivos";
-    case "reasoning":
-      return "Raciocínio";
-    case "plan":
-      return "Plano";
-    case "mcpToolCall":
-      return "Ferramenta MCP";
-    case "webSearch":
-      return "Pesquisa na web";
-    default:
-      return type;
-  }
-}
-
-function activityDetail(type: string, item: JsonObject): string {
-  if (type === "commandExecution") {
-    const command = item.command;
-    return Array.isArray(command)
-      ? command.filter((part): part is string => typeof part === "string").join(" ")
-      : typeof command === "string"
-        ? command
-        : "Executando comando";
-  }
-  if (type === "fileChange") {
-    const changes = item.changes;
-    return Array.isArray(changes)
-      ? `${changes.length} arquivo${changes.length === 1 ? "" : "s"}`
-      : "Preparando alterações";
-  }
-  return readString(item, "text") ?? readString(item, "query") ?? "Em andamento";
 }

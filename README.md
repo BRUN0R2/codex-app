@@ -27,11 +27,18 @@ CLI.
 - projetos persistidos, tarefas agrupadas e recentes com paginação;
 - criação, retomada, renomeação e arquivamento de tarefas;
 - seleção de workspace e envio/interrupção de turnos;
-- streaming de texto e atividades;
-- anexos e imagens coladas, validados no backend antes do envio;
+- timeline semântica com streaming, raciocínio contextual e estados ativos;
+- comandos expansíveis, diffs por arquivo e progresso agregado do turno;
+- anexos, imagens coladas e miniaturas lazy, validados no backend;
 - aprovações explícitas e presets semânticos de permissão;
 - configurações, modelos, esforço, velocidade e diagnósticos;
 - shell visual inspirado no Codex Desktop, sem alterar DPI ou zoom do sistema.
+
+Saídas extensas permanecem limitadas por contratos explícitos: comandos retêm a
+cauda mais recente e informam quantos caracteres anteriores foram omitidos;
+resultados de ferramentas removem payloads binários e valores sensíveis apenas
+da visualização. Miniaturas atravessam o IPC como bytes e viram `Blob URLs`
+revogáveis, sem base64 persistido no estado da interface.
 
 ## Fronteira atual do engine
 

@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tauri::AppHandle;
 use tauri::Manager;
+use tauri::ipc::Response;
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -116,6 +117,33 @@ pub async fn attachment_save_pasted_image(
         size: bytes.len() as u64,
         media_type: Some(format.media_type.into()),
     })
+}
+
+#[tauri::command]
+pub async fn attachment_read_image(path: String) -> CommandResult<Response> {
+    let attachment = inspect_path(&path).await.map_err(CommandError::from)?;
+    if attachment.kind != AttachmentKind::Image {
+        return Err(AppError::InvalidAttachment("preview target is not an image".into()).into());
+    }
+
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|error| AppError::FileSystem(error.to_string()))?;
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        return Err(AppError::InvalidAttachment(format!(
+            "image preview exceeds the {} MiB attachment limit",
+            MAX_ATTACHMENT_BYTES / 1024 / 1024
+        ))
+        .into());
+    }
+    if detect_image_format(&bytes).is_none() {
+        return Err(AppError::InvalidAttachment(
+            "image preview has an unsupported file signature".into(),
+        )
+        .into());
+    }
+
+    Ok(Response::new(bytes))
 }
 
 pub async fn inspect_path(path: &str) -> Result<Attachment, AppError> {

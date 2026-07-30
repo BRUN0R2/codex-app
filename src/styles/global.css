@@ -894,6 +894,8 @@ button.environment-row:hover {
 .message {
   position: relative;
   margin-bottom: 27px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 
 .message-user {
@@ -941,7 +943,11 @@ button.environment-row:hover {
   margin-bottom: 8px;
 }
 
-.message-attachments span {
+.message-attachments:last-child {
+  margin-bottom: 0;
+}
+
+.message-file-attachment {
   display: inline-flex;
   max-width: 250px;
   align-items: center;
@@ -955,6 +961,48 @@ button.environment-row:hover {
   font-size: 11.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.image-preview {
+  position: relative;
+  display: grid;
+  width: 78px;
+  height: 78px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  place-items: center;
+  border: 1px solid #414141;
+  border-radius: 9px;
+  color: #777777;
+  background: #202020;
+}
+
+.image-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.image-preview-placeholder {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+}
+
+.image-preview.state-loading .image-preview-placeholder {
+  animation: preview-pulse 1.3s ease-in-out infinite;
+}
+
+.image-preview.state-failed {
+  border-color: rgb(205 112 104 / 35%);
+  color: #a46d68;
+}
+
+@keyframes preview-pulse {
+  50% {
+    opacity: 0.45;
+  }
 }
 
 .streaming-caret {
@@ -973,73 +1021,385 @@ button.environment-row:hover {
   }
 }
 
-.activity-row {
-  display: grid;
-  grid-template-columns: 13px minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 8px;
-  margin: -7px 0 19px;
-  padding: 3px 1px;
+.activity-group {
+  margin: -5px 0 20px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 30px;
 }
 
-.activity-dot {
-  position: relative;
-  width: 10px;
-  height: 10px;
-  margin-top: 3px;
-  border: 1px solid #5c5c5c;
-  border-radius: 3px;
+.activity-group-header,
+.activity-item-button,
+.activity-item-static,
+.live-activity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  color: #969696;
+  font-size: 12.5px;
+  line-height: 1.35;
 }
 
-.activity-dot.status-completed::after {
-  position: absolute;
-  top: 1px;
-  left: 3px;
-  width: 2px;
-  height: 4px;
-  border-right: 1px solid #a2c58d;
-  border-bottom: 1px solid #a2c58d;
-  content: "";
-  transform: rotate(45deg);
+.activity-group-header {
+  max-width: 100%;
+  min-height: 26px;
+  gap: 6px;
+  padding: 2px 0;
+  background: transparent;
+  text-align: left;
 }
 
-.activity-dot.status-inprogress {
-  border-radius: 50%;
-  border-top-color: #b6b6b6;
-  animation: spin 850ms linear infinite;
+.activity-group.header-reasoning .activity-group-header {
+  color: #7e7e7e;
 }
 
-.activity-row strong {
-  display: block;
-  color: #a9a9a9;
-  font-size: 11.5px;
-  font-weight: 540;
+.activity-group.header-activity .activity-group-header {
+  color: #a0a0a0;
 }
 
-.activity-row p {
-  max-width: 580px;
-  margin: 3px 0 0;
+.activity-group-header:hover,
+.activity-group-header:focus-visible,
+.activity-item-button:hover:not(:disabled),
+.activity-item-button:focus-visible {
+  color: #e3e3e3;
+}
+
+.activity-group-label,
+.activity-item-label,
+.live-activity-label {
+  min-width: 0;
+  flex: 0 1 auto;
   overflow: hidden;
-  color: #666666;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10.5px;
-  line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.activity-status {
+.activity-group-label,
+.live-activity-label {
+  max-width: 570px;
+}
+
+.activity-item-label {
+  max-width: min(78%, 570px);
+}
+
+.activity-group-icon,
+.activity-group-header > svg,
+.activity-item-button > svg,
+.activity-item-static > svg,
+.live-activity > svg {
+  flex: 0 0 auto;
+}
+
+.activity-group.status-failed .activity-group-header,
+.activity-group.status-declined .activity-group-header {
+  color: #d58b84;
+}
+
+.activity-group-content {
+  display: grid;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.activity-group-content .live-activity {
+  margin: 0;
+}
+
+.viewed-image-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 4px 2px 7px;
+}
+
+.activity-detail-row,
+.file-change-list {
+  min-width: 0;
+}
+
+.activity-item-button,
+.activity-item-static {
+  width: 100%;
+  min-height: 26px;
+  gap: 6px;
+  padding: 2px 0;
+  background: transparent;
+  text-align: left;
+}
+
+.activity-item-button:disabled {
+  cursor: default;
+}
+
+.activity-item-detail {
+  margin-left: 3px;
+  overflow: hidden;
+  color: #666666;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-activity {
+  min-height: 26px;
+  gap: 7px;
+  margin: -5px 0 20px;
+  color: #777777;
+}
+
+.live-activity > svg {
+  color: #8a8a8a;
+}
+
+.tool-badge {
+  display: grid;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid #3d4c37;
+  border-radius: 4px;
+  color: #cbe0be;
+  background: #263022;
+  font-family: Georgia, serif;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.command-card,
+.file-diff-card {
+  margin: 2px 0 7px;
+  overflow: hidden;
+  border: 1px solid #333333;
+  border-radius: 9px;
+  background: #222222;
+}
+
+.detail-card-title,
+.file-diff-title {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  padding: 0 10px;
+  color: #b8b8b8;
+  font-size: 11.5px;
+}
+
+.detail-card-title {
+  border-bottom: 1px solid #303030;
+}
+
+.command-card pre,
+.tool-card pre {
+  max-height: 230px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  color: #bdbdbd;
+  background: transparent;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.command-prompt {
+  color: #d5d5d5;
+}
+
+.command-result {
+  padding: 6px 10px;
+  border-top: 1px solid #303030;
+  color: #777777;
+  font-size: 10.5px;
+  text-align: right;
+}
+
+.command-result.status-completed {
+  color: #8d9b88;
+}
+
+.command-result.status-failed,
+.command-result.status-declined {
+  color: #c97f77;
+}
+
+.file-change-button u {
+  text-underline-offset: 2px;
+}
+
+.diff-count {
+  flex: 0 0 auto;
+  color: #777777;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10.5px;
+  transition: color 100ms ease;
+}
+
+.file-change-button:hover .diff-additions,
+.file-change-button:focus-visible .diff-additions,
+.file-diff-title .diff-additions,
+.turn-progress .diff-additions {
+  color: #4ccf89;
+}
+
+.file-change-button:hover .diff-deletions,
+.file-change-button:focus-visible .diff-deletions,
+.file-diff-title .diff-deletions,
+.turn-progress .diff-deletions {
+  color: #e2736d;
+}
+
+.change-kind-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #676767;
+  transition: background 100ms ease;
+}
+
+.file-change-button:hover .change-add,
+.file-change-button:focus-visible .change-add {
+  background: #5f9fdf;
+}
+
+.activity-group-chevron,
+.activity-row-chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  color: #777777;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.activity-group-header:hover .activity-group-chevron,
+.activity-group-header:focus-visible .activity-group-chevron,
+.activity-item-button:hover .activity-row-chevron,
+.activity-item-button:focus-visible .activity-row-chevron {
+  opacity: 1;
+}
+
+.file-change-button:hover .change-delete,
+.file-change-button:focus-visible .change-delete {
+  background: #df706c;
+}
+
+.file-change-button:hover .change-update,
+.file-change-button:focus-visible .change-update {
+  background: #73b984;
+}
+
+.file-diff-title {
+  gap: 7px;
+  border-bottom: 1px solid #303030;
+}
+
+.file-diff-title > span:first-child {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-view {
+  max-height: 260px;
+  overflow: auto;
+  scrollbar-color: #494949 transparent;
+  scrollbar-width: thin;
+}
+
+.diff-view table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.diff-line td {
+  padding: 0;
+  vertical-align: top;
+}
+
+.diff-line-number {
+  width: 31px;
+  padding-right: 6px !important;
   color: #656565;
-  font-size: 9.5px;
+  background: rgb(0 0 0 / 10%);
+  text-align: right;
+  user-select: none;
 }
 
-.status-completed {
-  color: #8eaa7e;
+.diff-line-marker {
+  width: 18px;
+  color: #747474;
+  text-align: center;
+  user-select: none;
 }
 
-.status-failed,
-.status-declined {
-  color: var(--danger);
+.diff-line-content {
+  min-width: 360px;
+  padding-right: 12px !important;
+  color: #c8c8c8;
+  white-space: pre;
+}
+
+.diff-addition {
+  background: rgb(35 106 66 / 42%);
+}
+
+.diff-deletion {
+  background: rgb(126 46 43 / 43%);
+}
+
+.diff-header .diff-line-content {
+  color: #8e8e8e;
+  background: #1e1e1e;
+}
+
+.diff-empty {
+  padding: 15px 12px;
+  color: #6f6f6f;
+  font-size: 11px;
+}
+
+.diff-show-all {
+  position: sticky;
+  bottom: 0;
+  width: 100%;
+  min-height: 30px;
+  border-top: 1px solid #343434;
+  color: #8c8c8c;
+  background: #242424;
+  font-size: 10.5px;
+}
+
+.diff-show-all:hover {
+  color: #d2d2d2;
+  background: #292929;
+}
+
+.plan-details {
+  margin: -4px 0 19px;
+  color: #858585;
+  font-size: 12px;
+}
+
+.plan-details summary {
+  width: fit-content;
+  cursor: pointer;
+  color: #929292;
+}
+
+.plan-details > div {
+  margin-top: 7px;
+  color: #777777;
+  line-height: 1.55;
+  white-space: pre-wrap;
 }
 
 .thinking-row {
@@ -1075,6 +1435,38 @@ button.environment-row:hover {
     opacity: 1;
     transform: translateY(-3px);
   }
+}
+
+.turn-progress {
+  display: flex;
+  z-index: 6;
+  width: fit-content;
+  max-width: calc(100% - 34px);
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  margin: 0 auto 7px;
+  padding: 0 12px;
+  border: 1px solid #3a3a3a;
+  border-radius: 13px;
+  color: #8d8d8d;
+  background: #292929;
+  box-shadow: 0 9px 24px rgb(0 0 0 / 20%);
+  font-size: 11.5px;
+}
+
+.turn-progress-spinner {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  border: 2px solid #4c4c4c;
+  border-top-color: #4e9bcf;
+  border-radius: 50%;
+  animation: spin 900ms linear infinite;
+}
+
+.turn-progress-separator {
+  color: #616161;
 }
 
 .composer-wrap {

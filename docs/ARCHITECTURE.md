@@ -72,6 +72,28 @@ perfil do WebView. Conversas continuam pertencendo ao armazenamento do Codex;
 abrir uma tarefa usa `thread/resume` e reidrata a linha do tempo retornada pelo
 contrato oficial, sem duplicar o conteúdo no frontend.
 
+### Linha do tempo
+
+A linha do tempo possui fronteiras pequenas e tipadas:
+
+- `parseTimelineItem` traduz a união oficial `ThreadItem` para tipos de domínio;
+- `createTimeline` possui hidratação, deltas e substituição de itens por `id`;
+- `timelineGrouping` compõe mensagens, raciocínio e ações em blocos semânticos;
+- `ActivityGroup`, `ConversationEntry` e `DiffView` apenas renderizam o domínio;
+- `createTurnProgress` reduz snapshots de plano e diff a um resumo numérico.
+
+Raciocínio ativo e resumo de ações concluídas são cabeçalhos distintos no tipo,
+portanto ícone, cor e semântica não dependem de heurística CSS. Comandos e
+resultados de ferramentas possuem limites de memória explícitos e exibem toda
+omissão. O diff agregado do turno é processado em uma passagem e descartado; um
+diff por arquivo materializa inicialmente no máximo 400 linhas e só cria o
+restante após ação do usuário.
+
+Miniaturas são carregadas sob demanda por `IntersectionObserver`. O Rust valida
+arquivo regular, tamanho e assinatura PNG, JPEG, GIF ou WebP antes de devolver
+um buffer binário. O componente cria e revoga a `Blob URL`, deixando falhas
+visíveis sem manter base64 na árvore reativa.
+
 ## Fluxos principais
 
 ### Inicialização
@@ -104,7 +126,8 @@ visivelmente, mas nunca impede a exclusão local.
 
 Arquivos comuns viram `mention`, imagens validadas viram `localImage` e texto
 vira `text`. Imagens coladas são decodificadas, verificadas por assinatura e
-gravadas no cache antes do envio. A primeira tarefa inicia a ponte compatível.
+gravadas no cache antes do envio. Imagens históricas usam a mesma validação para
+pré-visualização binária. A primeira tarefa inicia a ponte compatível.
 
 ### Configuração e permissões
 

@@ -195,6 +195,79 @@ export function SquarePenIcon(props: IconProps) {
   );
 }
 
+export function TerminalIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect
+        x="3"
+        y="4"
+        width="18"
+        height="16"
+        rx="3"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+      />
+      <path
+        d="m7 9 3 3-3 3m6 0h4"
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="1.5"
+      />
+    </Svg>
+  );
+}
+
+export function EditIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="m4 20 4.2-1 10.9-10.9a2.1 2.1 0 0 0-3-3L5.2 16 4 20Z"
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="1.5"
+      />
+      <path
+        d="m14.5 6.5 3 3"
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-width="1.5"
+      />
+    </Svg>
+  );
+}
+
+export function ImagesIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect
+        x="7"
+        y="4"
+        width="13"
+        height="13"
+        rx="2.5"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+      />
+      <path
+        d="m9.5 14 3.2-3.2 2.1 2 1.4-1.3 2.3 2.5M5 8H4.5A2.5 2.5 0 0 0 2 10.5v7A2.5 2.5 0 0 0 4.5 20h7a2.5 2.5 0 0 0 2.5-2.5V17"
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="1.5"
+      />
+      <circle cx="16.5" cy="7.5" r="1" fill="currentColor" />
+    </Svg>
+  );
+}
+
 export function LaptopIcon(props: IconProps) {
   return (
     <Svg {...props}>

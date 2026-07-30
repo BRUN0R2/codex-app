@@ -1,7 +1,21 @@
-import { For, Show, createEffect } from "solid-js";
+import {
+  Index,
+  Match,
+  Show,
+  Switch,
+  createEffect,
+  createMemo,
+  createSignal,
+} from "solid-js";
 
-import type { TimelineEntry } from "../session/createCodexSession";
-import { FileIcon, ImageIcon } from "../../shared/components/Icons";
+import { ActivityGroup, LiveActivity } from "./ActivityGroup";
+import { MessageView, PlanView } from "./ConversationEntry";
+import { buildTimelineBlocks, type TimelineBlock } from "./timelineGrouping";
+import type {
+  MessageEntry,
+  PlanEntry,
+  TimelineEntry,
+} from "./timelineTypes";
 
 interface TimelineProps {
   busy: boolean;
@@ -9,16 +23,56 @@ interface TimelineProps {
 }
 
 export function Timeline(props: TimelineProps) {
+  const blocks = createMemo(() => buildTimelineBlocks(props.entries));
+  const [groupExpansion, setGroupExpansion] = createSignal<
+    ReadonlyMap<string, boolean>
+  >(new Map());
+  const [expandedDetail, setExpandedDetail] = createSignal<string | null>(null);
   let endMarker: HTMLDivElement | undefined;
+  let timelineElement: HTMLDivElement | undefined;
+  let followLatest = true;
 
   createEffect(() => {
-    props.entries.length;
+    props.entries;
     props.busy;
-    queueMicrotask(() => endMarker?.scrollIntoView({ block: "end" }));
+    if (followLatest) {
+      queueMicrotask(() => endMarker?.scrollIntoView({ block: "end" }));
+    }
   });
 
+  function groupExpanded(
+    block: Extract<TimelineBlock, { type: "activityGroup" }>,
+  ) {
+    return (
+      groupExpansion().get(block.id) ??
+      (block.status === "inProgress" && block.entries.length > 0)
+    );
+  }
+
+  function toggleGroup(id: string, expanded: boolean) {
+    setGroupExpansion((current) => {
+      const next = new Map(current);
+      next.set(id, !expanded);
+      return next;
+    });
+  }
+
+  function toggleDetail(id: string) {
+    setExpandedDetail((current) => (current === id ? null : id));
+  }
+
   return (
-    <div class="timeline">
+    <div
+      class="timeline"
+      onScroll={() => {
+        const element = timelineElement;
+        if (element !== undefined) {
+          followLatest =
+            element.scrollHeight - element.scrollTop - element.clientHeight < 120;
+        }
+      }}
+      ref={timelineElement}
+    >
       <Show
         when={props.entries.length > 0}
         fallback={
@@ -34,54 +88,43 @@ export function Timeline(props: TimelineProps) {
           </div>
         }
       >
-        <div class="timeline-content">
-          <For each={props.entries}>
-            {(entry) =>
-              entry.type === "message" ? (
-                <article
-                  class={`message message-${entry.role}`}
-                  classList={{ "message-failed": entry.status === "failed" }}
+        <div aria-live="polite" class="timeline-content" role="log">
+          <Index each={blocks()}>
+            {(block) => (
+              <Switch>
+                <Match
+                  when={activityGroupBlock(block())}
                 >
-                  <Show when={entry.phase === "commentary"}>
-                    <div class="message-meta">Atualização</div>
-                  </Show>
-                  <Show when={entry.attachments.length > 0}>
-                    <div class="message-attachments">
-                      <For each={entry.attachments}>
-                        {(attachment) => (
-                          <span title={attachment.path}>
-                            {attachment.kind === "image" ? (
-                              <ImageIcon size={15} />
-                            ) : (
-                              <FileIcon size={15} />
-                            )}
-                            {attachment.name}
-                          </span>
-                        )}
-                      </For>
-                    </div>
-                  </Show>
-                  <Show when={entry.text.length > 0}>
-                    <div class="message-text">{entry.text}</div>
-                  </Show>
-                  <Show when={entry.status === "streaming" && entry.role === "assistant"}>
-                    <span class="streaming-caret" aria-label="Gerando resposta" />
-                  </Show>
-                </article>
-              ) : (
-                <article class="activity-row">
-                  <span class={`activity-dot status-${entry.status.toLowerCase()}`} />
-                  <div>
-                    <strong>{entry.label}</strong>
-                    <p>{entry.detail}</p>
-                  </div>
-                  <span class={`activity-status status-${entry.status.toLowerCase()}`}>
-                    {statusLabel(entry.status)}
-                  </span>
-                </article>
-              )
-            }
-          </For>
+                  {(group) => (
+                    <ActivityGroup
+                      block={group()}
+                      expanded={groupExpanded(group())}
+                      expandedDetail={expandedDetail()}
+                      onToggle={() =>
+                        toggleGroup(group().id, groupExpanded(group()))
+                      }
+                      onToggleDetail={toggleDetail}
+                    />
+                  )}
+                </Match>
+                <Match
+                  when={liveActivityBlock(block())}
+                >
+                  {(live) => <LiveActivity entry={live().entry} />}
+                </Match>
+                <Match
+                  when={messageEntry(block())}
+                >
+                  {(message) => <MessageView entry={message()} />}
+                </Match>
+                <Match
+                  when={planEntry(block())}
+                >
+                  {(plan) => <PlanView entry={plan()} />}
+                </Match>
+              </Switch>
+            )}
+          </Index>
           <Show when={props.busy && !hasStreamingAssistant(props.entries)}>
             <div class="thinking-row">
               <span />
@@ -96,6 +139,30 @@ export function Timeline(props: TimelineProps) {
   );
 }
 
+function activityGroupBlock(
+  block: TimelineBlock,
+): Extract<TimelineBlock, { type: "activityGroup" }> | undefined {
+  return block.type === "activityGroup" ? block : undefined;
+}
+
+function liveActivityBlock(
+  block: TimelineBlock,
+): Extract<TimelineBlock, { type: "liveActivity" }> | undefined {
+  return block.type === "liveActivity" ? block : undefined;
+}
+
+function messageEntry(block: TimelineBlock): MessageEntry | undefined {
+  return block.type === "entry" && block.entry.type === "message"
+    ? block.entry
+    : undefined;
+}
+
+function planEntry(block: TimelineBlock): PlanEntry | undefined {
+  return block.type === "entry" && block.entry.type === "plan"
+    ? block.entry
+    : undefined;
+}
+
 function hasStreamingAssistant(entries: TimelineEntry[]): boolean {
   return entries.some(
     (entry) =>
@@ -103,19 +170,4 @@ function hasStreamingAssistant(entries: TimelineEntry[]): boolean {
       entry.role === "assistant" &&
       entry.status === "streaming",
   );
-}
-
-function statusLabel(status: string): string {
-  switch (status) {
-    case "completed":
-      return "concluído";
-    case "inProgress":
-      return "em andamento";
-    case "declined":
-      return "recusado";
-    case "failed":
-      return "falhou";
-    default:
-      return status;
-  }
 }

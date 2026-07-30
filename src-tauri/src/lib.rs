@@ -15,6 +15,7 @@ pub fn run() {
         .manage(EngineManager::default())
         .invoke_handler(tauri::generate_handler![
             attachments::attachment_inspect,
+            attachments::attachment_read_image,
             attachments::attachment_save_pasted_image,
             commands::engine_start,
             commands::engine_account_read,

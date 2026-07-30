@@ -13,6 +13,7 @@
   deduplicada e validação ao vivo sem interação.
 - [x] Projetos persistidos e tarefas paginadas, retomáveis, renomeáveis e
   arquiváveis.
+- [x] Timeline semântica com comandos, diffs, imagens e progresso do turno.
 
 ## Engine
 
@@ -25,6 +26,6 @@
 
 ## Produto
 
-- [ ] Renderizar diffs e toda a matriz de itens de ferramenta.
+- [ ] Completar visualizações dedicadas para os itens restantes do protocolo.
 - [ ] Completar as categorias de configuração suportadas.
 - [ ] Preparar assinatura, instalador, atualização e telemetria opt-in.

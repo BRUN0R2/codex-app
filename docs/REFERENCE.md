@@ -28,6 +28,8 @@ As áreas relevantes foram lidas diretamente no snapshot:
 - Entradas são `text`, `localImage` ou `mention`.
 - Configuração usa `config/read`, `config/value/write` e `config/batchWrite`.
 - Modelo, esforços e tiers de serviço vêm de `model/list`.
+- A timeline consome a união oficial `ThreadItem` e as notificações incrementais
+  `item/*`, `turn/plan/updated` e `turn/diff/updated`.
 - Solicitações do servidor são respondidas pelo mesmo `id`; métodos desconhecidos
   não recebem aprovação automática.
 
@@ -73,12 +75,24 @@ Padrões reproduzidos:
 - menu raiz de 226 px e submenus em cascata alinhados pela base;
 - listas compactas com check, descrições apenas quando agregam contexto e reset
   separado por divisor;
+- raciocínio como um único cabeçalho contextual, sem repetir deltas intermediários;
+- comandos e edições ativos como linhas compactas sem expansão prematura;
+- grupos concluídos expansíveis, com ícone semântico e seta apenas no hover/foco;
+- nome, estatísticas de diff, estado e seta no mesmo fluxo inline;
+- comandos com saída agregada, arquivos com diff e imagens visualizadas com
+  miniaturas reais;
+- progresso do turno em uma pílula compacta acima do compositor;
 - configurações em página inteira, busca lateral e conteúdo central de 768 px;
 - canvas `#181818`, sidebar `#202020`, superfícies `#2D2D2D`, seleção
   `#313131` e destaque de permissão próximo de `#FF8549`.
 
 A escala foi implementada no CSS do aplicativo. Não existe código que altere DPI,
 zoom do WebView ou escala do sistema operacional.
+
+Os contratos `commandExecution`, `fileChange`, `imageView`, `reasoning` e suas
+notificações foram conferidos nos tipos TypeScript gerados e no README do
+`app-server`. A interface preserva o item final como autoridade e usa deltas
+somente para o estado ativo, como orienta a referência.
 
 ## Validação do login nativo
 
