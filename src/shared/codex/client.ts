@@ -27,8 +27,12 @@ import type {
   RuntimeStatus,
   ServerResponseRequest,
   ThreadArchiveRequest,
+  ThreadForkRequest,
+  ThreadForkResponse,
   ThreadListRequest,
   ThreadListResponse,
+  ThreadReadRequest,
+  ThreadReadResponse,
   ThreadResumeRequest,
   ThreadResumeResponse,
   ThreadSetNameRequest,
@@ -122,6 +126,18 @@ export function resumeThread(
   request: ThreadResumeRequest,
 ): Promise<ThreadResumeResponse> {
   return invoke("engine_thread_resume", { request });
+}
+
+export function readThread(
+  request: ThreadReadRequest,
+): Promise<ThreadReadResponse> {
+  return invoke("engine_thread_read", { request });
+}
+
+export function forkThread(
+  request: ThreadForkRequest,
+): Promise<ThreadForkResponse> {
+  return invoke("engine_thread_fork", { request });
 }
 
 export function setThreadName(request: ThreadSetNameRequest): Promise<JsonValue> {

@@ -160,6 +160,24 @@ export interface ThreadResumeResponse {
   cwd: string;
 }
 
+export interface ThreadReadRequest {
+  threadId: string;
+}
+
+export interface ThreadReadResponse {
+  thread: CodexThread;
+}
+
+export interface ThreadForkRequest {
+  threadId: string;
+  lastTurnId: string | null;
+  model: string;
+}
+
+export interface ThreadForkResponse {
+  thread: CodexThread;
+}
+
 export interface ThreadSetNameRequest {
   threadId: string;
   name: string;
@@ -359,7 +377,17 @@ export interface TurnStartRequest {
   clientUserMessageId: string;
   text: string;
   attachments: Array<{ path: string }>;
+  model?: string;
+  effort?: ReasoningEffort;
 }
+
+export type ReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
 
 export interface TurnInterruptRequest {
   threadId: string;

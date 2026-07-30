@@ -26,6 +26,8 @@ pub fn run() {
             commands::engine_thread_start,
             commands::engine_thread_list,
             commands::engine_thread_resume,
+            commands::engine_thread_read,
+            commands::engine_thread_fork,
             commands::engine_thread_set_name,
             commands::engine_thread_archive,
             commands::engine_turn_start,

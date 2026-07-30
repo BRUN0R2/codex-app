@@ -10,11 +10,15 @@ use crate::attachments::inspect_path;
 use crate::engine::EngineConfigEdit;
 use crate::engine::EngineManager;
 use crate::engine::EngineOperation;
+use crate::engine::EngineReasoningEffort;
 use crate::engine::EngineStartResponse;
 use crate::engine::EngineTurnInput;
 use crate::engine::EngineWindowsSandboxSetupMode;
 use crate::error::AppError;
 use crate::error::CommandResult;
+
+const MAX_PROTOCOL_ID_LENGTH: usize = 256;
+const MAX_MODEL_NAME_LENGTH: usize = 256;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +36,20 @@ pub struct ThreadListRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ThreadResumeRequest {
     pub thread_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadReadRequest {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadForkRequest {
+    pub thread_id: String,
+    pub last_turn_id: Option<String>,
+    pub model: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +78,33 @@ pub struct TurnStartRequest {
     pub client_user_message_id: String,
     pub text: String,
     pub attachments: Vec<TurnAttachment>,
+    pub model: Option<String>,
+    pub effort: Option<ReasoningEffort>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+}
+
+impl From<ReasoningEffort> for EngineReasoningEffort {
+    fn from(value: ReasoningEffort) -> Self {
+        match value {
+            ReasoningEffort::None => Self::None,
+            ReasoningEffort::Minimal => Self::Minimal,
+            ReasoningEffort::Low => Self::Low,
+            ReasoningEffort::Medium => Self::Medium,
+            ReasoningEffort::High => Self::High,
+            ReasoningEffort::XHigh => Self::XHigh,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,6 +323,48 @@ pub async fn engine_thread_resume(
 }
 
 #[tauri::command]
+pub async fn engine_thread_read(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: ThreadReadRequest,
+) -> CommandResult<Value> {
+    validate_thread_id(&request.thread_id)?;
+    engine
+        .execute(
+            &app,
+            EngineOperation::ReadThread {
+                thread_id: request.thread_id,
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_thread_fork(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: ThreadForkRequest,
+) -> CommandResult<Value> {
+    validate_thread_id(&request.thread_id)?;
+    if let Some(last_turn_id) = request.last_turn_id.as_deref() {
+        validate_turn_id(last_turn_id)?;
+    }
+    let model = validate_model_name(request.model)?;
+    engine
+        .execute(
+            &app,
+            EngineOperation::ForkThread {
+                thread_id: request.thread_id,
+                last_turn_id: request.last_turn_id,
+                model,
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn engine_thread_set_name(
     app: AppHandle,
     engine: State<'_, EngineManager>,
@@ -324,6 +411,9 @@ pub async fn engine_turn_start(
     engine: State<'_, EngineManager>,
     request: TurnStartRequest,
 ) -> CommandResult<Value> {
+    validate_thread_id(&request.thread_id)?;
+    validate_protocol_id("client user message id", &request.client_user_message_id)?;
+    let model = request.model.map(validate_model_name).transpose()?;
     let mut input = Vec::with_capacity(request.attachments.len() + 1);
     let text = request.text.trim();
     if !text.is_empty() {
@@ -356,6 +446,8 @@ pub async fn engine_turn_start(
                 thread_id: request.thread_id,
                 client_user_message_id: request.client_user_message_id,
                 input,
+                model,
+                effort: request.effort.map(Into::into),
             },
         )
         .await
@@ -368,6 +460,8 @@ pub async fn engine_turn_interrupt(
     engine: State<'_, EngineManager>,
     request: TurnInterruptRequest,
 ) -> CommandResult<Value> {
+    validate_thread_id(&request.thread_id)?;
+    validate_turn_id(&request.turn_id)?;
     engine
         .execute(
             &app,
@@ -551,10 +645,36 @@ async fn validate_workspace(path: &str) -> Result<(), AppError> {
 }
 
 fn validate_thread_id(thread_id: &str) -> Result<(), AppError> {
-    if thread_id.trim().is_empty() {
-        return Err(AppError::Protocol("thread id cannot be empty".into()));
+    validate_protocol_id("thread id", thread_id)
+}
+
+fn validate_turn_id(turn_id: &str) -> Result<(), AppError> {
+    validate_protocol_id("turn id", turn_id)
+}
+
+fn validate_protocol_id(label: &str, value: &str) -> Result<(), AppError> {
+    if value.trim().is_empty() {
+        return Err(AppError::Protocol(format!("{label} cannot be empty")));
+    }
+    if value.len() > MAX_PROTOCOL_ID_LENGTH {
+        return Err(AppError::Protocol(format!(
+            "{label} exceeds {MAX_PROTOCOL_ID_LENGTH} bytes"
+        )));
     }
     Ok(())
+}
+
+fn validate_model_name(model: String) -> Result<String, AppError> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(AppError::Protocol("model cannot be empty".into()));
+    }
+    if model.len() > MAX_MODEL_NAME_LENGTH {
+        return Err(AppError::Protocol(format!(
+            "model exceeds {MAX_MODEL_NAME_LENGTH} bytes"
+        )));
+    }
+    Ok(model.to_string())
 }
 
 use crate::error::CommandError;

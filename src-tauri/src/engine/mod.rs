@@ -13,6 +13,7 @@ pub use contracts::EngineDescriptor;
 pub use contracts::EngineKind;
 pub use contracts::EngineNotification;
 pub use contracts::EngineOperation;
+pub use contracts::EngineReasoningEffort;
 pub use contracts::EngineServerRequest;
 pub use contracts::EngineStartResponse;
 pub use contracts::EngineTurnInput;

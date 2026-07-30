@@ -34,9 +34,11 @@ A superfície é uma enumeração fechada:
 - aprovação: responder uma solicitação pendente.
 
 Somente o adaptador de compatibilidade conhece métodos como `thread/list`,
-`thread/resume`, `turn/start` ou `model/list`. A UI invoca comandos Tauri pequenos
-e trabalha com tipos de domínio. A listagem usa paginação limitada, ordenação por
-recência e exclui tarefas arquivadas.
+`thread/resume`, `thread/read`, `thread/fork`, `turn/start` ou `model/list`. A UI
+invoca comandos Tauri pequenos e trabalha com tipos de domínio. A listagem usa
+paginação limitada, ordenação por recência e exclui tarefas arquivadas. Leitura
+completa e fork são operações fechadas: IDs e modelo são limitados na fronteira,
+e `turn/start` só aceita o enum oficial de esforço quando há override.
 
 `account/rateLimits/read` também fica atrás de uma operação fechada e sem
 parâmetros. A sessão o consulta apenas para contas ChatGPT, de forma deduplicada,

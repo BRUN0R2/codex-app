@@ -23,8 +23,10 @@ As áreas relevantes foram lidas diretamente no snapshot:
 - O cliente envia `initialize`, aguarda a resposta e então envia `initialized`.
 - O login OAuth usa o cliente, os escopos, flags, portas e callback observados em
   `codex-rs/login`; tokens nunca atravessam a interface deste aplicativo.
-- Conversas usam `thread/list`, `thread/start`, `thread/resume`,
-  `thread/name/set`, `thread/archive`, `turn/start` e `turn/interrupt`.
+- Conversas usam `thread/list`, `thread/start`, `thread/resume`, `thread/read`,
+  `thread/fork`, `thread/name/set`, `thread/archive`, `turn/start` e
+  `turn/interrupt`. A leitura sempre inclui turnos; o fork preserva
+  explicitamente o último turno incluído e o modelo de destino.
 - O envio atual usa `text`, `localImage` ou `mention`; a leitura histórica cobre
   também `image`, `audio`, `localAudio` e `skill`.
 - Configuração usa `config/read`, `config/value/write`, `config/batchWrite` e

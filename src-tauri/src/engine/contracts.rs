@@ -111,6 +111,29 @@ pub enum EngineWindowsSandboxSetupMode {
     Unelevated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+}
+
+impl EngineReasoningEffort {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+        }
+    }
+}
+
 impl EngineWindowsSandboxSetupMode {
     fn as_str(self) -> &'static str {
         match self {
@@ -148,6 +171,14 @@ pub enum EngineOperation {
     ResumeThread {
         thread_id: String,
     },
+    ReadThread {
+        thread_id: String,
+    },
+    ForkThread {
+        thread_id: String,
+        last_turn_id: Option<String>,
+        model: String,
+    },
     SetThreadName {
         thread_id: String,
         name: String,
@@ -159,6 +190,8 @@ pub enum EngineOperation {
         thread_id: String,
         client_user_message_id: String,
         input: Vec<EngineTurnInput>,
+        model: Option<String>,
+        effort: Option<EngineReasoningEffort>,
     },
     InterruptTurn {
         thread_id: String,
@@ -196,6 +229,8 @@ impl EngineOperation {
             Self::StartThread { .. } => "thread.start",
             Self::ListThreads { .. } => "thread.list",
             Self::ResumeThread { .. } => "thread.resume",
+            Self::ReadThread { .. } => "thread.read",
+            Self::ForkThread { .. } => "thread.fork",
             Self::SetThreadName { .. } => "thread.name.set",
             Self::ArchiveThread { .. } => "thread.archive",
             Self::StartTurn { .. } => "turn.start",
@@ -213,6 +248,8 @@ impl EngineOperation {
     pub fn audit_thread_id(&self) -> Option<&str> {
         match self {
             Self::ResumeThread { thread_id }
+            | Self::ReadThread { thread_id }
+            | Self::ForkThread { thread_id, .. }
             | Self::SetThreadName { thread_id, .. }
             | Self::ArchiveThread { thread_id }
             | Self::StartTurn { thread_id, .. }
@@ -264,6 +301,22 @@ impl EngineOperation {
             Self::ResumeThread { thread_id } => {
                 ("thread/resume", Some(json!({ "threadId": thread_id })))
             }
+            Self::ReadThread { thread_id } => (
+                "thread/read",
+                Some(json!({ "threadId": thread_id, "includeTurns": true })),
+            ),
+            Self::ForkThread {
+                thread_id,
+                last_turn_id,
+                model,
+            } => (
+                "thread/fork",
+                Some(json!({
+                    "threadId": thread_id,
+                    "lastTurnId": last_turn_id,
+                    "model": model,
+                })),
+            ),
             Self::SetThreadName { thread_id, name } => (
                 "thread/name/set",
                 Some(json!({ "threadId": thread_id, "name": name })),
@@ -275,17 +328,25 @@ impl EngineOperation {
                 thread_id,
                 client_user_message_id,
                 input,
-            } => (
-                "turn/start",
-                Some(json!({
+                model,
+                effort,
+            } => {
+                let mut params = json!({
                     "threadId": thread_id,
                     "clientUserMessageId": client_user_message_id,
                     "input": input
                         .into_iter()
                         .map(EngineTurnInput::into_json)
                         .collect::<Vec<_>>(),
-                })),
-            ),
+                });
+                if let Some(model) = model {
+                    params["model"] = Value::String(model);
+                }
+                if let Some(effort) = effort {
+                    params["effort"] = Value::String(effort.as_str().to_string());
+                }
+                ("turn/start", Some(params))
+            }
             Self::InterruptTurn { thread_id, turn_id } => (
                 "turn/interrupt",
                 Some(json!({ "threadId": thread_id, "turnId": turn_id })),
@@ -346,6 +407,7 @@ mod tests {
 
     use super::EngineConfigEdit;
     use super::EngineOperation;
+    use super::EngineReasoningEffort;
     use super::EngineTurnInput;
     use super::EngineWindowsSandboxSetupMode;
 
@@ -387,6 +449,8 @@ mod tests {
                     path: "C:\\workspace\\src\\main.rs".into(),
                 },
             ],
+            model: Some("gpt-5.6-codex".into()),
+            effort: Some(EngineReasoningEffort::Low),
         };
 
         let (method, params) = operation.into_compatibility_rpc();
@@ -406,6 +470,45 @@ mod tests {
                         "path": "C:\\workspace\\src\\main.rs",
                     },
                 ],
+                "model": "gpt-5.6-codex",
+                "effort": "low",
+            }))
+        );
+    }
+
+    #[test]
+    fn thread_read_always_requests_complete_turns() {
+        let (method, params) = EngineOperation::ReadThread {
+            thread_id: "thread-1".into(),
+        }
+        .into_compatibility_rpc();
+
+        assert_eq!(method, "thread/read");
+        assert_eq!(
+            params,
+            Some(json!({
+                "threadId": "thread-1",
+                "includeTurns": true,
+            }))
+        );
+    }
+
+    #[test]
+    fn thread_fork_can_branch_before_the_first_turn() {
+        let (method, params) = EngineOperation::ForkThread {
+            thread_id: "thread-1".into(),
+            last_turn_id: None,
+            model: "gpt-5.6-mini".into(),
+        }
+        .into_compatibility_rpc();
+
+        assert_eq!(method, "thread/fork");
+        assert_eq!(
+            params,
+            Some(json!({
+                "threadId": "thread-1",
+                "lastTurnId": null,
+                "model": "gpt-5.6-mini",
             }))
         );
     }
