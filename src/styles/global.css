@@ -3083,6 +3083,153 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   background: rgb(106 62 32 / 18%);
 }
 
+.windows-sandbox-action,
+.windows-sandbox-confirmation,
+.windows-sandbox-error,
+.windows-sandbox-success {
+  padding: 12px 13px;
+  border-top: 1px solid #343434;
+}
+
+.windows-sandbox-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.windows-sandbox-managed,
+.windows-sandbox-error,
+.windows-sandbox-success {
+  margin: 0;
+  font-size: 0.8214rem;
+  line-height: 1.45;
+}
+
+.windows-sandbox-managed {
+  color: #8d8d8d;
+}
+
+.windows-sandbox-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #a6a6a6;
+  font-size: 0.8214rem;
+}
+
+.windows-sandbox-progress > span {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #505050;
+  border-top-color: #a9a9a9;
+  border-radius: 50%;
+  animation: spin 900ms linear infinite;
+}
+
+.windows-sandbox-confirmation {
+  background: #202020;
+}
+
+.windows-sandbox-confirmation-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.windows-sandbox-confirmation-heading > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #b8c9d5;
+}
+
+.windows-sandbox-confirmation-heading strong {
+  color: #e5e5e5;
+  font-size: 0.8929rem;
+  font-weight: 620;
+}
+
+.windows-sandbox-confirmation-heading p {
+  margin: 3px 0 0;
+  color: #858585;
+  font-size: 0.8214rem;
+  line-height: 1.45;
+}
+
+.windows-sandbox-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.windows-sandbox-options > button {
+  padding: 10px;
+  border: 1px solid #3b3b3b;
+  border-radius: 9px;
+  color: #cfcfcf;
+  background: #282828;
+  text-align: left;
+}
+
+.windows-sandbox-options > button:hover {
+  border-color: #505050;
+  background: #2e2e2e;
+}
+
+.windows-sandbox-options > button.recommended {
+  border-color: rgb(92 142 177 / 48%);
+  background: rgb(57 87 109 / 20%);
+}
+
+.windows-sandbox-options > button > span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.windows-sandbox-options strong {
+  color: #e2e2e2;
+  font-size: 0.8214rem;
+  font-weight: 620;
+}
+
+.windows-sandbox-options small {
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: #9fc4dd;
+  background: rgb(66 112 144 / 28%);
+  font-size: 0.6429rem;
+  font-weight: 600;
+}
+
+.windows-sandbox-options p {
+  margin: 5px 0 0;
+  color: #838383;
+  font-size: 0.75rem;
+  line-height: 1.42;
+}
+
+.windows-sandbox-cancel {
+  margin-top: 10px;
+  padding: 0;
+  color: #929292;
+  background: transparent;
+  font-size: 0.75rem;
+}
+
+.windows-sandbox-cancel:hover {
+  color: #d8d8d8;
+}
+
+.windows-sandbox-error {
+  color: var(--danger);
+  background: rgb(100 43 42 / 12%);
+}
+
+.windows-sandbox-success {
+  color: var(--success);
+  background: rgb(54 91 48 / 12%);
+}
+
 .settings-row select,
 .settings-editor input,
 .settings-editor select,

@@ -30,6 +30,9 @@ As áreas relevantes foram lidas diretamente no snapshot:
 - Configuração usa `config/read`, `config/value/write`, `config/batchWrite` e
   `configRequirements/read`.
 - Prontidão do sandbox usa o RPC sem parâmetros `windowsSandbox/readiness`.
+- Preparação do sandbox usa `windowsSandbox/setupStart` e só termina com
+  `windowsSandbox/setupCompleted`; os modos permitidos vêm de
+  `allowedWindowsSandboxImplementations`.
 - Uso da conta usa `account/rateLimits/read`; atualizações incrementais chegam em
   `account/rateLimits/updated` e preservam metadados do snapshot completo.
 - Modelo, esforços e tiers de serviço vêm de `model/list`.
@@ -125,6 +128,13 @@ O diagnóstico de sandbox também foi exercitado sem iniciar setup. Neste Window
 o app-server retornou `ready`; a UI exibiu **Pronto** e permaneceu somente leitura.
 Esse estado indica capacidade do executor e não substitui a política ativa da
 tarefa, que pode continuar em acesso completo.
+
+O fluxo de preparação foi conferido no processor e nos testes do app-server. O
+modo `elevated` é o padrão recomendado e pode abrir UAC; `unelevated` usa token
+restrito sem Administrador, mas a própria referência o classifica como de maior
+risco em caso de prompt injection. A implementação expõe ambos somente quando
+permitidos e nunca escolhe fallback automaticamente. Como a máquina já retornou
+`ready`, nenhum setup ou prompt de elevação foi executado durante a validação.
 
 Os tipos `GetAccountRateLimitsResponse`, `RateLimitSnapshot` e
 `RateLimitWindow` confirmam que `usedPercent` representa consumo, enquanto

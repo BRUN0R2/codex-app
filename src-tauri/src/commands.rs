@@ -12,6 +12,7 @@ use crate::engine::EngineManager;
 use crate::engine::EngineOperation;
 use crate::engine::EngineStartResponse;
 use crate::engine::EngineTurnInput;
+use crate::engine::EngineWindowsSandboxSetupMode;
 use crate::error::AppError;
 use crate::error::CommandResult;
 
@@ -82,6 +83,29 @@ pub struct ConfigWriteRequest {
     pub value: Value,
     pub merge_strategy: MergeStrategy,
     pub expected_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowsSandboxSetupMode {
+    Elevated,
+    Unelevated,
+}
+
+impl From<WindowsSandboxSetupMode> for EngineWindowsSandboxSetupMode {
+    fn from(value: WindowsSandboxSetupMode) -> Self {
+        match value {
+            WindowsSandboxSetupMode::Elevated => Self::Elevated,
+            WindowsSandboxSetupMode::Unelevated => Self::Unelevated,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsSandboxSetupRequest {
+    pub mode: WindowsSandboxSetupMode,
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -392,6 +416,31 @@ pub async fn engine_windows_sandbox_readiness(
 ) -> CommandResult<Value> {
     engine
         .execute(&app, EngineOperation::ReadWindowsSandboxReadiness)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_windows_sandbox_setup_start(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: WindowsSandboxSetupRequest,
+) -> CommandResult<Value> {
+    if request
+        .cwd
+        .as_deref()
+        .is_some_and(|cwd| cwd.trim().is_empty() || !Path::new(cwd).is_absolute())
+    {
+        return Err(AppError::Protocol("sandbox setup cwd must be absolute".into()).into());
+    }
+    engine
+        .execute(
+            &app,
+            EngineOperation::StartWindowsSandboxSetup {
+                mode: request.mode.into(),
+                cwd: request.cwd,
+            },
+        )
         .await
         .map_err(Into::into)
 }

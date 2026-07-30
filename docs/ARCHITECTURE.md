@@ -148,8 +148,11 @@ valores administrados por sistema, MDM ou empresa. Os defaults administrados de
 modelo para novas tarefas continuam sendo defaults: uma seleção explícita não é
 tratada como proibida. Toda escrita envia a versão da camada de usuário lida por
 último, portanto uma edição externa gera conflito visível em vez de ser perdida.
-`windowsSandbox/readiness` completa esse contexto com um diagnóstico fechado e
-somente leitura. A UI não inicia instalação, elevação ou alteração do sistema.
+`windowsSandbox/readiness` completa esse contexto com um diagnóstico fechado.
+Quando o estado exige preparação, `WindowsSandboxSettings` apresenta os modos
+permitidos pela organização, explica o impacto e exige confirmação antes de
+invocar `windowsSandbox/setupStart`. A conclusão chega exclusivamente por
+`windowsSandbox/setupCompleted`; nenhum setup, UAC ou fallback começa sozinho.
 
 Preferências próprias da interface são persistidas no namespace fechado
 `desktop.codexDesktopNext`. Tamanho base, movimento, cursor e marcadores de diff

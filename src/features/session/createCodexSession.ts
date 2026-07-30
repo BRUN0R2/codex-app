@@ -28,6 +28,7 @@ import {
   startRuntime,
   startThread,
   startTurn,
+  startWindowsSandboxSetup,
   subscribeToCodexEvents,
   setThreadName,
   writeConfig,
@@ -58,6 +59,8 @@ import {
   type RuntimeStartResponse,
   type RuntimeStatus,
   type WindowsSandboxReadinessResponse,
+  type WindowsSandboxSetupCompletedNotification,
+  type WindowsSandboxSetupMode,
 } from "../../shared/codex/types";
 import { createTimeline } from "../chat/createTimeline";
 import {
@@ -78,6 +81,12 @@ import { threadTitle, type ThreadLibraryState } from "../projects/threadLibrary"
 
 export type CompatibilityContextState = "failed" | "idle" | "loading" | "ready";
 export type AccountRateLimitsState = "failed" | "idle" | "loading" | "ready";
+export type WindowsSandboxSetupState =
+  | { type: "failed"; error: string; mode: WindowsSandboxSetupMode }
+  | { type: "idle" }
+  | { type: "running"; mode: WindowsSandboxSetupMode }
+  | { type: "starting"; mode: WindowsSandboxSetupMode }
+  | { type: "succeeded"; mode: WindowsSandboxSetupMode };
 
 export interface CodexSession {
   account: Accessor<AccountReadResponse | undefined>;
@@ -90,6 +99,7 @@ export interface CodexSession {
   config: Accessor<ConfigReadResponse | null>;
   configRequirements: Accessor<ConfigRequirementsReadResponse | null>;
   windowsSandboxReadiness: Accessor<WindowsSandboxReadinessResponse | null>;
+  windowsSandboxSetupState: Accessor<WindowsSandboxSetupState>;
   diagnostics: Accessor<RuntimeDiagnostic[]>;
   error: Accessor<string | null>;
   loginPending: Accessor<boolean>;
@@ -132,6 +142,7 @@ export interface CodexSession {
   saveClipboardImage: (dataBase64: string) => Promise<Attachment>;
   selectProject: (path: string) => Promise<void>;
   sendMessage: (text: string, attachments: Attachment[]) => Promise<boolean>;
+  setupWindowsSandbox: (mode: WindowsSandboxSetupMode) => Promise<boolean>;
   writeSetting: (
     keyPath: string,
     value: JsonValue,
@@ -180,6 +191,8 @@ export function createCodexSession(): CodexSession {
     createSignal<ConfigRequirementsReadResponse | null>(null);
   const [windowsSandboxReadiness, setWindowsSandboxReadiness] =
     createSignal<WindowsSandboxReadinessResponse | null>(null);
+  const [windowsSandboxSetupState, setWindowsSandboxSetupState] =
+    createSignal<WindowsSandboxSetupState>({ type: "idle" });
   const [models, setModels] = createSignal<CodexModel[]>([]);
   const [diagnostics, setDiagnostics] = createSignal<RuntimeDiagnostic[]>([]);
   const [error, setError] = createSignal<string | null>(
@@ -345,6 +358,7 @@ export function createCodexSession(): CodexSession {
       if (!isSignedInAccount(response)) {
         resetCompatibilityContext();
         resetAccountRateLimits();
+        setWindowsSandboxSetupState({ type: "idle" });
         threadLibrary.reset();
         return;
       }
@@ -520,6 +534,10 @@ export function createCodexSession(): CodexSession {
   }
 
   async function logoutAccount() {
+    if (isWindowsSandboxSetupPending(windowsSandboxSetupState())) {
+      setError("Aguarde a configuração do sandbox do Windows terminar antes de sair.");
+      return;
+    }
     setError(null);
     try {
       await Promise.all([
@@ -537,6 +555,7 @@ export function createCodexSession(): CodexSession {
       }
       resetCompatibilityContext();
       resetAccountRateLimits();
+      setWindowsSandboxSetupState({ type: "idle" });
       threadLibrary.reset();
       setThreadId(null);
       timeline.reset();
@@ -795,6 +814,48 @@ export function createCodexSession(): CodexSession {
     setWindowsSandboxReadiness(sandboxReadinessResponse);
   }
 
+  async function setupWindowsSandbox(
+    mode: WindowsSandboxSetupMode,
+  ): Promise<boolean> {
+    if (isWindowsSandboxSetupPending(windowsSandboxSetupState())) {
+      return false;
+    }
+    const allowed =
+      configRequirements()?.requirements?.allowedWindowsSandboxImplementations
+      ?? null;
+    if (allowed !== null && !allowed.includes(mode)) {
+      const message = "A organização não permite esta implementação do sandbox.";
+      setWindowsSandboxSetupState({ type: "failed", error: message, mode });
+      addDiagnostic("stderr", message);
+      return false;
+    }
+    if (windowsSandboxReadiness()?.status === "ready") {
+      return false;
+    }
+
+    setWindowsSandboxSetupState({ type: "starting", mode });
+    try {
+      const response = await startWindowsSandboxSetup({
+        mode,
+        cwd: workspace(),
+      });
+      if (!response.started) {
+        throw new Error("O app-server não iniciou a configuração do sandbox.");
+      }
+      setWindowsSandboxSetupState((current) =>
+        current.type === "starting" && current.mode === mode
+          ? { type: "running", mode }
+          : current,
+      );
+      return true;
+    } catch (reason) {
+      const message = describeCommandError(reason);
+      setWindowsSandboxSetupState({ type: "failed", error: message, mode });
+      addDiagnostic("stderr", message);
+      return false;
+    }
+  }
+
   async function writeSetting(
     keyPath: string,
     value: JsonValue,
@@ -886,6 +947,43 @@ export function createCodexSession(): CodexSession {
             mergeAccountRateLimitsUpdate(current, update.rateLimits),
           );
           setAccountRateLimitsState("ready");
+        } catch (reason) {
+          addDiagnostic("stderr", describeCommandError(reason));
+        }
+        break;
+      }
+      case "windowsSandbox/setupCompleted": {
+        try {
+          const completed = parseWindowsSandboxSetupCompleted(params);
+          const current = windowsSandboxSetupState();
+          if (
+            !isWindowsSandboxSetupPending(current)
+            || current.mode !== completed.mode
+          ) {
+            addDiagnostic(
+              "stderr",
+              "O app-server concluiu uma configuração de sandbox sem solicitação ativa correspondente.",
+            );
+            break;
+          }
+          if (!completed.success) {
+            const message =
+              completed.error ?? "Não foi possível configurar o sandbox do Windows.";
+            setWindowsSandboxSetupState({
+              type: "failed",
+              error: message,
+              mode: completed.mode,
+            });
+            addDiagnostic("stderr", message);
+            break;
+          }
+          setWindowsSandboxSetupState({
+            type: "succeeded",
+            mode: completed.mode,
+          });
+          void refreshConfig().catch((reason) => {
+            addDiagnostic("stderr", describeCommandError(reason));
+          });
         } catch (reason) {
           addDiagnostic("stderr", describeCommandError(reason));
         }
@@ -1028,6 +1126,7 @@ export function createCodexSession(): CodexSession {
     config,
     configRequirements,
     windowsSandboxReadiness,
+    windowsSandboxSetupState,
     diagnostics,
     error,
     loginPending,
@@ -1066,6 +1165,7 @@ export function createCodexSession(): CodexSession {
     saveClipboardImage: savePastedImage,
     selectProject,
     sendMessage,
+    setupWindowsSandbox,
     writeSetting,
     writeSettings,
   };
@@ -1087,6 +1187,30 @@ function asObject(value: JsonValue | undefined): JsonObject | undefined {
 
 function activeUserConfigVersion(snapshot: ConfigReadResponse | null): string | null {
   return snapshot?.layers?.find((layer) => layer.name.type === "user")?.version ?? null;
+}
+
+function isWindowsSandboxSetupPending(
+  state: WindowsSandboxSetupState,
+): state is Extract<WindowsSandboxSetupState, { type: "running" | "starting" }> {
+  return state.type === "running" || state.type === "starting";
+}
+
+function parseWindowsSandboxSetupCompleted(
+  params: JsonObject | undefined,
+): WindowsSandboxSetupCompletedNotification {
+  const mode = readString(params, "mode");
+  const success = params?.success;
+  const error = params?.error;
+  if (
+    (mode !== "elevated" && mode !== "unelevated")
+    || typeof success !== "boolean"
+    || (error !== null && typeof error !== "string")
+  ) {
+    throw new Error(
+      "Notificação incompatível do Codex em windowsSandbox/setupCompleted.",
+    );
+  }
+  return { mode, success, error };
 }
 
 function extractModels(response: ModelListResponse): CodexModel[] {

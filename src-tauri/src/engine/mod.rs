@@ -16,6 +16,7 @@ pub use contracts::EngineOperation;
 pub use contracts::EngineServerRequest;
 pub use contracts::EngineStartResponse;
 pub use contracts::EngineTurnInput;
+pub use contracts::EngineWindowsSandboxSetupMode;
 pub use contracts::RuntimeDiagnostic;
 pub use contracts::RuntimeState;
 pub use contracts::RuntimeStatus;

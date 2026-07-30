@@ -38,6 +38,8 @@ import type {
   TurnStartRequest,
   TurnStartResponse,
   WindowsSandboxReadinessResponse,
+  WindowsSandboxSetupRequest,
+  WindowsSandboxSetupStartResponse,
 } from "./types";
 
 const NOTIFICATION_EVENT = "engine://notification";
@@ -152,6 +154,12 @@ export function readConfigRequirements(): Promise<ConfigRequirementsReadResponse
 
 export function readWindowsSandboxReadiness(): Promise<WindowsSandboxReadinessResponse> {
   return invoke("engine_windows_sandbox_readiness");
+}
+
+export function startWindowsSandboxSetup(
+  request: WindowsSandboxSetupRequest,
+): Promise<WindowsSandboxSetupStartResponse> {
+  return invoke("engine_windows_sandbox_setup_start", { request });
 }
 
 export function writeConfig(request: ConfigWriteRequest): Promise<JsonValue> {

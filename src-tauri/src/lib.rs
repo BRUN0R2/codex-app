@@ -33,6 +33,7 @@ pub fn run() {
             commands::engine_config_read,
             commands::engine_config_requirements_read,
             commands::engine_windows_sandbox_readiness,
+            commands::engine_windows_sandbox_setup_start,
             commands::engine_config_write,
             commands::engine_config_batch_write,
             commands::engine_model_list,

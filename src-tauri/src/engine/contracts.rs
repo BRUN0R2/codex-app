@@ -105,6 +105,21 @@ pub struct EngineConfigEdit {
     pub merge_strategy: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineWindowsSandboxSetupMode {
+    Elevated,
+    Unelevated,
+}
+
+impl EngineWindowsSandboxSetupMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Elevated => "elevated",
+            Self::Unelevated => "unelevated",
+        }
+    }
+}
+
 impl EngineConfigEdit {
     fn into_json(self) -> Value {
         json!({
@@ -155,6 +170,10 @@ pub enum EngineOperation {
     },
     ReadConfigRequirements,
     ReadWindowsSandboxReadiness,
+    StartWindowsSandboxSetup {
+        mode: EngineWindowsSandboxSetupMode,
+        cwd: Option<String>,
+    },
     WriteConfig {
         edit: EngineConfigEdit,
         expected_version: Option<String>,
@@ -184,6 +203,7 @@ impl EngineOperation {
             Self::ReadConfig { .. } => "config.read",
             Self::ReadConfigRequirements => "config.requirements.read",
             Self::ReadWindowsSandboxReadiness => "sandbox.windows.readiness",
+            Self::StartWindowsSandboxSetup { .. } => "sandbox.windows.setup.start",
             Self::WriteConfig { .. } => "config.write",
             Self::BatchWriteConfig { .. } => "config.batch_write",
             Self::ListModels => "models.list",
@@ -282,6 +302,13 @@ impl EngineOperation {
             }
             Self::ReadConfigRequirements => ("configRequirements/read", None),
             Self::ReadWindowsSandboxReadiness => ("windowsSandbox/readiness", None),
+            Self::StartWindowsSandboxSetup { mode, cwd } => {
+                let mut params = json!({ "mode": mode.as_str() });
+                if let Some(cwd) = cwd {
+                    params["cwd"] = Value::String(cwd);
+                }
+                ("windowsSandbox/setupStart", Some(params))
+            }
             Self::WriteConfig {
                 edit,
                 expected_version,
@@ -320,6 +347,7 @@ mod tests {
     use super::EngineConfigEdit;
     use super::EngineOperation;
     use super::EngineTurnInput;
+    use super::EngineWindowsSandboxSetupMode;
 
     #[test]
     fn chatgpt_login_maps_to_the_official_compatibility_contract() {
@@ -417,6 +445,24 @@ mod tests {
 
         assert_eq!(method, "windowsSandbox/readiness");
         assert_eq!(params, None);
+    }
+
+    #[test]
+    fn windows_sandbox_setup_preserves_mode_and_absolute_workspace() {
+        let (method, params) = EngineOperation::StartWindowsSandboxSetup {
+            mode: EngineWindowsSandboxSetupMode::Elevated,
+            cwd: Some("C:\\workspace".to_string()),
+        }
+        .into_compatibility_rpc();
+
+        assert_eq!(method, "windowsSandbox/setupStart");
+        assert_eq!(
+            params,
+            Some(json!({
+                "mode": "elevated",
+                "cwd": "C:\\workspace",
+            }))
+        );
     }
 
     #[test]

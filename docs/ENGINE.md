@@ -28,7 +28,8 @@ A superfície é uma enumeração fechada:
 - conta: ler, consultar limites de uso, entrar com ChatGPT, cancelar login e sair;
 - tarefa: listar, iniciar, retomar, renomear, arquivar, enviar turno e interromper;
 - configuração: ler, ler requisitos, escrever e escrever em lote;
-- segurança: consultar a prontidão do sandbox do Windows sem alterá-lo;
+- segurança: consultar a prontidão e iniciar a preparação confirmada do sandbox
+  do Windows;
 - modelos: listar;
 - aprovação: responder uma solicitação pendente.
 
@@ -98,7 +99,11 @@ Migrações futuras devem ser explícitas, transacionais e monotônicas.
 processo ou rede. `PermissionProfile` expressa os presets apresentados pela UI.
 A execução concreta e a aplicação efetiva do sandbox ainda pertencem à ponte.
 O engine já consulta `windowsSandbox/readiness` e expõe `ready`, `notConfigured`
-ou `updateRequired`; setup e elevação não são iniciados implicitamente.
+ou `updateRequired`. `windowsSandbox/setupStart` aceita apenas `elevated` ou
+`unelevated`, valida um workspace absoluto, respeita os requisitos administrados
+e retorna antes do trabalho terminar. O estado final vem na notificação
+`windowsSandbox/setupCompleted`. Setup e elevação nunca são iniciados
+implicitamente.
 
 ## Critérios para remover a ponte
 

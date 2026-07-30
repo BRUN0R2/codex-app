@@ -219,6 +219,7 @@ export interface GranularApprovalPolicy {
 export type AskForApproval = ApprovalPolicy | GranularApprovalPolicy;
 export type SandboxMode = "danger-full-access" | "read-only" | "workspace-write";
 export type WebSearchMode = "cached" | "disabled" | "indexed" | "live";
+export type WindowsSandboxSetupMode = "elevated" | "unelevated";
 
 export interface NewThreadModelDefaults {
   model: string | null;
@@ -229,6 +230,7 @@ export interface NewThreadModelDefaults {
 export interface ConfigRequirements {
   allowedApprovalPolicies: AskForApproval[] | null;
   allowedSandboxModes: SandboxMode[] | null;
+  allowedWindowsSandboxImplementations: WindowsSandboxSetupMode[] | null;
   allowedWebSearchModes: WebSearchMode[] | null;
   models: { newThread: NewThreadModelDefaults | null } | null;
 }
@@ -244,6 +246,21 @@ export type WindowsSandboxReadiness =
 
 export interface WindowsSandboxReadinessResponse {
   status: WindowsSandboxReadiness;
+}
+
+export interface WindowsSandboxSetupRequest {
+  mode: WindowsSandboxSetupMode;
+  cwd: string | null;
+}
+
+export interface WindowsSandboxSetupStartResponse {
+  started: boolean;
+}
+
+export interface WindowsSandboxSetupCompletedNotification {
+  mode: WindowsSandboxSetupMode;
+  success: boolean;
+  error: string | null;
 }
 
 export interface ReasoningEffortOption {
