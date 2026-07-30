@@ -88,9 +88,6 @@ historico.
 * Configuracoes e credenciais do Codex pertencem ao perfil do usuario e nunca
   devem ser copiadas, expostas ou reinterpretadas pela interface.
 
-O projeto nao deve implementar OAuth paralelo, capturar tokens do ChatGPT,
-contornar controles do Codex ou duplicar o armazenamento de credenciais.
-
 Adaptadores de compatibilidade devem ser explicitos, observaveis, substituiveis
 e possuir criterios documentados de remocao. Nenhuma dependencia temporaria pode
 vazar para os contratos da interface.

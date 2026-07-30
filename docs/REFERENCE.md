@@ -19,8 +19,8 @@ As áreas relevantes foram lidas diretamente no snapshot:
 
 - O transporte local é JSONL por `stdio`, sem framing `Content-Length`.
 - O cliente envia `initialize`, aguarda a resposta e então envia `initialized`.
-- Login usa `account/login/start` com `type: "chatgpt"`; tokens pertencem ao
-  runtime oficial e nunca atravessam a interface deste aplicativo.
+- A ponte usa `account/login/start` com `type: "chatgpt"`; tokens nunca
+  atravessam a interface deste aplicativo.
 - Conversas usam `thread/start`, `turn/start` e `turn/interrupt`.
 - Entradas são `text`, `localImage` ou `mention`.
 - Configuração usa `config/read`, `config/value/write` e `config/batchWrite`.
@@ -40,9 +40,10 @@ operações de domínio, `NativeEngine`, SQLite, registro de ferramentas e polí
 de permissões. O protocolo oficial agora fica atrás de
 `CodexCompatibilityEngine`, em vez de ser a arquitetura do aplicativo.
 
-O login ChatGPT continua delegado ao runtime oficial. Não foi criado OAuth
-paralelo, leitura de credenciais ou acesso a endpoints privados. O frontend recebe
-tipos de domínio e eventos, sem acesso a stdin, processo filho ou tokens.
+O login usado pelo produto ainda está delegado ao runtime oficial. O frontend
+recebe tipos de domínio e eventos, sem acesso a stdin, processo filho ou tokens.
+Uma prova nativa isolada validou o protocolo antes da implementação definitiva,
+conforme registrado abaixo.
 
 O processo da ponte é supervisionado por um único dono Rust, com I/O assíncrono,
 timeout limitado e correlação de respostas. Essa ponte ainda executa inferência e
@@ -71,6 +72,29 @@ Padrões reproduzidos:
 
 A escala foi implementada no CSS do aplicativo. Não existe código que altere DPI,
 zoom do WebView ou escala do sistema operacional.
+
+## Validação do login nativo
+
+Em 30 de julho de 2026, uma prova efêmera escrita em Rust reproduziu diretamente
+o fluxo observado em `codex-rs/login`, sem iniciar nem vincular o Codex CLI. O
+teste executou, em sequência:
+
+- PKCE S256 e estado aleatório;
+- autorização no navegador com callback em `localhost:1455`;
+- troca do código em `https://auth.openai.com/oauth/token`;
+- leitura estrutural das claims de identidade, conta e plano;
+- renovação pelo `refresh_token`;
+- revogação em `https://auth.openai.com/oauth/revoke`.
+
+O servidor aceitou também o `originator` próprio `codex_desktop_next`. O resultado
+observado foi `login=true`, `refresh=true` e `revoke=true`. Nenhuma credencial foi
+persistida, exibida ou enviada ao frontend; o processo descartou os valores
+sensíveis ao terminar. A página de conclusão no navegador foi verificada ao vivo.
+
+Essa evidência confirma que o login ChatGPT nativo é funcional neste ambiente e
+nesse snapshot do contrato. Ela não valida ainda armazenamento durável, retomada
+após reinício, concorrência de renovação ou integração com o engine do produto;
+esses pontos pertencem à implementação definitiva.
 
 ## Atualização da referência
 

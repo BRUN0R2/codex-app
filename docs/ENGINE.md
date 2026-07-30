@@ -38,9 +38,8 @@ domínio.
 
 ## Autenticação
 
-`ChatGptAuth` não implementa OAuth, não abre arquivos de credenciais e não
-aceita operações de inferência. Ele delega o fluxo oficial à ponte e entrega à UI
-somente:
+O `ChatGptAuth` usado pelo produto ainda delega o fluxo à ponte e não aceita
+operações de inferência. Ele entrega à UI somente:
 
 - URL de autorização;
 - identificador do fluxo;
@@ -49,6 +48,11 @@ somente:
 
 Tokens não entram em props, eventos Tauri, logs do engine nem SQLite. Também não
 há fallback para chave de API.
+
+A execução isolada de 30 de julho de 2026 comprovou que PKCE, callback local,
+troca, renovação e revogação funcionam diretamente em Rust sem o Codex CLI. A
+implementação definitiva deve preservar a mesma fronteira da UI e adicionar um
+armazenamento seguro com ownership exclusivo do backend nativo.
 
 ## Persistência
 
@@ -79,7 +83,7 @@ perfil antes de iniciar qualquer ação externa.
 
 A ponte só pode deixar de ser requisito quando houver, ao mesmo tempo:
 
-1. autenticação ChatGPT por contrato público e suportado;
+1. autenticação ChatGPT nativa com armazenamento seguro, renovação e logout;
 2. provider com streaming e catálogo de modelos;
 3. executor nativo de ferramentas com cancelamento;
 4. sandbox realmente aplicado por plataforma;
