@@ -23,6 +23,8 @@
 - [x] Prontidão do sandbox do Windows é consultada e exibida sem setup implícito.
 - [x] Preparação do sandbox possui confirmação, política administrativa e
   conclusão assíncrona tipada, sem elevação ou fallback automáticos.
+- [x] Avisos de diretórios graváveis por todos possuem parsing limitado, decisão
+  explícita e persistência versionada, sem correção automática de ACLs.
 - [x] Limites da conta usam snapshot oficial, atualização esparsa e cartão de uso
   responsivo sem polling, incluindo o aviso de esgotamento junto ao compositor.
 

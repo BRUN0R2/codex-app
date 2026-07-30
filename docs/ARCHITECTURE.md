@@ -162,6 +162,21 @@ zoom do WebView ou escala do Windows. A página avançada aceita um caminho e um
 valor JSON validados, mas deliberadamente não renderiza o objeto efetivo, que
 pode conter segredos de integrações.
 
+### Avisos de segurança do Windows
+
+`src/features/security` possui a fronteira do aviso
+`windows/worldWritableWarning`. O decoder exige os três campos oficiais, limita
+a renderização a três caminhos e converte qualquer excesso em contagem explícita.
+`failedScan` permanece um estado distinto: uma varredura incompleta nunca é
+apresentada como lista conclusiva de permissões inseguras.
+
+A sessão mantém uma união discriminada para pendência, persistência e falha. O
+compositor fica indisponível até a escolha explícita. **Continuar nesta sessão**
+suprime somente novas ocorrências no processo atual; **Continuar e não avisar
+novamente** grava `notice.hide_world_writable_warning = true` com a versão ativa
+da camada de usuário e confirma o valor efetivo após a releitura. Falhas mantêm o
+aviso aberto. O frontend não tenta editar ACLs nem executar uma correção.
+
 ### Uso da conta
 
 `src/shared/codex/rateLimits.ts` valida a resposta completa de

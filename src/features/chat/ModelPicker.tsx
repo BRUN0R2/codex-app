@@ -33,6 +33,7 @@ import {
 
 interface ModelPickerProps {
   config: ConfigReadResponse | null;
+  disabled: boolean;
   loadContext: () => Promise<void>;
   models: CodexModel[];
   writeSetting: (
@@ -93,6 +94,9 @@ export function ModelPicker(props: ModelPickerProps) {
   }
 
   async function toggle() {
+    if (props.disabled) {
+      return;
+    }
     if (open()) {
       close();
       return;
@@ -149,7 +153,7 @@ export function ModelPicker(props: ModelPickerProps) {
         aria-expanded={open()}
         aria-haspopup="menu"
         class="model-picker-trigger"
-        disabled={saving()}
+        disabled={props.disabled || saving()}
         onClick={() => void toggle()}
         type="button"
       >

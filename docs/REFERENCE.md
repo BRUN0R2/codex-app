@@ -33,6 +33,10 @@ As áreas relevantes foram lidas diretamente no snapshot:
 - Preparação do sandbox usa `windowsSandbox/setupStart` e só termina com
   `windowsSandbox/setupCompleted`; os modos permitidos vêm de
   `allowedWindowsSandboxImplementations`.
+- Diretórios graváveis por `Everyone` chegam em
+  `windows/worldWritableWarning` como até três `samplePaths`, `extraCount` e
+  `failedScan`; a lembrança oficial é
+  `notice.hide_world_writable_warning = true`.
 - Uso da conta usa `account/rateLimits/read`; atualizações incrementais chegam em
   `account/rateLimits/updated` e preservam metadados do snapshot completo.
 - Modelo, esforços e tiers de serviço vêm de `model/list`.
@@ -135,6 +139,18 @@ restrito sem Administrador, mas a própria referência o classifica como de maio
 risco em caso de prompt injection. A implementação expõe ambos somente quando
 permitidos e nunca escolhe fallback automaticamente. Como a máquina já retornou
 `ready`, nenhum setup ou prompt de elevação foi executado durante a validação.
+
+O aviso de diretórios graváveis por todos foi conferido no tipo gerado do
+`app-server-protocol`, em `windows_sandbox_prompts.rs`, no editor oficial de
+configuração e no auditor de ACLs. A semântica oficial oferece continuar somente
+na sessão ou continuar e não avisar novamente; falha de varredura declara que a
+proteção não pôde ser verificada e não inventa caminhos.
+
+Os dois estados visuais foram exercitados na janela Tauri com fixtures efêmeras:
+três caminhos mais uma contagem e `failedScan` sem amostras. A acessibilidade
+expôs um `alertdialog`, ambas as ações e o compositor desabilitado. As fixtures
+foram removidas depois da captura; não houve clique nas ações, escrita de
+configuração ou alteração de ACL durante essa validação.
 
 Os tipos `GetAccountRateLimitsResponse`, `RateLimitSnapshot` e
 `RateLimitWindow` confirmam que `usedPercent` representa consumo, enquanto

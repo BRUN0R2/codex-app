@@ -61,6 +61,7 @@ import {
   type WindowsSandboxReadinessResponse,
   type WindowsSandboxSetupCompletedNotification,
   type WindowsSandboxSetupMode,
+  type WindowsWorldWritableWarningNotification,
 } from "../../shared/codex/types";
 import { createTimeline } from "../chat/createTimeline";
 import {
@@ -78,6 +79,10 @@ import { createProjectWorkspace } from "../projects/createProjectWorkspace";
 import { createThreadLibrary } from "../projects/createThreadLibrary";
 import { pathsEqual, type ProjectRecord } from "../projects/projectStore";
 import { threadTitle, type ThreadLibraryState } from "../projects/threadLibrary";
+import {
+  parseWindowsWorldWritableWarning,
+  WORLD_WRITABLE_WARNING_CONFIG_KEY,
+} from "../security/windowsWorldWritableWarningProtocol";
 
 export type CompatibilityContextState = "failed" | "idle" | "loading" | "ready";
 export type AccountRateLimitsState = "failed" | "idle" | "loading" | "ready";
@@ -87,6 +92,21 @@ export type WindowsSandboxSetupState =
   | { type: "running"; mode: WindowsSandboxSetupMode }
   | { type: "starting"; mode: WindowsSandboxSetupMode }
   | { type: "succeeded"; mode: WindowsSandboxSetupMode };
+export type WindowsWorldWritableWarningState =
+  | {
+      type: "failed";
+      error: string;
+      warning: WindowsWorldWritableWarningNotification;
+    }
+  | { type: "idle" }
+  | {
+      type: "pending";
+      warning: WindowsWorldWritableWarningNotification;
+    }
+  | {
+      type: "persisting";
+      warning: WindowsWorldWritableWarningNotification;
+    };
 
 export interface CodexSession {
   account: Accessor<AccountReadResponse | undefined>;
@@ -100,6 +120,7 @@ export interface CodexSession {
   configRequirements: Accessor<ConfigRequirementsReadResponse | null>;
   windowsSandboxReadiness: Accessor<WindowsSandboxReadinessResponse | null>;
   windowsSandboxSetupState: Accessor<WindowsSandboxSetupState>;
+  worldWritableWarningState: Accessor<WindowsWorldWritableWarningState>;
   diagnostics: Accessor<RuntimeDiagnostic[]>;
   error: Accessor<string | null>;
   loginPending: Accessor<boolean>;
@@ -139,6 +160,7 @@ export interface CodexSession {
     request: T,
     response: ServerResponseFor<T>,
   ) => Promise<boolean>;
+  resolveWorldWritableWarning: (remember: boolean) => Promise<boolean>;
   saveClipboardImage: (dataBase64: string) => Promise<Attachment>;
   selectProject: (path: string) => Promise<void>;
   sendMessage: (text: string, attachments: Attachment[]) => Promise<boolean>;
@@ -193,6 +215,8 @@ export function createCodexSession(): CodexSession {
     createSignal<WindowsSandboxReadinessResponse | null>(null);
   const [windowsSandboxSetupState, setWindowsSandboxSetupState] =
     createSignal<WindowsSandboxSetupState>({ type: "idle" });
+  const [worldWritableWarningState, setWorldWritableWarningState] =
+    createSignal<WindowsWorldWritableWarningState>({ type: "idle" });
   const [models, setModels] = createSignal<CodexModel[]>([]);
   const [diagnostics, setDiagnostics] = createSignal<RuntimeDiagnostic[]>([]);
   const [error, setError] = createSignal<string | null>(
@@ -235,6 +259,7 @@ export function createCodexSession(): CodexSession {
   let compatibilityContextGeneration = 0;
   let compatibilityContextRequest: Promise<void> | null = null;
   let pendingLoginId: string | null = null;
+  let worldWritableWarningAcknowledgedForSession = false;
 
   onMount(() => {
     void (async () => {
@@ -359,6 +384,7 @@ export function createCodexSession(): CodexSession {
         resetCompatibilityContext();
         resetAccountRateLimits();
         setWindowsSandboxSetupState({ type: "idle" });
+        setWorldWritableWarningState({ type: "idle" });
         threadLibrary.reset();
         return;
       }
@@ -556,6 +582,7 @@ export function createCodexSession(): CodexSession {
       resetCompatibilityContext();
       resetAccountRateLimits();
       setWindowsSandboxSetupState({ type: "idle" });
+      setWorldWritableWarningState({ type: "idle" });
       threadLibrary.reset();
       setThreadId(null);
       timeline.reset();
@@ -878,6 +905,49 @@ export function createCodexSession(): CodexSession {
     await refreshConfig();
   }
 
+  async function resolveWorldWritableWarning(
+    remember: boolean,
+  ): Promise<boolean> {
+    const current = worldWritableWarningState();
+    if (current.type === "idle" || current.type === "persisting") {
+      return false;
+    }
+    if (!remember) {
+      worldWritableWarningAcknowledgedForSession = true;
+      setWorldWritableWarningState({ type: "idle" });
+      return true;
+    }
+
+    setWorldWritableWarningState({
+      type: "persisting",
+      warning: current.warning,
+    });
+    try {
+      await writeSetting(
+        WORLD_WRITABLE_WARNING_CONFIG_KEY,
+        true,
+        "replace",
+      );
+      if (!worldWritableWarningIsHidden(config())) {
+        throw new Error(
+          "O Codex salvou a preferência, mas ela não ficou efetiva na configuração.",
+        );
+      }
+      worldWritableWarningAcknowledgedForSession = true;
+      setWorldWritableWarningState({ type: "idle" });
+      return true;
+    } catch (reason) {
+      const message = describeCommandError(reason);
+      setWorldWritableWarningState({
+        type: "failed",
+        error: message,
+        warning: current.warning,
+      });
+      addDiagnostic("stderr", message);
+      return false;
+    }
+  }
+
   async function respondToInteractiveRequest<T extends InteractiveServerRequest>(
     request: T,
     response: ServerResponseFor<T>,
@@ -984,6 +1054,22 @@ export function createCodexSession(): CodexSession {
           void refreshConfig().catch((reason) => {
             addDiagnostic("stderr", describeCommandError(reason));
           });
+        } catch (reason) {
+          addDiagnostic("stderr", describeCommandError(reason));
+        }
+        break;
+      }
+      case "windows/worldWritableWarning": {
+        try {
+          const warning = parseWindowsWorldWritableWarning(notification.params);
+          if (worldWritableWarningAcknowledgedForSession) {
+            break;
+          }
+          setWorldWritableWarningState((current) =>
+            current.type === "persisting"
+              ? current
+              : { type: "pending", warning },
+          );
         } catch (reason) {
           addDiagnostic("stderr", describeCommandError(reason));
         }
@@ -1127,6 +1213,7 @@ export function createCodexSession(): CodexSession {
     configRequirements,
     windowsSandboxReadiness,
     windowsSandboxSetupState,
+    worldWritableWarningState,
     diagnostics,
     error,
     loginPending,
@@ -1162,6 +1249,7 @@ export function createCodexSession(): CodexSession {
     refreshConfig,
     refreshAccountRateLimits,
     respondToInteractiveRequest,
+    resolveWorldWritableWarning,
     saveClipboardImage: savePastedImage,
     selectProject,
     sendMessage,
@@ -1187,6 +1275,13 @@ function asObject(value: JsonValue | undefined): JsonObject | undefined {
 
 function activeUserConfigVersion(snapshot: ConfigReadResponse | null): string | null {
   return snapshot?.layers?.find((layer) => layer.name.type === "user")?.version ?? null;
+}
+
+function worldWritableWarningIsHidden(
+  snapshot: ConfigReadResponse | null,
+): boolean {
+  const notice = snapshot?.config.notice;
+  return isJsonObject(notice) && notice.hide_world_writable_warning === true;
 }
 
 function isWindowsSandboxSetupPending(

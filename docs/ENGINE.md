@@ -105,6 +105,12 @@ e retorna antes do trabalho terminar. O estado final vem na notificação
 `windowsSandbox/setupCompleted`. Setup e elevação nunca são iniciados
 implicitamente.
 
+O evento global `windows/worldWritableWarning` informa até três diretórios de
+exemplo, a quantidade omitida e se a varredura falhou. A ponte apenas preserva
+essa notificação; a UI valida o payload e exige uma escolha. A decisão persistente
+usa a escrita versionada de configuração já existente. Nenhuma operação do
+engine modifica ACLs automaticamente.
+
 ## Critérios para remover a ponte
 
 A autenticação nativa já não depende da ponte. Para removê-la do produto ainda

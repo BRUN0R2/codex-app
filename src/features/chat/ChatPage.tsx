@@ -2,6 +2,7 @@ import { Show } from "solid-js";
 
 import { UsageLimitNotice } from "../account/UsageLimitNotice";
 import { InteractiveRequestPanel } from "../approvals/InteractiveRequestPanel";
+import { WindowsWorldWritableWarning } from "../security/WindowsWorldWritableWarning";
 import type { CodexSession } from "../session/createCodexSession";
 import { Composer } from "./Composer";
 import { Timeline } from "./Timeline";
@@ -13,6 +14,9 @@ interface ChatPageProps {
 }
 
 export function ChatPage(props: ChatPageProps) {
+  const composerBlocked = () =>
+    props.session.worldWritableWarningState().type !== "idle";
+
   return (
     <section class="chat-page">
       <Timeline busy={props.session.busy()} entries={props.session.timeline()} />
@@ -31,10 +35,12 @@ export function ChatPage(props: ChatPageProps) {
           />
         )}
       </Show>
+      <WindowsWorldWritableWarning session={props.session} />
       <UsageLimitNotice session={props.session} />
       <Composer
         busy={props.session.busy()}
         config={props.session.config()}
+        disabled={composerBlocked()}
         inspectFiles={props.session.inspectFiles}
         loadCompatibilityContext={props.session.loadCompatibilityContext}
         models={props.session.models()}

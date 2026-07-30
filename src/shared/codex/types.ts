@@ -263,6 +263,12 @@ export interface WindowsSandboxSetupCompletedNotification {
   error: string | null;
 }
 
+export interface WindowsWorldWritableWarningNotification {
+  samplePaths: string[];
+  extraCount: number;
+  failedScan: boolean;
+}
+
 export interface ReasoningEffortOption {
   reasoningEffort: string;
   description: string;

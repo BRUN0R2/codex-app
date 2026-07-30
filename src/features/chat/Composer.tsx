@@ -22,6 +22,7 @@ import { PermissionPicker } from "./PermissionPicker";
 interface ComposerProps {
   busy: boolean;
   config: ConfigReadResponse | null;
+  disabled: boolean;
   models: CodexModel[];
   workspace: string | null;
   inspectFiles: (paths: string[]) => Promise<Attachment[]>;
@@ -113,7 +114,7 @@ export function Composer(props: ComposerProps) {
   }
 
   async function submit() {
-    if (props.busy || processing()) {
+    if (props.busy || props.disabled || processing()) {
       return;
     }
     const sent = await props.onSend(text(), attachments());
@@ -149,7 +150,13 @@ export function Composer(props: ComposerProps) {
           </button>
         }
       >
-        <div class="composer" classList={{ "composer-busy": props.busy }}>
+        <div
+          class="composer"
+          classList={{
+            "composer-busy": props.busy,
+            "composer-disabled": props.disabled,
+          }}
+        >
           <Show when={attachments().length > 0}>
             <div class="attachment-list">
               <For each={attachments()}>
@@ -175,7 +182,7 @@ export function Composer(props: ComposerProps) {
           </Show>
           <textarea
             aria-label="Mensagem"
-            disabled={props.busy}
+            disabled={props.busy || props.disabled}
             onInput={(event) => {
               setText(event.currentTarget.value);
               resizeTextarea(event.currentTarget);
@@ -192,7 +199,7 @@ export function Composer(props: ComposerProps) {
               <button
                 aria-label="Anexar arquivos"
                 class="icon-button"
-                disabled={props.busy || processing()}
+                disabled={props.busy || props.disabled || processing()}
                 onClick={() => void selectFiles()}
                 title="Anexar arquivos"
                 type="button"
@@ -201,7 +208,12 @@ export function Composer(props: ComposerProps) {
               </button>
               <PermissionPicker
                 config={props.config}
-                disabled={props.busy || processing() || props.config === null}
+                disabled={
+                  props.busy
+                  || props.disabled
+                  || processing()
+                  || props.config === null
+                }
                 onOpenSettings={props.onOpenSettings}
                 writeSettings={props.writeSettings}
               />
@@ -209,6 +221,7 @@ export function Composer(props: ComposerProps) {
             <div class="composer-actions-right">
               <ModelPicker
                 config={props.config}
+                disabled={props.disabled}
                 loadContext={props.loadCompatibilityContext}
                 models={props.models}
                 writeSetting={props.writeSetting}
@@ -220,7 +233,11 @@ export function Composer(props: ComposerProps) {
                   <button
                     aria-label="Enviar mensagem"
                     class="send-button"
-                    disabled={processing() || (text().trim().length === 0 && attachments().length === 0)}
+                    disabled={
+                      props.disabled
+                      || processing()
+                      || (text().trim().length === 0 && attachments().length === 0)
+                    }
                     onClick={() => void submit()}
                     title="Enviar"
                     type="button"
