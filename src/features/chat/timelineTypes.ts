@@ -1,18 +1,55 @@
-import type { Attachment } from "../../shared/codex/types";
-
 export type ActivityStatus =
   | "completed"
   | "declined"
   | "failed"
   | "inProgress";
 
+export type ImageDetail = "auto" | "high" | "low" | "original" | null;
+
+export type MessageAttachment =
+  | {
+      kind: "localImage";
+      id: string;
+      name: string;
+      path: string;
+      mediaType: string | null;
+      detail: ImageDetail;
+    }
+  | {
+      kind: "remoteImage";
+      id: string;
+      source: string;
+      embedded: boolean;
+      detail: ImageDetail;
+    }
+  | {
+      kind: "localAudio";
+      id: string;
+      name: string;
+      path: string;
+    }
+  | {
+      kind: "remoteAudio";
+      id: string;
+      source: string;
+      embedded: boolean;
+    }
+  | {
+      kind: "mention" | "skill";
+      id: string;
+      name: string;
+      path: string;
+    };
+
+export type MessagePhase = "commentary" | "final_answer" | null;
+
 export interface MessageEntry {
   type: "message";
   id: string;
   role: "assistant" | "user";
   text: string;
-  attachments: Attachment[];
-  phase: string | null;
+  attachments: MessageAttachment[];
+  phase: MessagePhase;
   status: "complete" | "failed" | "streaming";
 }
 
@@ -75,19 +112,107 @@ export interface ImageViewEntry {
   status: ActivityStatus;
 }
 
-export type ToolKind =
-  | "collaboration"
-  | "dynamic"
-  | "mcp"
-  | "other";
+export type ToolKind = "dynamic" | "mcp";
 
 export interface ToolEntry {
   type: "tool";
   id: string;
   kind: ToolKind;
   name: string;
+  provider: string | null;
   detail: string | null;
+  progress: string[];
+  readOnly: boolean | null;
+  durationMs: number | null;
   status: ActivityStatus;
+}
+
+export type AgentToolAction =
+  | "closeAgent"
+  | "resumeAgent"
+  | "sendInput"
+  | "spawnAgent"
+  | "wait";
+
+export interface AgentState {
+  threadId: string;
+  status: string;
+  message: string | null;
+}
+
+export interface AgentToolEntry {
+  type: "agentTool";
+  id: string;
+  action: AgentToolAction;
+  senderThreadId: string;
+  receiverThreadIds: string[];
+  prompt: string | null;
+  model: string | null;
+  reasoningEffort: string | null;
+  agents: AgentState[];
+  status: ActivityStatus;
+}
+
+export type SubAgentActivityKind = "interacted" | "interrupted" | "started";
+
+export interface SubAgentActivityEntry {
+  type: "subAgentActivity";
+  id: string;
+  kind: SubAgentActivityKind;
+  agentThreadId: string;
+  agentPath: string;
+  status: ActivityStatus;
+}
+
+export type WebSearchAction =
+  | { type: "findInPage"; source: string | null; pattern: string | null }
+  | { type: "openPage"; source: string | null }
+  | { type: "other" }
+  | { type: "search"; queries: string[]; query: string | null };
+
+export interface WebSearchEntry {
+  type: "webSearch";
+  id: string;
+  query: string;
+  action: WebSearchAction | null;
+  resultCount: number | null;
+  status: ActivityStatus;
+}
+
+export interface SleepEntry {
+  type: "sleep";
+  id: string;
+  durationMs: number;
+  status: ActivityStatus;
+}
+
+export interface ImageGenerationEntry {
+  type: "imageGeneration";
+  id: string;
+  revisedPrompt: string | null;
+  savedPath: string | null;
+  resultAvailable: boolean;
+  providerStatus: string;
+  status: ActivityStatus;
+}
+
+export interface HookPromptFragment {
+  text: string;
+  hookRunId: string;
+}
+
+export interface HookPromptEntry {
+  type: "hookPrompt";
+  id: string;
+  fragments: HookPromptFragment[];
+  status: ActivityStatus;
+}
+
+export interface ReviewEntry {
+  type: "review";
+  id: string;
+  event: "entered" | "exited";
+  review: string;
 }
 
 export interface ActivityEntry {
@@ -100,25 +225,38 @@ export interface ActivityEntry {
 
 export type GroupableTimelineEntry =
   | ActivityEntry
+  | AgentToolEntry
   | CommandEntry
   | FileChangeEntry
+  | HookPromptEntry
+  | ImageGenerationEntry
   | ImageViewEntry
-  | ToolEntry;
+  | SleepEntry
+  | SubAgentActivityEntry
+  | ToolEntry
+  | WebSearchEntry;
 
 export type TimelineEntry =
   | GroupableTimelineEntry
   | MessageEntry
   | PlanEntry
-  | ReasoningEntry;
+  | ReasoningEntry
+  | ReviewEntry;
 
 export function isGroupableTimelineEntry(
   entry: TimelineEntry,
 ): entry is GroupableTimelineEntry {
   return (
     entry.type === "activity" ||
+    entry.type === "agentTool" ||
     entry.type === "command" ||
     entry.type === "fileChange" ||
+    entry.type === "hookPrompt" ||
+    entry.type === "imageGeneration" ||
     entry.type === "imageView" ||
-    entry.type === "tool"
+    entry.type === "sleep" ||
+    entry.type === "subAgentActivity" ||
+    entry.type === "tool" ||
+    entry.type === "webSearch"
   );
 }

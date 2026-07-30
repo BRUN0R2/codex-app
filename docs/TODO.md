@@ -14,6 +14,8 @@
 - [x] Projetos persistidos e tarefas paginadas, retomáveis, renomeáveis e
   arquiváveis.
 - [x] Timeline semântica com comandos, diffs, imagens e progresso do turno.
+- [x] Todos os `ThreadItem` e `UserInput` do snapshot oficial atual possuem
+  parsing explícito e visualização dedicada.
 
 ## Engine
 
@@ -26,6 +28,7 @@
 
 ## Produto
 
-- [ ] Completar visualizações dedicadas para os itens restantes do protocolo.
+- [ ] Implementar formulários e permissões tipados para as solicitações
+  interativas restantes do app-server.
 - [ ] Completar as categorias de configuração suportadas.
 - [ ] Preparar assinatura, instalador, atualização e telemetria opt-in.

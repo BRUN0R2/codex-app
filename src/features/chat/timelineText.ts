@@ -1,6 +1,7 @@
 import type { JsonObject, JsonValue } from "../../shared/codex/types";
 
 const MAX_COMMAND_OUTPUT_CHARACTERS = 128 * 1024;
+const MAX_NARRATIVE_CHARACTERS = 128 * 1024;
 const MAX_TOOL_DETAIL_CHARACTERS = 32 * 1024;
 const MAX_TOOL_DETAIL_DEPTH = 8;
 const MAX_TOOL_DETAIL_NODES = 500;
@@ -36,6 +37,13 @@ export function boundCommandOutput(value: string): BoundedText {
     text: value.slice(-MAX_COMMAND_OUTPUT_CHARACTERS),
     omittedCharacters: value.length - MAX_COMMAND_OUTPUT_CHARACTERS,
   };
+}
+
+export function formatNarrativeText(value: string): string {
+  if (value.length <= MAX_NARRATIVE_CHARACTERS) {
+    return value;
+  }
+  return `${value.slice(0, MAX_NARRATIVE_CHARACTERS)}\n\n[${value.length - MAX_NARRATIVE_CHARACTERS} caracteres adicionais omitidos da visualização]`;
 }
 
 export function appendCommandOutput(

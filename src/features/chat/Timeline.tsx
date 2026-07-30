@@ -8,12 +8,14 @@ import {
   createSignal,
 } from "solid-js";
 
-import { ActivityGroup, LiveActivity } from "./ActivityGroup";
-import { MessageView, PlanView } from "./ConversationEntry";
+import { ActivityGroup } from "./ActivityGroup";
+import { MessageView, PlanView, ReviewView } from "./ConversationEntry";
+import { LiveActivity } from "./LiveActivity";
 import { buildTimelineBlocks, type TimelineBlock } from "./timelineGrouping";
 import type {
   MessageEntry,
   PlanEntry,
+  ReviewEntry,
   TimelineEntry,
 } from "./timelineTypes";
 
@@ -122,6 +124,9 @@ export function Timeline(props: TimelineProps) {
                 >
                   {(plan) => <PlanView entry={plan()} />}
                 </Match>
+                <Match when={reviewEntry(block())}>
+                  {(review) => <ReviewView entry={review()} />}
+                </Match>
               </Switch>
             )}
           </Index>
@@ -159,6 +164,12 @@ function messageEntry(block: TimelineBlock): MessageEntry | undefined {
 
 function planEntry(block: TimelineBlock): PlanEntry | undefined {
   return block.type === "entry" && block.entry.type === "plan"
+    ? block.entry
+    : undefined;
+}
+
+function reviewEntry(block: TimelineBlock): ReviewEntry | undefined {
+  return block.type === "entry" && block.entry.type === "review"
     ? block.entry
     : undefined;
 }

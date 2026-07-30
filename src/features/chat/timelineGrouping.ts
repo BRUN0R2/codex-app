@@ -5,6 +5,7 @@ import {
   type MessageEntry,
   type PlanEntry,
   type ReasoningEntry,
+  type ReviewEntry,
   type TimelineEntry,
 } from "./timelineTypes";
 
@@ -20,7 +21,7 @@ export type TimelineBlock =
   | {
       type: "entry";
       id: string;
-      entry: MessageEntry | PlanEntry;
+      entry: MessageEntry | PlanEntry | ReviewEntry;
     }
   | {
       type: "liveActivity";
@@ -162,7 +163,17 @@ export function activityGroupHeader(
   );
   const commandCount = entries.filter((entry) => entry.type === "command").length;
   const imageCount = entries.filter((entry) => entry.type === "imageView").length;
+  const generatedImageCount = entries.filter(
+    (entry) => entry.type === "imageGeneration",
+  ).length;
   const tools = entries.filter((entry) => entry.type === "tool");
+  const agentActivities = entries.filter(
+    (entry) =>
+      entry.type === "agentTool" || entry.type === "subAgentActivity",
+  );
+  const webSearches = entries.filter((entry) => entry.type === "webSearch");
+  const waits = entries.filter((entry) => entry.type === "sleep");
+  const hooks = entries.filter((entry) => entry.type === "hookPrompt");
   const activities = entries.filter((entry) => entry.type === "activity");
   const phrases: string[] = [];
 
@@ -179,10 +190,33 @@ export function activityGroupHeader(
       imageCount === 1 ? "Visualizou uma imagem" : `Visualizou ${imageCount} imagens`,
     );
   }
+  if (generatedImageCount > 0) {
+    phrases.push(
+      generatedImageCount === 1
+        ? "Gerou uma imagem"
+        : `Gerou ${generatedImageCount} imagens`,
+    );
+  }
   if (tools.length > 0) {
     phrases.push(
       tools.length === 1 ? (tools[0]?.name ?? "Usou uma ferramenta") : "Usou ferramentas",
     );
+  }
+  if (agentActivities.length > 0) {
+    phrases.push(
+      agentActivities.length === 1
+        ? agentActivityLabel(agentActivities[0])
+        : "Coordenou agentes",
+    );
+  }
+  if (webSearches.length > 0) {
+    phrases.push("Pesquisou na web");
+  }
+  if (waits.length > 0) {
+    phrases.push(waits.length === 1 ? "Aguardou" : "Aguardou em etapas");
+  }
+  if (hooks.length > 0) {
+    phrases.push(hooks.length === 1 ? "Executou um hook" : "Executou hooks");
   }
   if (activities.length > 0) {
     phrases.push(
@@ -201,6 +235,26 @@ export function activityGroupHeader(
       .map((phrase, index) => (index === 0 ? phrase : lowerInitial(phrase)))
       .join(" e "),
   };
+}
+
+function agentActivityLabel(
+  entry: GroupableTimelineEntry | undefined,
+): string {
+  if (entry?.type === "agentTool") {
+    switch (entry.action) {
+      case "spawnAgent":
+        return "Criou um agente";
+      case "sendInput":
+        return "Orientou um agente";
+      case "resumeAgent":
+        return "Retomou um agente";
+      case "wait":
+        return "Aguardou agentes";
+      case "closeAgent":
+        return "Encerrou um agente";
+    }
+  }
+  return "Acompanhou um agente";
 }
 
 function aggregateStatus(

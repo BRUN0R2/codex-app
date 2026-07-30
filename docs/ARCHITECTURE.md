@@ -76,7 +76,9 @@ contrato oficial, sem duplicar o conteúdo no frontend.
 
 A linha do tempo possui fronteiras pequenas e tipadas:
 
-- `parseTimelineItem` traduz a união oficial `ThreadItem` para tipos de domínio;
+- `parseTimelineItem` despacha exaustivamente a união oficial `ThreadItem`;
+- `parseUserMessage`, `parseToolItem` e `parseSpecialTimelineItem` validam suas
+  fronteiras e produzem uniões discriminadas menores;
 - `createTimeline` possui hidratação, deltas e substituição de itens por `id`;
 - `timelineGrouping` compõe mensagens, raciocínio e ações em blocos semânticos;
 - `ActivityGroup`, `ConversationEntry` e `DiffView` apenas renderizam o domínio;
@@ -89,10 +91,18 @@ omissão. O diff agregado do turno é processado em uma passagem e descartado; u
 diff por arquivo materializa inicialmente no máximo 400 linhas e só cria o
 restante após ação do usuário.
 
+O decoder cobre mensagens, hooks, raciocínio, plano, comandos, alterações,
+MCP, ferramentas dinâmicas, colaboração, subagentes, busca, espera, revisão,
+compactação, visualização e geração de imagens. Tipos ou campos obrigatórios
+desconhecidos geram diagnóstico visível; não são convertidos em atividades
+genéricas. O progresso incremental de MCP é limitado e preservado até o item
+final autoritativo.
+
 Miniaturas são carregadas sob demanda por `IntersectionObserver`. O Rust valida
 arquivo regular, tamanho e assinatura PNG, JPEG, GIF ou WebP antes de devolver
 um buffer binário. O componente cria e revoga a `Blob URL`, deixando falhas
-visíveis sem manter base64 na árvore reativa.
+visíveis sem manter base64 na árvore reativa. Geração de imagem conserva apenas
+metadados e `savedPath`; o payload base64 do protocolo é descartado na fronteira.
 
 ## Fluxos principais
 
@@ -127,7 +137,9 @@ visivelmente, mas nunca impede a exclusão local.
 Arquivos comuns viram `mention`, imagens validadas viram `localImage` e texto
 vira `text`. Imagens coladas são decodificadas, verificadas por assinatura e
 gravadas no cache antes do envio. Imagens históricas usam a mesma validação para
-pré-visualização binária. A primeira tarefa inicia a ponte compatível.
+pré-visualização binária. O histórico distingue ainda imagem e áudio remotos,
+áudio local, skills e menções sem iniciar downloads externos automaticamente.
+A primeira tarefa inicia a ponte compatível.
 
 ### Configuração e permissões
 

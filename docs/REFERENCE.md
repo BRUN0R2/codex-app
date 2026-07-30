@@ -25,11 +25,13 @@ As áreas relevantes foram lidas diretamente no snapshot:
   `codex-rs/login`; tokens nunca atravessam a interface deste aplicativo.
 - Conversas usam `thread/list`, `thread/start`, `thread/resume`,
   `thread/name/set`, `thread/archive`, `turn/start` e `turn/interrupt`.
-- Entradas são `text`, `localImage` ou `mention`.
+- O envio atual usa `text`, `localImage` ou `mention`; a leitura histórica cobre
+  também `image`, `audio`, `localAudio` e `skill`.
 - Configuração usa `config/read`, `config/value/write` e `config/batchWrite`.
 - Modelo, esforços e tiers de serviço vêm de `model/list`.
 - A timeline consome a união oficial `ThreadItem` e as notificações incrementais
-  `item/*`, `turn/plan/updated` e `turn/diff/updated`.
+  `item/*`, inclusive `item/mcpToolCall/progress`, `turn/plan/updated` e
+  `turn/diff/updated`.
 - Solicitações do servidor são respondidas pelo mesmo `id`; métodos desconhecidos
   não recebem aprovação automática.
 
@@ -93,6 +95,18 @@ Os contratos `commandExecution`, `fileChange`, `imageView`, `reasoning` e suas
 notificações foram conferidos nos tipos TypeScript gerados e no README do
 `app-server`. A interface preserva o item final como autoridade e usa deltas
 somente para o estado ativo, como orienta a referência.
+
+Também foram conferidos diretamente os tipos atuais de `hookPrompt`,
+`mcpToolCall`, `dynamicToolCall`, `collabAgentToolCall`, `subAgentActivity`,
+`webSearch`, `sleep`, `imageGeneration`, modos de revisão e `contextCompaction`.
+O resultado de ferramenta dinâmica pertence a `contentItems`; a geração de
+imagem pode carregar base64 em `result` e caminho seguro em `savedPath`. A UI
+mantém o segundo e descarta o primeiro depois da leitura, evitando duplicar um
+payload grande no estado reativo.
+
+O decoder local usa um catálogo fechado dos discriminadores atuais. Uma versão
+futura que introduza outro item falha visivelmente até que domínio e renderer
+sejam atualizados; não existe fallback genérico que aparente suporte inexistente.
 
 ## Validação do login nativo
 

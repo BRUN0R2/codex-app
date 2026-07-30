@@ -817,6 +817,9 @@ export function createCodexSession(): CodexSession {
       case "item/commandExecution/terminalInteraction":
         timeline.appendTerminalInteraction(params);
         break;
+      case "item/mcpToolCall/progress":
+        timeline.appendMcpToolProgress(params);
+        break;
       case "item/fileChange/patchUpdated":
         timeline.updateFileChangePatch(params);
         break;

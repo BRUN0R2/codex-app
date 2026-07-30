@@ -325,3 +325,48 @@ export function ShieldAlertIcon(props: IconProps) {
     </Svg>
   );
 }
+
+export function GlobeIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.5" />
+      <path d="M3.8 12h16.4M12 3.5c2.1 2.2 3.2 5 3.2 8.5S14.1 18.3 12 20.5C9.9 18.3 8.8 15.5 8.8 12S9.9 5.7 12 3.5Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" />
+    </Svg>
+  );
+}
+
+export function ClockIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.5" />
+      <path d="M12 7v5l3.2 2" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" />
+    </Svg>
+  );
+}
+
+export function UsersIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="9" cy="8" r="3" stroke="currentColor" stroke-width="1.5" />
+      <circle cx="17" cy="9" r="2.2" stroke="currentColor" stroke-width="1.4" />
+      <path d="M3.5 19c.4-3.5 2.2-5.3 5.5-5.3s5.1 1.8 5.5 5.3M14.5 14.1c3.4-.6 5.3 1 5.8 4" stroke="currentColor" stroke-linecap="round" stroke-width="1.5" />
+    </Svg>
+  );
+}
+
+export function AudioIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 10v4M9 7v10M13 4v16M17 8v8M21 10v4" stroke="currentColor" stroke-linecap="round" stroke-width="1.6" />
+    </Svg>
+  );
+}
+
+export function ReviewIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 3.5h14v17H5v-17Z" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5" />
+      <path d="M8 8h8M8 12h8M8 16h5" stroke="currentColor" stroke-linecap="round" stroke-width="1.5" />
+    </Svg>
+  );
+}

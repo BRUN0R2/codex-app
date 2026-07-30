@@ -27,9 +27,12 @@ CLI.
 - projetos persistidos, tarefas agrupadas e recentes com paginação;
 - criação, retomada, renomeação e arquivamento de tarefas;
 - seleção de workspace e envio/interrupção de turnos;
-- timeline semântica com streaming, raciocínio contextual e estados ativos;
+- timeline semântica com streaming, raciocínio contextual e todos os
+  `ThreadItem` do snapshot oficial atual;
 - comandos expansíveis, diffs por arquivo e progresso agregado do turno;
-- anexos, imagens coladas e miniaturas lazy, validados no backend;
+- MCP, ferramentas dinâmicas, agentes, busca, espera, hooks, revisão e geração
+  de imagem com estados dedicados;
+- anexos, imagens coladas, mídia histórica e miniaturas lazy validadas no backend;
 - aprovações explícitas e presets semânticos de permissão;
 - configurações, modelos, esforço, velocidade e diagnósticos;
 - shell visual inspirado no Codex Desktop, sem alterar DPI ou zoom do sistema.
@@ -39,6 +42,9 @@ cauda mais recente e informam quantos caracteres anteriores foram omitidos;
 resultados de ferramentas removem payloads binários e valores sensíveis apenas
 da visualização. Miniaturas atravessam o IPC como bytes e viram `Blob URLs`
 revogáveis, sem base64 persistido no estado da interface.
+Resultados base64 de geração de imagem também não permanecem na árvore reativa:
+a prévia usa o `savedPath` validado e informa explicitamente quando o app-server
+não oferece um arquivo local.
 
 ## Fronteira atual do engine
 

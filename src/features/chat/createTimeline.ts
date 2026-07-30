@@ -6,11 +6,10 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../../shared/codex/types";
-import {
-  parseFileChanges,
-  parseTimelineItem,
-} from "./parseTimelineItem";
-import { appendCommandOutput } from "./timelineText";
+import { toMessageAttachments } from "./messageAttachments";
+import { parseFileChanges } from "./parseCoreTimelineItem";
+import { parseTimelineItem } from "./parseTimelineItem";
+import { appendCommandOutput, formatToolDetail } from "./timelineText";
 import type {
   MessageEntry,
   TimelineEntry,
@@ -19,6 +18,8 @@ import type {
 interface TimelineOptions {
   reportProtocolError: (message: string) => void;
 }
+
+const MAX_TOOL_PROGRESS_MESSAGES = 40;
 
 export interface TimelineController {
   entries: Accessor<TimelineEntry[]>;
@@ -29,6 +30,7 @@ export interface TimelineController {
   ) => void;
   appendAgentDelta: (params: JsonObject | undefined) => void;
   appendCommandOutputDelta: (params: JsonObject | undefined) => void;
+  appendMcpToolProgress: (params: JsonObject | undefined) => void;
   appendPlanDelta: (params: JsonObject | undefined) => void;
   appendReasoningSummaryDelta: (params: JsonObject | undefined) => void;
   appendReasoningTextDelta: (params: JsonObject | undefined) => void;
@@ -53,7 +55,7 @@ export function createTimeline(options: TimelineOptions): TimelineController {
       id,
       role: "user",
       text,
-      attachments,
+      attachments: toMessageAttachments(attachments),
       phase: null,
       status: "streaming",
     });
@@ -146,6 +148,31 @@ export function createTimeline(options: TimelineOptions): TimelineController {
     );
   }
 
+  function appendMcpToolProgress(params: JsonObject | undefined) {
+    const id = readString(params, "itemId");
+    const message = readString(params, "message");
+    if (id === undefined || message === undefined) {
+      options.reportProtocolError(
+        "A atualização de progresso MCP não contém itemId e message.",
+      );
+      return;
+    }
+    const boundedMessage = formatToolDetail(message);
+    if (boundedMessage === null) {
+      return;
+    }
+    update(id, (entry) =>
+      entry.type === "tool" && entry.kind === "mcp"
+        ? {
+            ...entry,
+            progress: [...entry.progress, boundedMessage].slice(
+              -MAX_TOOL_PROGRESS_MESSAGES,
+            ),
+          }
+        : entry,
+    );
+  }
+
   function appendPlanDelta(params: JsonObject | undefined) {
     const id = readString(params, "itemId");
     const delta = readString(params, "delta");
@@ -223,9 +250,15 @@ export function createTimeline(options: TimelineOptions): TimelineController {
     if (id === undefined) {
       return;
     }
-    const changes = parseFileChanges(params?.changes);
+    const changes = parseFileChanges(params?.changes, id);
+    if (!changes.ok) {
+      options.reportProtocolError(changes.error);
+      return;
+    }
     update(id, (entry) =>
-      entry.type === "fileChange" ? { ...entry, changes } : entry,
+      entry.type === "fileChange"
+        ? { ...entry, changes: changes.value }
+        : entry,
     );
   }
 
@@ -278,6 +311,13 @@ export function createTimeline(options: TimelineOptions): TimelineController {
         entry.attachments.length === 0
       ) {
         next[index] = { ...entry, attachments: existing.attachments };
+      } else if (
+        existing?.type === "tool" &&
+        entry.type === "tool" &&
+        existing.progress.length > 0 &&
+        entry.progress.length === 0
+      ) {
+        next[index] = { ...entry, progress: existing.progress };
       } else {
         next[index] = entry;
       }
@@ -299,6 +339,7 @@ export function createTimeline(options: TimelineOptions): TimelineController {
     addOptimisticUserMessage,
     appendAgentDelta,
     appendCommandOutputDelta,
+    appendMcpToolProgress,
     appendPlanDelta,
     appendReasoningSummaryDelta,
     appendReasoningTextDelta,

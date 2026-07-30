@@ -963,6 +963,10 @@ button.environment-row:hover {
   white-space: nowrap;
 }
 
+.message-file-attachment > svg {
+  flex: 0 0 auto;
+}
+
 .image-preview {
   position: relative;
   display: grid;
@@ -1204,6 +1208,110 @@ button.environment-row:hover {
   white-space: pre-wrap;
 }
 
+.tool-progress-list {
+  display: grid;
+  gap: 5px;
+  padding: 9px 11px;
+  border-bottom: 1px solid #303030;
+  color: #929292;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.tool-meta {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 5px 10px;
+  border-top: 1px solid #303030;
+  color: #747474;
+  font-size: 10.5px;
+}
+
+.activity-facts {
+  margin: 0;
+}
+
+.activity-facts > div {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 10px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #303030;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.activity-facts > div:last-child {
+  border-bottom: 0;
+}
+
+.activity-facts dt {
+  color: #717171;
+}
+
+.activity-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #b6b6b6;
+  white-space: pre-wrap;
+}
+
+.hook-fragments {
+  max-height: 230px;
+  overflow: auto;
+  padding: 9px 11px;
+  scrollbar-color: #494949 transparent;
+  scrollbar-width: thin;
+}
+
+.hook-fragments p {
+  margin: 0 0 8px;
+  color: #aaaaaa;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.hook-fragments p:last-child {
+  margin-bottom: 0;
+}
+
+.generated-image-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 10px;
+}
+
+.generated-image-content .image-preview {
+  width: 96px;
+  height: 96px;
+}
+
+.generated-image-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.generated-image-copy p {
+  margin: 0;
+  color: #b5b5b5;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.generated-image-copy small {
+  display: block;
+  color: #777777;
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
 .command-prompt {
   color: #d5d5d5;
 }
@@ -1400,6 +1508,29 @@ button.environment-row:hover {
   color: #777777;
   line-height: 1.55;
   white-space: pre-wrap;
+}
+
+.review-status-row {
+  display: flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 7px;
+  margin: -5px 0 20px;
+  color: #8a8a8a;
+  font-size: 12.5px;
+}
+
+.review-entry {
+  margin-bottom: 27px;
+  padding-left: 1px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 100px;
+}
+
+.review-entry .message-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .thinking-row {

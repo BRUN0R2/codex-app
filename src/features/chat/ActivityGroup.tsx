@@ -1,18 +1,22 @@
-import { For, Match, Show, Switch } from "solid-js";
+import { For, Show } from "solid-js";
 
 import {
   ChevronDownIcon,
   ChevronRightIcon,
+  ClockIcon,
   EditIcon,
+  GlobeIcon,
+  ImageIcon,
   ImagesIcon,
+  SparkIcon,
   TerminalIcon,
+  UsersIcon,
 } from "../../shared/components/Icons";
-import { CommandActivity } from "./CommandActivity";
-import { FileChangeActivity } from "./FileChangeActivity";
+import { ActivityDetail } from "./ActivityDetail";
 import { ImagePreview } from "./ImagePreview";
 import { fileName } from "./timelinePresentation";
 import type { TimelineBlock } from "./timelineGrouping";
-import { GenericActivity, ToolActivity, ToolBadge } from "./ToolActivity";
+import { ToolBadge } from "./ToolActivity";
 import type {
   GroupableTimelineEntry,
   ImageViewEntry,
@@ -27,14 +31,8 @@ interface ActivityGroupProps {
 }
 
 export function ActivityGroup(props: ActivityGroupProps) {
-  const editsFiles = () =>
-    props.block.entries.some((entry) => entry.type === "fileChange");
   const viewedImages = () => props.block.entries.filter(isImageViewEntry);
-  const otherEntries = () =>
-    props.block.entries.filter((entry) => entry.type !== "imageView");
-  const onlyUsesTools = () =>
-    props.block.entries.length > 0 &&
-    props.block.entries.every((entry) => entry.type === "tool");
+  const otherEntries = () => props.block.entries.filter(isNotImageViewEntry);
 
   return (
     <section
@@ -48,15 +46,7 @@ export function ActivityGroup(props: ActivityGroupProps) {
       >
         <Show when={props.block.header.kind === "activity"}>
           <span class="activity-group-icon">
-            {viewedImages().length === props.block.entries.length ? (
-              <ImagesIcon size={14} />
-            ) : editsFiles() ? (
-              <EditIcon size={14} />
-            ) : onlyUsesTools() ? (
-              <ToolBadge />
-            ) : (
-              <TerminalIcon size={14} />
-            )}
+            <ActivityGroupIcon entries={props.block.entries} />
           </span>
         </Show>
         <span class="activity-group-label">{props.block.header.label}</span>
@@ -85,65 +75,11 @@ export function ActivityGroup(props: ActivityGroupProps) {
           </Show>
           <For each={otherEntries()}>
             {(entry) => (
-              <Switch>
-                <Match when={entry.status === "inProgress" ? entry : undefined}>
-                  {(live) => <LiveActivity entry={live()} />}
-                </Match>
-                <Match
-                  when={
-                    entry.type === "command" && entry.status !== "inProgress"
-                      ? entry
-                      : undefined
-                  }
-                >
-                  {(command) => (
-                    <CommandActivity
-                      entry={command()}
-                      expanded={props.expandedDetail === command().id}
-                      onToggle={() => props.onToggleDetail(command().id)}
-                    />
-                  )}
-                </Match>
-                <Match
-                  when={
-                    entry.type === "fileChange" && entry.status !== "inProgress"
-                      ? entry
-                      : undefined
-                  }
-                >
-                  {(fileChange) => (
-                    <FileChangeActivity
-                      entry={fileChange()}
-                      expandedDetail={props.expandedDetail}
-                      onToggleDetail={props.onToggleDetail}
-                    />
-                  )}
-                </Match>
-                <Match
-                  when={
-                    entry.type === "tool" && entry.status !== "inProgress"
-                      ? entry
-                      : undefined
-                  }
-                >
-                  {(tool) => (
-                    <ToolActivity
-                      entry={tool()}
-                      expanded={props.expandedDetail === tool().id}
-                      onToggle={() => props.onToggleDetail(tool().id)}
-                    />
-                  )}
-                </Match>
-                <Match
-                  when={
-                    entry.type === "activity" && entry.status !== "inProgress"
-                      ? entry
-                      : undefined
-                  }
-                >
-                  {(activity) => <GenericActivity entry={activity()} />}
-                </Match>
-              </Switch>
+              <ActivityDetail
+                entry={entry}
+                expandedDetail={props.expandedDetail}
+                onToggleDetail={props.onToggleDetail}
+              />
             )}
           </For>
         </div>
@@ -152,43 +88,56 @@ export function ActivityGroup(props: ActivityGroupProps) {
   );
 }
 
-interface LiveActivityProps {
-  entry: GroupableTimelineEntry;
+function ActivityGroupIcon(props: { entries: GroupableTimelineEntry[] }) {
+  if (onlyType(props.entries, "imageView")) {
+    return <ImagesIcon size={14} />;
+  }
+  if (props.entries.some((entry) => entry.type === "fileChange")) {
+    return <EditIcon size={14} />;
+  }
+  if (onlyTypes(props.entries, ["agentTool", "subAgentActivity"])) {
+    return <UsersIcon size={14} />;
+  }
+  if (onlyType(props.entries, "webSearch")) {
+    return <GlobeIcon size={14} />;
+  }
+  if (onlyType(props.entries, "sleep")) {
+    return <ClockIcon size={14} />;
+  }
+  if (onlyType(props.entries, "hookPrompt")) {
+    return <SparkIcon size={14} />;
+  }
+  if (onlyType(props.entries, "imageGeneration")) {
+    return <ImageIcon size={14} />;
+  }
+  if (onlyType(props.entries, "tool")) {
+    return <ToolBadge />;
+  }
+  return <TerminalIcon size={14} />;
 }
 
-export function LiveActivity(props: LiveActivityProps) {
-  const label = () => {
-    switch (props.entry.type) {
-      case "command":
-        return `Executando ${props.entry.command}`;
-      case "fileChange":
-        return "Editando arquivos";
-      case "imageView":
-        return "Visualizando imagem";
-      case "tool":
-        return `Usando ${props.entry.name}`;
-      case "activity":
-        return props.entry.label;
-    }
-  };
-  return (
-    <div class="live-activity" title={label()}>
-      {props.entry.type === "fileChange" ? (
-        <EditIcon size={13} />
-      ) : props.entry.type === "imageView" ? (
-        <ImagesIcon size={13} />
-      ) : props.entry.type === "tool" ? (
-        <ToolBadge />
-      ) : (
-        <TerminalIcon size={13} />
-      )}
-      <span class="live-activity-label">{label()}</span>
-    </div>
-  );
+function onlyType(
+  entries: GroupableTimelineEntry[],
+  type: GroupableTimelineEntry["type"],
+): boolean {
+  return entries.length > 0 && entries.every((entry) => entry.type === type);
+}
+
+function onlyTypes(
+  entries: GroupableTimelineEntry[],
+  types: ReadonlyArray<GroupableTimelineEntry["type"]>,
+): boolean {
+  return entries.length > 0 && entries.every((entry) => types.includes(entry.type));
 }
 
 function isImageViewEntry(
   entry: GroupableTimelineEntry,
 ): entry is ImageViewEntry {
   return entry.type === "imageView";
+}
+
+function isNotImageViewEntry(
+  entry: GroupableTimelineEntry,
+): entry is Exclude<GroupableTimelineEntry, ImageViewEntry> {
+  return entry.type !== "imageView";
 }
