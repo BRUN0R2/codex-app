@@ -172,6 +172,29 @@ export function MoreIcon(props: IconProps) {
   );
 }
 
+export function SquarePenIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M12 4H5.5A2.5 2.5 0 0 0 3 6.5v12A2.5 2.5 0 0 0 5.5 21h12a2.5 2.5 0 0 0 2.5-2.5V12"
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="1.5"
+      />
+      <path
+        d="m16.4 3.6 4 4L10 18l-4.5 1 1-4.5 9.9-9.9Z"
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="1.5"
+      />
+    </Svg>
+  );
+}
+
 export function LaptopIcon(props: IconProps) {
   return (
     <Svg {...props}>

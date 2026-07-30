@@ -26,14 +26,15 @@ independente da ponte.
 A superfície é uma enumeração fechada:
 
 - conta: ler, entrar com ChatGPT, cancelar login e sair;
-- tarefa: iniciar, enviar turno e interromper;
+- tarefa: listar, iniciar, retomar, renomear, arquivar, enviar turno e interromper;
 - configuração: ler, escrever e escrever em lote;
 - modelos: listar;
 - aprovação: responder uma solicitação pendente.
 
-Somente o adaptador de compatibilidade conhece métodos como `turn/start` ou
-`model/list`. A UI invoca comandos Tauri pequenos e trabalha com tipos de
-domínio.
+Somente o adaptador de compatibilidade conhece métodos como `thread/list`,
+`thread/resume`, `turn/start` ou `model/list`. A UI invoca comandos Tauri pequenos
+e trabalha com tipos de domínio. A listagem usa paginação limitada, ordenação por
+recência e exclui tarefas arquivadas.
 
 ## Autenticação nativa
 

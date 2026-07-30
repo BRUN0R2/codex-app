@@ -93,7 +93,7 @@ impl AgentEngine for NativeEngine {
     ) -> Result<Value, AppError> {
         let audit_name = operation.audit_name();
         let audit_thread_id = operation.audit_thread_id().map(str::to_string);
-        let thread_workspace = match &operation {
+        let started_thread_workspace = match &operation {
             EngineOperation::StartThread { cwd } => Some(cwd.clone()),
             _ => None,
         };
@@ -111,12 +111,13 @@ impl AgentEngine for NativeEngine {
             self.provider.execute(&self.bridge, app, operation).await?
         };
 
-        if let Some(workspace) = thread_workspace
-            && let Some(thread_id) = result
-                .get("thread")
-                .and_then(Value::as_object)
-                .and_then(|thread| thread.get("id"))
+        if let Some(thread) = result.get("thread").and_then(Value::as_object)
+            && let Some(thread_id) = thread.get("id").and_then(Value::as_str)
+            && let Some(workspace) = thread
+                .get("cwd")
                 .and_then(Value::as_str)
+                .map(str::to_string)
+                .or(started_thread_workspace)
         {
             self.storage.upsert_thread(thread_id, &workspace).await?;
         }

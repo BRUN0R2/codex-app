@@ -11,6 +11,8 @@
 - [x] Login, persistência após reinício e leitura da sessão pela ponte validados.
 - [x] Modelos e configuração pré-carregados em segundo plano, com concorrência
   deduplicada e validação ao vivo sem interação.
+- [x] Projetos persistidos e tarefas paginadas, retomáveis, renomeáveis e
+  arquiváveis.
 
 ## Engine
 
@@ -23,7 +25,6 @@
 
 ## Produto
 
-- [ ] Listar, retomar, renomear e arquivar tarefas.
 - [ ] Renderizar diffs e toda a matriz de itens de ferramenta.
 - [ ] Completar as categorias de configuração suportadas.
 - [ ] Preparar assinatura, instalador, atualização e telemetria opt-in.

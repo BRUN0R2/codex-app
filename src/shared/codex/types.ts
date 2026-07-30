@@ -111,16 +111,62 @@ export interface NativeLogoutResponse {
   remoteRevocationError: string | null;
 }
 
-export interface ThreadSummary {
+export type ThreadActiveFlag = "waitingOnApproval" | "waitingOnUserInput";
+
+export type ThreadStatus =
+  | { type: "active"; activeFlags: ThreadActiveFlag[] }
+  | { type: "idle" | "notLoaded" | "systemError" };
+
+export type TurnStatus = "completed" | "failed" | "inProgress" | "interrupted";
+
+export interface ThreadTurn {
   id: string;
-  preview?: string;
-  name?: string | null;
-  createdAt?: number;
-  updatedAt?: number;
+  items: JsonValue[];
+  status: TurnStatus;
+}
+
+export interface CodexThread {
+  id: string;
+  preview: string;
+  name: string | null;
+  cwd: string;
+  createdAt: number;
+  updatedAt: number;
+  recencyAt: number | null;
+  status: ThreadStatus;
+  turns: ThreadTurn[];
 }
 
 export interface ThreadStartResponse {
-  thread: ThreadSummary;
+  thread: CodexThread;
+}
+
+export interface ThreadListRequest {
+  cursor: string | null;
+}
+
+export interface ThreadListResponse {
+  data: CodexThread[];
+  nextCursor: string | null;
+  backwardsCursor: string | null;
+}
+
+export interface ThreadResumeRequest {
+  threadId: string;
+}
+
+export interface ThreadResumeResponse {
+  thread: CodexThread;
+  cwd: string;
+}
+
+export interface ThreadSetNameRequest {
+  threadId: string;
+  name: string;
+}
+
+export interface ThreadArchiveRequest {
+  threadId: string;
 }
 
 export interface TurnSummary {

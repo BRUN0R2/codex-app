@@ -60,12 +60,17 @@ memória.
 ## Frontend
 
 `src/features` é organizado por capacidade: autenticação, chat, aprovações,
-configurações, sessão e shell. `createCodexSession` é o único dono das transições
-de estado. Assim que a conta autenticada é conhecida, ele mostra o shell e inicia
-um único carregamento de modelos e configuração em segundo plano. Configurações,
-seletor de modelo e criação de tarefa compartilham a mesma promessa quando o
-aquecimento ainda está em curso; uma falha fica explícita e a próxima solicitação
-pode tentar novamente.
+configurações, projetos, sessão e shell. `createCodexSession` compõe os donos de
+estado; `createProjectWorkspace` controla a seleção persistida e
+`createThreadLibrary` controla paginação, deduplicação e atualização da biblioteca
+de tarefas. Assim que a conta autenticada é conhecida, o shell aparece e modelos,
+configuração e tarefas são carregados em segundo plano. Uma falha fica explícita
+e a próxima solicitação pode tentar novamente.
+
+A preferência de projetos contém somente caminhos locais e é versionada no
+perfil do WebView. Conversas continuam pertencendo ao armazenamento do Codex;
+abrir uma tarefa usa `thread/resume` e reidrata a linha do tempo retornada pelo
+contrato oficial, sem duplicar o conteúdo no frontend.
 
 ## Fluxos principais
 
@@ -76,8 +81,8 @@ pode tentar novamente.
 3. A disponibilidade da ponte é diagnosticada sem iniciar processo.
 4. A conta é lida do cofre criptografado com a chave do Credential Manager.
 5. A UI mostra login ou shell sem aguardar a ponte.
-6. Com sessão válida, configuração e modelos são solicitados em paralelo e o
-   estado passa por `idle`, `loading`, `ready` ou `failed`.
+6. Com sessão válida, configuração, modelos e a primeira página de tarefas são
+   solicitados em paralelo; cada dono expõe estado explícito de carregamento.
 
 Sem sessão, a ponte permanece inativa. O aquecimento não usa temporizador,
 polling ou cache persistente paralelo: concorrência é deduplicada no dono da

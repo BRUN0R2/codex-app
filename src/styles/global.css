@@ -124,7 +124,7 @@ pre {
 .mode-button,
 .sidebar-action,
 .project-empty,
-.project-root,
+.project-root-main,
 .project-task,
 .sidebar-footer > button {
   display: flex;
@@ -141,7 +141,6 @@ pre {
 .mode-button:hover,
 .sidebar-action:hover:not(:disabled),
 .project-empty:hover,
-.project-root:hover,
 .project-task:hover,
 .sidebar-footer > button:hover {
   color: var(--text);
@@ -198,14 +197,29 @@ pre {
 
 .sidebar-action > svg,
 .project-empty > svg,
-.project-root > svg {
+.project-root-main > svg {
   flex: 0 0 auto;
   color: #b1b1b1;
 }
 
-.project-section {
+.sidebar-library {
   min-height: 0;
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
   margin-top: 22px;
+  padding-bottom: 12px;
+  scrollbar-color: #454545 transparent;
+  scrollbar-width: thin;
+}
+
+.project-section,
+.recent-section {
+  min-height: 0;
+}
+
+.recent-section {
+  margin-top: 20px;
 }
 
 .sidebar-section-title {
@@ -235,7 +249,7 @@ pre {
 }
 
 .project-empty,
-.project-root {
+.project-root-main {
   height: 32px;
   gap: 9px;
   padding: 0 8px;
@@ -243,9 +257,9 @@ pre {
   font-size: 13.5px;
 }
 
-.project-root span,
+.project-root-main span,
 .project-empty span,
-.project-task span:first-child {
+.project-task > span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -255,18 +269,207 @@ pre {
   margin-top: 2px;
 }
 
-.project-task {
+.project-root {
   position: relative;
+  display: flex;
   height: 32px;
+  min-width: 0;
+  align-items: center;
+  border-radius: 8px;
+  transition: background 110ms ease;
+}
+
+.project-root:hover,
+.project-root.selected {
+  background: var(--surface-hover);
+}
+
+.project-root-main {
+  min-width: 0;
+  flex: 1;
+  background: transparent;
+  text-align: left;
+}
+
+.project-root-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding-right: 3px;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.project-root:hover .project-root-actions,
+.project-root:focus-within .project-root-actions {
+  opacity: 1;
+}
+
+.project-root-actions > button,
+.project-task-menu {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 6px;
+  color: #949494;
+  background: transparent;
+}
+
+.project-root-actions > button:hover,
+.project-root-actions > button.active,
+.project-task-menu:hover,
+.project-task-menu.active {
+  color: #e7e7e7;
+  background: #3a3a3a;
+}
+
+.project-task-row {
+  position: relative;
+  display: flex;
+  height: 32px;
+  min-width: 0;
+  align-items: center;
+  border-radius: 8px;
+}
+
+.project-task-row:hover,
+.project-task-row:focus-within,
+.project-task-row.project-task-active {
+  background: var(--surface-hover);
+}
+
+.project-task {
+  height: 32px;
+  min-width: 0;
+  flex: 1;
   justify-content: space-between;
   gap: 8px;
-  padding: 0 9px 0 31px;
+  padding: 0 32px 0 31px;
   color: #a5a5a5;
   font-size: 12.5px;
 }
 
-.project-task-active {
+.project-task-row.compact .project-task {
+  padding-left: 9px;
+}
+
+.project-task-row.project-task-active .project-task {
   color: #ececec;
+}
+
+.project-task-menu {
+  position: absolute;
+  z-index: 2;
+  right: 3px;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.project-task-row:hover .project-task-menu,
+.project-task-row:focus-within .project-task-menu,
+.project-task-menu.active {
+  opacity: 1;
+}
+
+.project-task-empty {
+  display: flex;
+  height: 32px;
+  align-items: center;
+  margin: 0;
+  padding: 0 9px 0 31px;
+  color: #656565;
+  font-size: 12.5px;
+}
+
+.recent-section .project-task-empty {
+  padding-left: 8px;
+}
+
+.project-task-rename {
+  width: 100%;
+  padding: 3px 7px 3px 27px;
+}
+
+.project-task-row.compact .project-task-rename {
+  padding-left: 5px;
+}
+
+.project-task-rename input {
+  width: 100%;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid #555555;
+  border-radius: 6px;
+  outline: none;
+  color: #f0f0f0;
+  background: #242424;
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.sidebar-menu-dismiss {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: default;
+}
+
+.sidebar-context-menu {
+  position: absolute;
+  z-index: 41;
+  top: 29px;
+  right: 3px;
+  width: 194px;
+  padding: 5px;
+  border: 1px solid #454545;
+  border-radius: 10px;
+  background: var(--surface-menu);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 42%);
+}
+
+.sidebar-context-menu > button {
+  display: flex;
+  width: 100%;
+  height: 30px;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: #dfdfdf;
+  background: transparent;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.sidebar-context-menu > button:hover {
+  background: var(--surface-hover);
+}
+
+.sidebar-context-menu > button.danger {
+  color: #ef9a92;
+}
+
+.thread-context-menu {
+  top: 29px;
+}
+
+.thread-load-more {
+  width: calc(100% - 12px);
+  height: 28px;
+  margin: 4px 6px 0;
+  border-radius: 7px;
+  color: #8d8d8d;
+  background: transparent;
+  font-size: 12px;
+}
+
+.thread-load-more:hover:not(:disabled) {
+  color: #d7d7d7;
   background: var(--surface-hover);
 }
 
@@ -287,8 +490,8 @@ pre {
 }
 
 .sidebar-spacer {
-  min-height: 20px;
-  flex: 1;
+  min-height: 8px;
+  flex: 0 0 auto;
 }
 
 .sidebar-footer {
@@ -349,14 +552,14 @@ pre {
 }
 
 .sidebar-collapsed .sidebar-label,
-.sidebar-collapsed .project-task {
+.sidebar-collapsed .sidebar-library {
   display: none;
 }
 
 .sidebar-collapsed .mode-button,
 .sidebar-collapsed .sidebar-action,
 .sidebar-collapsed .project-empty,
-.sidebar-collapsed .project-root,
+.sidebar-collapsed .project-root-main,
 .sidebar-collapsed .sidebar-footer > button {
   justify-content: center;
   padding: 0;

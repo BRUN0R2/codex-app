@@ -2,6 +2,7 @@ import { Show, createSignal } from "solid-js";
 
 import { ApprovalDialog } from "../approvals/ApprovalDialog";
 import { ChatPage } from "../chat/ChatPage";
+import { ProjectSidebar } from "../projects/ProjectSidebar";
 import type { CodexSession } from "../session/createCodexSession";
 import { SettingsDrawer } from "../settings/SettingsDrawer";
 import {
@@ -23,10 +24,6 @@ export function AppShell(props: AppShellProps) {
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
   const [environmentOpen, setEnvironmentOpen] = createSignal(true);
-  const workspaceName = () => {
-    const path = props.session.workspace();
-    return path?.split(/[\\/]/).at(-1) ?? "Selecionar projeto";
-  };
   const accountName = () => {
     const account = props.session.account()?.account;
     if (account !== null && account !== undefined && "email" in account) {
@@ -34,8 +31,7 @@ export function AppShell(props: AppShellProps) {
     }
     return account?.type ?? "Codex";
   };
-  const taskTitle = () =>
-    props.session.threadId() === null ? "Nova tarefa" : "Conversa atual";
+  const taskTitle = () => props.session.currentThreadTitle();
 
   return (
     <div
@@ -71,51 +67,7 @@ export function AppShell(props: AppShellProps) {
           </button>
         </nav>
 
-        <section class="project-section">
-          <div class="sidebar-section-title">
-            <span class="sidebar-label">Projetos</span>
-            <button
-              aria-label="Adicionar projeto"
-              onClick={() => void props.session.chooseWorkspace()}
-              title="Selecionar projeto"
-              type="button"
-            >
-              <PlusIcon size={14} />
-            </button>
-          </div>
-
-          <Show
-            when={props.session.workspace()}
-            fallback={
-              <button
-                class="project-empty"
-                onClick={() => void props.session.chooseWorkspace()}
-                type="button"
-              >
-                <FolderIcon size={16} />
-                <span class="sidebar-label">Abrir uma pasta</span>
-              </button>
-            }
-          >
-            <div class="project-group">
-              <button
-                class="project-root"
-                onClick={() => void props.session.chooseWorkspace()}
-                title={props.session.workspace() ?? undefined}
-                type="button"
-              >
-                <FolderIcon size={16} />
-                <span class="sidebar-label">{workspaceName()}</span>
-              </button>
-              <button class="project-task project-task-active" type="button">
-                <span class="sidebar-label">{taskTitle()}</span>
-                <Show when={props.session.busy()}>
-                  <span aria-label="Tarefa em andamento" class="task-spinner" />
-                </Show>
-              </button>
-            </div>
-          </Show>
-        </section>
+        <ProjectSidebar session={props.session} />
 
         <div class="sidebar-spacer" />
 

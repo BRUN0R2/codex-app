@@ -2,6 +2,8 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 
+const THREAD_PAGE_LIMIT: u32 = 100;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EngineKind {
@@ -124,6 +126,19 @@ pub enum EngineOperation {
     StartThread {
         cwd: String,
     },
+    ListThreads {
+        cursor: Option<String>,
+    },
+    ResumeThread {
+        thread_id: String,
+    },
+    SetThreadName {
+        thread_id: String,
+        name: String,
+    },
+    ArchiveThread {
+        thread_id: String,
+    },
     StartTurn {
         thread_id: String,
         client_user_message_id: String,
@@ -154,6 +169,10 @@ impl EngineOperation {
             Self::CancelLogin { .. } => "auth.cancel_login",
             Self::Logout => "auth.logout",
             Self::StartThread { .. } => "thread.start",
+            Self::ListThreads { .. } => "thread.list",
+            Self::ResumeThread { .. } => "thread.resume",
+            Self::SetThreadName { .. } => "thread.name.set",
+            Self::ArchiveThread { .. } => "thread.archive",
             Self::StartTurn { .. } => "turn.start",
             Self::InterruptTurn { .. } => "turn.interrupt",
             Self::ReadConfig { .. } => "config.read",
@@ -165,9 +184,11 @@ impl EngineOperation {
 
     pub fn audit_thread_id(&self) -> Option<&str> {
         match self {
-            Self::StartTurn { thread_id, .. } | Self::InterruptTurn { thread_id, .. } => {
-                Some(thread_id)
-            }
+            Self::ResumeThread { thread_id }
+            | Self::SetThreadName { thread_id, .. }
+            | Self::ArchiveThread { thread_id }
+            | Self::StartTurn { thread_id, .. }
+            | Self::InterruptTurn { thread_id, .. } => Some(thread_id),
             _ => None,
         }
     }
@@ -201,6 +222,26 @@ impl EngineOperation {
                     "serviceName": "codex_desktop_next",
                 })),
             ),
+            Self::ListThreads { cursor } => (
+                "thread/list",
+                Some(json!({
+                    "cursor": cursor,
+                    "limit": THREAD_PAGE_LIMIT,
+                    "sortKey": "recency_at",
+                    "sortDirection": "desc",
+                    "archived": false,
+                })),
+            ),
+            Self::ResumeThread { thread_id } => {
+                ("thread/resume", Some(json!({ "threadId": thread_id })))
+            }
+            Self::SetThreadName { thread_id, name } => (
+                "thread/name/set",
+                Some(json!({ "threadId": thread_id, "name": name })),
+            ),
+            Self::ArchiveThread { thread_id } => {
+                ("thread/archive", Some(json!({ "threadId": thread_id })))
+            }
             Self::StartTurn {
                 thread_id,
                 client_user_message_id,
@@ -302,6 +343,26 @@ mod tests {
                         "path": "C:\\workspace\\src\\main.rs",
                     },
                 ],
+            }))
+        );
+    }
+
+    #[test]
+    fn thread_library_uses_the_official_paginated_contract() {
+        let (method, params) = EngineOperation::ListThreads {
+            cursor: Some("next-page".into()),
+        }
+        .into_compatibility_rpc();
+
+        assert_eq!(method, "thread/list");
+        assert_eq!(
+            params,
+            Some(json!({
+                "cursor": "next-page",
+                "limit": 100,
+                "sortKey": "recency_at",
+                "sortDirection": "desc",
+                "archived": false,
             }))
         );
     }

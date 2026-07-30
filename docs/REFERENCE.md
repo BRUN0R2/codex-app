@@ -23,7 +23,8 @@ As áreas relevantes foram lidas diretamente no snapshot:
 - O cliente envia `initialize`, aguarda a resposta e então envia `initialized`.
 - O login OAuth usa o cliente, os escopos, flags, portas e callback observados em
   `codex-rs/login`; tokens nunca atravessam a interface deste aplicativo.
-- Conversas usam `thread/start`, `turn/start` e `turn/interrupt`.
+- Conversas usam `thread/list`, `thread/start`, `thread/resume`,
+  `thread/name/set`, `thread/archive`, `turn/start` e `turn/interrupt`.
 - Entradas são `text`, `localImage` ou `mention`.
 - Configuração usa `config/read`, `config/value/write` e `config/batchWrite`.
 - Modelo, esforços e tiers de serviço vêm de `model/list`.
@@ -62,6 +63,8 @@ os três submenus, menu da conta e página de configurações.
 Padrões reproduzidos:
 
 - sidebar de 273 px em janela ampla e conteúdo de chat centralizado;
+- projetos com raiz selecionável, ações no hover, tarefas indentadas e seção de
+  recentes;
 - compositor compacto, expansível e com ações agrupadas nas extremidades;
 - permissão resumida como intenção (`Aprovar por mim`, `Acesso completo` ou
   `Personalizado`) e detalhes técnicos concentrados nas configurações;

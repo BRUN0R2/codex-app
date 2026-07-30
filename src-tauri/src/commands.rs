@@ -23,6 +23,31 @@ pub struct ThreadStartRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThreadListRequest {
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadResumeRequest {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadSetNameRequest {
+    pub thread_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadArchiveRequest {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnAttachment {
     pub path: String,
 }
@@ -165,6 +190,85 @@ pub async fn engine_thread_start(
         .map_err(CommandError::from)?;
     engine
         .execute(&app, EngineOperation::StartThread { cwd: request.cwd })
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_thread_list(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: ThreadListRequest,
+) -> CommandResult<Value> {
+    if request.cursor.as_deref().is_some_and(str::is_empty) {
+        return Err(AppError::Protocol("thread cursor cannot be empty".into()).into());
+    }
+    engine
+        .execute(
+            &app,
+            EngineOperation::ListThreads {
+                cursor: request.cursor,
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_thread_resume(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: ThreadResumeRequest,
+) -> CommandResult<Value> {
+    validate_thread_id(&request.thread_id)?;
+    engine
+        .execute(
+            &app,
+            EngineOperation::ResumeThread {
+                thread_id: request.thread_id,
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_thread_set_name(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: ThreadSetNameRequest,
+) -> CommandResult<Value> {
+    validate_thread_id(&request.thread_id)?;
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(AppError::Protocol("thread name cannot be empty".into()).into());
+    }
+    engine
+        .execute(
+            &app,
+            EngineOperation::SetThreadName {
+                thread_id: request.thread_id,
+                name: name.to_string(),
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_thread_archive(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: ThreadArchiveRequest,
+) -> CommandResult<Value> {
+    validate_thread_id(&request.thread_id)?;
+    engine
+        .execute(
+            &app,
+            EngineOperation::ArchiveThread {
+                thread_id: request.thread_id,
+            },
+        )
         .await
         .map_err(Into::into)
 }
@@ -342,6 +446,13 @@ async fn validate_workspace(path: &str) -> Result<(), AppError> {
         return Err(AppError::FileSystem(
             "workspace path is not a directory".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_thread_id(thread_id: &str) -> Result<(), AppError> {
+    if thread_id.trim().is_empty() {
+        return Err(AppError::Protocol("thread id cannot be empty".into()));
     }
     Ok(())
 }

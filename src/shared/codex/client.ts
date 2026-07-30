@@ -22,6 +22,12 @@ import type {
   RuntimeStartResponse,
   RuntimeStatus,
   ServerResponseRequest,
+  ThreadArchiveRequest,
+  ThreadListRequest,
+  ThreadListResponse,
+  ThreadResumeRequest,
+  ThreadResumeResponse,
+  ThreadSetNameRequest,
   ThreadStartRequest,
   ThreadStartResponse,
   TurnInterruptRequest,
@@ -92,6 +98,26 @@ export function startThread(
   request: ThreadStartRequest,
 ): Promise<ThreadStartResponse> {
   return invoke("engine_thread_start", { request });
+}
+
+export function listThreads(
+  request: ThreadListRequest,
+): Promise<ThreadListResponse> {
+  return invoke("engine_thread_list", { request });
+}
+
+export function resumeThread(
+  request: ThreadResumeRequest,
+): Promise<ThreadResumeResponse> {
+  return invoke("engine_thread_resume", { request });
+}
+
+export function setThreadName(request: ThreadSetNameRequest): Promise<JsonValue> {
+  return invoke("engine_thread_set_name", { request });
+}
+
+export function archiveThread(request: ThreadArchiveRequest): Promise<JsonValue> {
+  return invoke("engine_thread_archive", { request });
 }
 
 export function startTurn(request: TurnStartRequest): Promise<TurnStartResponse> {

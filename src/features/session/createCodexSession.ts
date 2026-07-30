@@ -8,6 +8,7 @@ import {
 } from "solid-js";
 
 import {
+  archiveThread as archiveCodexThread,
   cancelLogin as cancelChatGptLogin,
   describeCommandError,
   inspectAttachments,
@@ -19,11 +20,13 @@ import {
   readAccount,
   readConfig,
   respondToServerRequest,
+  resumeThread as resumeCodexThread,
   savePastedImage,
   startRuntime,
   startThread,
   startTurn,
   subscribeToCodexEvents,
+  setThreadName,
   writeConfig,
   writeConfigBatch,
 } from "../../shared/codex/client";
@@ -35,6 +38,7 @@ import {
   type CodexModel,
   type CodexNotification,
   type CodexServerRequest,
+  type CodexThread,
   type ConfigReadResponse,
   type ConfigEditRequest,
   type JsonObject,
@@ -45,8 +49,10 @@ import {
   type RuntimeStartResponse,
   type RuntimeStatus,
 } from "../../shared/codex/types";
-
-const WORKSPACE_STORAGE_KEY = "codex-app.workspace";
+import { createProjectWorkspace } from "../projects/createProjectWorkspace";
+import { createThreadLibrary } from "../projects/createThreadLibrary";
+import { pathsEqual, type ProjectRecord } from "../projects/projectStore";
+import { threadTitle, type ThreadLibraryState } from "../projects/threadLibrary";
 
 export interface MessageEntry {
   type: "message";
@@ -81,10 +87,16 @@ export interface CodexSession {
   error: Accessor<string | null>;
   loginPending: Accessor<boolean>;
   models: Accessor<CodexModel[]>;
+  openingThreadId: Accessor<string | null>;
+  projects: Accessor<ProjectRecord[]>;
   runtime: Accessor<RuntimeStartResponse | null>;
   runtimeStatus: Accessor<RuntimeStatus>;
   signedIn: Accessor<boolean>;
   threadId: Accessor<string | null>;
+  threadLibraryState: Accessor<ThreadLibraryState>;
+  threads: Accessor<CodexThread[]>;
+  threadsNextCursor: Accessor<string | null>;
+  currentThreadTitle: Accessor<string>;
   timeline: Accessor<TimelineEntry[]>;
   workspace: Accessor<string | null>;
   chooseWorkspace: () => Promise<void>;
@@ -95,14 +107,21 @@ export interface CodexSession {
   interruptPendingRequest: (request: CodexServerRequest) => Promise<void>;
   login: () => Promise<void>;
   loadCompatibilityContext: () => Promise<void>;
+  loadMoreThreads: () => Promise<void>;
   logout: () => Promise<void>;
   newThread: () => void;
+  newThreadForProject: (path: string) => Promise<void>;
+  openThread: (threadId: string) => Promise<void>;
+  archiveThread: (threadId: string) => Promise<void>;
+  removeProject: (path: string) => Promise<void>;
+  renameThread: (threadId: string, name: string) => Promise<boolean>;
   refreshConfig: () => Promise<void>;
   respondToApproval: (
     request: CodexServerRequest,
     decision: ApprovalDecision,
   ) => Promise<void>;
   saveClipboardImage: (dataBase64: string) => Promise<Attachment>;
+  selectProject: (path: string) => Promise<void>;
   sendMessage: (text: string, attachments: Attachment[]) => Promise<boolean>;
   writeSetting: (
     keyPath: string,
@@ -122,6 +141,7 @@ function isSignedInAccount(
 }
 
 export function createCodexSession(): CodexSession {
+  const projectWorkspace = createProjectWorkspace();
   const [runtime, setRuntime] = createSignal<RuntimeStartResponse | null>(null);
   const [runtimeStatus, setRuntimeStatus] = createSignal<RuntimeStatus>({
     state: "starting",
@@ -129,9 +149,9 @@ export function createCodexSession(): CodexSession {
   });
   const [account, setAccount] = createSignal<AccountReadResponse>();
   const [loginPending, setLoginPending] = createSignal(false);
-  const [workspace, setWorkspace] = createSignal(loadStoredWorkspace());
   const [threadId, setThreadId] = createSignal<string | null>(null);
   const [activeTurnId, setActiveTurnId] = createSignal<string | null>(null);
+  const [openingThreadId, setOpeningThreadId] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [timeline, setTimeline] = createSignal<TimelineEntry[]>([]);
   const [approvalQueue, setApprovalQueue] = createSignal<CodexServerRequest[]>([]);
@@ -140,12 +160,36 @@ export function createCodexSession(): CodexSession {
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
   const [models, setModels] = createSignal<CodexModel[]>([]);
   const [diagnostics, setDiagnostics] = createSignal<RuntimeDiagnostic[]>([]);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createSignal<string | null>(
+    projectWorkspace.loadWarning,
+  );
 
   const signedIn = createMemo(() => isSignedInAccount(account()));
+  const workspace = projectWorkspace.path;
+  let disposed = false;
+  const threadLibrary = createThreadLibrary({
+    isDisposed: () => disposed,
+    reportDiagnostic: (message) => addDiagnostic("stderr", message),
+    runtime,
+    signedIn,
+  });
+  const currentThreadTitle = createMemo(() => {
+    const currentThreadId = threadId();
+    if (currentThreadId !== null) {
+      const current = threadLibrary
+        .threads()
+        .find((thread) => thread.id === currentThreadId);
+      if (current !== undefined) {
+        return threadTitle(current);
+      }
+    }
+    const firstUserMessage = timeline().find(
+      (entry): entry is MessageEntry => entry.type === "message" && entry.role === "user",
+    );
+    return firstUserMessage?.text.trim() || "Nova tarefa";
+  });
 
   let disposeEvents: () => void = () => undefined;
-  let disposed = false;
   let accountRefreshRequest: Promise<void> | null = null;
   let compatibilityContextGeneration = 0;
   let compatibilityContextRequest: Promise<void> | null = null;
@@ -263,9 +307,11 @@ export function createCodexSession(): CodexSession {
       }
       if (!isSignedInAccount(response)) {
         resetCompatibilityContext();
+        threadLibrary.reset();
         return;
       }
       prewarmCompatibilityContext();
+      threadLibrary.prewarm();
     });
     accountRefreshRequest = request;
 
@@ -319,6 +365,14 @@ export function createCodexSession(): CodexSession {
     }
   }
 
+  async function loadMoreThreads() {
+    try {
+      await threadLibrary.loadMore();
+    } catch (reason) {
+      setError(describeCommandError(reason));
+    }
+  }
+
   async function login() {
     setLoginPending(true);
     setError(null);
@@ -364,9 +418,10 @@ export function createCodexSession(): CodexSession {
   async function logoutAccount() {
     setError(null);
     try {
-      if (compatibilityContextRequest !== null) {
-        await compatibilityContextRequest.catch(() => undefined);
-      }
+      await Promise.all([
+        compatibilityContextRequest?.catch(() => undefined),
+        threadLibrary.settle(),
+      ]);
       const response = await logout();
       if (
         isNativeLogoutResponse(response) &&
@@ -376,6 +431,7 @@ export function createCodexSession(): CodexSession {
         addDiagnostic("stderr", response.remoteRevocationError);
       }
       resetCompatibilityContext();
+      threadLibrary.reset();
       setThreadId(null);
       setTimeline([]);
       await refreshAccount();
@@ -395,29 +451,169 @@ export function createCodexSession(): CodexSession {
       if (typeof selected !== "string") {
         return;
       }
-      setWorkspace(selected);
-      localStorage.setItem(WORKSPACE_STORAGE_KEY, selected);
-      setThreadId(null);
-      setTimeline([]);
-      if (compatibilityContextState() === "ready") {
-        await refreshConfig();
-      } else {
-        await reloadCompatibilityContext();
+      await activateProject(selected, true);
+    } catch (reason) {
+      setError(describeCommandError(reason));
+    }
+  }
+
+  async function selectProject(path: string) {
+    setError(null);
+    try {
+      await activateProject(path, false);
+    } catch (reason) {
+      setError(describeCommandError(reason));
+    }
+  }
+
+  async function newThreadForProject(path: string) {
+    setError(null);
+    try {
+      await activateProject(path, true);
+    } catch (reason) {
+      setError(describeCommandError(reason));
+    }
+  }
+
+  async function removeProject(path: string) {
+    if (busy() && pathsEqual(workspace(), path)) {
+      setError("Interrompa a tarefa atual antes de remover este projeto.");
+      return;
+    }
+    setError(null);
+    try {
+      const previousWorkspace = workspace();
+      projectWorkspace.remove(path);
+      if (!pathsEqual(previousWorkspace, workspace())) {
+        resetConversation();
+        await refreshWorkspaceConfig();
       }
     } catch (reason) {
       setError(describeCommandError(reason));
     }
   }
 
-  function newThread() {
-    if (busy()) {
+  async function activateProject(path: string, startFresh: boolean) {
+    const workspaceChanged = !pathsEqual(workspace(), path);
+    if (!workspaceChanged && !startFresh) {
       return;
     }
+    if (busy()) {
+      throw new Error(
+        workspaceChanged
+          ? "Interrompa a tarefa atual antes de trocar de projeto."
+          : "Interrompa a tarefa atual antes de iniciar outra tarefa.",
+      );
+    }
+    projectWorkspace.select(path);
+    if (workspaceChanged || startFresh) {
+      resetConversation();
+    }
+    if (workspaceChanged) {
+      await refreshWorkspaceConfig();
+    }
+  }
+
+  async function refreshWorkspaceConfig() {
+    if (compatibilityContextState() === "ready") {
+      await refreshConfig();
+    } else {
+      await reloadCompatibilityContext();
+    }
+  }
+
+  function newThread() {
+    if (busy()) {
+      setError("Interrompa a tarefa atual antes de iniciar outra tarefa.");
+      return;
+    }
+    resetConversation();
+    setError(null);
+  }
+
+  function resetConversation() {
     setThreadId(null);
     setActiveTurnId(null);
     setTimeline([]);
     setApprovalQueue([]);
+  }
+
+  function hydrateThread(thread: CodexThread) {
+    setThreadId(thread.id);
+    setTimeline([]);
+    setApprovalQueue([]);
+
+    let resumedTurnId: string | null = null;
+    for (const turn of thread.turns) {
+      for (const value of turn.items) {
+        const item = asObject(value);
+        if (item !== undefined) {
+          handleItem({ item }, true);
+        }
+      }
+      if (turn.status === "inProgress") {
+        resumedTurnId = turn.id;
+      }
+    }
+    setActiveTurnId(resumedTurnId);
+    setBusy(thread.status.type === "active" || resumedTurnId !== null);
+  }
+
+  async function openThread(requestedThreadId: string) {
+    if (openingThreadId() !== null || requestedThreadId === threadId()) {
+      return;
+    }
+    if (busy()) {
+      setError("Interrompa a tarefa atual antes de abrir outra tarefa.");
+      return;
+    }
+    setOpeningThreadId(requestedThreadId);
     setError(null);
+    try {
+      const response = await resumeCodexThread({ threadId: requestedThreadId });
+      projectWorkspace.add(response.thread.cwd);
+      hydrateThread(response.thread);
+      threadLibrary.merge([response.thread]);
+      await refreshWorkspaceConfig();
+    } catch (reason) {
+      setError(describeCommandError(reason));
+    } finally {
+      setOpeningThreadId(null);
+    }
+  }
+
+  async function renameThread(threadIdToRename: string, rawName: string) {
+    const name = rawName.trim();
+    if (name.length === 0) {
+      setError("Informe um nome para a tarefa.");
+      return false;
+    }
+    setError(null);
+    try {
+      await setThreadName({ threadId: threadIdToRename, name });
+      threadLibrary.update(threadIdToRename, (thread) => ({ ...thread, name }));
+      return true;
+    } catch (reason) {
+      setError(describeCommandError(reason));
+      return false;
+    }
+  }
+
+  async function archiveThread(threadIdToArchive: string) {
+    if (busy() && threadIdToArchive === threadId()) {
+      setError("Interrompa a tarefa atual antes de arquivá-la.");
+      return;
+    }
+    setError(null);
+    try {
+      await archiveCodexThread({ threadId: threadIdToArchive });
+      threadLibrary.remove(threadIdToArchive);
+      if (threadIdToArchive === threadId()) {
+        resetConversation();
+      }
+    } catch (reason) {
+      setError(describeCommandError(reason));
+    }
   }
 
   async function sendMessage(
@@ -453,6 +649,7 @@ export function createCodexSession(): CodexSession {
         const response = await startThread({ cwd });
         currentThreadId = response.thread.id;
         setThreadId(currentThreadId);
+        threadLibrary.merge([response.thread]);
       }
 
       const response = await startTurn({
@@ -572,8 +769,37 @@ export function createCodexSession(): CodexSession {
         if (id !== undefined && threadId() === null) {
           setThreadId(id);
         }
+        threadLibrary.refreshInBackground();
         break;
       }
+      case "thread/status/changed":
+        threadLibrary.refreshInBackground();
+        break;
+      case "thread/name/updated": {
+        const updatedThreadId = readString(params, "threadId");
+        const name = readString(params, "threadName");
+        if (updatedThreadId !== undefined) {
+          threadLibrary.update(updatedThreadId, (thread) => ({
+            ...thread,
+            name: name ?? null,
+          }));
+        }
+        break;
+      }
+      case "thread/archived":
+      case "thread/deleted": {
+        const removedThreadId = readString(params, "threadId");
+        if (removedThreadId !== undefined) {
+          threadLibrary.remove(removedThreadId);
+          if (removedThreadId === threadId()) {
+            resetConversation();
+          }
+        }
+        break;
+      }
+      case "thread/unarchived":
+        threadLibrary.refreshInBackground();
+        break;
       case "turn/started": {
         const turn = asObject(params?.turn);
         setActiveTurnId(readString(turn, "id") ?? null);
@@ -589,6 +815,7 @@ export function createCodexSession(): CodexSession {
         }
         setActiveTurnId(null);
         setBusy(false);
+        threadLibrary.refreshInBackground();
         break;
       }
       case "item/started":
@@ -754,10 +981,16 @@ export function createCodexSession(): CodexSession {
     error,
     loginPending,
     models,
+    openingThreadId,
+    projects: projectWorkspace.projects,
     runtime,
     runtimeStatus,
     signedIn,
+    currentThreadTitle,
     threadId,
+    threadLibraryState: threadLibrary.state,
+    threads: threadLibrary.threads,
+    threadsNextCursor: threadLibrary.nextCursor,
     timeline,
     workspace,
     chooseWorkspace,
@@ -767,19 +1000,22 @@ export function createCodexSession(): CodexSession {
     interruptPendingRequest,
     login,
     loadCompatibilityContext,
+    loadMoreThreads,
     logout: logoutAccount,
     newThread,
+    newThreadForProject,
+    openThread,
+    archiveThread,
+    removeProject,
+    renameThread,
     refreshConfig,
     respondToApproval,
     saveClipboardImage: savePastedImage,
+    selectProject,
     sendMessage,
     writeSetting,
     writeSettings,
   };
-}
-
-function loadStoredWorkspace(): string | null {
-  return localStorage.getItem(WORKSPACE_STORAGE_KEY);
 }
 
 function isNativeLogoutResponse(value: unknown): value is NativeLogoutResponse {

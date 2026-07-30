@@ -13,7 +13,7 @@ Credenciais do Windows.
 Inferência, modelos, configuração e execução de ferramentas ainda usam o
 `codex app-server` como ponte de compatibilidade. A ponte é explícita, isolada e
 supervisionada por um único dono Rust. Depois que uma sessão autenticada aparece,
-modelos e configuração são pré-carregados em paralelo, sem bloquear o shell. Uma
+modelos, configuração e tarefas recentes são pré-carregados sem bloquear o shell. Uma
 inicialização sem sessão e os fluxos de entrar, renovar ou sair não dependem da
 CLI.
 
@@ -24,7 +24,9 @@ CLI.
 - cofre `age` compatível com o backend seguro atual do Codex no Windows;
 - SQLite versionado para metadados de tarefas e operações, com WAL;
 - ponte Codex supervisionada, com aquecimento assíncrono de modelos e configuração;
-- seleção de workspace, criação de tarefa e envio/interrupção de turnos;
+- projetos persistidos, tarefas agrupadas e recentes com paginação;
+- criação, retomada, renomeação e arquivamento de tarefas;
+- seleção de workspace e envio/interrupção de turnos;
 - streaming de texto e atividades;
 - anexos e imagens coladas, validados no backend antes do envio;
 - aprovações explícitas e presets semânticos de permissão;
@@ -62,7 +64,7 @@ As versões exatas ficam travadas em `package.json`, `pnpm-lock.yaml`,
 
 - Windows 10 ou 11 com WebView2;
 - uma conta ChatGPT com acesso ao Codex;
-- Codex CLI para conversar, listar modelos e editar a configuração nesta fase;
+- Codex CLI para provider, tarefas, modelos e configuração nesta fase;
 - Node.js 26 ou superior e pnpm 11.17 ou superior;
 - toolchain MSVC para compilar Tauri no Windows.
 
