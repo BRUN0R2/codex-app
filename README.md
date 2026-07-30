@@ -6,8 +6,9 @@ TypeScript e a composição pertence ao `NativeEngine` deste projeto.
 
 A autenticação usa diretamente o fluxo OAuth ChatGPT estudado no Codex oficial.
 PKCE, callback local, troca, renovação, revogação e persistência segura pertencem
-ao backend Rust. Tokens nunca atravessam o IPC, não entram no SQLite e ficam no
-Gerenciador de Credenciais do Windows.
+ao backend Rust. Tokens nunca atravessam o IPC nem entram no SQLite; a sessão
+fica em um arquivo local criptografado cuja chave fica no Gerenciador de
+Credenciais do Windows.
 
 Inferência, modelos, configuração e execução de ferramentas ainda usam o
 `codex app-server` como ponte de compatibilidade. A ponte é explícita, isolada e
@@ -18,7 +19,7 @@ consultar a conta, entrar, renovar ou sair não inicia a CLI.
 
 - `NativeEngine` como backend padrão por um contrato `AgentEngine` fechado;
 - login ChatGPT nativo com PKCE, cancelamento, renovação e logout com revogação;
-- armazenamento direto no Credential Manager, compatível com o keyring do Codex;
+- cofre `age` compatível com o backend seguro atual do Codex no Windows;
 - SQLite versionado para metadados de tarefas e operações, com WAL;
 - ponte Codex sob demanda para provider, modelos e configuração;
 - seleção de workspace, criação de tarefa e envio/interrupção de turnos;
@@ -36,8 +37,8 @@ armazenamento e tokens. O provider compatível permanece restrito a
 `src-tauri/src/engine/compatibility.rs` e `src-tauri/src/codex`.
 
 Quando a ponte é necessária, o app-server recebe configuração explícita para ler
-o mesmo keyring direto administrado pelo backend nativo. O arquivo `auth.json` do
-usuário não é copiado, alterado nem removido por este aplicativo.
+o mesmo cofre criptografado administrado pelo backend nativo. O arquivo
+`auth.json` do usuário não é copiado, alterado nem removido por este aplicativo.
 
 ## Stack fixada
 
@@ -46,7 +47,7 @@ usuário não é copiado, alterado nem removido por este aplicativo.
 | Shell nativo | Tauri 2.11 |
 | Backend | Rust 1.97.1, edition 2024, Tokio |
 | Persistência local | SQLite via rusqlite 0.40 |
-| Credenciais | Windows Credential Manager |
+| Credenciais | age+scrypt; chave no Windows Credential Manager |
 | HTTP OAuth | reqwest 0.13 com rustls |
 | Interface | SolidJS 1.9.14, TypeScript 7.0 |
 | Build web | Vite 8.1 |

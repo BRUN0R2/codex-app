@@ -195,7 +195,7 @@ impl CodexRuntime {
                 "-c",
                 "cli_auth_credentials_store=\"keyring\"",
                 "-c",
-                "features.secret_auth_storage=false",
+                "features.secret_auth_storage=true",
                 "app-server",
                 "--listen",
                 "stdio://",

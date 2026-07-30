@@ -13,6 +13,8 @@ As áreas relevantes foram lidas diretamente no snapshot:
 - `codex-rs/app-server-protocol`: contratos gerados e tipos de entrada;
 - `codex-rs/core`: configuração, autenticação e catálogo de modelos;
 - `codex-rs/login`: fluxo ChatGPT administrado pelo runtime;
+- `codex-rs/secrets` e `codex-rs/keyring-store`: cofre criptografado e chave do
+  sistema operacional;
 - testes do `app-server`: sequência de inicialização e formato das respostas.
 
 ## Contratos adotados
@@ -41,8 +43,11 @@ de permissões. O protocolo oficial agora fica atrás de
 `CodexCompatibilityEngine`, em vez de ser a arquitetura do aplicativo.
 
 O login do produto agora pertence ao backend Rust. A implementação reproduz o
-contrato observado, mantém tokens em tipos redigidos e usa o store direto do
-Windows com a mesma chave derivada de `CODEX_HOME` da referência.
+contrato observado e mantém tokens em tipos redigidos. No snapshot atual,
+`SecretAuthStorage` é estável e habilitado por padrão no Windows: o registro fica
+em `secrets/codex_auth.age`, enquanto o Credential Manager guarda somente a
+chave curta associada ao `CODEX_HOME`. O app implementa esse backend em módulos
+próprios e preserva o formato consumido pelo `app-server`.
 
 O processo da ponte é supervisionado por um único dono Rust, com I/O assíncrono,
 timeout limitado e correlação de respostas. Ele não participa da autenticação e
@@ -92,9 +97,15 @@ sensíveis ao terminar. A página de conclusão no navegador foi verificada ao v
 
 Essa evidência confirmou o protocolo antes da integração. A implementação do
 produto adicionou armazenamento durável, detecção de alterações concorrentes,
-cancelamento e ownership serializado. O arranque integrado também foi verificado
-sem processo da CLI; o ciclo completo de persistência e logout permanece no
-checklist ao vivo até ser exercitado pela interface.
+cancelamento e ownership serializado.
+
+Após a integração, o fluxo real foi repetido pela interface. Uma sessão maior
+que o limite do Credential Manager foi gravada em um envelope de 4.797 bytes,
+sem arquivos temporários residuais. O app foi encerrado e iniciado novamente,
+reconheceu a conta sem novo login e manteve a ponte inativa até a abertura do
+seletor de modelo. Nesse momento, o `app-server` iniciado com
+`secret_auth_storage=true` leu o mesmo cofre e retornou 7 modelos. O logout
+remoto permanece no checklist para não invalidar a sessão validada.
 
 ## Atualização da referência
 

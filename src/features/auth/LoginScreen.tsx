@@ -18,8 +18,8 @@ export function LoginScreen(props: LoginScreenProps) {
         <h1>Seu agente de código, em uma base nativa.</h1>
         <p class="auth-description">
           Entre com sua conta ChatGPT pelo mesmo fluxo OAuth do Codex. A sessão
-          é processada pelo backend Rust e protegida pelo Gerenciador de
-          Credenciais do Windows.
+          é processada pelo backend Rust, criptografada localmente e protegida
+          pelo Gerenciador de Credenciais do Windows.
         </p>
         <button
           class="primary-button auth-button"

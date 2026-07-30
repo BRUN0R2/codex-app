@@ -41,7 +41,7 @@ domínio.
 3. entrega somente a URL de autorização à UI;
 4. valida método, caminho, estado, duplicatas e limites do callback;
 5. troca o código em `https://auth.openai.com/oauth/token`;
-6. grava a sessão no Credential Manager;
+6. grava a sessão em um cofre local criptografado;
 7. renova preventivamente e revoga no logout.
 
 O callback expira em dez minutos, aceita no máximo 32 conexões e limita os
@@ -55,15 +55,22 @@ estado de renovação e resultados sem segredos.
 
 ## Armazenamento de credenciais
 
-O backend usa o store direto do Windows com o mesmo contrato atual do Codex:
+O backend usa o contrato `Secrets` adotado pelo Codex atual no Windows:
 
-- serviço: `Codex Auth`;
-- chave: `cli|` mais os primeiros 16 dígitos do SHA-256 do `CODEX_HOME` canônico;
-- valor: registro JSON compatível, preservando campos futuros desconhecidos.
+- arquivo: `CODEX_HOME/secrets/codex_auth.age`;
+- envelope: age com recipient scrypt e schema versionado;
+- entrada: `global/CODEX_AUTH`, contendo o registro JSON compatível;
+- chave: 256 bits aleatórios, codificados em Base64;
+- Credential Manager: serviço `codex` e conta `secrets|` mais os primeiros 16
+  dígitos do SHA-256 do `CODEX_HOME` canônico.
 
-O app não lê nem escreve `auth.json`. A ponte é iniciada com o store direto em
-keyring e `secret_auth_storage` desabilitado para consumir a mesma sessão sem
-copiá-la.
+Somente a chave curta entra no Credential Manager; o tamanho dos tokens não fica
+limitado pelo store do Windows. Plaintext e tipos de segredo são zerados no
+descarte, e a gravação do envelope usa arquivo temporário sincronizado antes da
+substituição.
+
+O app não lê nem escreve `auth.json`. A ponte é iniciada com keyring e
+`secret_auth_storage` habilitado para consumir o mesmo cofre sem copiá-lo.
 
 ## Persistência nativa
 

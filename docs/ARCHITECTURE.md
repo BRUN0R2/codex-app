@@ -9,7 +9,8 @@ flowchart LR
     Commands --> Engine["NativeEngine"]
     Engine --> Auth["ChatGptAuth"]
     Auth --> OAuth["OAuth ChatGPT"]
-    Auth --> Keyring["Credential Manager"]
+    Auth --> Vault["codex_auth.age criptografado"]
+    Vault --> Keyring["Chave no Credential Manager"]
     Engine --> Store["SQLite nativo"]
     Engine --> Policy["Ferramentas e permissões"]
     Engine --> Provider["ChatGptCodexProvider"]
@@ -69,7 +70,7 @@ que depende deles ou inicia uma tarefa.
 1. A UI assina `engine://*` e invoca `engine_start`.
 2. O engine valida ferramentas, inicializa SQLite e autenticação nativa.
 3. A disponibilidade da ponte é diagnosticada sem iniciar processo.
-4. A conta é lida diretamente do Credential Manager.
+4. A conta é lida do cofre criptografado com a chave do Credential Manager.
 5. A UI mostra login ou shell; modelos e configuração permanecem ociosos.
 
 ### Login ChatGPT
@@ -77,7 +78,7 @@ que depende deles ou inicia uma tarefa.
 1. `engine_login_chatgpt` cria listener, estado e PKCE.
 2. A UI abre a URL retornada no navegador.
 3. O backend valida o callback e troca o código.
-4. A credencial é persistida diretamente no keyring.
+4. A credencial é persistida no cofre age e somente sua chave entra no keyring.
 5. Eventos públicos atualizam a tela.
 
 Falha ao abrir o navegador cancela o fluxo. Um logout concorrente cancela o

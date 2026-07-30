@@ -23,7 +23,7 @@ pub(super) enum AuthError {
     #[error("secure credential storage failed: {0}")]
     CredentialStorage(String),
     #[cfg(not(windows))]
-    #[error("native ChatGPT authentication requires Windows Credential Manager")]
+    #[error("native secure credential storage is currently supported only on Windows")]
     UnsupportedPlatform,
     #[error("native authentication task failed: {0}")]
     Task(String),
