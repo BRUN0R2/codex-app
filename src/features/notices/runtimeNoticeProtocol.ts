@@ -3,10 +3,13 @@ import {
   type DeprecationNoticeNotification,
   type GuardianWarningNotification,
   type JsonValue,
+  type ModelVerification,
+  type ModelVerificationNotification,
   type WarningNotification,
 } from "../../shared/codex/types";
 
 const MAX_THREAD_ID_CHARACTERS = 256;
+const MAX_MODEL_VERIFICATIONS = 16;
 
 export function parseDeprecationNotice(
   value: JsonValue | undefined,
@@ -58,6 +61,29 @@ export function parseGuardianWarningNotification(
     threadId: parseThreadId(value.threadId, "guardianWarning"),
     message,
   };
+}
+
+export function parseModelVerificationNotification(
+  value: JsonValue | undefined,
+): ModelVerificationNotification {
+  if (!isJsonObject(value) || !Array.isArray(value.verifications)) {
+    throw incompatibleNotification("model/verification");
+  }
+  if (value.verifications.length > MAX_MODEL_VERIFICATIONS) {
+    throw incompatibleNotification("model/verification");
+  }
+  return {
+    threadId: parseThreadId(value.threadId, "model/verification"),
+    turnId: parseThreadId(value.turnId, "model/verification"),
+    verifications: value.verifications.map(parseModelVerification),
+  };
+}
+
+function parseModelVerification(value: JsonValue): ModelVerification {
+  if (value !== "trustedAccessForCyber") {
+    throw incompatibleNotification("model/verification");
+  }
+  return value;
 }
 
 function parseThreadId(value: JsonValue | undefined, method: string): string {

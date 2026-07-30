@@ -85,9 +85,11 @@ import {
   type AppNotice,
 } from "../notices/createAppNoticeCenter";
 import { createThreadNoticeLibrary } from "../notices/createThreadNoticeLibrary";
+import { modelVerificationWarnings } from "../notices/modelVerificationNotice";
 import {
   parseDeprecationNotice,
   parseGuardianWarningNotification,
+  parseModelVerificationNotification,
   parseWarningNotification,
 } from "../notices/runtimeNoticeProtocol";
 import {
@@ -1096,6 +1098,19 @@ export function createCodexSession(): CodexSession {
         try {
           const warning = parseGuardianWarningNotification(notification.params);
           recordThreadWarning(warning.threadId, "guardian", warning.message);
+        } catch (reason) {
+          addDiagnostic("stderr", describeCommandError(reason));
+        }
+        break;
+      }
+      case "model/verification": {
+        try {
+          const verification = parseModelVerificationNotification(
+            notification.params,
+          );
+          for (const message of modelVerificationWarnings(verification)) {
+            recordThreadWarning(verification.threadId, "warning", message);
+          }
         } catch (reason) {
           addDiagnostic("stderr", describeCommandError(reason));
         }

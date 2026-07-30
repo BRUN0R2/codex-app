@@ -301,6 +301,14 @@ export interface GuardianWarningNotification {
   message: string;
 }
 
+export type ModelVerification = "trustedAccessForCyber";
+
+export interface ModelVerificationNotification {
+  threadId: string;
+  turnId: string;
+  verifications: ModelVerification[];
+}
+
 export interface ReasoningEffortOption {
   reasoningEffort: string;
   description: string;

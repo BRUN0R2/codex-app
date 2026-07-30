@@ -219,6 +219,13 @@ mesmo modelo é deduplicada; os demais avisos repetidos são mantidos, como na
 referência. Troca, arquivamento, exclusão e logout respeitam o mesmo ownership
 descrito no roteamento por tarefa.
 
+`model/verification` usa a mesma fronteira de retenção, mas preserva o domínio
+fechado `ModelVerification`. Destino, turno e lista são validados com limites
+antes de `modelVerificationNotice` converter `trustedAccessForCyber` na
+orientação equivalente à referência. Repetições dentro da mesma notificação
+produzem uma única ocorrência; notificações futuras desconhecidas falham
+visivelmente até receberem semântica explícita.
+
 ### Uso da conta
 
 `src/shared/codex/rateLimits.ts` valida a resposta completa de

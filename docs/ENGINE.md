@@ -118,6 +118,11 @@ frontend valida e limita cada payload, preserva o destino e mantém ocorrências
 transitórias por tarefa. O engine não tenta corrigir uma configuração rejeitada,
 reinterpretar uma advertência nem silenciar a falha.
 
+`model/verification` atravessa pelo mesmo transporte e continua associado ao
+`threadId` e `turnId` oficiais. A ponte não transforma verificações de segurança
+em texto; o frontend reconhece somente os discriminadores públicos suportados e
+apresenta a orientação correspondente no histórico da tarefa.
+
 ## Critérios para remover a ponte
 
 A autenticação nativa já não depende da ponte. Para removê-la do produto ainda

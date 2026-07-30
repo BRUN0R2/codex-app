@@ -31,6 +31,8 @@
   deduplicação e localização visível, sem correção automática do arquivo.
 - [x] Avisos, Guardian e deprecações possuem escopo oficial, retenção limitada
   por tarefa, omissões visíveis e deduplicação especial compatível com o Codex.
+- [x] Verificação de modelo `trustedAccessForCyber` possui parsing fechado,
+  orientação oficial e isolamento por tarefa.
 - [x] Limites da conta usam snapshot oficial, atualização esparsa e cartão de uso
   responsivo sem polling, incluindo o aviso de esgotamento junto ao compositor.
 
@@ -45,4 +47,6 @@
 
 ## Produto
 
+- [ ] Implementar `model/safetyBuffering/updated` com estado de espera e retry
+  seguro por fork, preservando a entrada original.
 - [ ] Preparar assinatura, instalador, atualização e telemetria opt-in.

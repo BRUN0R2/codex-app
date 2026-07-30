@@ -43,6 +43,8 @@ As áreas relevantes foram lidas diretamente no snapshot:
 - `deprecationNotice` é global e preserva `summary` e `details`; `warning` usa
   `threadId` opcional e `guardianWarning` exige um `threadId`, ambos com
   `message` autoritativa.
+- `model/verification` pertence a uma tarefa e a um turno; o snapshot atual
+  possui somente a verificação fechada `trustedAccessForCyber`.
 - Uso da conta usa `account/rateLimits/read`; atualizações incrementais chegam em
   `account/rateLimits/updated` e preservam metadados do snapshot completo.
 - Modelo, esforços e tiers de serviço vêm de `model/list`.
@@ -196,6 +198,16 @@ com contagem de omissões e uma depreciação não bloqueante junto ao composito
 envio de mensagem, alteração de configuração ou clique em ação. Depois da
 captura, as fixtures foram removidas e uma nova leitura confirmou a interface
 normal sem resíduos.
+
+O tipo gerado `ModelVerificationNotification` exige `threadId`, `turnId` e uma
+lista de `ModelVerification`. A TUI procura
+`trustedAccessForCyber` e o converte em um aviso que explica as verificações
+adicionais e aponta para `https://chatgpt.com/cyber`; ela não o confunde com o
+evento de redirecionamento de modelo. A implementação local reproduz essa
+semântica, mantém o aviso no escopo da tarefa e rejeita discriminadores futuros
+sem fallback genérico. Uma prova Vite efêmera confirmou parsing, limite,
+deduplicação dentro do evento e isolamento de uma tarefa estrangeira antes de
+ser removida.
 
 Os tipos `GetAccountRateLimitsResponse`, `RateLimitSnapshot` e
 `RateLimitWindow` confirmam que `usedPercent` representa consumo, enquanto
