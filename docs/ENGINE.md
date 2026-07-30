@@ -25,7 +25,7 @@ independente da ponte.
 
 A superfície é uma enumeração fechada:
 
-- conta: ler, entrar com ChatGPT, cancelar login e sair;
+- conta: ler, consultar limites de uso, entrar com ChatGPT, cancelar login e sair;
 - tarefa: listar, iniciar, retomar, renomear, arquivar, enviar turno e interromper;
 - configuração: ler, ler requisitos, escrever e escrever em lote;
 - segurança: consultar a prontidão do sandbox do Windows sem alterá-lo;
@@ -36,6 +36,11 @@ Somente o adaptador de compatibilidade conhece métodos como `thread/list`,
 `thread/resume`, `turn/start` ou `model/list`. A UI invoca comandos Tauri pequenos
 e trabalha com tipos de domínio. A listagem usa paginação limitada, ordenação por
 recência e exclui tarefas arquivadas.
+
+`account/rateLimits/read` também fica atrás de uma operação fechada e sem
+parâmetros. A sessão o consulta apenas para contas ChatGPT, de forma deduplicada,
+e passa a acompanhar `account/rateLimits/updated`; não existe RPC arbitrário nem
+estimativa local de cota.
 
 ## Autenticação nativa
 

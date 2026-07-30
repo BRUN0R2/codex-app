@@ -21,6 +21,8 @@
 - [x] Categorias de configuração suportadas possuem páginas modulares, política
   administrativa tipada e preferências visuais persistidas.
 - [x] Prontidão do sandbox do Windows é consultada e exibida sem setup implícito.
+- [x] Limites da conta usam snapshot oficial, atualização esparsa e cartão de uso
+  responsivo sem polling, incluindo o aviso de esgotamento junto ao compositor.
 
 ## Engine
 

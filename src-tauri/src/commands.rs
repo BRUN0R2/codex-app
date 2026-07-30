@@ -148,6 +148,17 @@ pub async fn engine_account_read(
 }
 
 #[tauri::command]
+pub async fn engine_account_rate_limits_read(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+) -> CommandResult<Value> {
+    engine
+        .execute(&app, EngineOperation::ReadAccountRateLimits)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn engine_login_chatgpt(
     app: AppHandle,
     engine: State<'_, EngineManager>,

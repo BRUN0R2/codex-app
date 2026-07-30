@@ -19,6 +19,7 @@ pub fn run() {
             attachments::attachment_save_pasted_image,
             commands::engine_start,
             commands::engine_account_read,
+            commands::engine_account_rate_limits_read,
             commands::engine_login_chatgpt,
             commands::engine_login_cancel,
             commands::engine_logout,

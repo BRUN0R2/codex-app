@@ -1,5 +1,6 @@
 import { Show } from "solid-js";
 
+import { UsageLimitNotice } from "../account/UsageLimitNotice";
 import { InteractiveRequestPanel } from "../approvals/InteractiveRequestPanel";
 import type { CodexSession } from "../session/createCodexSession";
 import { Composer } from "./Composer";
@@ -30,6 +31,7 @@ export function ChatPage(props: ChatPageProps) {
           />
         )}
       </Show>
+      <UsageLimitNotice session={props.session} />
       <Composer
         busy={props.session.busy()}
         config={props.session.config()}

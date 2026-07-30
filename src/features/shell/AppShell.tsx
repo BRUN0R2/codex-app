@@ -1,6 +1,7 @@
 import { Show, createEffect, createSignal } from "solid-js";
 
 import { ChatPage } from "../chat/ChatPage";
+import { AccountUsageCard } from "../account/AccountUsageCard";
 import { ProjectSidebar } from "../projects/ProjectSidebar";
 import type { CodexSession } from "../session/createCodexSession";
 import { SettingsDrawer } from "../settings/SettingsDrawer";
@@ -77,6 +78,8 @@ export function AppShell(props: AppShellProps) {
         <ProjectSidebar session={props.session} />
 
         <div class="sidebar-spacer" />
+
+        <AccountUsageCard session={props.session} />
 
         <footer class="sidebar-footer">
           <button onClick={() => setSettingsOpen(true)} type="button">

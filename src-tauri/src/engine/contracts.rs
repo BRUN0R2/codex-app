@@ -118,6 +118,7 @@ impl EngineConfigEdit {
 #[derive(Debug)]
 pub enum EngineOperation {
     AccountRead,
+    ReadAccountRateLimits,
     LoginChatGpt,
     CancelLogin {
         login_id: String,
@@ -169,6 +170,7 @@ impl EngineOperation {
     pub fn audit_name(&self) -> &'static str {
         match self {
             Self::AccountRead => "account.read",
+            Self::ReadAccountRateLimits => "account.rate_limits.read",
             Self::LoginChatGpt => "auth.login_chatgpt",
             Self::CancelLogin { .. } => "auth.cancel_login",
             Self::Logout => "auth.logout",
@@ -209,6 +211,7 @@ impl EngineOperation {
     pub fn into_compatibility_rpc(self) -> (&'static str, Option<Value>) {
         match self {
             Self::AccountRead => ("account/read", Some(json!({ "refreshToken": false }))),
+            Self::ReadAccountRateLimits => ("account/rateLimits/read", None),
             Self::LoginChatGpt => (
                 "account/login/start",
                 Some(json!({
@@ -331,6 +334,14 @@ mod tests {
                 "appBrand": "codex",
             }))
         );
+    }
+
+    #[test]
+    fn account_rate_limits_use_the_official_parameterless_contract() {
+        let (method, params) = EngineOperation::ReadAccountRateLimits.into_compatibility_rpc();
+
+        assert_eq!(method, "account/rateLimits/read");
+        assert_eq!(params, None);
     }
 
     #[test]

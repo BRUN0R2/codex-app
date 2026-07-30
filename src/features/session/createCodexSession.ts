@@ -18,6 +18,7 @@ import {
   logout,
   openExternalUrl,
   readAccount,
+  readAccountRateLimits,
   readConfig,
   readConfigRequirements,
   readWindowsSandboxReadiness,
@@ -32,6 +33,11 @@ import {
   writeConfig,
   writeConfigBatch,
 } from "../../shared/codex/client";
+import {
+  mergeAccountRateLimitsUpdate,
+  parseAccountRateLimitsUpdatedNotification,
+} from "../../shared/codex/rateLimits";
+import type { AccountRateLimitsResponse } from "../../shared/codex/rateLimitTypes";
 import {
   isJsonObject,
   readString,
@@ -71,9 +77,12 @@ import { pathsEqual, type ProjectRecord } from "../projects/projectStore";
 import { threadTitle, type ThreadLibraryState } from "../projects/threadLibrary";
 
 export type CompatibilityContextState = "failed" | "idle" | "loading" | "ready";
+export type AccountRateLimitsState = "failed" | "idle" | "loading" | "ready";
 
 export interface CodexSession {
   account: Accessor<AccountReadResponse | undefined>;
+  accountRateLimits: Accessor<AccountRateLimitsResponse | null>;
+  accountRateLimitsState: Accessor<AccountRateLimitsState>;
   activeTurnId: Accessor<string | null>;
   pendingServerRequests: Accessor<PendingServerRequest[]>;
   busy: Accessor<boolean>;
@@ -115,6 +124,7 @@ export interface CodexSession {
   removeProject: (path: string) => Promise<void>;
   renameThread: (threadId: string, name: string) => Promise<boolean>;
   refreshConfig: () => Promise<void>;
+  refreshAccountRateLimits: () => Promise<void>;
   respondToInteractiveRequest: <T extends InteractiveServerRequest>(
     request: T,
     response: ServerResponseFor<T>,
@@ -139,6 +149,12 @@ function isSignedInAccount(
   );
 }
 
+function isChatGptSession(
+  snapshot: AccountReadResponse | undefined,
+): snapshot is AccountReadResponse {
+  return snapshot?.account?.type === "chatgpt";
+}
+
 export function createCodexSession(): CodexSession {
   const projectWorkspace = createProjectWorkspace();
   const [runtime, setRuntime] = createSignal<RuntimeStartResponse | null>(null);
@@ -147,6 +163,10 @@ export function createCodexSession(): CodexSession {
     message: null,
   });
   const [account, setAccount] = createSignal<AccountReadResponse>();
+  const [accountRateLimits, setAccountRateLimits] =
+    createSignal<AccountRateLimitsResponse | null>(null);
+  const [accountRateLimitsState, setAccountRateLimitsState] =
+    createSignal<AccountRateLimitsState>("idle");
   const [loginPending, setLoginPending] = createSignal(false);
   const [threadId, setThreadId] = createSignal<string | null>(null);
   const [activeTurnId, setActiveTurnId] = createSignal<string | null>(null);
@@ -197,6 +217,8 @@ export function createCodexSession(): CodexSession {
 
   let disposeEvents: () => void = () => undefined;
   let accountRefreshRequest: Promise<void> | null = null;
+  let accountRateLimitsGeneration = 0;
+  let accountRateLimitsRequest: Promise<void> | null = null;
   let compatibilityContextGeneration = 0;
   let compatibilityContextRequest: Promise<void> | null = null;
   let pendingLoginId: string | null = null;
@@ -322,6 +344,7 @@ export function createCodexSession(): CodexSession {
       }
       if (!isSignedInAccount(response)) {
         resetCompatibilityContext();
+        resetAccountRateLimits();
         threadLibrary.reset();
         return;
       }
@@ -356,6 +379,7 @@ export function createCodexSession(): CodexSession {
       setCompatibilityContextState("failed");
       return;
     }
+    refreshAccountRateLimitsInBackground();
     void loadCompatibilityContext().catch(() => {
       // The loader owns its state and diagnostic; prewarming must not replace
       // an unrelated foreground error.
@@ -369,6 +393,69 @@ export function createCodexSession(): CodexSession {
     setConfigRequirements(null);
     setWindowsSandboxReadiness(null);
     setModels([]);
+  }
+
+  function resetAccountRateLimits() {
+    accountRateLimitsGeneration += 1;
+    setAccountRateLimits(null);
+    setAccountRateLimitsState("idle");
+  }
+
+  async function refreshAccountRateLimits() {
+    if (!isChatGptSession(account())) {
+      setAccountRateLimits(null);
+      setAccountRateLimitsState("idle");
+      return;
+    }
+    if (accountRateLimitsRequest !== null) {
+      return accountRateLimitsRequest;
+    }
+
+    const started = runtime();
+    if (started === null) {
+      throw new Error("A engine nativa ainda não foi inicializada.");
+    }
+    if (!started.compatibility.available) {
+      throw new Error(
+        started.compatibility.reason ??
+          "A ponte de compatibilidade do Codex não está disponível.",
+      );
+    }
+
+    const generation = accountRateLimitsGeneration;
+    setAccountRateLimitsState("loading");
+    const request = readAccountRateLimits().then((response) => {
+      if (
+        disposed
+        || generation !== accountRateLimitsGeneration
+        || !isChatGptSession(account())
+      ) {
+        return;
+      }
+      setAccountRateLimits(response);
+      setAccountRateLimitsState("ready");
+    });
+    accountRateLimitsRequest = request;
+
+    try {
+      await request;
+    } catch (reason) {
+      if (!disposed && generation === accountRateLimitsGeneration) {
+        setAccountRateLimitsState("failed");
+        addDiagnostic("stderr", describeCommandError(reason));
+      }
+      throw reason;
+    } finally {
+      if (accountRateLimitsRequest === request) {
+        accountRateLimitsRequest = null;
+      }
+    }
+  }
+
+  function refreshAccountRateLimitsInBackground() {
+    void refreshAccountRateLimits().catch(() => {
+      // The usage surface owns its explicit failure state and retry action.
+    });
   }
 
   async function reloadCompatibilityContext() {
@@ -437,6 +524,7 @@ export function createCodexSession(): CodexSession {
     try {
       await Promise.all([
         compatibilityContextRequest?.catch(() => undefined),
+        accountRateLimitsRequest?.catch(() => undefined),
         threadLibrary.settle(),
       ]);
       const response = await logout();
@@ -448,6 +536,7 @@ export function createCodexSession(): CodexSession {
         addDiagnostic("stderr", response.remoteRevocationError);
       }
       resetCompatibilityContext();
+      resetAccountRateLimits();
       threadLibrary.reset();
       setThreadId(null);
       timeline.reset();
@@ -783,6 +872,25 @@ export function createCodexSession(): CodexSession {
       case "account/updated":
         refreshAccountInBackground();
         break;
+      case "account/rateLimits/updated": {
+        try {
+          const update = parseAccountRateLimitsUpdatedNotification(
+            notification.params,
+          );
+          const current = accountRateLimits();
+          if (current === null) {
+            refreshAccountRateLimitsInBackground();
+            break;
+          }
+          setAccountRateLimits(
+            mergeAccountRateLimitsUpdate(current, update.rateLimits),
+          );
+          setAccountRateLimitsState("ready");
+        } catch (reason) {
+          addDiagnostic("stderr", describeCommandError(reason));
+        }
+        break;
+      }
       case "thread/started": {
         const item = asObject(params?.thread);
         const id = readString(item, "id");
@@ -910,6 +1018,8 @@ export function createCodexSession(): CodexSession {
 
   return {
     account,
+    accountRateLimits,
+    accountRateLimitsState,
     activeTurnId,
     pendingServerRequests: serverRequests.pending,
     busy,
@@ -951,6 +1061,7 @@ export function createCodexSession(): CodexSession {
     removeProject,
     renameThread,
     refreshConfig,
+    refreshAccountRateLimits,
     respondToInteractiveRequest,
     saveClipboardImage: savePastedImage,
     selectProject,

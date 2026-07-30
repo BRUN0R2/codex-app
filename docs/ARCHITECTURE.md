@@ -64,9 +64,10 @@ configurações, projetos, sessão e shell. `createCodexSession` compõe os dono
 estado; `createProjectWorkspace` controla a seleção persistida e
 `createThreadLibrary` controla paginação, deduplicação e atualização da biblioteca
 de tarefas. Assim que a conta autenticada é conhecida, o shell aparece e modelos,
-configuração, requisitos administrativos, prontidão do sandbox e tarefas são
-carregados em segundo plano. Uma falha fica explícita e a próxima solicitação
-pode tentar novamente.
+configuração, requisitos administrativos, prontidão do sandbox, limites da conta
+e tarefas são carregados em segundo plano. Limites possuem um dono independente:
+uma indisponibilidade dessa consulta não atrasa modelos, configurações ou a
+abertura da conversa, e fica explícita junto à ação de tentar novamente.
 
 A preferência de projetos contém somente caminhos locais e é versionada no
 perfil do WebView. Conversas continuam pertencendo ao armazenamento do Codex;
@@ -158,6 +159,20 @@ zoom do WebView ou escala do Windows. A página avançada aceita um caminho e um
 valor JSON validados, mas deliberadamente não renderiza o objeto efetivo, que
 pode conter segredos de integrações.
 
+### Uso da conta
+
+`src/shared/codex/rateLimits.ts` valida a resposta completa de
+`account/rateLimits/read` antes que ela entre no estado. O cartão da sidebar usa o
+bucket `codex`, prefere a janela semanal oficial e calcula o restante somente a
+partir de `usedPercent`. Timestamps são formatados no locale e fuso do usuário.
+Ao esgotar qualquer janela autoritativa, o cartão sai da sidebar e um aviso é
+mostrado junto ao compositor com o reset aplicável e uma releitura explícita.
+
+Não existe polling. `account/rateLimits/updated` atualiza as janelas recebidas e
+preserva metadados ausentes do último snapshot completo, conforme o contrato de
+notificação esparsa. Falha de parsing gera diagnóstico e nunca é convertida em
+zero de uso ou outro valor estimado.
+
 ## Fluxos principais
 
 ### Inicialização
@@ -167,9 +182,9 @@ pode conter segredos de integrações.
 3. A disponibilidade da ponte é diagnosticada sem iniciar processo.
 4. A conta é lida do cofre criptografado com a chave do Credential Manager.
 5. A UI mostra login ou shell sem aguardar a ponte.
-6. Com sessão válida, configuração, requisitos, prontidão do sandbox, modelos e
-   a primeira página de tarefas são solicitados em paralelo; cada dono expõe
-   estado explícito de carregamento.
+6. Com sessão válida, configuração, requisitos, prontidão do sandbox, limites da
+   conta, modelos e a primeira página de tarefas são solicitados em paralelo;
+   cada dono expõe estado explícito de carregamento.
 
 Sem sessão, a ponte permanece inativa. O aquecimento não usa temporizador,
 polling ou cache persistente paralelo: concorrência é deduplicada no dono da

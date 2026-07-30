@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
+import { parseAccountRateLimitsResponse } from "./rateLimits";
+import type { AccountRateLimitsResponse } from "./rateLimitTypes";
+
 import type {
   AccountReadResponse,
   Attachment,
@@ -80,6 +83,11 @@ export function startRuntime(): Promise<RuntimeStartResponse> {
 
 export function readAccount(): Promise<AccountReadResponse> {
   return invoke("engine_account_read");
+}
+
+export async function readAccountRateLimits(): Promise<AccountRateLimitsResponse> {
+  const response = await invoke<JsonValue>("engine_account_rate_limits_read");
+  return parseAccountRateLimitsResponse(response);
 }
 
 export function loginWithChatGpt(): Promise<LoginChatGptResponse> {

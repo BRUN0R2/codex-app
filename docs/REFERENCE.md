@@ -30,6 +30,8 @@ As áreas relevantes foram lidas diretamente no snapshot:
 - Configuração usa `config/read`, `config/value/write`, `config/batchWrite` e
   `configRequirements/read`.
 - Prontidão do sandbox usa o RPC sem parâmetros `windowsSandbox/readiness`.
+- Uso da conta usa `account/rateLimits/read`; atualizações incrementais chegam em
+  `account/rateLimits/updated` e preservam metadados do snapshot completo.
 - Modelo, esforços e tiers de serviço vêm de `model/list`.
 - A timeline consome a união oficial `ThreadItem` e as notificações incrementais
   `item/*`, inclusive `item/mcpToolCall/progress`, `turn/plan/updated` e
@@ -123,6 +125,18 @@ O diagnóstico de sandbox também foi exercitado sem iniciar setup. Neste Window
 o app-server retornou `ready`; a UI exibiu **Pronto** e permaneceu somente leitura.
 Esse estado indica capacidade do executor e não substitui a política ativa da
 tarefa, que pode continuar em acesso completo.
+
+Os tipos `GetAccountRateLimitsResponse`, `RateLimitSnapshot` e
+`RateLimitWindow` confirmam que `usedPercent` representa consumo, enquanto
+`resetsAt` é um timestamp Unix em segundos. A seleção da janela semanal segue a
+tolerância de 5% usada pela TUI oficial; quando ela não existe, a interface usa a
+janela de maior duração disponível sem inventar uma periodicidade.
+
+Na comparação ao vivo, a conta atingiu 100% de consumo. O Codex Desktop retirou
+o cartão de uso da sidebar e mostrou um aviso de esgotamento acima do compositor,
+com o mesmo horário de reset. O app reproduz essa transição e oferece releitura
+do snapshot; ações comerciais não foram inventadas porque seus destinos não
+fazem parte do contrato público estudado.
 
 Os contratos `commandExecution`, `fileChange`, `imageView`, `reasoning` e suas
 notificações foram conferidos nos tipos TypeScript gerados e no README do
