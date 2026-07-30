@@ -74,6 +74,22 @@ perfil do WebView. Conversas continuam pertencendo ao armazenamento do Codex;
 abrir uma tarefa usa `thread/resume` e reidrata a linha do tempo retornada pelo
 contrato oficial, sem duplicar o conteúdo no frontend.
 
+### Roteamento por tarefa
+
+`threadNotificationRouting` valida o `threadId` obrigatório antes de qualquer
+mutação de conversa. Turnos, itens, deltas, progresso, patches e erros só podem
+alterar a linha do tempo cujo identificador está ativo. Eventos de ciclo de vida
+continuam atualizando a biblioteca inteira, mas `thread/started` nunca escolhe a
+tarefa visível: a resposta correlacionada de `thread/start` ou `thread/resume` é
+a única autoridade para essa transição.
+
+Solicitações interativas possuem fila compartilhada e ownership por tarefa. A
+interface deriva somente as entradas da tarefa ativa; trocar de conversa não
+apaga aprovações de outra tarefa. Arquivamento e exclusão removem apenas o escopo
+correspondente, enquanto logout limpa a fila completa. Uma solicitação inválida
+destinada a outra tarefa permanece visível quando ela for aberta, sem produzir
+um erro global na conversa atual.
+
 ### Linha do tempo
 
 A linha do tempo possui fronteiras pequenas e tipadas:

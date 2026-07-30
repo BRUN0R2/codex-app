@@ -48,6 +48,10 @@ As áreas relevantes foram lidas diretamente no snapshot:
   `turn/diff/updated`.
 - Solicitações do servidor são respondidas pelo mesmo `id`; métodos desconhecidos
   não recebem aprovação automática.
+- O roteador oficial classifica notificações como globais, do aplicativo ou de
+  uma tarefa. `turn/*`, `item/*`, `error`, `warning`, `guardianWarning` e
+  `serverRequest/resolved` preservam o `threadId` de destino; avisos de
+  configuração e depreciação são do aplicativo.
 - O catálogo interativo atual contém
   `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`,
   `item/tool/requestUserInput`, `item/permissions/requestApproval` e
@@ -197,6 +201,13 @@ payload grande no estado reativo.
 O decoder local usa um catálogo fechado dos discriminadores atuais. Uma versão
 futura que introduza outro item falha visivelmente até que domínio e renderer
 sejam atualizados; não existe fallback genérico que aparente suporte inexistente.
+
+O mapa de `app_server_event_targets.rs` foi reproduzido na fronteira da sessão
+para os eventos já suportados. Uma prova isolada carregada pelo pipeline Vite
+confirmou que um destino ausente falha, uma tarefa estrangeira não altera o
+estado ativo, solicitações globais continuam visíveis e a limpeza de uma tarefa
+não remove filas alheias. O fixture e o runner efêmeros foram removidos depois da
+validação.
 
 As solicitações interativas também foram conferidas nos tipos gerados, no README
 do app-server e nos fluxos da TUI. O contrato preservado é:

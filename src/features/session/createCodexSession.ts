@@ -83,6 +83,11 @@ import { threadTitle, type ThreadLibraryState } from "../projects/threadLibrary"
 import { parseConfigWarning } from "../notices/configWarningProtocol";
 import { createConfigWarningCenter } from "../notices/createConfigWarningCenter";
 import {
+  isActiveThreadTarget,
+  isRequestVisibleForThread,
+  readRequiredNotificationThreadId,
+} from "./threadNotificationRouting";
+import {
   parseWindowsWorldWritableWarning,
   WORLD_WRITABLE_WARNING_CONFIG_KEY,
 } from "../security/windowsWorldWritableWarningProtocol";
@@ -211,6 +216,13 @@ export function createCodexSession(): CodexSession {
   const [openingThreadId, setOpeningThreadId] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
   const serverRequests = createServerRequestQueue();
+  const pendingServerRequests = createMemo(() =>
+    serverRequests
+      .pending()
+      .filter((request) =>
+        isRequestVisibleForThread(request.threadId, threadId()),
+      ),
+  );
   const configWarnings = createConfigWarningCenter();
   const [compatibilityContextState, setCompatibilityContextState] =
     createSignal<CompatibilityContextState>("idle");
@@ -391,6 +403,7 @@ export function createCodexSession(): CodexSession {
         resetAccountRateLimits();
         setWindowsSandboxSetupState({ type: "idle" });
         setWorldWritableWarningState({ type: "idle" });
+        serverRequests.clear();
         threadLibrary.reset();
         return;
       }
@@ -589,6 +602,7 @@ export function createCodexSession(): CodexSession {
       resetAccountRateLimits();
       setWindowsSandboxSetupState({ type: "idle" });
       setWorldWritableWarningState({ type: "idle" });
+      serverRequests.clear();
       threadLibrary.reset();
       setThreadId(null);
       timeline.reset();
@@ -695,12 +709,10 @@ export function createCodexSession(): CodexSession {
     setActiveTurnId(null);
     timeline.reset();
     turnProgress.reset();
-    serverRequests.clear();
   }
 
   function hydrateThread(thread: CodexThread) {
     setThreadId(thread.id);
-    serverRequests.clear();
     turnProgress.reset();
 
     let resumedTurnId: string | null = null;
@@ -763,6 +775,7 @@ export function createCodexSession(): CodexSession {
     try {
       await archiveCodexThread({ threadId: threadIdToArchive });
       threadLibrary.remove(threadIdToArchive);
+      serverRequests.removeForThread(threadIdToArchive);
       if (threadIdToArchive === threadId()) {
         resetConversation();
       }
@@ -1091,18 +1104,28 @@ export function createCodexSession(): CodexSession {
       }
       case "thread/started": {
         const item = asObject(params?.thread);
-        const id = readString(item, "id");
-        if (id !== undefined && threadId() === null) {
-          setThreadId(id);
+        if (readString(item, "id") === undefined) {
+          addDiagnostic(
+            "stderr",
+            "Notificação incompatível do Codex em thread/started: thread.id ausente.",
+          );
+          break;
         }
         threadLibrary.refreshInBackground();
         break;
       }
-      case "thread/status/changed":
+      case "thread/status/changed": {
+        if (readNotificationThreadId(notification.method, params) === undefined) {
+          break;
+        }
         threadLibrary.refreshInBackground();
         break;
+      }
       case "thread/name/updated": {
-        const updatedThreadId = readString(params, "threadId");
+        const updatedThreadId = readNotificationThreadId(
+          notification.method,
+          params,
+        );
         const name = readString(params, "threadName");
         if (updatedThreadId !== undefined) {
           threadLibrary.update(updatedThreadId, (thread) => ({
@@ -1114,9 +1137,13 @@ export function createCodexSession(): CodexSession {
       }
       case "thread/archived":
       case "thread/deleted": {
-        const removedThreadId = readString(params, "threadId");
+        const removedThreadId = readNotificationThreadId(
+          notification.method,
+          params,
+        );
         if (removedThreadId !== undefined) {
           threadLibrary.remove(removedThreadId);
+          serverRequests.removeForThread(removedThreadId);
           if (removedThreadId === threadId()) {
             resetConversation();
           }
@@ -1124,9 +1151,16 @@ export function createCodexSession(): CodexSession {
         break;
       }
       case "thread/unarchived":
+        if (readNotificationThreadId(notification.method, params) === undefined) {
+          break;
+        }
         threadLibrary.refreshInBackground();
         break;
       case "turn/started": {
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          threadLibrary.refreshInBackground();
+          break;
+        }
         const turn = asObject(params?.turn);
         turnProgress.reset();
         setActiveTurnId(readString(turn, "id") ?? null);
@@ -1134,6 +1168,10 @@ export function createCodexSession(): CodexSession {
         break;
       }
       case "turn/completed": {
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          threadLibrary.refreshInBackground();
+          break;
+        }
         const turn = asObject(params?.turn);
         const turnError = asObject(turn?.error);
         const message = readString(turnError, "message");
@@ -1146,48 +1184,88 @@ export function createCodexSession(): CodexSession {
         break;
       }
       case "turn/diff/updated":
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          break;
+        }
         turnProgress.updateDiff(params);
         break;
       case "turn/plan/updated":
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          break;
+        }
         turnProgress.updatePlan(params);
         break;
       case "item/started":
       case "item/completed":
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          break;
+        }
         timeline.handleItem(
           params?.item,
           notification.method === "item/completed",
         );
         break;
       case "item/agentMessage/delta":
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          break;
+        }
         timeline.appendAgentDelta(params);
         break;
       case "item/commandExecution/outputDelta":
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          break;
+        }
         timeline.appendCommandOutputDelta(params);
         break;
       case "item/commandExecution/terminalInteraction":
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          break;
+        }
         timeline.appendTerminalInteraction(params);
         break;
       case "item/mcpToolCall/progress":
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          break;
+        }
         timeline.appendMcpToolProgress(params);
         break;
       case "item/fileChange/patchUpdated":
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          break;
+        }
         timeline.updateFileChangePatch(params);
         break;
       case "item/plan/delta":
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          break;
+        }
         timeline.appendPlanDelta(params);
         break;
       case "item/reasoning/summaryTextDelta":
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          break;
+        }
         timeline.appendReasoningSummaryDelta(params);
         break;
       case "item/reasoning/textDelta":
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          break;
+        }
         timeline.appendReasoningTextDelta(params);
         break;
       case "error": {
+        if (!notificationTargetsCurrentThread(notification.method, params)) {
+          threadLibrary.refreshInBackground();
+          break;
+        }
         const eventError = asObject(params?.error);
         setError(readString(eventError, "message") ?? "O turno falhou.");
         break;
       }
       case "serverRequest/resolved": {
+        if (readNotificationThreadId(notification.method, params) === undefined) {
+          break;
+        }
         const requestId = params?.requestId;
         if (requestId !== undefined) {
           serverRequests.remove(requestId);
@@ -1200,10 +1278,37 @@ export function createCodexSession(): CodexSession {
   }
 
   function handleServerRequest(request: CodexServerRequest) {
-    const protocolError = serverRequests.enqueue(request);
-    if (protocolError !== null) {
-      setError(protocolError);
+    const result = serverRequests.enqueue(request);
+    if (
+      result.error !== null
+      && (result.request === null
+        || isRequestVisibleForThread(result.request.threadId, threadId()))
+    ) {
+      setError(result.error);
     }
+  }
+
+  function readNotificationThreadId(
+    method: string,
+    params: JsonObject | undefined,
+  ): string | undefined {
+    try {
+      return readRequiredNotificationThreadId(method, params);
+    } catch (reason) {
+      addDiagnostic("stderr", describeCommandError(reason));
+      return undefined;
+    }
+  }
+
+  function notificationTargetsCurrentThread(
+    method: string,
+    params: JsonObject | undefined,
+  ): boolean {
+    const targetThreadId = readNotificationThreadId(method, params);
+    return (
+      targetThreadId !== undefined
+      && isActiveThreadTarget(targetThreadId, threadId())
+    );
   }
 
   function handleDiagnostic(diagnostic: RuntimeDiagnostic) {
@@ -1219,7 +1324,7 @@ export function createCodexSession(): CodexSession {
     accountRateLimits,
     accountRateLimitsState,
     activeTurnId,
-    pendingServerRequests: serverRequests.pending,
+    pendingServerRequests,
     busy,
     cancelLogin: cancelPendingLogin,
     compatibilityContextState,

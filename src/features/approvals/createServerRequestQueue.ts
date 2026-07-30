@@ -9,21 +9,30 @@ import type {
 
 export interface ServerRequestQueue {
   clear: () => void;
-  enqueue: (request: CodexServerRequest) => string | null;
+  enqueue: (request: CodexServerRequest) => ServerRequestEnqueueResult;
   pending: Accessor<PendingServerRequest[]>;
   remove: (id: unknown) => void;
+  removeForThread: (threadId: string) => void;
+}
+
+export interface ServerRequestEnqueueResult {
+  error: string | null;
+  request: PendingServerRequest | null;
 }
 
 export function createServerRequestQueue(): ServerRequestQueue {
   const [pending, setPending] = createSignal<PendingServerRequest[]>([]);
 
-  function enqueue(raw: CodexServerRequest): string | null {
+  function enqueue(raw: CodexServerRequest): ServerRequestEnqueueResult {
     const result = parseServerRequest(raw);
     const request = result.request;
     if (request !== null) {
       setPending((current) => upsert(current, request));
     }
-    return result.ok ? null : result.error;
+    return {
+      error: result.ok ? null : result.error,
+      request,
+    };
   }
 
   function remove(rawId: unknown) {
@@ -34,10 +43,17 @@ export function createServerRequestQueue(): ServerRequestQueue {
     setPending((current) => current.filter((request) => request.id !== id));
   }
 
+  function removeForThread(threadId: string) {
+    setPending((current) =>
+      current.filter((request) => request.threadId !== threadId),
+    );
+  }
+
   return {
     pending,
     enqueue,
     remove,
+    removeForThread,
     clear: () => setPending([]),
   };
 }

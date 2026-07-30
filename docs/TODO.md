@@ -18,6 +18,8 @@
   parsing explícito e visualização dedicada.
 - [x] Solicitações interativas do app-server possuem fila, parsing, respostas e
   renderização inline tipados, incluindo permissões granulares e MCP.
+- [x] Notificações, erros e solicitações interativas são roteados por `threadId`;
+  tarefas em segundo plano não alteram a conversa ou aprovação visível.
 - [x] Categorias de configuração suportadas possuem páginas modulares, política
   administrativa tipada e preferências visuais persistidas.
 - [x] Prontidão do sandbox do Windows é consultada e exibida sem setup implícito.
