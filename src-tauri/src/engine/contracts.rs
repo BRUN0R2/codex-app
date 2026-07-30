@@ -152,11 +152,14 @@ pub enum EngineOperation {
         include_layers: bool,
         cwd: Option<String>,
     },
+    ReadConfigRequirements,
     WriteConfig {
         edit: EngineConfigEdit,
+        expected_version: Option<String>,
     },
     BatchWriteConfig {
         edits: Vec<EngineConfigEdit>,
+        expected_version: Option<String>,
     },
     ListModels,
 }
@@ -176,6 +179,7 @@ impl EngineOperation {
             Self::StartTurn { .. } => "turn.start",
             Self::InterruptTurn { .. } => "turn.interrupt",
             Self::ReadConfig { .. } => "config.read",
+            Self::ReadConfigRequirements => "config.requirements.read",
             Self::WriteConfig { .. } => "config.write",
             Self::BatchWriteConfig { .. } => "config.batch_write",
             Self::ListModels => "models.list",
@@ -271,17 +275,33 @@ impl EngineOperation {
                 }
                 ("config/read", Some(params))
             }
-            Self::WriteConfig { edit } => ("config/value/write", Some(edit.into_json())),
-            Self::BatchWriteConfig { edits } => (
-                "config/batchWrite",
-                Some(json!({
+            Self::ReadConfigRequirements => ("configRequirements/read", None),
+            Self::WriteConfig {
+                edit,
+                expected_version,
+            } => {
+                let mut params = edit.into_json();
+                if let Some(expected_version) = expected_version {
+                    params["expectedVersion"] = Value::String(expected_version);
+                }
+                ("config/value/write", Some(params))
+            }
+            Self::BatchWriteConfig {
+                edits,
+                expected_version,
+            } => {
+                let mut params = json!({
                     "edits": edits
                         .into_iter()
                         .map(EngineConfigEdit::into_json)
                         .collect::<Vec<_>>(),
                     "reloadUserConfig": false,
-                })),
-            ),
+                });
+                if let Some(expected_version) = expected_version {
+                    params["expectedVersion"] = Value::String(expected_version);
+                }
+                ("config/batchWrite", Some(params))
+            }
             Self::ListModels => ("model/list", Some(json!({ "limit": 100 }))),
         }
     }
@@ -291,6 +311,7 @@ impl EngineOperation {
 mod tests {
     use serde_json::json;
 
+    use super::EngineConfigEdit;
     use super::EngineOperation;
     use super::EngineTurnInput;
 
@@ -363,6 +384,38 @@ mod tests {
                 "sortKey": "recency_at",
                 "sortDirection": "desc",
                 "archived": false,
+            }))
+        );
+    }
+
+    #[test]
+    fn config_requirements_use_the_official_parameterless_contract() {
+        let (method, params) = EngineOperation::ReadConfigRequirements.into_compatibility_rpc();
+
+        assert_eq!(method, "configRequirements/read");
+        assert_eq!(params, None);
+    }
+
+    #[test]
+    fn config_write_preserves_the_expected_user_layer_version() {
+        let (method, params) = EngineOperation::WriteConfig {
+            edit: EngineConfigEdit {
+                key_path: "model".to_string(),
+                value: json!("gpt-5.6-codex"),
+                merge_strategy: "replace",
+            },
+            expected_version: Some("version-1".to_string()),
+        }
+        .into_compatibility_rpc();
+
+        assert_eq!(method, "config/value/write");
+        assert_eq!(
+            params,
+            Some(json!({
+                "keyPath": "model",
+                "value": "gpt-5.6-codex",
+                "mergeStrategy": "replace",
+                "expectedVersion": "version-1",
             }))
         );
     }

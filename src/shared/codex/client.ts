@@ -13,6 +13,7 @@ import type {
   ConfigBatchWriteRequest,
   ConfigReadRequest,
   ConfigReadResponse,
+  ConfigRequirementsReadResponse,
   ConfigWriteRequest,
   JsonValue,
   LoginChatGptResponse,
@@ -134,6 +135,10 @@ export function readConfig(
   request: ConfigReadRequest,
 ): Promise<ConfigReadResponse> {
   return invoke("engine_config_read", { request });
+}
+
+export function readConfigRequirements(): Promise<ConfigRequirementsReadResponse> {
+  return invoke("engine_config_requirements_read");
 }
 
 export function writeConfig(request: ConfigWriteRequest): Promise<JsonValue> {

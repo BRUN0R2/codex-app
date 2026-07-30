@@ -1,9 +1,13 @@
-import { Show, createSignal } from "solid-js";
+import { Show, createEffect, createSignal } from "solid-js";
 
 import { ChatPage } from "../chat/ChatPage";
 import { ProjectSidebar } from "../projects/ProjectSidebar";
 import type { CodexSession } from "../session/createCodexSession";
 import { SettingsDrawer } from "../settings/SettingsDrawer";
+import {
+  applyAppearancePreferences,
+  readAppearancePreferences,
+} from "../settings/appearancePreferences";
 import {
   ChevronDownIcon,
   CloseIcon,
@@ -31,6 +35,10 @@ export function AppShell(props: AppShellProps) {
     return account?.type ?? "Codex";
   };
   const taskTitle = () => props.session.currentThreadTitle();
+
+  createEffect(() => {
+    applyAppearancePreferences(readAppearancePreferences(props.session.config()));
+  });
 
   return (
     <div

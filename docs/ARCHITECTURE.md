@@ -64,8 +64,8 @@ configurações, projetos, sessão e shell. `createCodexSession` compõe os dono
 estado; `createProjectWorkspace` controla a seleção persistida e
 `createThreadLibrary` controla paginação, deduplicação e atualização da biblioteca
 de tarefas. Assim que a conta autenticada é conhecida, o shell aparece e modelos,
-configuração e tarefas são carregados em segundo plano. Uma falha fica explícita
-e a próxima solicitação pode tentar novamente.
+configuração, requisitos administrativos e tarefas são carregados em segundo
+plano. Uma falha fica explícita e a próxima solicitação pode tentar novamente.
 
 A preferência de projetos contém somente caminhos locais e é versionada no
 perfil do WebView. Conversas continuam pertencendo ao armazenamento do Codex;
@@ -132,6 +132,29 @@ O handshake da ponte declara `experimentalApi`, `requestAttestation` e
 `mcpServerOpenaiFormElicitation` como falsos. Assim, o cliente não anuncia
 ferramentas dinâmicas, atestados ou formulários opacos que ainda não implementa.
 
+### Configurações
+
+`src/features/settings` separa navegação, controles reutilizáveis e uma página
+por capacidade. `SettingsDrawer` apenas coordena a página ativa, o estado de
+salvamento e erros; regras de política e preferências visuais vivem em módulos
+sem dependência do renderer.
+
+Configuração do agente usa somente `config/read`, `config/value/write`,
+`config/batchWrite` e `configRequirements/read`. As listas permitidas limitam
+as opções de aprovação, sandbox e busca; as origens de configuração bloqueiam
+valores administrados por sistema, MDM ou empresa. Os defaults administrados de
+modelo para novas tarefas continuam sendo defaults: uma seleção explícita não é
+tratada como proibida. Toda escrita envia a versão da camada de usuário lida por
+último, portanto uma edição externa gera conflito visível em vez de ser perdida.
+
+Preferências próprias da interface são persistidas no namespace fechado
+`desktop.codexDesktopNext`. Tamanho base, movimento, cursor e marcadores de diff
+são decodificados em uma união tipada antes de alterar atributos do elemento
+raiz. Todo tamanho tipográfico deriva de `rem`; o aplicativo não modifica DPI,
+zoom do WebView ou escala do Windows. A página avançada aceita um caminho e um
+valor JSON validados, mas deliberadamente não renderiza o objeto efetivo, que
+pode conter segredos de integrações.
+
 ## Fluxos principais
 
 ### Inicialização
@@ -141,8 +164,9 @@ ferramentas dinâmicas, atestados ou formulários opacos que ainda não implemen
 3. A disponibilidade da ponte é diagnosticada sem iniciar processo.
 4. A conta é lida do cofre criptografado com a chave do Credential Manager.
 5. A UI mostra login ou shell sem aguardar a ponte.
-6. Com sessão válida, configuração, modelos e a primeira página de tarefas são
-   solicitados em paralelo; cada dono expõe estado explícito de carregamento.
+6. Com sessão válida, configuração, requisitos, modelos e a primeira página de
+   tarefas são solicitados em paralelo; cada dono expõe estado explícito de
+   carregamento.
 
 Sem sessão, a ponte permanece inativa. O aquecimento não usa temporizador,
 polling ou cache persistente paralelo: concorrência é deduplicada no dono da
@@ -171,7 +195,9 @@ A primeira tarefa inicia a ponte compatível.
 
 ### Configuração e permissões
 
-Leitura e escrita usam operações dedicadas. Presets são aplicados em lote:
+Leitura, requisitos e escrita usam operações dedicadas. A UI filtra opções pelas
+restrições administrativas e desabilita chaves cuja origem é gerenciada. Presets
+de permissão são aplicados em lote:
 
 - **Somente leitura**: `read-only` + `untrusted`;
 - **Aprovar por mim**: `workspace-write` + `on-request`;

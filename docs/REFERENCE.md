@@ -27,7 +27,8 @@ As áreas relevantes foram lidas diretamente no snapshot:
   `thread/name/set`, `thread/archive`, `turn/start` e `turn/interrupt`.
 - O envio atual usa `text`, `localImage` ou `mention`; a leitura histórica cobre
   também `image`, `audio`, `localAudio` e `skill`.
-- Configuração usa `config/read`, `config/value/write` e `config/batchWrite`.
+- Configuração usa `config/read`, `config/value/write`, `config/batchWrite` e
+  `configRequirements/read`.
 - Modelo, esforços e tiers de serviço vêm de `model/list`.
 - A timeline consome a união oficial `ThreadItem` e as notificações incrementais
   `item/*`, inclusive `item/mcpToolCall/progress`, `turn/plan/updated` e
@@ -91,11 +92,31 @@ Padrões reproduzidos:
   miniaturas reais;
 - progresso do turno em uma pílula compacta acima do compositor;
 - configurações em página inteira, busca lateral e conteúdo central de 768 px;
+- categorias separadas para geral, aparência, personalização, conta,
+  configuração e edição avançada;
 - canvas `#181818`, sidebar `#202020`, superfícies `#2D2D2D`, seleção
   `#313131` e destaque de permissão próximo de `#FF8549`.
 
 A escala foi implementada no CSS do aplicativo. Não existe código que altere DPI,
 zoom do WebView ou escala do sistema operacional.
+
+Os contratos de configuração foram conferidos em `app-server-protocol`, no
+carregamento de camadas do core e em `managed_new_thread_defaults.rs`. A UI usa
+as listas permitidas de `ConfigRequirements` para aprovação, sandbox e busca, e
+usa `ConfigLayerSource` para reconhecer valores administrados. Os defaults
+gerenciados de modelo para novas tarefas não são uma lista de bloqueio: a própria
+referência preserva a precedência de uma escolha explícita. Preferências locais
+da interface ficam no campo opaco `desktop`, sob um namespace próprio, sem criar
+um armazenamento paralelo. Escritas preservam `expectedVersion` da camada ativa
+de usuário para manter a detecção de concorrência do app-server.
+
+A configuração efetiva não é despejada na interface avançada. Camadas do Codex
+podem conter cabeçalhos MCP e outros segredos; por isso o diagnóstico mostra
+somente contagens e a edição exige caminho e JSON explícitos.
+
+A escrita versionada foi exercitada na janela Tauri real alterando a escala da
+interface em sequência e restaurando 15 px. Cada alteração recarregou a camada
+ativa sem conflito, erro visível ou mudança de DPI do sistema.
 
 Os contratos `commandExecution`, `fileChange`, `imageView`, `reasoning` e suas
 notificações foram conferidos nos tipos TypeScript gerados e no README do

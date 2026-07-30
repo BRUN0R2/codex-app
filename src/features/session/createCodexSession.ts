@@ -19,6 +19,7 @@ import {
   openExternalUrl,
   readAccount,
   readConfig,
+  readConfigRequirements,
   respondToServerRequest,
   resumeThread as resumeCodexThread,
   savePastedImage,
@@ -40,6 +41,7 @@ import {
   type CodexServerRequest,
   type CodexThread,
   type ConfigReadResponse,
+  type ConfigRequirementsReadResponse,
   type ConfigEditRequest,
   type JsonObject,
   type JsonValue,
@@ -75,6 +77,7 @@ export interface CodexSession {
   busy: Accessor<boolean>;
   compatibilityContextState: Accessor<CompatibilityContextState>;
   config: Accessor<ConfigReadResponse | null>;
+  configRequirements: Accessor<ConfigRequirementsReadResponse | null>;
   diagnostics: Accessor<RuntimeDiagnostic[]>;
   error: Accessor<string | null>;
   loginPending: Accessor<boolean>;
@@ -150,6 +153,8 @@ export function createCodexSession(): CodexSession {
   const [compatibilityContextState, setCompatibilityContextState] =
     createSignal<CompatibilityContextState>("idle");
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
+  const [configRequirements, setConfigRequirements] =
+    createSignal<ConfigRequirementsReadResponse | null>(null);
   const [models, setModels] = createSignal<CodexModel[]>([]);
   const [diagnostics, setDiagnostics] = createSignal<RuntimeDiagnostic[]>([]);
   const [error, setError] = createSignal<string | null>(
@@ -259,8 +264,9 @@ export function createCodexSession(): CodexSession {
         );
       }
 
-      const [configResponse, modelsResponse] = await Promise.all([
+      const [configResponse, requirementsResponse, modelsResponse] = await Promise.all([
         readConfig({ includeLayers: true, cwd: workspace() }),
+        readConfigRequirements(),
         listModels(),
       ]);
       if (
@@ -271,6 +277,7 @@ export function createCodexSession(): CodexSession {
         return;
       }
       setConfig(configResponse);
+      setConfigRequirements(requirementsResponse);
       setModels(extractModels(modelsResponse));
       setCompatibilityContextState("ready");
     })();
@@ -347,6 +354,7 @@ export function createCodexSession(): CodexSession {
     compatibilityContextGeneration += 1;
     setCompatibilityContextState("idle");
     setConfig(null);
+    setConfigRequirements(null);
     setModels([]);
   }
 
@@ -671,11 +679,15 @@ export function createCodexSession(): CodexSession {
   }
 
   async function refreshConfig() {
-    const response = await readConfig({
-      includeLayers: true,
-      cwd: workspace(),
-    });
-    setConfig(response);
+    const [configResponse, requirementsResponse] = await Promise.all([
+      readConfig({
+        includeLayers: true,
+        cwd: workspace(),
+      }),
+      readConfigRequirements(),
+    ]);
+    setConfig(configResponse);
+    setConfigRequirements(requirementsResponse);
   }
 
   async function writeSetting(
@@ -683,12 +695,20 @@ export function createCodexSession(): CodexSession {
     value: JsonValue,
     mergeStrategy: "replace" | "upsert",
   ) {
-    await writeConfig({ keyPath, value, mergeStrategy });
+    await writeConfig({
+      keyPath,
+      value,
+      mergeStrategy,
+      expectedVersion: activeUserConfigVersion(config()),
+    });
     await refreshConfig();
   }
 
   async function writeSettings(edits: ConfigEditRequest[]) {
-    await writeConfigBatch({ edits });
+    await writeConfigBatch({
+      edits,
+      expectedVersion: activeUserConfigVersion(config()),
+    });
     await refreshConfig();
   }
 
@@ -880,6 +900,7 @@ export function createCodexSession(): CodexSession {
     cancelLogin: cancelPendingLogin,
     compatibilityContextState,
     config,
+    configRequirements,
     diagnostics,
     error,
     loginPending,
@@ -934,6 +955,10 @@ function isNativeLogoutResponse(value: unknown): value is NativeLogoutResponse {
 
 function asObject(value: JsonValue | undefined): JsonObject | undefined {
   return isJsonObject(value) ? value : undefined;
+}
+
+function activeUserConfigVersion(snapshot: ConfigReadResponse | null): string | null {
+  return snapshot?.layers?.find((layer) => layer.name.type === "user")?.version ?? null;
 }
 
 function extractModels(response: ModelListResponse): CodexModel[] {

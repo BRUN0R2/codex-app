@@ -35,6 +35,50 @@ export function SettingsIcon(props: IconProps) {
   );
 }
 
+export function PaletteIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M12 3.5a8.5 8.5 0 1 0 0 17h1.2a1.8 1.8 0 0 0 0-3.6h-.7a1.8 1.8 0 0 1 0-3.6H16a4.5 4.5 0 0 0 4.5-4.5C20.5 5.9 16.7 3.5 12 3.5Z"
+        stroke="currentColor"
+        stroke-linejoin="round"
+        stroke-width="1.6"
+      />
+      <circle cx="7.5" cy="10" fill="currentColor" r="1" />
+      <circle cx="10" cy="6.8" fill="currentColor" r="1" />
+      <circle cx="14.2" cy="6.7" fill="currentColor" r="1" />
+    </Svg>
+  );
+}
+
+export function UserIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="8" r="3.5" stroke="currentColor" stroke-width="1.6" />
+      <path
+        d="M5 20a7 7 0 0 1 14 0"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-width="1.6"
+      />
+    </Svg>
+  );
+}
+
+export function CodeIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="m8.5 7-5 5 5 5M15.5 7l5 5-5 5M14 4l-4 16"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="1.6"
+      />
+    </Svg>
+  );
+}
+
 export function FolderIcon(props: IconProps) {
   return (
     <Svg {...props}>

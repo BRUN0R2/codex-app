@@ -35,7 +35,8 @@ CLI.
 - anexos, imagens coladas, mídia histórica e miniaturas lazy validadas no backend;
 - aprovações de comando e arquivo, perguntas estruturadas, permissões granulares
   e eliciações MCP com contratos tipados;
-- configurações, modelos, esforço, velocidade e diagnósticos;
+- configurações modulares de modelo, resposta, segurança, aparência,
+  personalização, conta e diagnóstico;
 - shell visual inspirado no Codex Desktop, sem alterar DPI ou zoom do sistema.
 
 Saídas extensas permanecem limitadas por contratos explícitos: comandos retêm a
@@ -46,6 +47,13 @@ revogáveis, sem base64 persistido no estado da interface.
 Resultados base64 de geração de imagem também não permanecem na árvore reativa:
 a prévia usa o `savedPath` validado e informa explicitamente quando o app-server
 não oferece um arquivo local.
+
+As configurações do agente usam as chaves oficiais e respeitam tanto as
+restrições de `configRequirements/read` quanto a origem administrativa de cada
+valor. Preferências exclusivas deste desktop ficam sob
+`desktop.codexDesktopNext`, com schema fechado e aplicação reativa. A página
+avançada não exibe valores efetivos brutos, pois uma configuração pode conter
+cabeçalhos ou credenciais de integrações.
 
 ## Fronteira atual do engine
 

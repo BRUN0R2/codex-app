@@ -81,12 +81,22 @@ pub struct ConfigWriteRequest {
     pub key_path: String,
     pub value: Value,
     pub merge_strategy: MergeStrategy,
+    pub expected_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigEditRequest {
+    pub key_path: String,
+    pub value: Value,
+    pub merge_strategy: MergeStrategy,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigBatchWriteRequest {
-    pub edits: Vec<ConfigWriteRequest>,
+    pub edits: Vec<ConfigEditRequest>,
+    pub expected_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,6 +364,17 @@ pub async fn engine_config_read(
 }
 
 #[tauri::command]
+pub async fn engine_config_requirements_read(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+) -> CommandResult<Value> {
+    engine
+        .execute(&app, EngineOperation::ReadConfigRequirements)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn engine_config_write(
     app: AppHandle,
     engine: State<'_, EngineManager>,
@@ -371,6 +392,7 @@ pub async fn engine_config_write(
                     value: request.value,
                     merge_strategy: request.merge_strategy.as_str(),
                 },
+                expected_version: request.expected_version,
             },
         )
         .await
@@ -394,6 +416,7 @@ pub async fn engine_config_batch_write(
         return Err(AppError::Protocol("config key path cannot be empty".into()).into());
     }
 
+    let expected_version = request.expected_version;
     let edits = request
         .edits
         .into_iter()
@@ -405,7 +428,13 @@ pub async fn engine_config_batch_write(
         .collect::<Vec<_>>();
 
     engine
-        .execute(&app, EngineOperation::BatchWriteConfig { edits })
+        .execute(
+            &app,
+            EngineOperation::BatchWriteConfig {
+                edits,
+                expected_version,
+            },
+        )
         .await
         .map_err(Into::into)
 }

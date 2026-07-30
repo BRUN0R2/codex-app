@@ -182,8 +182,59 @@ export interface TurnStartResponse {
 
 export interface ConfigReadResponse {
   config: JsonObject;
-  layers?: JsonValue[];
-  origins?: JsonObject;
+  layers: ConfigLayer[] | null;
+  origins: Record<string, ConfigLayerMetadata>;
+}
+
+export type ConfigLayerSource =
+  | { type: "enterpriseManaged"; id: string; name: string }
+  | { type: "legacyManagedConfigTomlFromFile"; file: string }
+  | { type: "legacyManagedConfigTomlFromMdm" }
+  | { type: "mdm"; domain: string; key: string }
+  | { type: "project"; dotCodexFolder: string }
+  | { type: "sessionFlags" }
+  | { type: "system"; file: string }
+  | { type: "user"; file: string; profile: string | null };
+
+export interface ConfigLayerMetadata {
+  name: ConfigLayerSource;
+  version: string;
+}
+
+export interface ConfigLayer extends ConfigLayerMetadata {
+  config: JsonValue;
+  disabledReason: string | null;
+}
+
+export type ApprovalPolicy = "never" | "on-request" | "untrusted";
+export interface GranularApprovalPolicy {
+  granular: {
+    mcp_elicitations: boolean;
+    request_permissions: boolean;
+    rules: boolean;
+    sandbox_approval: boolean;
+    skill_approval: boolean;
+  };
+}
+export type AskForApproval = ApprovalPolicy | GranularApprovalPolicy;
+export type SandboxMode = "danger-full-access" | "read-only" | "workspace-write";
+export type WebSearchMode = "cached" | "disabled" | "indexed" | "live";
+
+export interface NewThreadModelDefaults {
+  model: string | null;
+  modelReasoningEffort: string | null;
+  serviceTier: string | null;
+}
+
+export interface ConfigRequirements {
+  allowedApprovalPolicies: AskForApproval[] | null;
+  allowedSandboxModes: SandboxMode[] | null;
+  allowedWebSearchModes: WebSearchMode[] | null;
+  models: { newThread: NewThreadModelDefaults | null } | null;
+}
+
+export interface ConfigRequirementsReadResponse {
+  requirements: ConfigRequirements | null;
 }
 
 export interface ReasoningEffortOption {
@@ -248,16 +299,19 @@ export interface ConfigReadRequest {
   cwd: string | null;
 }
 
-export interface ConfigWriteRequest {
+export interface ConfigEditRequest {
   keyPath: string;
   value: JsonValue;
   mergeStrategy: "replace" | "upsert";
 }
 
-export type ConfigEditRequest = ConfigWriteRequest;
+export interface ConfigWriteRequest extends ConfigEditRequest {
+  expectedVersion?: string | null;
+}
 
 export interface ConfigBatchWriteRequest {
   edits: ConfigEditRequest[];
+  expectedVersion?: string | null;
 }
 
 export interface ServerResponseRequest {
@@ -267,6 +321,43 @@ export interface ServerResponseRequest {
 
 export function isJsonObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function isJsonValue(value: unknown): value is JsonValue {
+  const pending: unknown[] = [value];
+  const seen = new WeakSet<object>();
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (
+      current === null
+      || typeof current === "boolean"
+      || typeof current === "string"
+    ) {
+      continue;
+    }
+    if (typeof current === "number") {
+      if (Number.isFinite(current)) {
+        continue;
+      }
+      return false;
+    }
+    if (typeof current !== "object" || seen.has(current)) {
+      return false;
+    }
+    seen.add(current);
+    if (Array.isArray(current)) {
+      pending.push(...current);
+      continue;
+    }
+    const prototype = Object.getPrototypeOf(current);
+    if (prototype !== Object.prototype && prototype !== null) {
+      return false;
+    }
+    pending.push(...Object.values(current));
+  }
+
+  return true;
 }
 
 export function readString(

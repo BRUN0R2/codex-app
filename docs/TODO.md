@@ -18,6 +18,8 @@
   parsing explícito e visualização dedicada.
 - [x] Solicitações interativas do app-server possuem fila, parsing, respostas e
   renderização inline tipados, incluindo permissões granulares e MCP.
+- [x] Categorias de configuração suportadas possuem páginas modulares, política
+  administrativa tipada e preferências visuais persistidas.
 
 ## Engine
 
@@ -30,5 +32,4 @@
 
 ## Produto
 
-- [ ] Completar as categorias de configuração suportadas.
 - [ ] Preparar assinatura, instalador, atualização e telemetria opt-in.
