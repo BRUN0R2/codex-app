@@ -20,6 +20,7 @@ import {
   readAccount,
   readConfig,
   readConfigRequirements,
+  readWindowsSandboxReadiness,
   respondToServerRequest,
   resumeThread as resumeCodexThread,
   savePastedImage,
@@ -50,6 +51,7 @@ import {
   type RuntimeDiagnostic,
   type RuntimeStartResponse,
   type RuntimeStatus,
+  type WindowsSandboxReadinessResponse,
 } from "../../shared/codex/types";
 import { createTimeline } from "../chat/createTimeline";
 import {
@@ -78,6 +80,7 @@ export interface CodexSession {
   compatibilityContextState: Accessor<CompatibilityContextState>;
   config: Accessor<ConfigReadResponse | null>;
   configRequirements: Accessor<ConfigRequirementsReadResponse | null>;
+  windowsSandboxReadiness: Accessor<WindowsSandboxReadinessResponse | null>;
   diagnostics: Accessor<RuntimeDiagnostic[]>;
   error: Accessor<string | null>;
   loginPending: Accessor<boolean>;
@@ -155,6 +158,8 @@ export function createCodexSession(): CodexSession {
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
   const [configRequirements, setConfigRequirements] =
     createSignal<ConfigRequirementsReadResponse | null>(null);
+  const [windowsSandboxReadiness, setWindowsSandboxReadiness] =
+    createSignal<WindowsSandboxReadinessResponse | null>(null);
   const [models, setModels] = createSignal<CodexModel[]>([]);
   const [diagnostics, setDiagnostics] = createSignal<RuntimeDiagnostic[]>([]);
   const [error, setError] = createSignal<string | null>(
@@ -264,9 +269,15 @@ export function createCodexSession(): CodexSession {
         );
       }
 
-      const [configResponse, requirementsResponse, modelsResponse] = await Promise.all([
+      const [
+        configResponse,
+        requirementsResponse,
+        sandboxReadinessResponse,
+        modelsResponse,
+      ] = await Promise.all([
         readConfig({ includeLayers: true, cwd: workspace() }),
         readConfigRequirements(),
+        readWindowsSandboxReadiness(),
         listModels(),
       ]);
       if (
@@ -278,6 +289,7 @@ export function createCodexSession(): CodexSession {
       }
       setConfig(configResponse);
       setConfigRequirements(requirementsResponse);
+      setWindowsSandboxReadiness(sandboxReadinessResponse);
       setModels(extractModels(modelsResponse));
       setCompatibilityContextState("ready");
     })();
@@ -355,6 +367,7 @@ export function createCodexSession(): CodexSession {
     setCompatibilityContextState("idle");
     setConfig(null);
     setConfigRequirements(null);
+    setWindowsSandboxReadiness(null);
     setModels([]);
   }
 
@@ -679,15 +692,18 @@ export function createCodexSession(): CodexSession {
   }
 
   async function refreshConfig() {
-    const [configResponse, requirementsResponse] = await Promise.all([
-      readConfig({
-        includeLayers: true,
-        cwd: workspace(),
-      }),
-      readConfigRequirements(),
-    ]);
+    const [configResponse, requirementsResponse, sandboxReadinessResponse] =
+      await Promise.all([
+        readConfig({
+          includeLayers: true,
+          cwd: workspace(),
+        }),
+        readConfigRequirements(),
+        readWindowsSandboxReadiness(),
+      ]);
     setConfig(configResponse);
     setConfigRequirements(requirementsResponse);
+    setWindowsSandboxReadiness(sandboxReadinessResponse);
   }
 
   async function writeSetting(
@@ -901,6 +917,7 @@ export function createCodexSession(): CodexSession {
     compatibilityContextState,
     config,
     configRequirements,
+    windowsSandboxReadiness,
     diagnostics,
     error,
     loginPending,

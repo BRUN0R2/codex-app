@@ -64,8 +64,9 @@ configurações, projetos, sessão e shell. `createCodexSession` compõe os dono
 estado; `createProjectWorkspace` controla a seleção persistida e
 `createThreadLibrary` controla paginação, deduplicação e atualização da biblioteca
 de tarefas. Assim que a conta autenticada é conhecida, o shell aparece e modelos,
-configuração, requisitos administrativos e tarefas são carregados em segundo
-plano. Uma falha fica explícita e a próxima solicitação pode tentar novamente.
+configuração, requisitos administrativos, prontidão do sandbox e tarefas são
+carregados em segundo plano. Uma falha fica explícita e a próxima solicitação
+pode tentar novamente.
 
 A preferência de projetos contém somente caminhos locais e é versionada no
 perfil do WebView. Conversas continuam pertencendo ao armazenamento do Codex;
@@ -146,6 +147,8 @@ valores administrados por sistema, MDM ou empresa. Os defaults administrados de
 modelo para novas tarefas continuam sendo defaults: uma seleção explícita não é
 tratada como proibida. Toda escrita envia a versão da camada de usuário lida por
 último, portanto uma edição externa gera conflito visível em vez de ser perdida.
+`windowsSandbox/readiness` completa esse contexto com um diagnóstico fechado e
+somente leitura. A UI não inicia instalação, elevação ou alteração do sistema.
 
 Preferências próprias da interface são persistidas no namespace fechado
 `desktop.codexDesktopNext`. Tamanho base, movimento, cursor e marcadores de diff
@@ -164,9 +167,9 @@ pode conter segredos de integrações.
 3. A disponibilidade da ponte é diagnosticada sem iniciar processo.
 4. A conta é lida do cofre criptografado com a chave do Credential Manager.
 5. A UI mostra login ou shell sem aguardar a ponte.
-6. Com sessão válida, configuração, requisitos, modelos e a primeira página de
-   tarefas são solicitados em paralelo; cada dono expõe estado explícito de
-   carregamento.
+6. Com sessão válida, configuração, requisitos, prontidão do sandbox, modelos e
+   a primeira página de tarefas são solicitados em paralelo; cada dono expõe
+   estado explícito de carregamento.
 
 Sem sessão, a ponte permanece inativa. O aquecimento não usa temporizador,
 polling ou cache persistente paralelo: concorrência é deduplicada no dono da

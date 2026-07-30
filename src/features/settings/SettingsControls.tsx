@@ -94,6 +94,24 @@ export function SettingsToggle(props: {
   );
 }
 
+export function SettingsStatus(props: {
+  description: string;
+  label: string;
+  tone?: "default" | "success" | "warning";
+  value: string;
+}) {
+  return (
+    <div class="settings-row">
+      <SettingsRowCopy description={props.description} label={props.label} />
+      <span
+        class={`settings-status settings-status-${props.tone ?? "default"}`}
+      >
+        {props.value}
+      </span>
+    </div>
+  );
+}
+
 function SettingsRowCopy(props: {
   description: string;
   label: string;

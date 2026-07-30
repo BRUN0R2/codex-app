@@ -27,7 +27,8 @@ A superfície é uma enumeração fechada:
 
 - conta: ler, entrar com ChatGPT, cancelar login e sair;
 - tarefa: listar, iniciar, retomar, renomear, arquivar, enviar turno e interromper;
-- configuração: ler, escrever e escrever em lote;
+- configuração: ler, ler requisitos, escrever e escrever em lote;
+- segurança: consultar a prontidão do sandbox do Windows sem alterá-lo;
 - modelos: listar;
 - aprovação: responder uma solicitação pendente.
 
@@ -91,6 +92,8 @@ Migrações futuras devem ser explícitas, transacionais e monotônicas.
 `ToolRegistry` classifica ferramentas como leitura, escrita no workspace,
 processo ou rede. `PermissionProfile` expressa os presets apresentados pela UI.
 A execução concreta e a aplicação efetiva do sandbox ainda pertencem à ponte.
+O engine já consulta `windowsSandbox/readiness` e expõe `ready`, `notConfigured`
+ou `updateRequired`; setup e elevação não são iniciados implicitamente.
 
 ## Critérios para remover a ponte
 

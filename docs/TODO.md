@@ -20,6 +20,7 @@
   renderização inline tipados, incluindo permissões granulares e MCP.
 - [x] Categorias de configuração suportadas possuem páginas modulares, política
   administrativa tipada e preferências visuais persistidas.
+- [x] Prontidão do sandbox do Windows é consultada e exibida sem setup implícito.
 
 ## Engine
 

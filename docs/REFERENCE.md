@@ -29,6 +29,7 @@ As áreas relevantes foram lidas diretamente no snapshot:
   também `image`, `audio`, `localAudio` e `skill`.
 - Configuração usa `config/read`, `config/value/write`, `config/batchWrite` e
   `configRequirements/read`.
+- Prontidão do sandbox usa o RPC sem parâmetros `windowsSandbox/readiness`.
 - Modelo, esforços e tiers de serviço vêm de `model/list`.
 - A timeline consome a união oficial `ThreadItem` e as notificações incrementais
   `item/*`, inclusive `item/mcpToolCall/progress`, `turn/plan/updated` e
@@ -117,6 +118,11 @@ somente contagens e a edição exige caminho e JSON explícitos.
 A escrita versionada foi exercitada na janela Tauri real alterando a escala da
 interface em sequência e restaurando 15 px. Cada alteração recarregou a camada
 ativa sem conflito, erro visível ou mudança de DPI do sistema.
+
+O diagnóstico de sandbox também foi exercitado sem iniciar setup. Neste Windows,
+o app-server retornou `ready`; a UI exibiu **Pronto** e permaneceu somente leitura.
+Esse estado indica capacidade do executor e não substitui a política ativa da
+tarefa, que pode continuar em acesso completo.
 
 Os contratos `commandExecution`, `fileChange`, `imageView`, `reasoning` e suas
 notificações foram conferidos nos tipos TypeScript gerados e no README do

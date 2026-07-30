@@ -237,6 +237,15 @@ export interface ConfigRequirementsReadResponse {
   requirements: ConfigRequirements | null;
 }
 
+export type WindowsSandboxReadiness =
+  | "notConfigured"
+  | "ready"
+  | "updateRequired";
+
+export interface WindowsSandboxReadinessResponse {
+  status: WindowsSandboxReadiness;
+}
+
 export interface ReasoningEffortOption {
   reasoningEffort: string;
   description: string;

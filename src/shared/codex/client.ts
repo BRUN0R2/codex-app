@@ -34,6 +34,7 @@ import type {
   TurnInterruptRequest,
   TurnStartRequest,
   TurnStartResponse,
+  WindowsSandboxReadinessResponse,
 } from "./types";
 
 const NOTIFICATION_EVENT = "engine://notification";
@@ -139,6 +140,10 @@ export function readConfig(
 
 export function readConfigRequirements(): Promise<ConfigRequirementsReadResponse> {
   return invoke("engine_config_requirements_read");
+}
+
+export function readWindowsSandboxReadiness(): Promise<WindowsSandboxReadinessResponse> {
+  return invoke("engine_windows_sandbox_readiness");
 }
 
 export function writeConfig(request: ConfigWriteRequest): Promise<JsonValue> {

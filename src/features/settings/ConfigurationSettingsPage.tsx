@@ -1,14 +1,20 @@
 import { createMemo } from "solid-js";
 
 import { configString } from "../../shared/codex/models";
-import type {
-  ApprovalPolicy,
-  GranularApprovalPolicy,
-  SandboxMode,
+import {
+  isJsonObject,
+  type ApprovalPolicy,
+  type GranularApprovalPolicy,
+  type SandboxMode,
+  type WindowsSandboxReadiness,
 } from "../../shared/codex/types";
-import { isJsonObject } from "../../shared/codex/types";
 import { RefreshIcon } from "../../shared/components/Icons";
-import { SettingsPageHeading, SettingsSection, SettingsSelect } from "./SettingsControls";
+import {
+  SettingsPageHeading,
+  SettingsSection,
+  SettingsSelect,
+  SettingsStatus,
+} from "./SettingsControls";
 import { isAdministrativelyManaged } from "./configPolicy";
 import type { SelectOption, SettingsPageProps } from "./settingsTypes";
 
@@ -31,7 +37,9 @@ export function ConfigurationSettingsPage(props: SettingsPageProps) {
       ?? null,
   );
   const allowedSandboxModes = createMemo(
-    () => props.session.configRequirements()?.requirements?.allowedSandboxModes ?? null,
+    () =>
+      props.session.configRequirements()?.requirements?.allowedSandboxModes
+      ?? null,
   );
   const approvalOptions = createMemo<SelectOption[]>(() => {
     const allowed = allowedApprovalPolicies();
@@ -65,6 +73,10 @@ export function ConfigurationSettingsPage(props: SettingsPageProps) {
     isAdministrativelyManaged(props.session.config(), "model_reasoning_summary");
   const verbosityManaged = () =>
     isAdministrativelyManaged(props.session.config(), "model_verbosity");
+  const windowsSandbox = () =>
+    windowsSandboxPresentation(
+      props.session.windowsSandboxReadiness()?.status ?? null,
+    );
 
   return (
     <>
@@ -148,9 +160,19 @@ export function ConfigurationSettingsPage(props: SettingsPageProps) {
         />
       </SettingsSection>
 
+      <SettingsSection title="Sandbox do Windows">
+        <SettingsStatus
+          description="Confirma se o executor compatível pode aplicar o isolamento do Windows."
+          label="Prontidão do executor"
+          tone={windowsSandbox().tone}
+          value={windowsSandbox().label}
+        />
+      </SettingsSection>
+
       <p class="settings-note">
         Restrições administrativas vêm de <code>requirements.toml</code> ou MDM e
-        não são contornadas pela interface.
+        não são contornadas pela interface. A prontidão é somente um diagnóstico;
+        esta tela não instala nem altera o sandbox do sistema.
       </p>
     </>
   );
@@ -175,4 +197,19 @@ function isGranularApproval(value: unknown): value is GranularApprovalPolicy {
     && typeof granular.sandbox_approval === "boolean"
     && typeof granular.skill_approval === "boolean"
   );
+}
+
+function windowsSandboxPresentation(
+  status: WindowsSandboxReadiness | null,
+): { label: string; tone: "default" | "success" | "warning" } {
+  switch (status) {
+    case "ready":
+      return { label: "Pronto", tone: "success" };
+    case "notConfigured":
+      return { label: "Não configurado", tone: "warning" };
+    case "updateRequired":
+      return { label: "Atualização necessária", tone: "warning" };
+    case null:
+      return { label: "Verificando…", tone: "default" };
+  }
 }

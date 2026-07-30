@@ -37,6 +37,7 @@ CLI.
   e eliciações MCP com contratos tipados;
 - configurações modulares de modelo, resposta, segurança, aparência,
   personalização, conta e diagnóstico;
+- prontidão do sandbox do Windows consultada em modo somente leitura;
 - shell visual inspirado no Codex Desktop, sem alterar DPI ou zoom do sistema.
 
 Saídas extensas permanecem limitadas por contratos explícitos: comandos retêm a

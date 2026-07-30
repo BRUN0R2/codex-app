@@ -375,6 +375,17 @@ pub async fn engine_config_requirements_read(
 }
 
 #[tauri::command]
+pub async fn engine_windows_sandbox_readiness(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+) -> CommandResult<Value> {
+    engine
+        .execute(&app, EngineOperation::ReadWindowsSandboxReadiness)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn engine_config_write(
     app: AppHandle,
     engine: State<'_, EngineManager>,

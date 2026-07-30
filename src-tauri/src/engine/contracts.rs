@@ -153,6 +153,7 @@ pub enum EngineOperation {
         cwd: Option<String>,
     },
     ReadConfigRequirements,
+    ReadWindowsSandboxReadiness,
     WriteConfig {
         edit: EngineConfigEdit,
         expected_version: Option<String>,
@@ -180,6 +181,7 @@ impl EngineOperation {
             Self::InterruptTurn { .. } => "turn.interrupt",
             Self::ReadConfig { .. } => "config.read",
             Self::ReadConfigRequirements => "config.requirements.read",
+            Self::ReadWindowsSandboxReadiness => "sandbox.windows.readiness",
             Self::WriteConfig { .. } => "config.write",
             Self::BatchWriteConfig { .. } => "config.batch_write",
             Self::ListModels => "models.list",
@@ -276,6 +278,7 @@ impl EngineOperation {
                 ("config/read", Some(params))
             }
             Self::ReadConfigRequirements => ("configRequirements/read", None),
+            Self::ReadWindowsSandboxReadiness => ("windowsSandbox/readiness", None),
             Self::WriteConfig {
                 edit,
                 expected_version,
@@ -393,6 +396,15 @@ mod tests {
         let (method, params) = EngineOperation::ReadConfigRequirements.into_compatibility_rpc();
 
         assert_eq!(method, "configRequirements/read");
+        assert_eq!(params, None);
+    }
+
+    #[test]
+    fn windows_sandbox_readiness_uses_the_official_parameterless_contract() {
+        let (method, params) =
+            EngineOperation::ReadWindowsSandboxReadiness.into_compatibility_rpc();
+
+        assert_eq!(method, "windowsSandbox/readiness");
         assert_eq!(params, None);
     }
 

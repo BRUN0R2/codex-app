@@ -2905,6 +2905,29 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   line-height: 1.4;
 }
 
+.settings-status {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border: 1px solid #444444;
+  border-radius: 999px;
+  color: #a0a0a0;
+  background: #292929;
+  font-size: 0.75rem;
+  line-height: 1.2;
+}
+
+.settings-status-success {
+  border-color: rgb(112 157 86 / 35%);
+  color: var(--success);
+  background: rgb(64 91 48 / 18%);
+}
+
+.settings-status-warning {
+  border-color: rgb(230 166 98 / 32%);
+  color: var(--warning);
+  background: rgb(106 62 32 / 18%);
+}
+
 .settings-row select,
 .settings-editor input,
 .settings-editor select,
