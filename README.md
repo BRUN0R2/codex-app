@@ -12,8 +12,10 @@ Credenciais do Windows.
 
 Inferência, modelos, configuração e execução de ferramentas ainda usam o
 `codex app-server` como ponte de compatibilidade. A ponte é explícita, isolada e
-iniciada somente quando uma dessas capacidades é solicitada; abrir o app,
-consultar a conta, entrar, renovar ou sair não inicia a CLI.
+supervisionada por um único dono Rust. Depois que uma sessão autenticada aparece,
+modelos e configuração são pré-carregados em paralelo, sem bloquear o shell. Uma
+inicialização sem sessão e os fluxos de entrar, renovar ou sair não dependem da
+CLI.
 
 ## O que já funciona
 
@@ -21,7 +23,7 @@ consultar a conta, entrar, renovar ou sair não inicia a CLI.
 - login ChatGPT nativo com PKCE, cancelamento, renovação e logout com revogação;
 - cofre `age` compatível com o backend seguro atual do Codex no Windows;
 - SQLite versionado para metadados de tarefas e operações, com WAL;
-- ponte Codex sob demanda para provider, modelos e configuração;
+- ponte Codex supervisionada, com aquecimento assíncrono de modelos e configuração;
 - seleção de workspace, criação de tarefa e envio/interrupção de turnos;
 - streaming de texto e atividades;
 - anexos e imagens coladas, validados no backend antes do envio;
@@ -51,7 +53,7 @@ o mesmo cofre criptografado administrado pelo backend nativo. O arquivo
 | HTTP OAuth | reqwest 0.13 com rustls |
 | Interface | SolidJS 1.9.14, TypeScript 7.0 |
 | Build web | Vite 8.1 |
-| Provider temporário | Codex CLI `app-server` sob demanda |
+| Provider temporário | Codex CLI `app-server` supervisionado |
 
 As versões exatas ficam travadas em `package.json`, `pnpm-lock.yaml`,
 `Cargo.lock` e `rust-toolchain.toml`.

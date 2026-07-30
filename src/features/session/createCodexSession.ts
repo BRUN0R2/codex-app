@@ -68,12 +68,14 @@ export interface ActivityEntry {
 
 export type TimelineEntry = ActivityEntry | MessageEntry;
 export type ApprovalDecision = "accept" | "acceptForSession" | "cancel" | "decline";
+export type CompatibilityContextState = "failed" | "idle" | "loading" | "ready";
 
 export interface CodexSession {
   account: Accessor<AccountReadResponse | undefined>;
   activeTurnId: Accessor<string | null>;
   approvalQueue: Accessor<CodexServerRequest[]>;
   busy: Accessor<boolean>;
+  compatibilityContextState: Accessor<CompatibilityContextState>;
   config: Accessor<ConfigReadResponse | null>;
   diagnostics: Accessor<RuntimeDiagnostic[]>;
   error: Accessor<string | null>;
@@ -110,6 +112,15 @@ export interface CodexSession {
   writeSettings: (edits: ConfigEditRequest[]) => Promise<void>;
 }
 
+function isSignedInAccount(
+  snapshot: AccountReadResponse | undefined,
+): snapshot is AccountReadResponse {
+  return (
+    snapshot !== undefined &&
+    (snapshot.account !== null || !snapshot.requiresOpenaiAuth)
+  );
+}
+
 export function createCodexSession(): CodexSession {
   const [runtime, setRuntime] = createSignal<RuntimeStartResponse | null>(null);
   const [runtimeStatus, setRuntimeStatus] = createSignal<RuntimeStatus>({
@@ -124,20 +135,19 @@ export function createCodexSession(): CodexSession {
   const [busy, setBusy] = createSignal(false);
   const [timeline, setTimeline] = createSignal<TimelineEntry[]>([]);
   const [approvalQueue, setApprovalQueue] = createSignal<CodexServerRequest[]>([]);
+  const [compatibilityContextState, setCompatibilityContextState] =
+    createSignal<CompatibilityContextState>("idle");
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
   const [models, setModels] = createSignal<CodexModel[]>([]);
   const [diagnostics, setDiagnostics] = createSignal<RuntimeDiagnostic[]>([]);
   const [error, setError] = createSignal<string | null>(null);
 
-  const signedIn = createMemo(() => {
-    const snapshot = account();
-    return snapshot !== undefined &&
-      (snapshot.account !== null || !snapshot.requiresOpenaiAuth);
-  });
+  const signedIn = createMemo(() => isSignedInAccount(account()));
 
   let disposeEvents: () => void = () => undefined;
   let disposed = false;
-  let compatibilityContextLoaded = false;
+  let accountRefreshRequest: Promise<void> | null = null;
+  let compatibilityContextGeneration = 0;
   let compatibilityContextRequest: Promise<void> | null = null;
   let pendingLoginId: string | null = null;
 
@@ -176,6 +186,9 @@ export function createCodexSession(): CodexSession {
     await refreshAccount();
 
     if (!started.compatibility.available) {
+      if (signedIn()) {
+        setCompatibilityContextState("failed");
+      }
       addDiagnostic(
         "stderr",
         started.compatibility.reason ??
@@ -185,38 +198,51 @@ export function createCodexSession(): CodexSession {
   }
 
   async function loadCompatibilityContext() {
-    if (compatibilityContextLoaded) {
+    if (compatibilityContextState() === "ready") {
       return;
     }
     if (compatibilityContextRequest !== null) {
       return compatibilityContextRequest;
     }
 
-    const started = runtime();
-    if (started === null) {
-      throw new Error("A engine nativa ainda não foi inicializada.");
-    }
-    if (!started.compatibility.available) {
-      throw new Error(
-        started.compatibility.reason ??
-          "A ponte de compatibilidade do Codex não está disponível.",
-      );
-    }
+    setCompatibilityContextState("loading");
+    const generation = compatibilityContextGeneration;
+    const request = (async () => {
+      const started = runtime();
+      if (started === null) {
+        throw new Error("A engine nativa ainda não foi inicializada.");
+      }
+      if (!started.compatibility.available) {
+        throw new Error(
+          started.compatibility.reason ??
+            "A ponte de compatibilidade do Codex não está disponível.",
+        );
+      }
 
-    const request = Promise.all([
-      readConfig({ includeLayers: true, cwd: workspace() }),
-      listModels(),
-    ]).then(([configResponse, modelsResponse]) => {
+      const [configResponse, modelsResponse] = await Promise.all([
+        readConfig({ includeLayers: true, cwd: workspace() }),
+        listModels(),
+      ]);
+      if (
+        disposed ||
+        generation !== compatibilityContextGeneration ||
+        !signedIn()
+      ) {
+        return;
+      }
       setConfig(configResponse);
       setModels(extractModels(modelsResponse));
-      compatibilityContextLoaded = true;
-    });
+      setCompatibilityContextState("ready");
+    })();
     compatibilityContextRequest = request;
 
     try {
       await request;
     } catch (reason) {
-      addDiagnostic("stderr", describeCommandError(reason));
+      if (!disposed && generation === compatibilityContextGeneration) {
+        setCompatibilityContextState("failed");
+        addDiagnostic("stderr", describeCommandError(reason));
+      }
       throw reason;
     } finally {
       if (compatibilityContextRequest === request) {
@@ -226,10 +252,70 @@ export function createCodexSession(): CodexSession {
   }
 
   async function refreshAccount() {
-    const response = await readAccount();
-    setAccount(response);
-    if (response.refresh?.status === "failed" && response.refresh.error !== null) {
-      addDiagnostic("stderr", response.refresh.error);
+    if (accountRefreshRequest !== null) {
+      return accountRefreshRequest;
+    }
+
+    const request = readAccount().then((response) => {
+      setAccount(response);
+      if (response.refresh?.status === "failed" && response.refresh.error !== null) {
+        addDiagnostic("stderr", response.refresh.error);
+      }
+      if (!isSignedInAccount(response)) {
+        resetCompatibilityContext();
+        return;
+      }
+      prewarmCompatibilityContext();
+    });
+    accountRefreshRequest = request;
+
+    try {
+      await request;
+    } finally {
+      if (accountRefreshRequest === request) {
+        accountRefreshRequest = null;
+      }
+    }
+  }
+
+  function refreshAccountInBackground() {
+    void refreshAccount().catch((reason) => {
+      if (!disposed) {
+        setError(describeCommandError(reason));
+      }
+    });
+  }
+
+  function prewarmCompatibilityContext() {
+    const started = runtime();
+    if (disposed || !signedIn() || started === null) {
+      return;
+    }
+    if (!started.compatibility.available) {
+      setCompatibilityContextState("failed");
+      return;
+    }
+    void loadCompatibilityContext().catch(() => {
+      // The loader owns its state and diagnostic; prewarming must not replace
+      // an unrelated foreground error.
+    });
+  }
+
+  function resetCompatibilityContext() {
+    compatibilityContextGeneration += 1;
+    setCompatibilityContextState("idle");
+    setConfig(null);
+    setModels([]);
+  }
+
+  async function reloadCompatibilityContext() {
+    const pendingRequest = compatibilityContextRequest;
+    resetCompatibilityContext();
+    if (pendingRequest !== null) {
+      await pendingRequest.catch(() => undefined);
+    }
+    if (signedIn()) {
+      await loadCompatibilityContext();
     }
   }
 
@@ -289,9 +375,7 @@ export function createCodexSession(): CodexSession {
       ) {
         addDiagnostic("stderr", response.remoteRevocationError);
       }
-      compatibilityContextLoaded = false;
-      setConfig(null);
-      setModels([]);
+      resetCompatibilityContext();
       setThreadId(null);
       setTimeline([]);
       await refreshAccount();
@@ -301,20 +385,27 @@ export function createCodexSession(): CodexSession {
   }
 
   async function chooseWorkspace() {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: "Selecione a pasta do projeto",
-    });
-    if (typeof selected !== "string") {
-      return;
-    }
-    setWorkspace(selected);
-    localStorage.setItem(WORKSPACE_STORAGE_KEY, selected);
-    setThreadId(null);
-    setTimeline([]);
-    if (compatibilityContextLoaded) {
-      await refreshConfig();
+    setError(null);
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Selecione a pasta do projeto",
+      });
+      if (typeof selected !== "string") {
+        return;
+      }
+      setWorkspace(selected);
+      localStorage.setItem(WORKSPACE_STORAGE_KEY, selected);
+      setThreadId(null);
+      setTimeline([]);
+      if (compatibilityContextState() === "ready") {
+        await refreshConfig();
+      } else {
+        await reloadCompatibilityContext();
+      }
+    } catch (reason) {
+      setError(describeCommandError(reason));
     }
   }
 
@@ -468,12 +559,12 @@ export function createCodexSession(): CodexSession {
         if (params?.success === false) {
           setError(readString(params, "error") ?? "Não foi possível concluir o login.");
         } else {
-          void refreshAccount();
+          refreshAccountInBackground();
         }
         break;
       }
       case "account/updated":
-        void refreshAccount();
+        refreshAccountInBackground();
         break;
       case "thread/started": {
         const item = asObject(params?.thread);
@@ -657,6 +748,7 @@ export function createCodexSession(): CodexSession {
     approvalQueue,
     busy,
     cancelLogin: cancelPendingLogin,
+    compatibilityContextState,
     config,
     diagnostics,
     error,

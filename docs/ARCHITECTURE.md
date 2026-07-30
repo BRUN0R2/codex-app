@@ -14,7 +14,7 @@ flowchart LR
     Engine --> Store["SQLite nativo"]
     Engine --> Policy["Ferramentas e permissões"]
     Engine --> Provider["ChatGptCodexProvider"]
-    Provider --> Bridge["Ponte sob demanda"]
+    Provider --> Bridge["Ponte supervisionada"]
     Bridge --> Server["codex app-server"]
     Server --> Events["Eventos engine://"]
     Events --> Session["Estado da sessão"]
@@ -49,7 +49,9 @@ encerrar; `EngineManager` escolhe o backend uma vez.
 `engine/compatibility.rs` traduz operações não nativas. `codex/runtime.rs` é o
 único dono do processo filho, do handshake JSONL, dos timeouts e da correlação de
 respostas. A inicialização do `NativeEngine` apenas verifica se o executável está
-disponível; o processo nasce na primeira operação compatível.
+disponível; o processo nasce na primeira operação compatível. Em uma sessão
+autenticada, essa primeira operação é o aquecimento assíncrono solicitado pela
+UI para configuração e modelos.
 
 No Windows, o filho não abre console. O logout nativo encerra a ponte antes de
 revogar e apagar a credencial, impedindo que uma sessão já carregada continue em
@@ -59,9 +61,11 @@ memória.
 
 `src/features` é organizado por capacidade: autenticação, chat, aprovações,
 configurações, sessão e shell. `createCodexSession` é o único dono das transições
-de estado e impede que bootstrap, login ou seleção de workspace iniciem a ponte.
-Modelos e configuração são carregados apenas quando o usuário abre um controle
-que depende deles ou inicia uma tarefa.
+de estado. Assim que a conta autenticada é conhecida, ele mostra o shell e inicia
+um único carregamento de modelos e configuração em segundo plano. Configurações,
+seletor de modelo e criação de tarefa compartilham a mesma promessa quando o
+aquecimento ainda está em curso; uma falha fica explícita e a próxima solicitação
+pode tentar novamente.
 
 ## Fluxos principais
 
@@ -71,7 +75,13 @@ que depende deles ou inicia uma tarefa.
 2. O engine valida ferramentas, inicializa SQLite e autenticação nativa.
 3. A disponibilidade da ponte é diagnosticada sem iniciar processo.
 4. A conta é lida do cofre criptografado com a chave do Credential Manager.
-5. A UI mostra login ou shell; modelos e configuração permanecem ociosos.
+5. A UI mostra login ou shell sem aguardar a ponte.
+6. Com sessão válida, configuração e modelos são solicitados em paralelo e o
+   estado passa por `idle`, `loading`, `ready` ou `failed`.
+
+Sem sessão, a ponte permanece inativa. O aquecimento não usa temporizador,
+polling ou cache persistente paralelo: concorrência é deduplicada no dono da
+sessão e no runtime Rust.
 
 ### Login ChatGPT
 

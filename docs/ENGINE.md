@@ -16,7 +16,10 @@ modelos, configuração e execução de ferramentas.
 
 O descritor expõe tipo, provider, autenticação, capacidades e disponibilidade da
 ponte. Disponibilidade não significa processo ativo: no engine nativo, a ponte é
-iniciada sob demanda e encerrada no ciclo de vida do app ou antes do logout.
+iniciada pela primeira operação compatível e encerrada no ciclo de vida do app ou
+antes do logout. Em uma sessão autenticada, a UI antecipa essa operação para
+carregar configuração e modelos em segundo plano; autenticação continua nativa e
+independente da ponte.
 
 ## Operações
 

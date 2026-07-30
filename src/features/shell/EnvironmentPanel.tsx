@@ -33,6 +33,20 @@ export function EnvironmentPanel(props: EnvironmentPanelProps) {
   const effort = createMemo(() =>
     configuredReasoningEffort(props.session.config(), model()),
   );
+  const modelsStatus = createMemo(() => {
+    switch (props.session.compatibilityContextState()) {
+      case "loading":
+        return "Carregando modelos…";
+      case "failed":
+        return "Falha ao carregar modelos";
+      case "idle":
+        return "Modelos ainda não carregados";
+      case "ready": {
+        const count = props.session.models().length;
+        return count === 1 ? "1 modelo disponível" : `${count} modelos disponíveis`;
+      }
+    }
+  });
 
   return (
     <aside aria-label="Ambiente" class="environment-panel">
@@ -90,7 +104,7 @@ export function EnvironmentPanel(props: EnvironmentPanelProps) {
           <SettingsIcon size={17} />
           <span>
             <strong>Configurações</strong>
-            <small>{props.session.models().length} modelos disponíveis</small>
+            <small>{modelsStatus()}</small>
           </span>
           <ChevronRightIcon size={14} />
         </button>

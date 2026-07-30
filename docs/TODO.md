@@ -9,6 +9,8 @@
 - [x] Shell, painel de ambiente, seletores e configurações modulares.
 - [x] Viabilidade OAuth validada ao vivo sem iniciar o Codex CLI.
 - [x] Login, persistência após reinício e leitura da sessão pela ponte validados.
+- [x] Modelos e configuração pré-carregados em segundo plano, com concorrência
+  deduplicada e validação ao vivo sem interação.
 
 ## Engine
 

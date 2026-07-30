@@ -102,10 +102,14 @@ cancelamento e ownership serializado.
 Após a integração, o fluxo real foi repetido pela interface. Uma sessão maior
 que o limite do Credential Manager foi gravada em um envelope de 4.797 bytes,
 sem arquivos temporários residuais. O app foi encerrado e iniciado novamente,
-reconheceu a conta sem novo login e manteve a ponte inativa até a abertura do
-seletor de modelo. Nesse momento, o `app-server` iniciado com
-`secret_auth_storage=true` leu o mesmo cofre e retornou 7 modelos. O logout
-remoto permanece no checklist para não invalidar a sessão validada.
+reconheceu a conta sem novo login e o `app-server` iniciado com
+`secret_auth_storage=true` leu o mesmo cofre e retornou 7 modelos.
+
+Depois do aquecimento assíncrono, uma nova inicialização foi observada sem abrir
+o seletor nem acionar outro controle. Em duas execuções limpas, a ponte filha
+surgiu de três a quatro segundos após o processo da UI e o painel de ambiente
+passou para `7 modelos disponíveis` automaticamente. O logout remoto permanece
+no checklist para não invalidar a sessão validada.
 
 ## Atualização da referência
 
