@@ -48,6 +48,7 @@ import {
   type CodexNotification,
   type CodexServerRequest,
   type CodexThread,
+  type ConfigWarningNotification,
   type ConfigReadResponse,
   type ConfigRequirementsReadResponse,
   type ConfigEditRequest,
@@ -79,6 +80,8 @@ import { createProjectWorkspace } from "../projects/createProjectWorkspace";
 import { createThreadLibrary } from "../projects/createThreadLibrary";
 import { pathsEqual, type ProjectRecord } from "../projects/projectStore";
 import { threadTitle, type ThreadLibraryState } from "../projects/threadLibrary";
+import { parseConfigWarning } from "../notices/configWarningProtocol";
+import { createConfigWarningCenter } from "../notices/createConfigWarningCenter";
 import {
   parseWindowsWorldWritableWarning,
   WORLD_WRITABLE_WARNING_CONFIG_KEY,
@@ -117,6 +120,7 @@ export interface CodexSession {
   busy: Accessor<boolean>;
   compatibilityContextState: Accessor<CompatibilityContextState>;
   config: Accessor<ConfigReadResponse | null>;
+  configWarnings: Accessor<readonly ConfigWarningNotification[]>;
   configRequirements: Accessor<ConfigRequirementsReadResponse | null>;
   windowsSandboxReadiness: Accessor<WindowsSandboxReadinessResponse | null>;
   windowsSandboxSetupState: Accessor<WindowsSandboxSetupState>;
@@ -140,6 +144,7 @@ export interface CodexSession {
   workspace: Accessor<string | null>;
   chooseWorkspace: () => Promise<void>;
   clearError: () => void;
+  dismissConfigWarning: (warning: ConfigWarningNotification) => void;
   cancelLogin: () => Promise<void>;
   inspectFiles: (paths: string[]) => Promise<Attachment[]>;
   interrupt: () => Promise<void>;
@@ -206,6 +211,7 @@ export function createCodexSession(): CodexSession {
   const [openingThreadId, setOpeningThreadId] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
   const serverRequests = createServerRequestQueue();
+  const configWarnings = createConfigWarningCenter();
   const [compatibilityContextState, setCompatibilityContextState] =
     createSignal<CompatibilityContextState>("idle");
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
@@ -1022,6 +1028,14 @@ export function createCodexSession(): CodexSession {
         }
         break;
       }
+      case "configWarning": {
+        try {
+          configWarnings.push(parseConfigWarning(notification.params));
+        } catch (reason) {
+          addDiagnostic("stderr", describeCommandError(reason));
+        }
+        break;
+      }
       case "windowsSandbox/setupCompleted": {
         try {
           const completed = parseWindowsSandboxSetupCompleted(params);
@@ -1210,6 +1224,7 @@ export function createCodexSession(): CodexSession {
     cancelLogin: cancelPendingLogin,
     compatibilityContextState,
     config,
+    configWarnings: configWarnings.warnings,
     configRequirements,
     windowsSandboxReadiness,
     windowsSandboxSetupState,
@@ -1233,6 +1248,7 @@ export function createCodexSession(): CodexSession {
     workspace,
     chooseWorkspace,
     clearError: () => setError(null),
+    dismissConfigWarning: configWarnings.dismiss,
     inspectFiles: inspectAttachments,
     interrupt,
     interruptPendingRequest,

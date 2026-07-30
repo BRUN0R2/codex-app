@@ -2,6 +2,7 @@ import { Show } from "solid-js";
 
 import { UsageLimitNotice } from "../account/UsageLimitNotice";
 import { InteractiveRequestPanel } from "../approvals/InteractiveRequestPanel";
+import { ConfigWarningNotice } from "../notices/ConfigWarningNotice";
 import { WindowsWorldWritableWarning } from "../security/WindowsWorldWritableWarning";
 import type { CodexSession } from "../session/createCodexSession";
 import { Composer } from "./Composer";
@@ -35,6 +36,10 @@ export function ChatPage(props: ChatPageProps) {
           />
         )}
       </Show>
+      <ConfigWarningNotice
+        onOpenSettings={props.onOpenSettings}
+        session={props.session}
+      />
       <WindowsWorldWritableWarning session={props.session} />
       <UsageLimitNotice session={props.session} />
       <Composer

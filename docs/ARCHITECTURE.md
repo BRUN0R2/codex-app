@@ -60,8 +60,8 @@ memória.
 ## Frontend
 
 `src/features` é organizado por capacidade: autenticação, chat, aprovações,
-configurações, projetos, sessão e shell. `createCodexSession` compõe os donos de
-estado; `createProjectWorkspace` controla a seleção persistida e
+configurações, avisos, projetos, sessão e shell. `createCodexSession` compõe os
+donos de estado; `createProjectWorkspace` controla a seleção persistida e
 `createThreadLibrary` controla paginação, deduplicação e atualização da biblioteca
 de tarefas. Assim que a conta autenticada é conhecida, o shell aparece e modelos,
 configuração, requisitos administrativos, prontidão do sandbox, limites da conta
@@ -177,6 +177,21 @@ novamente** grava `notice.hide_world_writable_warning = true` com a versão ativ
 da camada de usuário e confirma o valor efetivo após a releitura. Falhas mantêm o
 aviso aberto. O frontend não tenta editar ACLs nem executar uma correção.
 
+### Avisos globais de configuração
+
+`src/features/notices` preserva `configWarning` como um domínio próprio. O
+decoder acompanha o contrato oficial completo: resumo, detalhes opcionais,
+caminho opcional e intervalo com linha e coluna de base um. Índices fora do
+intervalo seguro do JavaScript ou formatos divergentes viram diagnóstico de
+protocolo, nunca texto parcialmente confiável na interface.
+
+`createConfigWarningCenter` recebe avisos tanto da inicialização quanto da
+abertura de tarefas, elimina repetições estruturais e mantém no máximo vinte
+entradas. A interface mostra uma entrada por vez junto ao compositor, preserva
+detalhes e localização, informa as demais por contagem e permite abrir as
+configurações ou dispensar somente a ocorrência atual. O aviso não bloqueia o
+compositor e não tenta reescrever ou abrir automaticamente o arquivo indicado.
+
 ### Uso da conta
 
 `src/shared/codex/rateLimits.ts` valida a resposta completa de
@@ -203,6 +218,9 @@ zero de uso ou outro valor estimado.
 6. Com sessão válida, configuração, requisitos, prontidão do sandbox, limites da
    conta, modelos e a primeira página de tarefas são solicitados em paralelo;
    cada dono expõe estado explícito de carregamento.
+
+A assinatura precede o handshake para que avisos globais enviados logo após
+`initialize`, como `configWarning`, não sejam perdidos durante o bootstrap.
 
 Sem sessão, a ponte permanece inativa. O aquecimento não usa temporizador,
 polling ou cache persistente paralelo: concorrência é deduplicada no dono da

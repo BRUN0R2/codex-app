@@ -37,6 +37,9 @@ As áreas relevantes foram lidas diretamente no snapshot:
   `windows/worldWritableWarning` como até três `samplePaths`, `extraCount` e
   `failedScan`; a lembrança oficial é
   `notice.hide_world_writable_warning = true`.
+- Avisos de configuração chegam em `configWarning` logo após `initialize` e
+  também podem surgir em `thread/start`; o contrato preserva `summary`,
+  `details`, `path` e `range` com posições de base um.
 - Uso da conta usa `account/rateLimits/read`; atualizações incrementais chegam em
   `account/rateLimits/updated` e preservam metadados do snapshot completo.
 - Modelo, esforços e tiers de serviço vêm de `model/list`.
@@ -151,6 +154,20 @@ três caminhos mais uma contagem e `failedScan` sem amostras. A acessibilidade
 expôs um `alertdialog`, ambas as ações e o compositor desabilitado. As fixtures
 foram removidas depois da captura; não houve clique nas ações, escrita de
 configuração ou alteração de ACL durante essa validação.
+
+O fluxo de `configWarning` foi conferido no processor de inicialização, no
+carregamento por tarefa e no cliente TUI. A referência entrega primeiro a
+resposta de `initialize` e então publica cada aviso global; ao carregar uma
+tarefa, evita repetir apenas o aviso de política que já estava na lista inicial.
+O cliente oficial apresenta `summary` e acrescenta `details` quando existe, sem
+executar uma correção automática.
+
+Na janela Tauri, fixtures efêmeras exercitaram duas ocorrências distintas e uma
+duplicata estrutural, incluindo caminho e intervalo. A árvore de acessibilidade
+confirmou somente uma entrada ativa, contador `+1`, detalhes, localização e
+compositor disponível. As fixtures foram removidas sem escrever no
+`config.toml`; a captura visual foi interrompida quando houve entrada do usuário,
+preservando o foco da janela em uso.
 
 Os tipos `GetAccountRateLimitsResponse`, `RateLimitSnapshot` e
 `RateLimitWindow` confirmam que `usedPercent` representa consumo, enquanto

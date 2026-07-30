@@ -269,6 +269,23 @@ export interface WindowsWorldWritableWarningNotification {
   failedScan: boolean;
 }
 
+export interface TextPosition {
+  line: number;
+  column: number;
+}
+
+export interface TextRange {
+  start: TextPosition;
+  end: TextPosition;
+}
+
+export interface ConfigWarningNotification {
+  summary: string;
+  details: string | null;
+  path?: string;
+  range?: TextRange;
+}
+
 export interface ReasoningEffortOption {
   reasoningEffort: string;
   description: string;

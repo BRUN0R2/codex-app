@@ -2171,6 +2171,113 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   outline: 0;
 }
 
+.config-warning-notice {
+  display: flex;
+  z-index: 6;
+  width: min(740px, calc(100% - 34px));
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 auto 7px;
+  padding: 10px 11px;
+  border: 1px solid rgb(220 157 87 / 32%);
+  border-radius: 14px;
+  color: #d8d8d8;
+  background: #292520;
+  box-shadow: 0 9px 26px rgb(0 0 0 / 20%);
+}
+
+.config-warning-notice > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--warning);
+}
+
+.config-warning-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.config-warning-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.config-warning-heading strong {
+  overflow: hidden;
+  color: #eee7df;
+  font-size: 0.8214rem;
+  font-weight: 640;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-warning-heading span {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: #c7a77f;
+  background: rgb(220 157 87 / 10%);
+  font-size: 0.6071rem;
+  font-weight: 650;
+}
+
+.config-warning-copy p {
+  margin: 3px 0 0;
+  color: #aaa198;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.config-warning-copy code {
+  display: block;
+  margin-top: 5px;
+  overflow: hidden;
+  color: #8e867e;
+  font-family: var(--font-mono);
+  font-size: 0.6786rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-warning-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.config-warning-actions button {
+  display: inline-flex;
+  height: 29px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid #4b433b;
+  border-radius: 8px;
+  color: #cfc5bb;
+  background: #302a25;
+  font-size: 0.75rem;
+  font-weight: 590;
+}
+
+.config-warning-actions button:hover {
+  border-color: #62564b;
+  color: #eee7df;
+  background: #38302a;
+}
+
+.config-warning-actions .config-warning-dismiss {
+  width: 29px;
+  padding: 0;
+  color: #9e958c;
+  background: transparent;
+}
+
 .world-writable-warning:focus-visible {
   border-color: rgb(230 166 98 / 68%);
   box-shadow: 0 0 0 2px rgb(230 166 98 / 13%), 0 12px 32px rgb(0 0 0 / 24%);
@@ -3797,9 +3904,20 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   .timeline-content,
   .composer-wrap,
   .interactive-request-wrap,
+  .config-warning-notice,
   .world-writable-warning,
   .usage-limit-notice {
     width: calc(100% - 22px);
+  }
+
+  .config-warning-notice {
+    flex-wrap: wrap;
+  }
+
+  .config-warning-actions {
+    width: 100%;
+    justify-content: flex-end;
+    padding-left: 28px;
   }
 
   .usage-limit-notice {

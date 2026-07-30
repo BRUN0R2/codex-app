@@ -111,6 +111,12 @@ essa notificação; a UI valida o payload e exige uma escolha. A decisão persis
 usa a escrita versionada de configuração já existente. Nenhuma operação do
 engine modifica ACLs automaticamente.
 
+`configWarning` também atravessa a ponte sem transformação. O app-server o envia
+após `initialize` para avisos de startup e pode emitir uma ocorrência adicional
+ao carregar a configuração de uma tarefa. Resumo, detalhes e localização são
+validados no frontend, deduplicados e limitados; o engine não tenta corrigir uma
+configuração rejeitada nem silencia a falha.
+
 ## Critérios para remover a ponte
 
 A autenticação nativa já não depende da ponte. Para removê-la do produto ainda
