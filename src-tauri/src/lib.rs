@@ -19,6 +19,7 @@ pub fn run() {
             commands::engine_start,
             commands::engine_account_read,
             commands::engine_login_chatgpt,
+            commands::engine_login_cancel,
             commands::engine_logout,
             commands::engine_thread_start,
             commands::engine_turn_start,

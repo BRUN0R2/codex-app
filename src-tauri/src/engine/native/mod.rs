@@ -62,29 +62,27 @@ impl AgentEngine for NativeEngine {
             ));
         }
         self.storage.initialize(app).await?;
+        self.auth.initialize(app).await?;
         self.storage.record_operation("engine.start", None).await?;
 
-        let bridge = self.bridge.start(app).await?;
-        let mut initialize = bridge.initialize;
-        if let Value::Object(object) = &mut initialize {
-            object.insert(
-                "nativeEngine".into(),
-                json!({
-                    "provider": self.provider.descriptor(),
-                    "permissionPreset": self.permissions.preset_name(),
-                    "availablePermissionPresets": PermissionProfile::supported_presets()
-                        .map(PermissionProfile::preset_name),
-                    "registeredTools": self.tools.descriptors().len(),
-                    "compatibilityBridge": true,
-                }),
-            );
-        }
+        let compatibility = self.bridge.availability();
+        let initialize = json!({
+            "nativeEngine": {
+                "provider": self.provider.descriptor(),
+                "permissionPreset": self.permissions.preset_name(),
+                "availablePermissionPresets": PermissionProfile::supported_presets()
+                    .map(PermissionProfile::preset_name),
+                "registeredTools": self.tools.descriptors().len(),
+                "compatibilityBridge": compatibility,
+            },
+        });
 
         Ok(EngineStartResponse {
             engine: self.descriptor(),
-            executable: bridge.executable,
-            transport: "native+jsonl-stdio-bridge".into(),
+            executable: compatibility.executable.clone(),
+            transport: "native".into(),
             initialize,
+            compatibility,
         })
     }
 
@@ -103,8 +101,12 @@ impl AgentEngine for NativeEngine {
             .record_operation(audit_name, audit_thread_id.as_deref())
             .await?;
 
+        if matches!(&operation, EngineOperation::Logout) {
+            self.bridge.stop().await;
+        }
+
         let result = if operation.is_auth() {
-            self.auth.execute(&self.bridge, app, operation).await?
+            self.auth.execute(app, operation).await?
         } else {
             self.provider.execute(&self.bridge, app, operation).await?
         };
@@ -134,6 +136,7 @@ impl AgentEngine for NativeEngine {
     }
 
     async fn stop(&self) {
+        self.auth.stop().await;
         self.bridge.stop().await;
     }
 }

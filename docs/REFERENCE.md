@@ -19,8 +19,8 @@ As áreas relevantes foram lidas diretamente no snapshot:
 
 - O transporte local é JSONL por `stdio`, sem framing `Content-Length`.
 - O cliente envia `initialize`, aguarda a resposta e então envia `initialized`.
-- A ponte usa `account/login/start` com `type: "chatgpt"`; tokens nunca
-  atravessam a interface deste aplicativo.
+- O login OAuth usa o cliente, os escopos, flags, portas e callback observados em
+  `codex-rs/login`; tokens nunca atravessam a interface deste aplicativo.
 - Conversas usam `thread/start`, `turn/start` e `turn/interrupt`.
 - Entradas são `text`, `localImage` ou `mention`.
 - Configuração usa `config/read`, `config/value/write` e `config/batchWrite`.
@@ -40,14 +40,13 @@ operações de domínio, `NativeEngine`, SQLite, registro de ferramentas e polí
 de permissões. O protocolo oficial agora fica atrás de
 `CodexCompatibilityEngine`, em vez de ser a arquitetura do aplicativo.
 
-O login usado pelo produto ainda está delegado ao runtime oficial. O frontend
-recebe tipos de domínio e eventos, sem acesso a stdin, processo filho ou tokens.
-Uma prova nativa isolada validou o protocolo antes da implementação definitiva,
-conforme registrado abaixo.
+O login do produto agora pertence ao backend Rust. A implementação reproduz o
+contrato observado, mantém tokens em tipos redigidos e usa o store direto do
+Windows com a mesma chave derivada de `CODEX_HOME` da referência.
 
 O processo da ponte é supervisionado por um único dono Rust, com I/O assíncrono,
-timeout limitado e correlação de respostas. Essa ponte ainda executa inferência e
-ferramentas nesta fase; sua presença é exposta nos diagnósticos da interface.
+timeout limitado e correlação de respostas. Ele não participa da autenticação e
+só nasce quando provider, modelos ou configuração são solicitados.
 
 ## Estudo visual ao vivo
 
@@ -91,10 +90,11 @@ observado foi `login=true`, `refresh=true` e `revoke=true`. Nenhuma credencial f
 persistida, exibida ou enviada ao frontend; o processo descartou os valores
 sensíveis ao terminar. A página de conclusão no navegador foi verificada ao vivo.
 
-Essa evidência confirma que o login ChatGPT nativo é funcional neste ambiente e
-nesse snapshot do contrato. Ela não valida ainda armazenamento durável, retomada
-após reinício, concorrência de renovação ou integração com o engine do produto;
-esses pontos pertencem à implementação definitiva.
+Essa evidência confirmou o protocolo antes da integração. A implementação do
+produto adicionou armazenamento durável, detecção de alterações concorrentes,
+cancelamento e ownership serializado. O arranque integrado também foi verificado
+sem processo da CLI; o ciclo completo de persistência e logout permanece no
+checklist ao vivo até ser exercitado pela interface.
 
 ## Atualização da referência
 

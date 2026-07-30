@@ -31,6 +31,13 @@ export interface RuntimeStartResponse {
   executable: string | null;
   transport: string;
   initialize: JsonObject;
+  compatibility: CompatibilityStatus;
+}
+
+export interface CompatibilityStatus {
+  available: boolean;
+  executable: string | null;
+  reason: string | null;
 }
 
 export interface RuntimeDiagnostic {
@@ -70,12 +77,38 @@ export type CodexAccount = ApiKeyAccount | ChatGptAccount | OtherAccount;
 export interface AccountReadResponse {
   account: CodexAccount | null;
   requiresOpenaiAuth: boolean;
+  refresh?: AuthRefreshResult;
+}
+
+export type AuthRefreshStatus =
+  | "failed"
+  | "notRequired"
+  | "succeeded"
+  | "superseded";
+
+export interface AuthRefreshResult {
+  status: AuthRefreshStatus;
+  error: string | null;
 }
 
 export interface LoginChatGptResponse {
   type: "chatgpt";
   loginId: string;
   authUrl: string;
+}
+
+export interface CancelLoginRequest {
+  loginId: string;
+}
+
+export interface CancelLoginResponse {
+  status: "canceled" | "notFound";
+}
+
+export interface NativeLogoutResponse {
+  localCredentialsRemoved: boolean;
+  remoteRevocation: "failed" | "notApplicable" | "succeeded";
+  remoteRevocationError: string | null;
 }
 
 export interface ThreadSummary {

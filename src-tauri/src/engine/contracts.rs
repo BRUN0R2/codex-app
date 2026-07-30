@@ -28,6 +28,15 @@ pub struct EngineStartResponse {
     pub executable: Option<String>,
     pub transport: String,
     pub initialize: Value,
+    pub compatibility: CompatibilityStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompatibilityStatus {
+    pub available: bool,
+    pub executable: Option<String>,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,6 +117,9 @@ impl EngineConfigEdit {
 pub enum EngineOperation {
     AccountRead,
     LoginChatGpt,
+    CancelLogin {
+        login_id: String,
+    },
     Logout,
     StartThread {
         cwd: String,
@@ -139,6 +151,7 @@ impl EngineOperation {
         match self {
             Self::AccountRead => "account.read",
             Self::LoginChatGpt => "auth.login_chatgpt",
+            Self::CancelLogin { .. } => "auth.cancel_login",
             Self::Logout => "auth.logout",
             Self::StartThread { .. } => "thread.start",
             Self::StartTurn { .. } => "turn.start",
@@ -160,7 +173,10 @@ impl EngineOperation {
     }
 
     pub fn is_auth(&self) -> bool {
-        matches!(self, Self::AccountRead | Self::LoginChatGpt | Self::Logout)
+        matches!(
+            self,
+            Self::AccountRead | Self::LoginChatGpt | Self::CancelLogin { .. } | Self::Logout
+        )
     }
 
     pub fn into_compatibility_rpc(self) -> (&'static str, Option<Value>) {
@@ -174,6 +190,9 @@ impl EngineOperation {
                     "appBrand": "codex",
                 })),
             ),
+            Self::CancelLogin { login_id } => {
+                ("account/login/cancel", Some(json!({ "loginId": login_id })))
+            }
             Self::Logout => ("account/logout", None),
             Self::StartThread { cwd } => (
                 "thread/start",

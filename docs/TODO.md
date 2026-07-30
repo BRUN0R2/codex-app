@@ -1,33 +1,26 @@
 # Próximos passos
 
-## Concluído nesta base
+## Concluído
 
-- [x] Contrato `AgentEngine` e operações de domínio fechadas.
-- [x] `NativeEngine` como composição padrão.
-- [x] Adaptador Codex isolado como ponte de compatibilidade.
-- [x] Módulos de autenticação, provider, ferramentas, sandbox e SQLite.
-- [x] Login ChatGPT pela ponte sem expor tokens à UI.
-- [x] Viabilidade do login nativo validada com PKCE, renovação e revogação.
+- [x] `NativeEngine`, contratos de domínio e ponte isolada sob demanda.
+- [x] Login ChatGPT nativo com PKCE, cancelamento, renovação e revogação.
+- [x] Credenciais no Windows Credential Manager sem tokens no IPC ou SQLite.
 - [x] Chat com streaming, interrupção, anexos, imagens coladas e aprovações.
-- [x] Shell modular, painel de ambiente, seletor em cascata e configurações.
-- [x] Descritor e diagnósticos que tornam a ponte visível.
+- [x] Shell, painel de ambiente, seletores e configurações modulares.
+- [x] Viabilidade OAuth validada ao vivo sem iniciar o Codex CLI.
 
-## Migração do engine
+## Engine
 
-- [ ] Implementar login nativo com armazenamento seguro no Windows.
-- [ ] Integrar renovação, logout e estado da conta ao `NativeEngine`.
-- [ ] Definir protocolo nativo de eventos e fixtures independentes do Codex.
-- [ ] Implementar executor de ferramentas com cancelamento e saída estruturada.
-- [ ] Aplicar `PermissionProfile` antes de cada ferramenta, com sandbox por SO.
+- [ ] Concluir o ciclo integrado ao vivo: login, reinício, ponte e logout.
+- [ ] Implementar provider direto com paridade de modelos e streaming.
+- [ ] Implementar executor nativo de ferramentas com cancelamento.
+- [ ] Aplicar sandbox por SO antes de executar cada ferramenta.
 - [ ] Persistir e retomar tarefas pelo armazenamento nativo.
-- [ ] Validar e implementar provider direto com paridade de modelos e streaming.
-- [ ] Remover o requisito do Codex CLI somente depois dos testes de paridade.
+- [ ] Remover a ponte após testes de paridade e end-to-end.
 
 ## Produto
 
-- [ ] Listar, retomar, renomear e arquivar tarefas existentes.
-- [ ] Renderizar toda a matriz de itens, incluindo diffs e ferramentas.
-- [ ] Criar testes E2E contra uma ponte controlada e testes do engine sem ponte.
-- [ ] Completar categorias de configuração conforme contratos suportados.
-- [ ] Preparar assinatura, instalador, atualização e telemetria estritamente
-  opt-in.
+- [ ] Listar, retomar, renomear e arquivar tarefas.
+- [ ] Renderizar diffs e toda a matriz de itens de ferramenta.
+- [ ] Completar as categorias de configuração suportadas.
+- [ ] Preparar assinatura, instalador, atualização e telemetria opt-in.

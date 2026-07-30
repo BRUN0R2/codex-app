@@ -33,6 +33,7 @@ import {
 
 interface ModelPickerProps {
   config: ConfigReadResponse | null;
+  loadContext: () => Promise<void>;
   models: CodexModel[];
   writeSetting: (
     keyPath: string,
@@ -46,6 +47,7 @@ type PickerPage = "effort" | "model" | "speed" | null;
 
 export function ModelPicker(props: ModelPickerProps) {
   const [open, setOpen] = createSignal(false);
+  const [loading, setLoading] = createSignal(false);
   const [page, setPage] = createSignal<PickerPage>(null);
   const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -90,13 +92,22 @@ export function ModelPicker(props: ModelPickerProps) {
     setError(null);
   }
 
-  function toggle() {
+  async function toggle() {
     if (open()) {
       close();
-    } else {
-      setPage(null);
-      setError(null);
-      setOpen(true);
+      return;
+    }
+
+    setPage(null);
+    setError(null);
+    setOpen(true);
+    setLoading(true);
+    try {
+      await props.loadContext();
+    } catch (reason) {
+      setError(describeError(reason));
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -138,8 +149,8 @@ export function ModelPicker(props: ModelPickerProps) {
         aria-expanded={open()}
         aria-haspopup="menu"
         class="model-picker-trigger"
-        disabled={visibleModels().length === 0}
-        onClick={toggle}
+        disabled={saving()}
+        onClick={() => void toggle()}
         type="button"
       >
         <span>{compactModelName(model()?.displayName ?? "Modelo padrão")}</span>
@@ -149,20 +160,26 @@ export function ModelPicker(props: ModelPickerProps) {
 
       <Show when={open()}>
         <div aria-label="Modelo e raciocínio" class="model-popover" role="menu">
+          <Show when={loading()}>
+            <p class="model-picker-status">Carregando modelos…</p>
+          </Show>
           <MenuRow
             active={page() === "model"}
+            disabled={loading()}
             label="Modelo"
             onOpen={() => setPage("model")}
             value={compactModelName(model()?.displayName ?? "Padrão")}
           />
           <MenuRow
             active={page() === "effort"}
+            disabled={loading()}
             label="Esforço"
             onOpen={() => setPage("effort")}
             value={reasoningLabel(effort())}
           />
           <MenuRow
             active={page() === "speed"}
+            disabled={loading()}
             label="Velocidade"
             onOpen={() => setPage("speed")}
             value={serviceTierLabel(serviceTier(), model())}
@@ -170,7 +187,7 @@ export function ModelPicker(props: ModelPickerProps) {
           <div class="model-menu-divider" />
           <button
             class="model-reset-row"
-            disabled={saving()}
+            disabled={saving() || loading()}
             onClick={() => void reset()}
             onPointerEnter={() => setPage(null)}
             role="menuitem"
@@ -258,6 +275,7 @@ export function ModelPicker(props: ModelPickerProps) {
 
 function MenuRow(props: {
   active: boolean;
+  disabled: boolean;
   label: string;
   onOpen: () => void;
   value: string;
@@ -266,6 +284,7 @@ function MenuRow(props: {
     <button
       class="model-menu-row"
       classList={{ active: props.active }}
+      disabled={props.disabled}
       onClick={props.onOpen}
       onPointerEnter={props.onOpen}
       role="menuitem"

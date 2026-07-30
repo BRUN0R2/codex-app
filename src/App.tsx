@@ -9,13 +9,18 @@ export default function App() {
 
   return (
     <Switch>
-      <Match when={session.runtimeStatus().state === "failed"}>
+      <Match
+        when={
+          session.runtime() === null &&
+          session.runtimeStatus().state === "failed"
+        }
+      >
         <main class="boot-screen">
           <div class="boot-card boot-card-error">
             <div class="brand-mark brand-mark-large">C</div>
             <h1>Não foi possível iniciar o engine</h1>
             <p>{session.runtimeStatus().message ?? session.error()}</p>
-            <code>A ponte temporária de login ChatGPT não está disponível.</code>
+            <code>O backend nativo não concluiu a inicialização.</code>
           </div>
         </main>
       </Match>
@@ -31,6 +36,7 @@ export default function App() {
       <Match when={!session.signedIn()}>
         <LoginScreen
           error={session.error()}
+          onCancel={session.cancelLogin}
           onLogin={session.login}
           pending={session.loginPending()}
         />

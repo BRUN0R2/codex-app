@@ -5,6 +5,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AccountReadResponse,
   Attachment,
+  CancelLoginRequest,
+  CancelLoginResponse,
   CodexNotification,
   CodexServerRequest,
   CommandError,
@@ -15,6 +17,7 @@ import type {
   JsonValue,
   LoginChatGptResponse,
   ModelListResponse,
+  NativeLogoutResponse,
   RuntimeDiagnostic,
   RuntimeStartResponse,
   RuntimeStatus,
@@ -75,7 +78,13 @@ export function loginWithChatGpt(): Promise<LoginChatGptResponse> {
   return invoke("engine_login_chatgpt");
 }
 
-export function logout(): Promise<JsonValue> {
+export function cancelLogin(
+  request: CancelLoginRequest,
+): Promise<CancelLoginResponse> {
+  return invoke("engine_login_cancel", { request });
+}
+
+export function logout(): Promise<JsonValue | NativeLogoutResponse> {
   return invoke("engine_logout");
 }
 

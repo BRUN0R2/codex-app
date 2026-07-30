@@ -5,6 +5,7 @@ import {
   Switch,
   createMemo,
   createSignal,
+  onMount,
 } from "solid-js";
 
 import {
@@ -75,6 +76,12 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
   });
   const matchesQuery = (label: string) =>
     label.toLocaleLowerCase("pt-BR").includes(query().trim().toLocaleLowerCase("pt-BR"));
+
+  onMount(() => {
+    void props.session.loadCompatibilityContext().catch((reason) => {
+      setFormError(describeError(reason));
+    });
+  });
 
   function updateQuery(nextQuery: string) {
     setQuery(nextQuery);
@@ -303,9 +310,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
                   <div>
                     <dt>Ponte de compatibilidade</dt>
                     <dd>
-                      {props.session.runtime()?.engine.usesCompatibilityBridge
-                        ? "Ativa"
-                        : "Desativada"}
+                      {compatibilityLabel(props.session)}
                     </dd>
                   </div>
                   <div>
@@ -440,6 +445,14 @@ function accountPlan(session: CodexSession): string {
     }
   }
   return "Autenticação oficial do ChatGPT";
+}
+
+function compatibilityLabel(session: CodexSession): string {
+  const runtime = session.runtime();
+  if (runtime === null || !runtime.compatibility.available) {
+    return "Indisponível";
+  }
+  return runtime.engine.kind === "native" ? "Sob demanda" : "Ativa";
 }
 
 function describeError(reason: unknown): string {

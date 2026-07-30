@@ -21,6 +21,8 @@ pub enum AppError {
     Rpc { code: Option<i64>, message: String },
     #[error("engine error: {0}")]
     Engine(String),
+    #[error("native ChatGPT authentication error: {0}")]
+    Auth(String),
     #[error("native storage error: {0}")]
     Storage(String),
     #[error("invalid attachment: {0}")]
@@ -40,6 +42,7 @@ impl AppError {
             Self::Timeout { .. } => "codexRequestTimeout",
             Self::Rpc { .. } => "codexRpcError",
             Self::Engine(_) => "engineError",
+            Self::Auth(_) => "nativeAuthError",
             Self::Storage(_) => "nativeStorageError",
             Self::InvalidAttachment(_) => "invalidAttachment",
             Self::FileSystem(_) => "fileSystemError",

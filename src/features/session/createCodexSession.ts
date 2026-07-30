@@ -8,6 +8,7 @@ import {
 } from "solid-js";
 
 import {
+  cancelLogin as cancelChatGptLogin,
   describeCommandError,
   inspectAttachments,
   interruptTurn,
@@ -39,6 +40,7 @@ import {
   type JsonObject,
   type JsonValue,
   type ModelListResponse,
+  type NativeLogoutResponse,
   type RuntimeDiagnostic,
   type RuntimeStartResponse,
   type RuntimeStatus,
@@ -85,10 +87,12 @@ export interface CodexSession {
   workspace: Accessor<string | null>;
   chooseWorkspace: () => Promise<void>;
   clearError: () => void;
+  cancelLogin: () => Promise<void>;
   inspectFiles: (paths: string[]) => Promise<Attachment[]>;
   interrupt: () => Promise<void>;
   interruptPendingRequest: (request: CodexServerRequest) => Promise<void>;
   login: () => Promise<void>;
+  loadCompatibilityContext: () => Promise<void>;
   logout: () => Promise<void>;
   newThread: () => void;
   refreshConfig: () => Promise<void>;
@@ -133,6 +137,9 @@ export function createCodexSession(): CodexSession {
 
   let disposeEvents: () => void = () => undefined;
   let disposed = false;
+  let compatibilityContextLoaded = false;
+  let compatibilityContextRequest: Promise<void> | null = null;
+  let pendingLoginId: string | null = null;
 
   onMount(() => {
     void (async () => {
@@ -168,20 +175,62 @@ export function createCodexSession(): CodexSession {
     setRuntimeStatus({ state: "ready", message: null });
     await refreshAccount();
 
-    const [configResult, modelsResult] = await Promise.allSettled([
-      refreshConfig(),
-      listModels(),
-    ]);
-    if (modelsResult.status === "fulfilled") {
-      setModels(extractModels(modelsResult.value));
+    if (!started.compatibility.available) {
+      addDiagnostic(
+        "stderr",
+        started.compatibility.reason ??
+          "A ponte de compatibilidade do Codex não está disponível.",
+      );
     }
-    if (configResult.status === "rejected") {
-      addDiagnostic("stderr", describeCommandError(configResult.reason));
+  }
+
+  async function loadCompatibilityContext() {
+    if (compatibilityContextLoaded) {
+      return;
+    }
+    if (compatibilityContextRequest !== null) {
+      return compatibilityContextRequest;
+    }
+
+    const started = runtime();
+    if (started === null) {
+      throw new Error("A engine nativa ainda não foi inicializada.");
+    }
+    if (!started.compatibility.available) {
+      throw new Error(
+        started.compatibility.reason ??
+          "A ponte de compatibilidade do Codex não está disponível.",
+      );
+    }
+
+    const request = Promise.all([
+      readConfig({ includeLayers: true, cwd: workspace() }),
+      listModels(),
+    ]).then(([configResponse, modelsResponse]) => {
+      setConfig(configResponse);
+      setModels(extractModels(modelsResponse));
+      compatibilityContextLoaded = true;
+    });
+    compatibilityContextRequest = request;
+
+    try {
+      await request;
+    } catch (reason) {
+      addDiagnostic("stderr", describeCommandError(reason));
+      throw reason;
+    } finally {
+      if (compatibilityContextRequest === request) {
+        compatibilityContextRequest = null;
+      }
     }
   }
 
   async function refreshAccount() {
-    setAccount(await readAccount());
+    const response = await readAccount();
+    setAccount(response);
+    if (response.refresh?.status === "failed" && response.refresh.error !== null) {
+      addDiagnostic("stderr", response.refresh.error);
+    }
   }
 
   async function login() {
@@ -189,9 +238,39 @@ export function createCodexSession(): CodexSession {
     setError(null);
     try {
       const response = await loginWithChatGpt();
-      await openExternalUrl(response.authUrl);
+      pendingLoginId = response.loginId;
+      try {
+        await openExternalUrl(response.authUrl);
+      } catch (reason) {
+        try {
+          await cancelChatGptLogin({ loginId: response.loginId });
+        } catch (cancelReason) {
+          addDiagnostic("stderr", describeCommandError(cancelReason));
+        }
+        throw new Error(
+          "Não foi possível abrir o navegador para entrar com o ChatGPT.",
+          { cause: reason },
+        );
+      }
     } catch (reason) {
+      pendingLoginId = null;
       setLoginPending(false);
+      setError(describeCommandError(reason));
+    }
+  }
+
+  async function cancelPendingLogin() {
+    const loginId = pendingLoginId;
+    if (loginId === null) {
+      return;
+    }
+    setError(null);
+    try {
+      await cancelChatGptLogin({ loginId });
+      pendingLoginId = null;
+      setLoginPending(false);
+      await refreshAccount();
+    } catch (reason) {
       setError(describeCommandError(reason));
     }
   }
@@ -199,7 +278,20 @@ export function createCodexSession(): CodexSession {
   async function logoutAccount() {
     setError(null);
     try {
-      await logout();
+      if (compatibilityContextRequest !== null) {
+        await compatibilityContextRequest.catch(() => undefined);
+      }
+      const response = await logout();
+      if (
+        isNativeLogoutResponse(response) &&
+        response.remoteRevocation === "failed" &&
+        response.remoteRevocationError !== null
+      ) {
+        addDiagnostic("stderr", response.remoteRevocationError);
+      }
+      compatibilityContextLoaded = false;
+      setConfig(null);
+      setModels([]);
       setThreadId(null);
       setTimeline([]);
       await refreshAccount();
@@ -221,7 +313,9 @@ export function createCodexSession(): CodexSession {
     localStorage.setItem(WORKSPACE_STORAGE_KEY, selected);
     setThreadId(null);
     setTimeline([]);
-    await refreshConfig();
+    if (compatibilityContextLoaded) {
+      await refreshConfig();
+    }
   }
 
   function newThread() {
@@ -365,6 +459,11 @@ export function createCodexSession(): CodexSession {
     const params = asObject(notification.params);
     switch (notification.method) {
       case "account/login/completed": {
+        const completedLoginId = readString(params, "loginId");
+        if (completedLoginId === undefined || completedLoginId !== pendingLoginId) {
+          break;
+        }
+        pendingLoginId = null;
         setLoginPending(false);
         if (params?.success === false) {
           setError(readString(params, "error") ?? "Não foi possível concluir o login.");
@@ -557,6 +656,7 @@ export function createCodexSession(): CodexSession {
     activeTurnId,
     approvalQueue,
     busy,
+    cancelLogin: cancelPendingLogin,
     config,
     diagnostics,
     error,
@@ -574,6 +674,7 @@ export function createCodexSession(): CodexSession {
     interrupt,
     interruptPendingRequest,
     login,
+    loadCompatibilityContext,
     logout: logoutAccount,
     newThread,
     refreshConfig,
@@ -587,6 +688,16 @@ export function createCodexSession(): CodexSession {
 
 function loadStoredWorkspace(): string | null {
   return localStorage.getItem(WORKSPACE_STORAGE_KEY);
+}
+
+function isNativeLogoutResponse(value: unknown): value is NativeLogoutResponse {
+  return (
+    isJsonObject(value) &&
+    typeof value.localCredentialsRemoved === "boolean" &&
+    typeof value.remoteRevocation === "string" &&
+    (value.remoteRevocationError === null ||
+      typeof value.remoteRevocationError === "string")
+  );
 }
 
 function asObject(value: JsonValue | undefined): JsonObject | undefined {

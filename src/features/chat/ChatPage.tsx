@@ -15,6 +15,7 @@ export function ChatPage(props: ChatPageProps) {
         busy={props.session.busy()}
         config={props.session.config()}
         inspectFiles={props.session.inspectFiles}
+        loadCompatibilityContext={props.session.loadCompatibilityContext}
         models={props.session.models()}
         onChooseWorkspace={props.session.chooseWorkspace}
         onInterrupt={props.session.interrupt}

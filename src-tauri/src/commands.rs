@@ -87,6 +87,12 @@ pub struct ServerResponseRequest {
     pub response: Value,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelLoginRequest {
+    pub login_id: String,
+}
+
 #[tauri::command]
 pub async fn engine_start(
     app: AppHandle,
@@ -113,6 +119,26 @@ pub async fn engine_login_chatgpt(
 ) -> CommandResult<Value> {
     engine
         .execute(&app, EngineOperation::LoginChatGpt)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_login_cancel(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: CancelLoginRequest,
+) -> CommandResult<Value> {
+    if request.login_id.trim().is_empty() {
+        return Err(AppError::Protocol("login id cannot be empty".into()).into());
+    }
+    engine
+        .execute(
+            &app,
+            EngineOperation::CancelLogin {
+                login_id: request.login_id,
+            },
+        )
         .await
         .map_err(Into::into)
 }

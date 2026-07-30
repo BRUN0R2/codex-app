@@ -7,6 +7,7 @@ use tauri::AppHandle;
 
 use crate::error::AppError;
 
+pub use contracts::CompatibilityStatus;
 pub use contracts::EngineConfigEdit;
 pub use contracts::EngineDescriptor;
 pub use contracts::EngineKind;

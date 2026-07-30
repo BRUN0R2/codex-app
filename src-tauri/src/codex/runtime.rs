@@ -24,6 +24,7 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use super::CompatibilityStartResponse;
+use crate::engine::CompatibilityStatus;
 use crate::engine::EngineNotification;
 use crate::engine::EngineServerRequest;
 use crate::engine::NOTIFICATION_EVENT;
@@ -69,6 +70,21 @@ impl Default for CodexRuntime {
 }
 
 impl CodexRuntime {
+    pub fn availability(&self) -> CompatibilityStatus {
+        match resolve_codex_binary() {
+            Ok(executable) => CompatibilityStatus {
+                available: true,
+                executable: Some(executable.to_string_lossy().into_owned()),
+                reason: None,
+            },
+            Err(error) => CompatibilityStatus {
+                available: false,
+                executable: None,
+                reason: Some(error.to_string()),
+            },
+        }
+    }
+
     pub async fn start(&self, app: &AppHandle) -> Result<CompatibilityStartResponse, AppError> {
         let _start_guard = self.start_lock.lock().await;
 
@@ -82,7 +98,13 @@ impl CodexRuntime {
         }
 
         emit_status(app, RuntimeState::Starting, None);
-        let session = self.spawn_session(app).await?;
+        let session = match self.spawn_session(app).await {
+            Ok(session) => session,
+            Err(error) => {
+                emit_status(app, RuntimeState::Failed, Some(error.to_string()));
+                return Err(error);
+            }
+        };
         *self.session.write().await = Some(Arc::clone(&session));
 
         let initialize_params = json!({
@@ -103,8 +125,14 @@ impl CodexRuntime {
                 return Err(error);
             }
         };
-        self.send_notification_to(&session, "initialized", None)
-            .await?;
+        if let Err(error) = self
+            .send_notification_to(&session, "initialized", None)
+            .await
+        {
+            self.stop_session(&session).await;
+            emit_status(app, RuntimeState::Failed, Some(error.to_string()));
+            return Err(error);
+        }
         *session.initialize.write().await = Some(initialize.clone());
         emit_status(app, RuntimeState::Ready, None);
 
@@ -163,7 +191,15 @@ impl CodexRuntime {
         let executable = resolve_codex_binary()?;
         let mut command = Command::new(&executable);
         command
-            .args(["app-server", "--listen", "stdio://"])
+            .args([
+                "-c",
+                "cli_auth_credentials_store=\"keyring\"",
+                "-c",
+                "features.secret_auth_storage=false",
+                "app-server",
+                "--listen",
+                "stdio://",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

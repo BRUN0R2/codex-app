@@ -2,94 +2,93 @@
 
 ## Objetivo
 
-O `NativeEngine` é a base própria do aplicativo. Ele concentra composição,
-armazenamento, políticas e catálogo de ferramentas atrás de operações tipadas.
-O Codex CLI é um adaptador temporário para as capacidades ChatGPT que ainda não
-possuem uma integração pública direta equivalente.
-
-Esta etapa não afirma que a inferência já é totalmente nativa: autenticação,
-modelo, streaming e execução de ferramentas ainda passam pela ponte. A fronteira
-foi criada para que isso possa mudar sem reescrever a interface.
+O `NativeEngine` é o dono da composição do aplicativo. Ele concentra
+autenticação, armazenamento, políticas e catálogo de ferramentas atrás de
+operações tipadas. O Codex CLI é somente um adaptador temporário para provider,
+modelos, configuração e execução de ferramentas.
 
 ## Implementações
 
 | Implementação | Seleção | Responsabilidade |
 | --- | --- | --- |
-| `NativeEngine` | padrão | composição, SQLite, ferramentas, permissões, auth e provider |
+| `NativeEngine` | padrão | auth, composição, SQLite, ferramentas, permissões e provider |
 | `CodexCompatibilityEngine` | `CODEX_APP_ENGINE=compatibility` | diagnóstico direto do protocolo oficial |
 
-O descritor retornado à UI informa `kind`, provider, autenticação, capacidades,
-transporte e se uma ponte está ativa. A tela de configurações mostra esses dados
-para evitar uma falsa impressão de execução puramente nativa.
+O descritor expõe tipo, provider, autenticação, capacidades e disponibilidade da
+ponte. Disponibilidade não significa processo ativo: no engine nativo, a ponte é
+iniciada sob demanda e encerrada no ciclo de vida do app ou antes do logout.
 
 ## Operações
 
 A superfície é uma enumeração fechada:
 
-- conta: ler, entrar com ChatGPT e sair;
+- conta: ler, entrar com ChatGPT, cancelar login e sair;
 - tarefa: iniciar, enviar turno e interromper;
 - configuração: ler, escrever e escrever em lote;
 - modelos: listar;
 - aprovação: responder uma solicitação pendente.
 
-Somente o adaptador de compatibilidade conhece nomes como `turn/start` ou
-`model/list`. A UI invoca comandos Tauri `engine_*` e trabalha com tipos de
+Somente o adaptador de compatibilidade conhece métodos como `turn/start` ou
+`model/list`. A UI invoca comandos Tauri pequenos e trabalha com tipos de
 domínio.
 
-## Autenticação
+## Autenticação nativa
 
-O `ChatGptAuth` usado pelo produto ainda delega o fluxo à ponte e não aceita
-operações de inferência. Ele entrega à UI somente:
+`ChatGptAuth` implementa diretamente o fluxo estudado em `codex-rs/login`:
 
-- URL de autorização;
-- identificador do fluxo;
-- estado público da conta;
-- evento de conclusão.
+1. gera estado aleatório e PKCE S256;
+2. escuta `127.0.0.1` nas portas oficiais 1455 ou 1457;
+3. entrega somente a URL de autorização à UI;
+4. valida método, caminho, estado, duplicatas e limites do callback;
+5. troca o código em `https://auth.openai.com/oauth/token`;
+6. grava a sessão no Credential Manager;
+7. renova preventivamente e revoga no logout.
 
-Tokens não entram em props, eventos Tauri, logs do engine nem SQLite. Também não
-há fallback para chave de API.
+O callback expira em dez minutos, aceita no máximo 32 conexões e limita os
+cabeçalhos a 16 KiB. Requisições OAuth e revogação possuem timeouts próprios.
+Login, renovação e logout são serializados por um dono único; cancelamento e
+trocas externas de credencial são tratados explicitamente.
 
-A execução isolada de 30 de julho de 2026 comprovou que PKCE, callback local,
-troca, renovação e revogação funcionam diretamente em Rust sem o Codex CLI. A
-implementação definitiva deve preservar a mesma fronteira da UI e adicionar um
-armazenamento seguro com ownership exclusivo do backend nativo.
+Tokens são tipos redigidos e zerados no descarte. Eles não entram em props,
+eventos Tauri, logs, diagnósticos ou SQLite. A UI recebe somente email, plano,
+estado de renovação e resultados sem segredos.
 
-## Persistência
+## Armazenamento de credenciais
+
+O backend usa o store direto do Windows com o mesmo contrato atual do Codex:
+
+- serviço: `Codex Auth`;
+- chave: `cli|` mais os primeiros 16 dígitos do SHA-256 do `CODEX_HOME` canônico;
+- valor: registro JSON compatível, preservando campos futuros desconhecidos.
+
+O app não lê nem escreve `auth.json`. A ponte é iniciada com o store direto em
+keyring e `secret_auth_storage` desabilitado para consumir a mesma sessão sem
+copiá-la.
+
+## Persistência nativa
 
 O schema SQLite atual tem versão 1:
 
 - `engine_threads`: identificador da tarefa, workspace e timestamps;
 - `engine_events`: sequência, tarefa opcional, nome da operação e timestamp.
 
-O payload da mensagem não é persistido. Migrações futuras devem ser explícitas,
-transacionais e monotônicas; nunca devem alterar `user_version` sem aplicar o
-schema correspondente.
+O payload das mensagens e as credenciais não são persistidos nessa base.
+Migrações futuras devem ser explícitas, transacionais e monotônicas.
 
 ## Ferramentas e sandbox
 
-`ToolRegistry` descreve ferramentas por identificador e risco:
-
-- leitura;
-- escrita no workspace;
-- processo;
-- rede.
-
-`PermissionProfile` expressa os presets que a interface apresenta. Nesta etapa,
-a execução concreta e a aplicação efetiva do sandbox ainda pertencem à ponte.
-A próxima implementação nativa deve verificar o risco da ferramenta contra o
-perfil antes de iniciar qualquer ação externa.
+`ToolRegistry` classifica ferramentas como leitura, escrita no workspace,
+processo ou rede. `PermissionProfile` expressa os presets apresentados pela UI.
+A execução concreta e a aplicação efetiva do sandbox ainda pertencem à ponte.
 
 ## Critérios para remover a ponte
 
-A ponte só pode deixar de ser requisito quando houver, ao mesmo tempo:
+A autenticação nativa já não depende da ponte. Para removê-la do produto ainda
+faltam, em conjunto:
 
-1. autenticação ChatGPT nativa com armazenamento seguro, renovação e logout;
-2. provider com streaming e catálogo de modelos;
-3. executor nativo de ferramentas com cancelamento;
-4. sandbox realmente aplicado por plataforma;
-5. aprovações correlacionadas e testadas;
-6. persistência e retomada de tarefas;
-7. fixtures de compatibilidade e testes end-to-end.
-
-Até lá, falhar visivelmente é preferível a capturar credenciais ou depender de
-endpoints privados.
+1. provider direto com streaming e catálogo de modelos;
+2. executor nativo de ferramentas com cancelamento;
+3. sandbox aplicado por plataforma;
+4. aprovações correlacionadas e testadas;
+5. persistência e retomada completas de tarefas;
+6. fixtures de paridade e testes end-to-end.

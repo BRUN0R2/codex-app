@@ -25,6 +25,7 @@ interface ComposerProps {
   models: CodexModel[];
   workspace: string | null;
   inspectFiles: (paths: string[]) => Promise<Attachment[]>;
+  loadCompatibilityContext: () => Promise<void>;
   onChooseWorkspace: () => Promise<void>;
   onInterrupt: () => Promise<void>;
   onOpenSettings: () => void;
@@ -208,6 +209,7 @@ export function Composer(props: ComposerProps) {
             <div class="composer-actions-right">
               <ModelPicker
                 config={props.config}
+                loadContext={props.loadCompatibilityContext}
                 models={props.models}
                 writeSetting={props.writeSetting}
                 writeSettings={props.writeSettings}

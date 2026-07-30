@@ -2,6 +2,7 @@ use serde_json::Value;
 use tauri::AppHandle;
 
 use super::AgentEngine;
+use super::CompatibilityStatus;
 use super::EngineDescriptor;
 use super::EngineKind;
 use super::EngineOperation;
@@ -29,11 +30,17 @@ impl AgentEngine for CodexCompatibilityEngine {
 
     async fn start(&self, app: &AppHandle) -> Result<EngineStartResponse, AppError> {
         let started = self.runtime.start(app).await?;
+        let executable = started.executable;
         Ok(EngineStartResponse {
             engine: self.descriptor(),
-            executable: Some(started.executable),
+            executable: Some(executable.clone()),
             transport: "jsonl-stdio".into(),
             initialize: started.initialize,
+            compatibility: CompatibilityStatus {
+                available: true,
+                executable: Some(executable),
+                reason: None,
+            },
         })
     }
 
@@ -57,6 +64,12 @@ impl AgentEngine for CodexCompatibilityEngine {
 
     async fn stop(&self) {
         self.runtime.stop().await;
+    }
+}
+
+impl CodexCompatibilityEngine {
+    pub fn availability(&self) -> CompatibilityStatus {
+        self.runtime.availability()
     }
 }
 
