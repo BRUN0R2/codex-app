@@ -1,0 +1,35 @@
+{
+  "name": "codex-desktop-next",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.17.0",
+  "engines": {
+    "node": ">=26.0.0",
+    "pnpm": ">=11.17.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "pnpm typecheck && vite build",
+    "check": "pnpm build && cargo check --manifest-path src-tauri/Cargo.toml",
+    "clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "format:check": "cargo fmt --manifest-path src-tauri/Cargo.toml --all --check",
+    "verify": "pnpm check && pnpm format:check && pnpm clippy && pnpm test",
+    "format:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --all",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "2.7.2",
+    "@tauri-apps/plugin-opener": "2.5.4",
+    "solid-js": "1.9.14"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "typescript": "7.0.2",
+    "vite": "8.1.5",
+    "vite-plugin-solid": "2.11.14"
+  }
+}
