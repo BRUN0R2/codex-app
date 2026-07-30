@@ -2,14 +2,16 @@ use std::path::Path;
 
 use serde::Deserialize;
 use serde_json::Value;
-use serde_json::json;
 use tauri::AppHandle;
 use tauri::State;
 
 use crate::attachments::AttachmentKind;
 use crate::attachments::inspect_path;
-use crate::codex::CodexRuntime;
-use crate::codex::RuntimeStartResponse;
+use crate::engine::EngineConfigEdit;
+use crate::engine::EngineManager;
+use crate::engine::EngineOperation;
+use crate::engine::EngineStartResponse;
+use crate::engine::EngineTurnInput;
 use crate::error::AppError;
 use crate::error::CommandResult;
 
@@ -86,86 +88,71 @@ pub struct ServerResponseRequest {
 }
 
 #[tauri::command]
-pub async fn codex_runtime_start(
+pub async fn engine_start(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
-) -> CommandResult<RuntimeStartResponse> {
-    runtime.start(&app).await.map_err(Into::into)
+    engine: State<'_, EngineManager>,
+) -> CommandResult<EngineStartResponse> {
+    engine.start(&app).await.map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn codex_account_read(
+pub async fn engine_account_read(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
+    engine: State<'_, EngineManager>,
 ) -> CommandResult<Value> {
-    runtime
-        .request(&app, "account/read", Some(json!({ "refreshToken": false })))
+    engine
+        .execute(&app, EngineOperation::AccountRead)
         .await
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn codex_login_chatgpt(
+pub async fn engine_login_chatgpt(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
+    engine: State<'_, EngineManager>,
 ) -> CommandResult<Value> {
-    runtime
-        .request(
-            &app,
-            "account/login/start",
-            Some(json!({
-                "type": "chatgpt",
-                "useHostedLoginSuccessPage": true,
-                "appBrand": "codex"
-            })),
-        )
+    engine
+        .execute(&app, EngineOperation::LoginChatGpt)
         .await
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn codex_logout(
+pub async fn engine_logout(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
+    engine: State<'_, EngineManager>,
 ) -> CommandResult<Value> {
-    runtime
-        .request(&app, "account/logout", None)
+    engine
+        .execute(&app, EngineOperation::Logout)
         .await
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn codex_thread_start(
+pub async fn engine_thread_start(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
+    engine: State<'_, EngineManager>,
     request: ThreadStartRequest,
 ) -> CommandResult<Value> {
     validate_workspace(&request.cwd)
         .await
         .map_err(CommandError::from)?;
-    runtime
-        .request(
-            &app,
-            "thread/start",
-            Some(json!({
-                "cwd": request.cwd,
-                "serviceName": "codex_desktop_next"
-            })),
-        )
+    engine
+        .execute(&app, EngineOperation::StartThread { cwd: request.cwd })
         .await
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn codex_turn_start(
+pub async fn engine_turn_start(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
+    engine: State<'_, EngineManager>,
     request: TurnStartRequest,
 ) -> CommandResult<Value> {
     let mut input = Vec::with_capacity(request.attachments.len() + 1);
     let text = request.text.trim();
     if !text.is_empty() {
-        input.push(json!({ "type": "text", "text": text }));
+        input.push(EngineTurnInput::Text(text.to_string()));
     }
 
     for reference in request.attachments {
@@ -173,15 +160,13 @@ pub async fn codex_turn_start(
             .await
             .map_err(CommandError::from)?;
         match attachment.kind {
-            AttachmentKind::Image => input.push(json!({
-                "type": "localImage",
-                "path": attachment.path
-            })),
-            AttachmentKind::File => input.push(json!({
-                "type": "mention",
-                "name": attachment.name,
-                "path": attachment.path
-            })),
+            AttachmentKind::Image => input.push(EngineTurnInput::LocalImage {
+                path: attachment.path,
+            }),
+            AttachmentKind::File => input.push(EngineTurnInput::Mention {
+                name: attachment.name,
+                path: attachment.path,
+            }),
         }
     }
 
@@ -189,82 +174,83 @@ pub async fn codex_turn_start(
         return Err(AppError::Protocol("a turn requires text or an attachment".into()).into());
     }
 
-    runtime
-        .request(
+    engine
+        .execute(
             &app,
-            "turn/start",
-            Some(json!({
-                "threadId": request.thread_id,
-                "clientUserMessageId": request.client_user_message_id,
-                "input": input
-            })),
+            EngineOperation::StartTurn {
+                thread_id: request.thread_id,
+                client_user_message_id: request.client_user_message_id,
+                input,
+            },
         )
         .await
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn codex_turn_interrupt(
+pub async fn engine_turn_interrupt(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
+    engine: State<'_, EngineManager>,
     request: TurnInterruptRequest,
 ) -> CommandResult<Value> {
-    runtime
-        .request(
+    engine
+        .execute(
             &app,
-            "turn/interrupt",
-            Some(json!({
-                "threadId": request.thread_id,
-                "turnId": request.turn_id
-            })),
+            EngineOperation::InterruptTurn {
+                thread_id: request.thread_id,
+                turn_id: request.turn_id,
+            },
         )
         .await
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn codex_config_read(
+pub async fn engine_config_read(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
+    engine: State<'_, EngineManager>,
     request: ConfigReadRequest,
 ) -> CommandResult<Value> {
-    let mut params = json!({ "includeLayers": request.include_layers });
-    if let Some(cwd) = request.cwd {
-        params["cwd"] = Value::String(cwd);
-    }
-    runtime
-        .request(&app, "config/read", Some(params))
+    engine
+        .execute(
+            &app,
+            EngineOperation::ReadConfig {
+                include_layers: request.include_layers,
+                cwd: request.cwd,
+            },
+        )
         .await
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn codex_config_write(
+pub async fn engine_config_write(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
+    engine: State<'_, EngineManager>,
     request: ConfigWriteRequest,
 ) -> CommandResult<Value> {
     if request.key_path.trim().is_empty() {
         return Err(AppError::Protocol("config key path cannot be empty".into()).into());
     }
-    runtime
-        .request(
+    engine
+        .execute(
             &app,
-            "config/value/write",
-            Some(json!({
-                "keyPath": request.key_path,
-                "value": request.value,
-                "mergeStrategy": request.merge_strategy.as_str()
-            })),
+            EngineOperation::WriteConfig {
+                edit: EngineConfigEdit {
+                    key_path: request.key_path,
+                    value: request.value,
+                    merge_strategy: request.merge_strategy.as_str(),
+                },
+            },
         )
         .await
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn codex_config_batch_write(
+pub async fn engine_config_batch_write(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
+    engine: State<'_, EngineManager>,
     request: ConfigBatchWriteRequest,
 ) -> CommandResult<Value> {
     if request.edits.is_empty() {
@@ -281,46 +267,37 @@ pub async fn codex_config_batch_write(
     let edits = request
         .edits
         .into_iter()
-        .map(|edit| {
-            json!({
-                "keyPath": edit.key_path,
-                "value": edit.value,
-                "mergeStrategy": edit.merge_strategy.as_str()
-            })
+        .map(|edit| EngineConfigEdit {
+            key_path: edit.key_path,
+            value: edit.value,
+            merge_strategy: edit.merge_strategy.as_str(),
         })
         .collect::<Vec<_>>();
 
-    runtime
-        .request(
-            &app,
-            "config/batchWrite",
-            Some(json!({
-                "edits": edits,
-                "reloadUserConfig": false
-            })),
-        )
+    engine
+        .execute(&app, EngineOperation::BatchWriteConfig { edits })
         .await
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn codex_model_list(
+pub async fn engine_model_list(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
+    engine: State<'_, EngineManager>,
 ) -> CommandResult<Value> {
-    runtime
-        .request(&app, "model/list", Some(json!({ "limit": 100 })))
+    engine
+        .execute(&app, EngineOperation::ListModels)
         .await
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn codex_server_request_respond(
+pub async fn engine_server_request_respond(
     app: AppHandle,
-    runtime: State<'_, CodexRuntime>,
+    engine: State<'_, EngineManager>,
     request: ServerResponseRequest,
 ) -> CommandResult<()> {
-    runtime
+    engine
         .respond(&app, request.id, request.response)
         .await
         .map_err(Into::into)

@@ -26,10 +26,10 @@ import type {
   TurnStartResponse,
 } from "./types";
 
-const NOTIFICATION_EVENT = "codex://notification";
-const SERVER_REQUEST_EVENT = "codex://server-request";
-const RUNTIME_DIAGNOSTIC_EVENT = "codex://runtime-diagnostic";
-const RUNTIME_STATUS_EVENT = "codex://runtime-status";
+const NOTIFICATION_EVENT = "engine://notification";
+const SERVER_REQUEST_EVENT = "engine://server-request";
+const RUNTIME_DIAGNOSTIC_EVENT = "engine://runtime-diagnostic";
+const RUNTIME_STATUS_EVENT = "engine://runtime-status";
 
 export interface CodexEventHandlers {
   onNotification: (notification: CodexNotification) => void;
@@ -64,55 +64,55 @@ export async function subscribeToCodexEvents(
 }
 
 export function startRuntime(): Promise<RuntimeStartResponse> {
-  return invoke("codex_runtime_start");
+  return invoke("engine_start");
 }
 
 export function readAccount(): Promise<AccountReadResponse> {
-  return invoke("codex_account_read");
+  return invoke("engine_account_read");
 }
 
 export function loginWithChatGpt(): Promise<LoginChatGptResponse> {
-  return invoke("codex_login_chatgpt");
+  return invoke("engine_login_chatgpt");
 }
 
 export function logout(): Promise<JsonValue> {
-  return invoke("codex_logout");
+  return invoke("engine_logout");
 }
 
 export function startThread(
   request: ThreadStartRequest,
 ): Promise<ThreadStartResponse> {
-  return invoke("codex_thread_start", { request });
+  return invoke("engine_thread_start", { request });
 }
 
 export function startTurn(request: TurnStartRequest): Promise<TurnStartResponse> {
-  return invoke("codex_turn_start", { request });
+  return invoke("engine_turn_start", { request });
 }
 
 export function interruptTurn(
   request: TurnInterruptRequest,
 ): Promise<JsonValue> {
-  return invoke("codex_turn_interrupt", { request });
+  return invoke("engine_turn_interrupt", { request });
 }
 
 export function readConfig(
   request: ConfigReadRequest,
 ): Promise<ConfigReadResponse> {
-  return invoke("codex_config_read", { request });
+  return invoke("engine_config_read", { request });
 }
 
 export function writeConfig(request: ConfigWriteRequest): Promise<JsonValue> {
-  return invoke("codex_config_write", { request });
+  return invoke("engine_config_write", { request });
 }
 
 export function writeConfigBatch(
   request: ConfigBatchWriteRequest,
 ): Promise<JsonValue> {
-  return invoke("codex_config_batch_write", { request });
+  return invoke("engine_config_batch_write", { request });
 }
 
 export function listModels(): Promise<ModelListResponse> {
-  return invoke("codex_model_list");
+  return invoke("engine_model_list");
 }
 
 export function inspectAttachments(paths: string[]): Promise<Attachment[]> {
@@ -128,7 +128,7 @@ export function savePastedImage(dataBase64: string): Promise<Attachment> {
 export function respondToServerRequest(
   request: ServerResponseRequest,
 ): Promise<void> {
-  return invoke("codex_server_request_respond", { request });
+  return invoke("engine_server_request_respond", { request });
 }
 
 export function openExternalUrl(url: string): Promise<void> {

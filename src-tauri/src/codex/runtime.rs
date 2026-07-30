@@ -23,16 +23,16 @@ use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
-use super::CodexNotification;
-use super::CodexServerRequest;
-use super::NOTIFICATION_EVENT;
-use super::RUNTIME_DIAGNOSTIC_EVENT;
-use super::RUNTIME_STATUS_EVENT;
-use super::RuntimeDiagnostic;
-use super::RuntimeStartResponse;
-use super::RuntimeState;
-use super::RuntimeStatus;
-use super::SERVER_REQUEST_EVENT;
+use super::CompatibilityStartResponse;
+use crate::engine::EngineNotification;
+use crate::engine::EngineServerRequest;
+use crate::engine::NOTIFICATION_EVENT;
+use crate::engine::RUNTIME_DIAGNOSTIC_EVENT;
+use crate::engine::RUNTIME_STATUS_EVENT;
+use crate::engine::RuntimeDiagnostic;
+use crate::engine::RuntimeState;
+use crate::engine::RuntimeStatus;
+use crate::engine::SERVER_REQUEST_EVENT;
 use crate::error::AppError;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -69,13 +69,13 @@ impl Default for CodexRuntime {
 }
 
 impl CodexRuntime {
-    pub async fn start(&self, app: &AppHandle) -> Result<RuntimeStartResponse, AppError> {
+    pub async fn start(&self, app: &AppHandle) -> Result<CompatibilityStartResponse, AppError> {
         let _start_guard = self.start_lock.lock().await;
 
         if let Some(session) = self.active_session().await
             && let Some(initialize) = session.initialize.read().await.clone()
         {
-            return Ok(RuntimeStartResponse {
+            return Ok(CompatibilityStartResponse {
                 executable: session.executable.to_string_lossy().into_owned(),
                 initialize,
             });
@@ -108,7 +108,7 @@ impl CodexRuntime {
         *session.initialize.write().await = Some(initialize.clone());
         emit_status(app, RuntimeState::Ready, None);
 
-        Ok(RuntimeStartResponse {
+        Ok(CompatibilityStartResponse {
             executable: session.executable.to_string_lossy().into_owned(),
             initialize,
         })
@@ -369,7 +369,7 @@ async fn route_message(session: &Session, app: &AppHandle, message: Value) {
         if let Some(id) = object.get("id") {
             let _ = app.emit(
                 SERVER_REQUEST_EVENT,
-                CodexServerRequest {
+                EngineServerRequest {
                     id: id.clone(),
                     method: method.into(),
                     params,
@@ -378,7 +378,7 @@ async fn route_message(session: &Session, app: &AppHandle, message: Value) {
         } else {
             let _ = app.emit(
                 NOTIFICATION_EVENT,
-                CodexNotification {
+                EngineNotification {
                     method: method.into(),
                     params,
                 },

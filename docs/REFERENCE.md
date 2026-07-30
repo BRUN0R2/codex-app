@@ -30,14 +30,23 @@ As áreas relevantes foram lidas diretamente no snapshot:
 
 ## Decisões de implementação
 
-O projeto não copia o motor do agente, OAuth, armazenamento de credenciais nem
-componentes privados. A fronteira pública do `app-server` é encapsulada por
-comandos Tauri explícitos. Isso reduz superfície de segurança e permite atualizar
-o runtime oficial sem duplicar sua lógica.
+O projeto usa a referência para entender responsabilidades e semântica, sem
+copiar componentes privados nem incorporar o workspace Rust inteiro. O snapshot
+contém dezenas de crates internos fortemente conectados; tratá-lo como uma
+biblioteca pequena apenas deslocaria o acoplamento para dentro deste app.
 
-O processo é supervisionado por um único dono Rust, com I/O assíncrono, timeout
-limitado e correlação de respostas. O frontend recebe tipos de domínio e eventos,
-sem acesso a stdin, processo filho ou arquivos de credenciais.
+Foi criada uma base própria em `src-tauri/src/engine`: contrato `AgentEngine`,
+operações de domínio, `NativeEngine`, SQLite, registro de ferramentas e política
+de permissões. O protocolo oficial agora fica atrás de
+`CodexCompatibilityEngine`, em vez de ser a arquitetura do aplicativo.
+
+O login ChatGPT continua delegado ao runtime oficial. Não foi criado OAuth
+paralelo, leitura de credenciais ou acesso a endpoints privados. O frontend recebe
+tipos de domínio e eventos, sem acesso a stdin, processo filho ou tokens.
+
+O processo da ponte é supervisionado por um único dono Rust, com I/O assíncrono,
+timeout limitado e correlação de respostas. Essa ponte ainda executa inferência e
+ferramentas nesta fase; sua presença é exposta nos diagnósticos da interface.
 
 ## Estudo visual ao vivo
 

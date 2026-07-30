@@ -2,15 +2,30 @@
 
 ## Concluído nesta base
 
-- [x] Runtime `codex app-server`, login ChatGPT e configuração oficial.
+- [x] Contrato `AgentEngine` e operações de domínio fechadas.
+- [x] `NativeEngine` como composição padrão.
+- [x] Adaptador Codex isolado como ponte de compatibilidade.
+- [x] Módulos de autenticação, provider, ferramentas, sandbox e SQLite.
+- [x] Login oficial ChatGPT sem expor tokens à UI.
 - [x] Chat com streaming, interrupção, anexos, imagens coladas e aprovações.
 - [x] Shell modular, painel de ambiente, seletor em cascata e configurações.
-- [x] Validação ao vivo no Windows e alinhamento visual com o Codex Desktop.
+- [x] Descritor e diagnósticos que tornam a ponte visível.
 
-## Próxima etapa
+## Migração do engine
 
-- [ ] Listar, retomar, renomear e persistir tarefas existentes.
-- [ ] Renderizar toda a matriz de itens do protocolo, incluindo diffs e ferramentas.
-- [ ] Criar fixtures de compatibilidade e testes E2E contra um `app-server` controlado.
-- [ ] Completar categorias de configuração somente quando houver contrato oficial.
-- [ ] Preparar assinatura, instalador, atualização e telemetria estritamente opt-in.
+- [ ] Definir protocolo nativo de eventos e fixtures independentes do Codex.
+- [ ] Implementar executor de ferramentas com cancelamento e saída estruturada.
+- [ ] Aplicar `PermissionProfile` antes de cada ferramenta, com sandbox por SO.
+- [ ] Persistir e retomar tarefas pelo armazenamento nativo.
+- [ ] Implementar provider direto quando houver contrato ChatGPT público e
+  suportado com paridade de login, modelos e streaming.
+- [ ] Remover o requisito do Codex CLI somente depois dos testes de paridade.
+
+## Produto
+
+- [ ] Listar, retomar, renomear e arquivar tarefas existentes.
+- [ ] Renderizar toda a matriz de itens, incluindo diffs e ferramentas.
+- [ ] Criar testes E2E contra uma ponte controlada e testes do engine sem ponte.
+- [ ] Completar categorias de configuração conforme contratos suportados.
+- [ ] Preparar assinatura, instalador, atualização e telemetria estritamente
+  opt-in.

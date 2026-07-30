@@ -3,7 +3,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("Codex CLI was not found. Install Codex or set CODEX_APP_BINARY to its executable.")]
+    #[error(
+        "the temporary Codex compatibility bridge was not found; install Codex or set CODEX_APP_BINARY"
+    )]
     CodexBinaryNotFound,
     #[error("configured Codex executable does not exist: {0}")]
     InvalidCodexBinary(String),
@@ -17,6 +19,10 @@ pub enum AppError {
     Timeout { method: String },
     #[error("Codex request failed: {message}")]
     Rpc { code: Option<i64>, message: String },
+    #[error("engine error: {0}")]
+    Engine(String),
+    #[error("native storage error: {0}")]
+    Storage(String),
     #[error("invalid attachment: {0}")]
     InvalidAttachment(String),
     #[error("filesystem operation failed: {0}")]
@@ -33,6 +39,8 @@ impl AppError {
             Self::Protocol(_) => "codexProtocolError",
             Self::Timeout { .. } => "codexRequestTimeout",
             Self::Rpc { .. } => "codexRpcError",
+            Self::Engine(_) => "engineError",
+            Self::Storage(_) => "nativeStorageError",
             Self::InvalidAttachment(_) => "invalidAttachment",
             Self::FileSystem(_) => "fileSystemError",
         }

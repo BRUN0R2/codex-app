@@ -273,7 +273,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
               <Match when={page() === "account"}>
                 <div class="settings-page-heading">
                   <h3>Conta e runtime</h3>
-                  <p>Sessão ChatGPT e processo local responsável pelo agente.</p>
+                  <p>Sessão ChatGPT, engine nativo e ponte de compatibilidade.</p>
                 </div>
 
                 <div class="account-card">
@@ -293,12 +293,28 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
 
                 <dl class="settings-facts">
                   <div>
+                    <dt>Engine</dt>
+                    <dd>{props.session.runtime()?.engine.name ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Provider</dt>
+                    <dd>{props.session.runtime()?.engine.provider ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Ponte de compatibilidade</dt>
+                    <dd>
+                      {props.session.runtime()?.engine.usesCompatibilityBridge
+                        ? "Ativa"
+                        : "Desativada"}
+                    </dd>
+                  </div>
+                  <div>
                     <dt>Estado</dt>
                     <dd>{props.session.runtimeStatus().state}</dd>
                   </div>
                   <div>
                     <dt>Executável</dt>
-                    <dd title={props.session.runtime()?.executable}>
+                    <dd title={props.session.runtime()?.executable ?? undefined}>
                       {props.session.runtime()?.executable ?? "—"}
                     </dd>
                   </div>
@@ -423,7 +439,7 @@ function accountPlan(session: CodexSession): string {
       return `Plano ${plan}`;
     }
   }
-  return "Autenticação gerenciada pelo Codex";
+  return "Autenticação oficial do ChatGPT";
 }
 
 function describeError(reason: unknown): string {

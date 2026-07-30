@@ -1,27 +1,41 @@
 # Codex App
 
-Base desktop nativa, modular e enxuta para experimentar uma interface semelhante
-ao Codex Desktop. O shell usa Tauri e Rust; a interface usa SolidJS e TypeScript;
-e o agente continua sendo o `codex app-server` oficial.
+Base desktop nativa, modular e enxuta para experimentar um agente com a
+ergonomia do Codex Desktop. O shell usa Tauri e Rust, a interface usa SolidJS e
+TypeScript e a composição do agente pertence ao `NativeEngine` deste projeto.
 
-Este repositório é uma fundação funcional, não uma tentativa de reimplementar o
-motor do Codex. Autenticação, sessão, modelos, configuração e execução permanecem
-sob responsabilidade do runtime oficial.
+O login é feito com a conta ChatGPT pelo fluxo oficial do Codex. Nesta etapa de
+migração, autenticação, inferência e eventos ainda atravessam uma ponte de
+compatibilidade isolada para o `codex app-server`. A UI não recebe tokens e o
+SQLite nativo não armazena credenciais.
 
 ## O que já funciona
 
-- inicialização e supervisão assíncrona do `codex app-server` por `stdio`;
-- reutilização segura da conta ChatGPT já autenticada pelo Codex;
-- login oficial pelo navegador, logout e atualização de estado da conta;
-- seleção de workspace, criação de thread e envio/interrupção de turnos;
-- streaming de texto e atividades do turno;
+- `NativeEngine` como backend padrão, selecionado por um contrato `AgentEngine`;
+- módulos independentes para autenticação, provider, ferramentas, permissões e
+  armazenamento;
+- SQLite nativo versionado para metadados de tarefas e operações, com WAL;
+- login e logout oficiais pelo ChatGPT, reutilizando uma sessão existente;
+- seleção de workspace, criação de tarefa e envio/interrupção de turnos;
+- streaming de texto e atividades;
 - anexos de arquivos e imagens, incluindo colar imagens no compositor;
-- validação nativa de limites, caminho, tamanho e assinatura real das imagens;
+- validação nativa de caminho, limite, tamanho e assinatura real das imagens;
 - aprovações explícitas para comandos e alterações de arquivos;
-- seletor semântico de permissões com presets atômicos e acesso ao `config.toml`;
-- configurações em tela inteira, busca e editor para qualquer chave oficial;
-- seletor em cascata de modelo, esforço e velocidade, com redefinição atômica;
-- painel de ambiente, listagem de modelos e diagnósticos do runtime.
+- presets semânticos de permissão e edição atômica da configuração;
+- configurações em tela inteira, modelos, esforço, velocidade e diagnósticos;
+- shell visual inspirado no Codex Desktop, sem alterar DPI ou zoom do sistema.
+
+## Fronteira atual do engine
+
+O projeto já possui sua própria fronteira de domínio e seu próprio dono de
+composição. A ponte oficial fica restrita a
+`src-tauri/src/engine/compatibility.rs` e `src-tauri/src/codex`.
+
+Ela ainda é necessária porque não implementamos OAuth privado nem consumimos
+endpoints internos do ChatGPT. Enquanto não houver um contrato público direto
+equivalente, o `ChatGptAuth` e o `ChatGptCodexProvider` delegam a execução à
+ponte. Isso mantém o login correto e cria um caminho de substituição módulo por
+módulo, sem acoplar a interface ao CLI.
 
 ## Stack fixada
 
@@ -29,25 +43,26 @@ sob responsabilidade do runtime oficial.
 | --- | --- |
 | Shell nativo | Tauri 2.11 |
 | Backend | Rust 1.97.1, edition 2024, Tokio |
+| Persistência local | SQLite via rusqlite 0.40 |
 | Interface | SolidJS 1.9.14, TypeScript 7.0 |
-| Build web | Vite 8.1 com Rolldown |
-| Runtime de agente | Codex CLI `app-server` oficial |
+| Build web | Vite 8.1 |
+| Ponte ChatGPT temporária | Codex CLI `app-server` |
 
-O SolidJS 1.9 é usado por ser a linha estável atual; versões beta não entram na
-base somente por terem número maior. Versões exatas ficam travadas em
-`package.json`, `pnpm-lock.yaml`, `Cargo.lock` e `rust-toolchain.toml`.
-O perfil Rust de release usa uma única unidade de geração, ThinLTO, otimização
-nível 3, remoção de símbolos e abort em panic.
+As versões exatas ficam travadas em `package.json`, `pnpm-lock.yaml`,
+`Cargo.lock` e `rust-toolchain.toml`. O perfil Rust de release usa uma única
+unidade de geração, ThinLTO, otimização nível 3, remoção de símbolos e abort em
+panic.
 
 ## Pré-requisitos
 
 - Windows 10 ou 11 com WebView2;
-- Codex CLI instalado e disponível no `PATH`;
+- Codex CLI instalado e disponível no `PATH` enquanto a ponte estiver ativa;
+- uma conta ChatGPT com acesso ao Codex;
 - Node.js 26 ou superior e pnpm 11.17 ou superior;
-- toolchain MSVC necessária para compilar Tauri no Windows.
+- toolchain MSVC para compilar Tauri no Windows.
 
-O Rust correto é instalado automaticamente pelo `rust-toolchain.toml`. Para usar
-um executável específico do Codex, defina `CODEX_APP_BINARY` com o caminho absoluto.
+Para usar um executável específico do Codex, defina `CODEX_APP_BINARY` com um
+caminho absoluto.
 
 ## Executar
 
@@ -56,9 +71,16 @@ pnpm install
 pnpm tauri dev
 ```
 
-Se não houver uma sessão existente, o botão de login inicia o fluxo ChatGPT no
-navegador. O app recebe apenas o estado do fluxo; tokens nunca passam pela UI nem
-são armazenados por este projeto.
+O `NativeEngine` é o padrão. Para diagnosticar somente a integração antiga:
+
+```powershell
+$env:CODEX_APP_ENGINE = "compatibility"
+pnpm tauri dev
+```
+
+Se não houver sessão, **Continuar com ChatGPT** abre o navegador no fluxo
+oficial. O app recebe apenas URL, conclusão e estado da conta; tokens nunca
+atravessam o IPC da interface.
 
 ## Verificar
 
@@ -69,16 +91,10 @@ pnpm verify
 O comando compila o frontend, checa o crate Rust, valida formatação, executa
 Clippy com warnings como erro e roda os testes nativos.
 
-## Direção visual
-
-A interface adota a densidade e os padrões de interação do Codex Desktop sem
-acoplar o projeto aos componentes privados do aplicativo. A escala tipográfica é
-definida em CSS e não altera DPI nem zoom do sistema. Cores-base, superfícies,
-seleções e estados são tokens centralizados em `src/styles/global.css`.
-
-## Arquitetura e referência
+## Documentação
 
 - [Arquitetura](docs/ARCHITECTURE.md)
+- [Contrato do engine](docs/ENGINE.md)
 - [Estudo do Codex oficial](docs/REFERENCE.md)
 - [Regras do projeto](docs/RULES.md)
 - [Próximos passos](docs/TODO.md)
@@ -90,6 +106,6 @@ fica em `.reference/` e não é versionada.
 ## Limite de segurança
 
 Este projeto não implementa OAuth próprio, não lê arquivos de credenciais, não
-captura tokens e não chama endpoints privados do ChatGPT. A integração pública é
-o protocolo do `codex app-server`; qualquer incompatibilidade deve falhar de forma
-visível e ser corrigida nessa fronteira.
+captura tokens e não chama endpoints privados do ChatGPT. Incompatibilidades da
+ponte falham de forma visível. O objetivo é removê-la quando cada responsabilidade
+tiver uma alternativa pública, testada e compatível.

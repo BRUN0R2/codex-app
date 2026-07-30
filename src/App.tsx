@@ -13,9 +13,9 @@ export default function App() {
         <main class="boot-screen">
           <div class="boot-card boot-card-error">
             <div class="brand-mark brand-mark-large">C</div>
-            <h1>Não foi possível iniciar o Codex</h1>
+            <h1>Não foi possível iniciar o engine</h1>
             <p>{session.runtimeStatus().message ?? session.error()}</p>
-            <code>Instale o Codex CLI ou configure CODEX_APP_BINARY.</code>
+            <code>A ponte temporária de login ChatGPT não está disponível.</code>
           </div>
         </main>
       </Match>
@@ -24,7 +24,7 @@ export default function App() {
           <div class="boot-loader">
             <div class="brand-mark brand-mark-large">C</div>
             <span />
-            <p>Inicializando o app-server…</p>
+            <p>Inicializando o Native Engine…</p>
           </div>
         </main>
       </Match>

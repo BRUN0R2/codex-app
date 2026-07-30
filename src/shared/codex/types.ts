@@ -14,8 +14,22 @@ export interface RuntimeStatus {
   message: string | null;
 }
 
+export type EngineKind = "compatibility" | "native";
+
+export interface EngineDescriptor {
+  id: string;
+  name: string;
+  kind: EngineKind;
+  provider: string;
+  auth: string;
+  capabilities: string[];
+  usesCompatibilityBridge: boolean;
+}
+
 export interface RuntimeStartResponse {
-  executable: string;
+  engine: EngineDescriptor;
+  executable: string | null;
+  transport: string;
   initialize: JsonObject;
 }
 

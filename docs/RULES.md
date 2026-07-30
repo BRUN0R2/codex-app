@@ -82,12 +82,18 @@ historico.
 * TypeScript estrito no frontend.
 * Vite como empacotador frontend.
 * Windows e o alvo operacional inicial.
-* O `codex app-server` oficial e o runtime de agente e autenticacao.
+* O `NativeEngine` deste projeto e o dono da composicao do agente.
+* O `codex app-server` oficial e uma ponte de compatibilidade isolada para
+  autenticacao ChatGPT e capacidades ainda nao substituidas.
 * Configuracoes e credenciais do Codex pertencem ao perfil do usuario e nunca
   devem ser copiadas, expostas ou reinterpretadas pela interface.
 
 O projeto nao deve implementar OAuth paralelo, capturar tokens do ChatGPT,
 contornar controles do Codex ou duplicar o armazenamento de credenciais.
+
+Adaptadores de compatibilidade devem ser explicitos, observaveis, substituiveis
+e possuir criterios documentados de remocao. Nenhuma dependencia temporaria pode
+vazar para os contratos da interface.
 
 Qualquer tecnologia nova deve ter motivo claro, escopo isolado e custo de
 manutencao proporcional ao beneficio.

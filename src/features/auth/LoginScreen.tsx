@@ -31,8 +31,8 @@ export function LoginScreen(props: LoginScreenProps) {
           {(message) => <p class="inline-error">{message()}</p>}
         </Show>
         <p class="auth-footnote">
-          O login é executado pelo <code>codex app-server</code> instalado neste
-          computador.
+          O módulo <code>ChatGptAuth</code> delega credenciais à ponte oficial;
+          tokens nunca atravessam a interface.
         </p>
       </section>
     </main>

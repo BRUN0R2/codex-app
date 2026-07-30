@@ -109,7 +109,7 @@ export function EnvironmentPanel(props: EnvironmentPanelProps) {
         </Show>
         <div class="source-row">
           <span class="codex-source-mark">C</span>
-          <span>Codex app-server</span>
+          <span>{props.session.runtime()?.engine.name ?? "Native Engine"}</span>
         </div>
       </section>
     </aside>
