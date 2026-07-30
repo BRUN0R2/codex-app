@@ -1,6 +1,5 @@
 import { Show, createSignal } from "solid-js";
 
-import { ApprovalDialog } from "../approvals/ApprovalDialog";
 import { ChatPage } from "../chat/ChatPage";
 import { ProjectSidebar } from "../projects/ProjectSidebar";
 import type { CodexSession } from "../session/createCodexSession";
@@ -144,10 +143,6 @@ export function AppShell(props: AppShellProps) {
 
       <Show when={settingsOpen()}>
         <SettingsDrawer onClose={() => setSettingsOpen(false)} session={props.session} />
-      </Show>
-
-      <Show when={props.session.approvalQueue()[0]}>
-        {(request) => <ApprovalDialog request={request()} session={props.session} />}
       </Show>
 
       <Show when={props.session.error()}>

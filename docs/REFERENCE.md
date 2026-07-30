@@ -34,6 +34,12 @@ As áreas relevantes foram lidas diretamente no snapshot:
   `turn/diff/updated`.
 - Solicitações do servidor são respondidas pelo mesmo `id`; métodos desconhecidos
   não recebem aprovação automática.
+- O catálogo interativo atual contém
+  `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`,
+  `item/tool/requestUserInput`, `item/permissions/requestApproval` e
+  `mcpServer/elicitation/request`; `serverRequest/resolved` encerra cada entrada.
+- O cliente negocia as capacidades de inicialização explicitamente e só marca
+  como verdade uma extensão cujo fluxo completo consegue atender.
 
 ## Decisões de implementação
 
@@ -107,6 +113,27 @@ payload grande no estado reativo.
 O decoder local usa um catálogo fechado dos discriminadores atuais. Uma versão
 futura que introduza outro item falha visivelmente até que domínio e renderer
 sejam atualizados; não existe fallback genérico que aparente suporte inexistente.
+
+As solicitações interativas também foram conferidas nos tipos gerados, no README
+do app-server e nos fluxos da TUI. O contrato preservado é:
+
+- aprovações usam somente decisões oferecidas por `availableDecisions`, quando
+  presente, e recorrem às heurísticas estáveis quando o campo experimental foi
+  omitido;
+- respostas selecionadas de `request_user_input` usam o rótulo da opção e texto
+  livre usa o prefixo `user_note: ` esperado pelo runtime;
+- `request_permissions` devolve somente o subconjunto solicitado e nunca
+  combina `strictAutoReview` com escopo de sessão;
+- formulários MCP estáveis aceitam apenas os tipos primitivos do esquema oficial;
+  aprovações MCP vazias preservam `_meta.persist` como `session` ou `always`;
+- URL MCP aceita somente HTTP(S), e `openai/form` inesperado é cancelado sem
+  materializar o payload opaco na árvore reativa.
+
+Como o cliente ainda não implementa ferramentas dinâmicas, geração externa de
+atestados nem formulários OpenAI estendidos, o `initialize` anuncia
+`experimentalApi: false`, `requestAttestation: false` e
+`mcpServerOpenaiFormElicitation: false`. O parser defensivo continua tornando
+qualquer desvio visível em vez de aceitar silenciosamente.
 
 ## Validação do login nativo
 

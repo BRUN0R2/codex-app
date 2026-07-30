@@ -33,7 +33,8 @@ CLI.
 - MCP, ferramentas dinâmicas, agentes, busca, espera, hooks, revisão e geração
   de imagem com estados dedicados;
 - anexos, imagens coladas, mídia histórica e miniaturas lazy validadas no backend;
-- aprovações explícitas e presets semânticos de permissão;
+- aprovações de comando e arquivo, perguntas estruturadas, permissões granulares
+  e eliciações MCP com contratos tipados;
 - configurações, modelos, esforço, velocidade e diagnósticos;
 - shell visual inspirado no Codex Desktop, sem alterar DPI ou zoom do sistema.
 
@@ -56,6 +57,9 @@ armazenamento e tokens. O provider compatível permanece restrito a
 Quando a ponte é necessária, o app-server recebe configuração explícita para ler
 o mesmo cofre criptografado administrado pelo backend nativo. O arquivo
 `auth.json` do usuário não é copiado, alterado nem removido por este aplicativo.
+O handshake anuncia somente capacidades realmente implementadas; APIs
+experimentais, atestados externos e formulários OpenAI opacos permanecem
+desativados até possuírem uma implementação completa.
 
 ## Stack fixada
 

@@ -104,6 +104,34 @@ um buffer binário. O componente cria e revoga a `Blob URL`, deixando falhas
 visíveis sem manter base64 na árvore reativa. Geração de imagem conserva apenas
 metadados e `savedPath`; o payload base64 do protocolo é descartado na fronteira.
 
+### Solicitações interativas
+
+`src/features/approvals` é uma fronteira de protocolo própria, não um modal
+genérico. `parseServerRequest` mantém um catálogo fechado das solicitações do
+app-server e as converte em uma união discriminada. Parsers menores validam
+aprovações, perguntas, perfis de permissão e esquemas MCP antes que qualquer dado
+chegue aos componentes.
+
+`createServerRequestQueue` é o único dono da fila. Identificadores JSON-RPC
+numéricos e textuais permanecem distintos, uma atualização do mesmo `id`
+substitui a entrada e `serverRequest/resolved` remove a solicitação de forma
+idempotente. Erros de decodificação ficam visíveis como incompatibilidade; nunca
+viram aprovação automática.
+
+Cada contrato possui um renderer inline próximo ao compositor:
+
+- comando e arquivo exibem contexto, decisões permitidas e diff autoritativo;
+- `request_user_input` preserva opções, texto livre, segredo e resolução
+  automática;
+- `request_permissions` concede somente o subconjunto marcado, com escopo de
+  turno ou sessão e revisão estrita limitada ao turno;
+- MCP separa formulário tipado, autorização por URL e formulário opaco não
+  suportado, que só pode ser cancelado com segurança.
+
+O handshake da ponte declara `experimentalApi`, `requestAttestation` e
+`mcpServerOpenaiFormElicitation` como falsos. Assim, o cliente não anuncia
+ferramentas dinâmicas, atestados ou formulários opacos que ainda não implementa.
+
 ## Fluxos principais
 
 ### Inicialização

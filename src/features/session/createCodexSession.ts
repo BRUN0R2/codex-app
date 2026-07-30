@@ -55,18 +55,23 @@ import {
   type TurnProgressSummary,
 } from "../chat/createTurnProgress";
 import type { MessageEntry, TimelineEntry } from "../chat/timelineTypes";
+import { createServerRequestQueue } from "../approvals/createServerRequestQueue";
+import type {
+  InteractiveServerRequest,
+  PendingServerRequest,
+  ServerResponseFor,
+} from "../approvals/serverRequestTypes";
 import { createProjectWorkspace } from "../projects/createProjectWorkspace";
 import { createThreadLibrary } from "../projects/createThreadLibrary";
 import { pathsEqual, type ProjectRecord } from "../projects/projectStore";
 import { threadTitle, type ThreadLibraryState } from "../projects/threadLibrary";
 
-export type ApprovalDecision = "accept" | "acceptForSession" | "cancel" | "decline";
 export type CompatibilityContextState = "failed" | "idle" | "loading" | "ready";
 
 export interface CodexSession {
   account: Accessor<AccountReadResponse | undefined>;
   activeTurnId: Accessor<string | null>;
-  approvalQueue: Accessor<CodexServerRequest[]>;
+  pendingServerRequests: Accessor<PendingServerRequest[]>;
   busy: Accessor<boolean>;
   compatibilityContextState: Accessor<CompatibilityContextState>;
   config: Accessor<ConfigReadResponse | null>;
@@ -92,7 +97,7 @@ export interface CodexSession {
   cancelLogin: () => Promise<void>;
   inspectFiles: (paths: string[]) => Promise<Attachment[]>;
   interrupt: () => Promise<void>;
-  interruptPendingRequest: (request: CodexServerRequest) => Promise<void>;
+  interruptPendingRequest: (request: PendingServerRequest) => Promise<void>;
   login: () => Promise<void>;
   loadCompatibilityContext: () => Promise<void>;
   loadMoreThreads: () => Promise<void>;
@@ -104,10 +109,10 @@ export interface CodexSession {
   removeProject: (path: string) => Promise<void>;
   renameThread: (threadId: string, name: string) => Promise<boolean>;
   refreshConfig: () => Promise<void>;
-  respondToApproval: (
-    request: CodexServerRequest,
-    decision: ApprovalDecision,
-  ) => Promise<void>;
+  respondToInteractiveRequest: <T extends InteractiveServerRequest>(
+    request: T,
+    response: ServerResponseFor<T>,
+  ) => Promise<boolean>;
   saveClipboardImage: (dataBase64: string) => Promise<Attachment>;
   selectProject: (path: string) => Promise<void>;
   sendMessage: (text: string, attachments: Attachment[]) => Promise<boolean>;
@@ -141,7 +146,7 @@ export function createCodexSession(): CodexSession {
   const [activeTurnId, setActiveTurnId] = createSignal<string | null>(null);
   const [openingThreadId, setOpeningThreadId] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
-  const [approvalQueue, setApprovalQueue] = createSignal<CodexServerRequest[]>([]);
+  const serverRequests = createServerRequestQueue();
   const [compatibilityContextState, setCompatibilityContextState] =
     createSignal<CompatibilityContextState>("idle");
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
@@ -528,12 +533,12 @@ export function createCodexSession(): CodexSession {
     setActiveTurnId(null);
     timeline.reset();
     turnProgress.reset();
-    setApprovalQueue([]);
+    serverRequests.clear();
   }
 
   function hydrateThread(thread: CodexThread) {
     setThreadId(thread.id);
-    setApprovalQueue([]);
+    serverRequests.clear();
     turnProgress.reset();
 
     let resumedTurnId: string | null = null;
@@ -687,36 +692,39 @@ export function createCodexSession(): CodexSession {
     await refreshConfig();
   }
 
-  async function respondToApproval(
-    request: CodexServerRequest,
-    decision: ApprovalDecision,
-  ) {
+  async function respondToInteractiveRequest<T extends InteractiveServerRequest>(
+    request: T,
+    response: ServerResponseFor<T>,
+  ): Promise<boolean> {
     try {
       await respondToServerRequest({
         id: request.id,
-        response: { decision },
+        response,
       });
-      removeServerRequest(request.id);
+      serverRequests.remove(request.id);
+      return true;
     } catch (reason) {
       setError(describeCommandError(reason));
+      return false;
     }
   }
 
-  async function interruptPendingRequest(request: CodexServerRequest) {
-    const params = asObject(request.params);
-    const requestedThreadId = readString(params, "threadId") ?? threadId();
-    const requestedTurnId = readString(params, "turnId") ?? activeTurnId();
-    if (requestedThreadId !== null && requestedTurnId !== null) {
-      try {
-        await interruptTurn({
-          threadId: requestedThreadId,
-          turnId: requestedTurnId,
-        });
-      } catch (reason) {
-        setError(describeCommandError(reason));
-      }
+  async function interruptPendingRequest(request: PendingServerRequest) {
+    const requestedThreadId = request.threadId ?? threadId();
+    const requestedTurnId = request.turnId ?? activeTurnId();
+    if (requestedThreadId === null || requestedTurnId === null) {
+      setError("A solicitação não está associada a um turno que possa ser interrompido.");
+      return;
     }
-    removeServerRequest(request.id);
+    try {
+      await interruptTurn({
+        threadId: requestedThreadId,
+        turnId: requestedTurnId,
+      });
+      serverRequests.remove(request.id);
+    } catch (reason) {
+      setError(describeCommandError(reason));
+    }
   }
 
   function handleNotification(notification: CodexNotification) {
@@ -840,7 +848,7 @@ export function createCodexSession(): CodexSession {
       case "serverRequest/resolved": {
         const requestId = params?.requestId;
         if (requestId !== undefined) {
-          removeServerRequest(requestId);
+          serverRequests.remove(requestId);
         }
         break;
       }
@@ -850,7 +858,10 @@ export function createCodexSession(): CodexSession {
   }
 
   function handleServerRequest(request: CodexServerRequest) {
-    setApprovalQueue((queue) => [...queue, request]);
+    const protocolError = serverRequests.enqueue(request);
+    if (protocolError !== null) {
+      setError(protocolError);
+    }
   }
 
   function handleDiagnostic(diagnostic: RuntimeDiagnostic) {
@@ -861,17 +872,10 @@ export function createCodexSession(): CodexSession {
     setDiagnostics((current) => [...current.slice(-19), { stream, message }]);
   }
 
-  function removeServerRequest(id: JsonValue) {
-    const serializedId = JSON.stringify(id);
-    setApprovalQueue((queue) =>
-      queue.filter((request) => JSON.stringify(request.id) !== serializedId),
-    );
-  }
-
   return {
     account,
     activeTurnId,
-    approvalQueue,
+    pendingServerRequests: serverRequests.pending,
     busy,
     cancelLogin: cancelPendingLogin,
     compatibilityContextState,
@@ -909,7 +913,7 @@ export function createCodexSession(): CodexSession {
     removeProject,
     renameThread,
     refreshConfig,
-    respondToApproval,
+    respondToInteractiveRequest,
     saveClipboardImage: savePastedImage,
     selectProject,
     sendMessage,

@@ -107,13 +107,7 @@ impl CodexRuntime {
         };
         *self.session.write().await = Some(Arc::clone(&session));
 
-        let initialize_params = json!({
-            "clientInfo": {
-                "name": "codex_desktop_next",
-                "title": "Codex App",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        });
+        let initialize_params = initialize_params();
         let initialize = match self
             .send_request_to(&session, "initialize", Some(initialize_params))
             .await
@@ -458,6 +452,21 @@ fn emit_status(app: &AppHandle, state: RuntimeState, message: Option<String>) {
     let _ = app.emit(RUNTIME_STATUS_EVENT, RuntimeStatus { state, message });
 }
 
+fn initialize_params() -> Value {
+    json!({
+        "clientInfo": {
+            "name": "codex_desktop_next",
+            "title": "Codex App",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "capabilities": {
+            "experimentalApi": false,
+            "requestAttestation": false,
+            "mcpServerOpenaiFormElicitation": false
+        }
+    })
+}
+
 fn resolve_codex_binary() -> Result<PathBuf, AppError> {
     if let Some(configured) = std::env::var_os("CODEX_APP_BINARY") {
         let path = PathBuf::from(configured);
@@ -470,4 +479,25 @@ fn resolve_codex_binary() -> Result<PathBuf, AppError> {
     }
 
     which::which("codex").map_err(|_| AppError::CodexBinaryNotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::initialize_params;
+
+    #[test]
+    fn initialize_declares_only_supported_server_capabilities() {
+        let params = initialize_params();
+
+        assert_eq!(
+            params["capabilities"],
+            json!({
+                "experimentalApi": false,
+                "requestAttestation": false,
+                "mcpServerOpenaiFormElicitation": false,
+            })
+        );
+    }
 }

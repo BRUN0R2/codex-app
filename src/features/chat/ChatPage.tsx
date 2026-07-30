@@ -1,3 +1,6 @@
+import { Show } from "solid-js";
+
+import { InteractiveRequestPanel } from "../approvals/InteractiveRequestPanel";
 import type { CodexSession } from "../session/createCodexSession";
 import { Composer } from "./Composer";
 import { Timeline } from "./Timeline";
@@ -16,6 +19,17 @@ export function ChatPage(props: ChatPageProps) {
         busy={props.session.busy()}
         progress={props.session.turnProgress()}
       />
+      <Show when={props.session.pendingServerRequests()[0]}>
+        {(request) => (
+          <InteractiveRequestPanel
+            onInterrupt={props.session.interruptPendingRequest}
+            onRespond={props.session.respondToInteractiveRequest}
+            pendingCount={props.session.pendingServerRequests().length}
+            request={request()}
+            timeline={props.session.timeline()}
+          />
+        )}
+      </Show>
       <Composer
         busy={props.session.busy()}
         config={props.session.config()}

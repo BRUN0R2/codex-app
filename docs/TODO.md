@@ -16,6 +16,8 @@
 - [x] Timeline semântica com comandos, diffs, imagens e progresso do turno.
 - [x] Todos os `ThreadItem` e `UserInput` do snapshot oficial atual possuem
   parsing explícito e visualização dedicada.
+- [x] Solicitações interativas do app-server possuem fila, parsing, respostas e
+  renderização inline tipados, incluindo permissões granulares e MCP.
 
 ## Engine
 
@@ -28,7 +30,5 @@
 
 ## Produto
 
-- [ ] Implementar formulários e permissões tipados para as solicitações
-  interativas restantes do app-server.
 - [ ] Completar as categorias de configuração suportadas.
 - [ ] Preparar assinatura, instalador, atualização e telemetria opt-in.
