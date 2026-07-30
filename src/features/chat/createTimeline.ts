@@ -13,6 +13,7 @@ import { appendCommandOutput, formatToolDetail } from "./timelineText";
 import type {
   MessageEntry,
   TimelineEntry,
+  WarningEntry,
 } from "./timelineTypes";
 
 interface TimelineOptions {
@@ -38,6 +39,7 @@ export interface TimelineController {
   handleItem: (value: JsonValue | undefined, completed: boolean) => void;
   hydrate: (items: JsonValue[]) => void;
   markUserMessage: (id: string, status: "complete" | "failed") => void;
+  reconcileWarnings: (entries: WarningEntry[]) => void;
   reset: () => void;
   updateFileChangePatch: (params: JsonObject | undefined) => void;
 }
@@ -270,6 +272,28 @@ export function createTimeline(options: TimelineOptions): TimelineController {
     );
   }
 
+  function reconcileWarnings(warnings: WarningEntry[]) {
+    const warningById = new Map(
+      warnings.map((warning) => [warning.id, warning]),
+    );
+    const retainedWarningIds = new Set(warningById.keys());
+    const retainedEntries = entries()
+      .filter(
+        (entry) =>
+          entry.type !== "warning" || retainedWarningIds.has(entry.id),
+      )
+      .map((entry) =>
+        entry.type === "warning"
+          ? (warningById.get(entry.id) ?? entry)
+          : entry,
+      );
+    const existingIds = new Set(retainedEntries.map(({ id }) => id));
+    setEntries([
+      ...retainedEntries,
+      ...warnings.filter(({ id }) => !existingIds.has(id)),
+    ]);
+  }
+
   function replaceOptimisticUserMessage(replacement: MessageEntry) {
     const optimistic = entries().find(
       (entry) =>
@@ -344,6 +368,7 @@ export function createTimeline(options: TimelineOptions): TimelineController {
     appendReasoningSummaryDelta,
     appendReasoningTextDelta,
     appendTerminalInteraction,
+    reconcileWarnings,
     handleItem,
     hydrate,
     markUserMessage,

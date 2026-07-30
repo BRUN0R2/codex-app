@@ -1652,6 +1652,44 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   gap: 6px;
 }
 
+.timeline-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: -3px 0 20px;
+  color: #bda47b;
+  font-size: 0.8214rem;
+  line-height: 1.45;
+}
+
+.timeline-warning > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.timeline-warning > div {
+  min-width: 0;
+}
+
+.timeline-warning small,
+.timeline-warning span {
+  display: block;
+}
+
+.timeline-warning small {
+  margin-bottom: 2px;
+  color: #77716a;
+  font-size: 0.6786rem;
+}
+
+.timeline-warning span {
+  white-space: pre-wrap;
+}
+
+.timeline-warning-guardian {
+  color: #cf9175;
+}
+
 .thinking-row {
   display: flex;
   gap: 4px;
@@ -2171,7 +2209,7 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   outline: 0;
 }
 
-.config-warning-notice {
+.app-notice {
   display: flex;
   z-index: 6;
   width: min(740px, calc(100% - 34px));
@@ -2187,25 +2225,34 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   box-shadow: 0 9px 26px rgb(0 0 0 / 20%);
 }
 
-.config-warning-notice > svg {
+.app-notice > svg {
   flex: 0 0 auto;
   margin-top: 1px;
   color: var(--warning);
 }
 
-.config-warning-copy {
+.app-notice-deprecationNotice {
+  border-color: rgb(218 112 102 / 36%);
+  background: #2b2221;
+}
+
+.app-notice-deprecationNotice > svg {
+  color: var(--danger);
+}
+
+.app-notice-copy {
   min-width: 0;
   flex: 1;
 }
 
-.config-warning-heading {
+.app-notice-heading {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 7px;
 }
 
-.config-warning-heading strong {
+.app-notice-heading strong {
   overflow: hidden;
   color: #eee7df;
   font-size: 0.8214rem;
@@ -2214,7 +2261,7 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   white-space: nowrap;
 }
 
-.config-warning-heading span {
+.app-notice-heading span {
   flex: 0 0 auto;
   padding: 1px 5px;
   border-radius: 999px;
@@ -2224,7 +2271,7 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   font-weight: 650;
 }
 
-.config-warning-copy p {
+.app-notice-copy p {
   margin: 3px 0 0;
   color: #aaa198;
   font-size: 0.75rem;
@@ -2232,7 +2279,12 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   white-space: pre-wrap;
 }
 
-.config-warning-copy code {
+.app-notice-copy .app-notice-omitted {
+  color: #887f77;
+  font-size: 0.6786rem;
+}
+
+.app-notice-copy code {
   display: block;
   margin-top: 5px;
   overflow: hidden;
@@ -2243,14 +2295,14 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   white-space: nowrap;
 }
 
-.config-warning-actions {
+.app-notice-actions {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   gap: 4px;
 }
 
-.config-warning-actions button {
+.app-notice-actions button {
   display: inline-flex;
   height: 29px;
   align-items: center;
@@ -2265,13 +2317,13 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   font-weight: 590;
 }
 
-.config-warning-actions button:hover {
+.app-notice-actions button:hover {
   border-color: #62564b;
   color: #eee7df;
   background: #38302a;
 }
 
-.config-warning-actions .config-warning-dismiss {
+.app-notice-actions .app-notice-dismiss {
   width: 29px;
   padding: 0;
   color: #9e958c;
@@ -3904,17 +3956,17 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   .timeline-content,
   .composer-wrap,
   .interactive-request-wrap,
-  .config-warning-notice,
+  .app-notice,
   .world-writable-warning,
   .usage-limit-notice {
     width: calc(100% - 22px);
   }
 
-  .config-warning-notice {
+  .app-notice {
     flex-wrap: wrap;
   }
 
-  .config-warning-actions {
+  .app-notice-actions {
     width: 100%;
     justify-content: flex-end;
     padding-left: 28px;

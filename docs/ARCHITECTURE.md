@@ -193,20 +193,31 @@ novamente** grava `notice.hide_world_writable_warning = true` com a versão ativ
 da camada de usuário e confirma o valor efetivo após a releitura. Falhas mantêm o
 aviso aberto. O frontend não tenta editar ACLs nem executar uma correção.
 
-### Avisos globais de configuração
+### Avisos do aplicativo e da tarefa
 
-`src/features/notices` preserva `configWarning` como um domínio próprio. O
-decoder acompanha o contrato oficial completo: resumo, detalhes opcionais,
-caminho opcional e intervalo com linha e coluna de base um. Índices fora do
-intervalo seguro do JavaScript ou formatos divergentes viram diagnóstico de
-protocolo, nunca texto parcialmente confiável na interface.
+`src/features/notices` separa escopo de aplicativo e escopo de tarefa. Os
+decoders acompanham os contratos oficiais de `configWarning`,
+`deprecationNotice`, `warning` e `guardianWarning`. Resumo, detalhes, mensagem,
+destino, caminho e intervalo de base um são validados antes de chegar à
+interface; identificadores ou índices fora dos limites locais viram diagnóstico
+de protocolo, nunca texto parcialmente confiável.
 
-`createConfigWarningCenter` recebe avisos tanto da inicialização quanto da
-abertura de tarefas, elimina repetições estruturais e mantém no máximo vinte
-entradas. A interface mostra uma entrada por vez junto ao compositor, preserva
-detalhes e localização, informa as demais por contagem e permite abrir as
-configurações ou dispensar somente a ocorrência atual. O aviso não bloqueia o
-compositor e não tenta reescrever ou abrir automaticamente o arquivo indicado.
+`createAppNoticeCenter` mantém uma união discriminada para avisos globais. Uma
+ocorrência de configuração é deduplicada estruturalmente; avisos e deprecações
+repetidos permanecem ocorrências distintas. A fila conserva no máximo vinte
+entradas, limita resumo, detalhes e caminho e informa explicitamente qualquer
+descarte. O cartão mostra uma entrada por vez junto ao compositor, permite abrir
+configurações apenas quando existe localização configurável e nunca bloqueia a
+mensagem ou executa uma correção automática.
+
+`createThreadNoticeLibrary` preserva `warning` e `guardianWarning` pelo
+`threadId`, inclusive quando a tarefa está em segundo plano. O estado mantém no
+máximo quarenta avisos por tarefa e sessenta e quatro tarefas, explicita
+omissões e reconcilia a timeline ativa para que o limite também valha durante
+uma execução longa. Somente a mensagem oficial de fallback de metadados de um
+mesmo modelo é deduplicada; os demais avisos repetidos são mantidos, como na
+referência. Troca, arquivamento, exclusão e logout respeitam o mesmo ownership
+descrito no roteamento por tarefa.
 
 ### Uso da conta
 

@@ -286,6 +286,21 @@ export interface ConfigWarningNotification {
   range?: TextRange;
 }
 
+export interface DeprecationNoticeNotification {
+  summary: string;
+  details: string | null;
+}
+
+export interface WarningNotification {
+  threadId: string | null;
+  message: string;
+}
+
+export interface GuardianWarningNotification {
+  threadId: string;
+  message: string;
+}
+
 export interface ReasoningEffortOption {
   reasoningEffort: string;
   description: string;

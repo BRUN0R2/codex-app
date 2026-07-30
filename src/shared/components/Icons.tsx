@@ -370,6 +370,21 @@ export function ShieldAlertIcon(props: IconProps) {
   );
 }
 
+export function WarningIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M12 3.5 21 20H3L12 3.5Z"
+        stroke="currentColor"
+        stroke-linejoin="round"
+        stroke-width="1.5"
+      />
+      <path d="M12 9v4.5" stroke="currentColor" stroke-linecap="round" stroke-width="1.6" />
+      <circle cx="12" cy="17" fill="currentColor" r="1" />
+    </Svg>
+  );
+}
+
 export function GlobeIcon(props: IconProps) {
   return (
     <Svg {...props}>

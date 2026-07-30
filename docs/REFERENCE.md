@@ -40,6 +40,9 @@ As áreas relevantes foram lidas diretamente no snapshot:
 - Avisos de configuração chegam em `configWarning` logo após `initialize` e
   também podem surgir em `thread/start`; o contrato preserva `summary`,
   `details`, `path` e `range` com posições de base um.
+- `deprecationNotice` é global e preserva `summary` e `details`; `warning` usa
+  `threadId` opcional e `guardianWarning` exige um `threadId`, ambos com
+  `message` autoritativa.
 - Uso da conta usa `account/rateLimits/read`; atualizações incrementais chegam em
   `account/rateLimits/updated` e preservam metadados do snapshot completo.
 - Modelo, esforços e tiers de serviço vêm de `model/list`.
@@ -172,6 +175,27 @@ confirmou somente uma entrada ativa, contador `+1`, detalhes, localização e
 compositor disponível. As fixtures foram removidas sem escrever no
 `config.toml`; a captura visual foi interrompida quando houve entrada do usuário,
 preservando o foco da janela em uso.
+
+Os tipos TypeScript gerados `DeprecationNoticeNotification`,
+`WarningNotification` e `GuardianWarningNotification` confirmaram a separação
+de escopo. Na TUI, avisos comuns e Guardian seguem a mesma célula de histórico;
+o estado especial elimina somente repetições da mensagem exata de fallback de
+metadados para o mesmo slug de modelo. A implementação local preserva essa
+exceção sem deduplicar genericamente mensagens iguais.
+
+Uma prova isolada pelo pipeline Vite validou parsing estrito, rejeição de
+destino excessivo, ocorrências globais distintas, limite de vinte avisos do app,
+limite de quarenta avisos por tarefa, descarte de tarefas antigas, reconciliação
+da timeline e a exceção de metadados. Essa prova detectou a diferença semântica
+entre `HashSet::insert` do Rust e `Set.add` do JavaScript antes do runtime final;
+o runner efêmero foi removido após a correção.
+
+Na janela Tauri real, fixtures efêmeras mostraram um aviso comum, um Guardian
+com contagem de omissões e uma depreciação não bloqueante junto ao compositor.
+Ícones, cores, quebra de linha e posição foram conferidos visualmente; não houve
+envio de mensagem, alteração de configuração ou clique em ação. Depois da
+captura, as fixtures foram removidas e uma nova leitura confirmou a interface
+normal sem resíduos.
 
 Os tipos `GetAccountRateLimitsResponse`, `RateLimitSnapshot` e
 `RateLimitWindow` confirmam que `usedPercent` representa consumo, enquanto

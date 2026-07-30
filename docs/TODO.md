@@ -29,6 +29,8 @@
   explícita e persistência versionada, sem correção automática de ACLs.
 - [x] Avisos globais de configuração possuem parsing integral, fila limitada,
   deduplicação e localização visível, sem correção automática do arquivo.
+- [x] Avisos, Guardian e deprecações possuem escopo oficial, retenção limitada
+  por tarefa, omissões visíveis e deduplicação especial compatível com o Codex.
 - [x] Limites da conta usam snapshot oficial, atualização esparsa e cartão de uso
   responsivo sem polling, incluindo o aviso de esgotamento junto ao compositor.
 

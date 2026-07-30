@@ -111,11 +111,12 @@ essa notificação; a UI valida o payload e exige uma escolha. A decisão persis
 usa a escrita versionada de configuração já existente. Nenhuma operação do
 engine modifica ACLs automaticamente.
 
-`configWarning` também atravessa a ponte sem transformação. O app-server o envia
-após `initialize` para avisos de startup e pode emitir uma ocorrência adicional
-ao carregar a configuração de uma tarefa. Resumo, detalhes e localização são
-validados no frontend, deduplicados e limitados; o engine não tenta corrigir uma
-configuração rejeitada nem silencia a falha.
+`configWarning`, `deprecationNotice`, `warning` e `guardianWarning` também
+atravessam a ponte sem transformação. O app-server envia avisos globais após
+`initialize` e pode associar avisos comuns ou Guardian a um `threadId`. O
+frontend valida e limita cada payload, preserva o destino e mantém ocorrências
+transitórias por tarefa. O engine não tenta corrigir uma configuração rejeitada,
+reinterpretar uma advertência nem silenciar a falha.
 
 ## Critérios para remover a ponte
 

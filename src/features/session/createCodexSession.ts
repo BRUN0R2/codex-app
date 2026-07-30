@@ -48,7 +48,6 @@ import {
   type CodexNotification,
   type CodexServerRequest,
   type CodexThread,
-  type ConfigWarningNotification,
   type ConfigReadResponse,
   type ConfigRequirementsReadResponse,
   type ConfigEditRequest,
@@ -81,7 +80,16 @@ import { createThreadLibrary } from "../projects/createThreadLibrary";
 import { pathsEqual, type ProjectRecord } from "../projects/projectStore";
 import { threadTitle, type ThreadLibraryState } from "../projects/threadLibrary";
 import { parseConfigWarning } from "../notices/configWarningProtocol";
-import { createConfigWarningCenter } from "../notices/createConfigWarningCenter";
+import {
+  createAppNoticeCenter,
+  type AppNotice,
+} from "../notices/createAppNoticeCenter";
+import { createThreadNoticeLibrary } from "../notices/createThreadNoticeLibrary";
+import {
+  parseDeprecationNotice,
+  parseGuardianWarningNotification,
+  parseWarningNotification,
+} from "../notices/runtimeNoticeProtocol";
 import {
   isActiveThreadTarget,
   isRequestVisibleForThread,
@@ -125,7 +133,8 @@ export interface CodexSession {
   busy: Accessor<boolean>;
   compatibilityContextState: Accessor<CompatibilityContextState>;
   config: Accessor<ConfigReadResponse | null>;
-  configWarnings: Accessor<readonly ConfigWarningNotification[]>;
+  appNotices: Accessor<readonly AppNotice[]>;
+  appNoticesOmitted: Accessor<number>;
   configRequirements: Accessor<ConfigRequirementsReadResponse | null>;
   windowsSandboxReadiness: Accessor<WindowsSandboxReadinessResponse | null>;
   windowsSandboxSetupState: Accessor<WindowsSandboxSetupState>;
@@ -149,7 +158,7 @@ export interface CodexSession {
   workspace: Accessor<string | null>;
   chooseWorkspace: () => Promise<void>;
   clearError: () => void;
-  dismissConfigWarning: (warning: ConfigWarningNotification) => void;
+  dismissAppNotice: (notice: AppNotice) => void;
   cancelLogin: () => Promise<void>;
   inspectFiles: (paths: string[]) => Promise<Attachment[]>;
   interrupt: () => Promise<void>;
@@ -223,7 +232,10 @@ export function createCodexSession(): CodexSession {
         isRequestVisibleForThread(request.threadId, threadId()),
       ),
   );
-  const configWarnings = createConfigWarningCenter();
+  const appNotices = createAppNoticeCenter();
+  const threadNotices = createThreadNoticeLibrary({
+    reportDiagnostic: (message) => addDiagnostic("stderr", message),
+  });
   const [compatibilityContextState, setCompatibilityContextState] =
     createSignal<CompatibilityContextState>("idle");
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
@@ -404,6 +416,7 @@ export function createCodexSession(): CodexSession {
         setWindowsSandboxSetupState({ type: "idle" });
         setWorldWritableWarningState({ type: "idle" });
         serverRequests.clear();
+        threadNotices.clear();
         threadLibrary.reset();
         return;
       }
@@ -603,6 +616,7 @@ export function createCodexSession(): CodexSession {
       setWindowsSandboxSetupState({ type: "idle" });
       setWorldWritableWarningState({ type: "idle" });
       serverRequests.clear();
+      threadNotices.clear();
       threadLibrary.reset();
       setThreadId(null);
       timeline.reset();
@@ -717,6 +731,7 @@ export function createCodexSession(): CodexSession {
 
     let resumedTurnId: string | null = null;
     timeline.hydrate(thread.turns.flatMap((turn) => turn.items));
+    timeline.reconcileWarnings(threadNotices.entriesFor(thread.id));
     for (const turn of thread.turns) {
       if (turn.status === "inProgress") {
         resumedTurnId = turn.id;
@@ -776,6 +791,7 @@ export function createCodexSession(): CodexSession {
       await archiveCodexThread({ threadId: threadIdToArchive });
       threadLibrary.remove(threadIdToArchive);
       serverRequests.removeForThread(threadIdToArchive);
+      threadNotices.remove(threadIdToArchive);
       if (threadIdToArchive === threadId()) {
         resetConversation();
       }
@@ -1043,7 +1059,43 @@ export function createCodexSession(): CodexSession {
       }
       case "configWarning": {
         try {
-          configWarnings.push(parseConfigWarning(notification.params));
+          appNotices.push({
+            type: "configWarning",
+            value: parseConfigWarning(notification.params),
+          });
+        } catch (reason) {
+          addDiagnostic("stderr", describeCommandError(reason));
+        }
+        break;
+      }
+      case "deprecationNotice": {
+        try {
+          appNotices.push({
+            type: "deprecationNotice",
+            value: parseDeprecationNotice(notification.params),
+          });
+        } catch (reason) {
+          addDiagnostic("stderr", describeCommandError(reason));
+        }
+        break;
+      }
+      case "warning": {
+        try {
+          const warning = parseWarningNotification(notification.params);
+          if (warning.threadId === null) {
+            appNotices.push({ type: "warning", message: warning.message });
+          } else {
+            recordThreadWarning(warning.threadId, "warning", warning.message);
+          }
+        } catch (reason) {
+          addDiagnostic("stderr", describeCommandError(reason));
+        }
+        break;
+      }
+      case "guardianWarning": {
+        try {
+          const warning = parseGuardianWarningNotification(notification.params);
+          recordThreadWarning(warning.threadId, "guardian", warning.message);
         } catch (reason) {
           addDiagnostic("stderr", describeCommandError(reason));
         }
@@ -1144,6 +1196,7 @@ export function createCodexSession(): CodexSession {
         if (removedThreadId !== undefined) {
           threadLibrary.remove(removedThreadId);
           serverRequests.removeForThread(removedThreadId);
+          threadNotices.remove(removedThreadId);
           if (removedThreadId === threadId()) {
             resetConversation();
           }
@@ -1288,6 +1341,20 @@ export function createCodexSession(): CodexSession {
     }
   }
 
+  function recordThreadWarning(
+    targetThreadId: string,
+    kind: "guardian" | "warning",
+    message: string,
+  ) {
+    const recorded = threadNotices.record(targetThreadId, kind, message);
+    if (
+      recorded
+      && isActiveThreadTarget(targetThreadId, threadId())
+    ) {
+      timeline.reconcileWarnings(threadNotices.entriesFor(targetThreadId));
+    }
+  }
+
   function readNotificationThreadId(
     method: string,
     params: JsonObject | undefined,
@@ -1329,7 +1396,8 @@ export function createCodexSession(): CodexSession {
     cancelLogin: cancelPendingLogin,
     compatibilityContextState,
     config,
-    configWarnings: configWarnings.warnings,
+    appNotices: appNotices.notices,
+    appNoticesOmitted: appNotices.omittedCount,
     configRequirements,
     windowsSandboxReadiness,
     windowsSandboxSetupState,
@@ -1353,7 +1421,7 @@ export function createCodexSession(): CodexSession {
     workspace,
     chooseWorkspace,
     clearError: () => setError(null),
-    dismissConfigWarning: configWarnings.dismiss,
+    dismissAppNotice: appNotices.dismiss,
     inspectFiles: inspectAttachments,
     interrupt,
     interruptPendingRequest,

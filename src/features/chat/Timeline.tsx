@@ -9,7 +9,12 @@ import {
 } from "solid-js";
 
 import { ActivityGroup } from "./ActivityGroup";
-import { MessageView, PlanView, ReviewView } from "./ConversationEntry";
+import {
+  MessageView,
+  PlanView,
+  ReviewView,
+  WarningView,
+} from "./ConversationEntry";
 import { LiveActivity } from "./LiveActivity";
 import { buildTimelineBlocks, type TimelineBlock } from "./timelineGrouping";
 import type {
@@ -17,6 +22,7 @@ import type {
   PlanEntry,
   ReviewEntry,
   TimelineEntry,
+  WarningEntry,
 } from "./timelineTypes";
 
 interface TimelineProps {
@@ -127,6 +133,9 @@ export function Timeline(props: TimelineProps) {
                 <Match when={reviewEntry(block())}>
                   {(review) => <ReviewView entry={review()} />}
                 </Match>
+                <Match when={warningEntry(block())}>
+                  {(warning) => <WarningView entry={warning()} />}
+                </Match>
               </Switch>
             )}
           </Index>
@@ -170,6 +179,12 @@ function planEntry(block: TimelineBlock): PlanEntry | undefined {
 
 function reviewEntry(block: TimelineBlock): ReviewEntry | undefined {
   return block.type === "entry" && block.entry.type === "review"
+    ? block.entry
+    : undefined;
+}
+
+function warningEntry(block: TimelineBlock): WarningEntry | undefined {
+  return block.type === "entry" && block.entry.type === "warning"
     ? block.entry
     : undefined;
 }

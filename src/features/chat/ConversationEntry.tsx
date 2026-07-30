@@ -5,7 +5,9 @@ import {
   FileIcon,
   ImageIcon,
   ReviewIcon,
+  ShieldAlertIcon,
   SparkIcon,
+  WarningIcon,
 } from "../../shared/components/Icons";
 import { ImagePreview } from "./ImagePreview";
 import type {
@@ -13,6 +15,7 @@ import type {
   PlanEntry,
   ReviewEntry,
   MessageAttachment,
+  WarningEntry,
 } from "./timelineTypes";
 
 export function MessageView(props: { entry: MessageEntry }) {
@@ -68,6 +71,30 @@ export function PlanView(props: { entry: PlanEntry }) {
       <summary>Plano</summary>
       <div>{props.entry.text}</div>
     </details>
+  );
+}
+
+export function WarningView(props: { entry: WarningEntry }) {
+  return (
+    <aside
+      class={`timeline-warning timeline-warning-${props.entry.kind}`}
+      role="status"
+    >
+      {props.entry.kind === "guardian" ? (
+        <ShieldAlertIcon size={15} />
+      ) : (
+        <WarningIcon size={15} />
+      )}
+      <div>
+        <Show when={props.entry.omittedBefore > 0}>
+          <small>
+            {props.entry.omittedBefore} aviso(s) anterior(es) foram omitidos
+            deste processo.
+          </small>
+        </Show>
+        <span>{props.entry.message}</span>
+      </div>
+    </aside>
   );
 }
 

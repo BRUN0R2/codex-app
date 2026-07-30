@@ -68,6 +68,16 @@ export interface PlanEntry {
   status: "completed" | "inProgress";
 }
 
+export type WarningKind = "guardian" | "warning";
+
+export interface WarningEntry {
+  type: "warning";
+  id: string;
+  kind: WarningKind;
+  message: string;
+  omittedBefore: number;
+}
+
 export type CommandSource =
   | "agent"
   | "unifiedExecInteraction"
@@ -241,7 +251,8 @@ export type TimelineEntry =
   | MessageEntry
   | PlanEntry
   | ReasoningEntry
-  | ReviewEntry;
+  | ReviewEntry
+  | WarningEntry;
 
 export function isGroupableTimelineEntry(
   entry: TimelineEntry,

@@ -7,6 +7,7 @@ import {
   type ReasoningEntry,
   type ReviewEntry,
   type TimelineEntry,
+  type WarningEntry,
 } from "./timelineTypes";
 
 export type TimelineBlock =
@@ -21,7 +22,7 @@ export type TimelineBlock =
   | {
       type: "entry";
       id: string;
-      entry: MessageEntry | PlanEntry | ReviewEntry;
+      entry: MessageEntry | PlanEntry | ReviewEntry | WarningEntry;
     }
   | {
       type: "liveActivity";
