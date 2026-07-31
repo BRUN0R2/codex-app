@@ -2195,6 +2195,94 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   padding: 0 0 17px;
 }
 
+.safety-buffering-notice {
+  display: grid;
+  z-index: 7;
+  width: min(740px, calc(100% - 34px));
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0 10px;
+  margin: 0 auto 7px;
+  padding: 11px 12px;
+  border: 1px solid #414141;
+  border-radius: 14px;
+  color: #d8d8d8;
+  background: #292929;
+  box-shadow: 0 10px 28px rgb(0 0 0 / 22%);
+}
+
+.safety-buffering-notice > svg {
+  grid-row: 1 / span 2;
+  margin-top: 1px;
+  color: #c9c9c9;
+}
+
+.safety-buffering-copy {
+  min-width: 0;
+}
+
+.safety-buffering-copy strong {
+  display: block;
+  color: #efefef;
+  font-size: 0.8214rem;
+  font-weight: 640;
+  line-height: 1.35;
+}
+
+.safety-buffering-copy p {
+  margin: 3px 0 0;
+  color: #a7a7a7;
+  font-size: 0.75rem;
+  line-height: 1.42;
+}
+
+.safety-buffering-copy .safety-buffering-error {
+  color: #e18a81;
+}
+
+.safety-buffering-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.safety-buffering-actions button {
+  min-height: 29px;
+  padding: 0 10px;
+  border: 1px solid #484848;
+  border-radius: 8px;
+  color: #d0d0d0;
+  background: #323232;
+  font-size: 0.7143rem;
+  font-weight: 590;
+}
+
+.safety-buffering-actions button:hover:not(:disabled) {
+  border-color: #5b5b5b;
+  color: #f0f0f0;
+  background: #393939;
+}
+
+.safety-buffering-actions button.primary {
+  border-color: #ededed;
+  color: #202020;
+  background: #ededed;
+}
+
+.safety-buffering-actions button.primary:hover:not(:disabled) {
+  border-color: #fff;
+  background: #fff;
+}
+
+.safety-buffering-actions button.link {
+  padding-inline: 6px;
+  border-color: transparent;
+  color: #a6a6a6;
+  background: transparent;
+}
+
 .world-writable-warning {
   z-index: 7;
   width: min(740px, calc(100% - 34px));
@@ -3956,6 +4044,7 @@ html[data-diff-display="markers"] .diff-deletion .diff-line-marker {
   .timeline-content,
   .composer-wrap,
   .interactive-request-wrap,
+  .safety-buffering-notice,
   .app-notice,
   .world-writable-warning,
   .usage-limit-notice {

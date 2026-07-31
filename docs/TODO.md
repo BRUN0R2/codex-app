@@ -47,6 +47,6 @@
 
 ## Produto
 
-- [ ] Implementar `model/safetyBuffering/updated` com estado de espera e retry
+- [x] Implementar `model/safetyBuffering/updated` com estado de espera e retry
   seguro por fork, preservando a entrada original.
 - [ ] Preparar assinatura, instalador, atualização e telemetria opt-in.

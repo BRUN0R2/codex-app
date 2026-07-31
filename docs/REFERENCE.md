@@ -25,8 +25,9 @@ As áreas relevantes foram lidas diretamente no snapshot:
   `codex-rs/login`; tokens nunca atravessam a interface deste aplicativo.
 - Conversas usam `thread/list`, `thread/start`, `thread/resume`, `thread/read`,
   `thread/fork`, `thread/name/set`, `thread/archive`, `turn/start` e
-  `turn/interrupt`. A leitura sempre inclui turnos; o fork preserva
-  explicitamente o último turno incluído e o modelo de destino.
+  `turn/interrupt`. A leitura sempre inclui turnos; o retry de safety buffering
+  bifurca diretamente antes do turno interrompido, conserva o modelo de destino
+  e adia a continuação automática de goals até o novo turno.
 - O envio atual usa `text`, `localImage` ou `mention`; a leitura histórica cobre
   também `image`, `audio`, `localAudio` e `skill`.
 - Configuração usa `config/read`, `config/value/write`, `config/batchWrite` e
@@ -262,11 +263,42 @@ do app-server e nos fluxos da TUI. O contrato preservado é:
 - URL MCP aceita somente HTTP(S), e `openai/form` inesperado é cancelado sem
   materializar o payload opaco na árvore reativa.
 
-Como o cliente ainda não implementa ferramentas dinâmicas, geração externa de
-atestados nem formulários OpenAI estendidos, o `initialize` anuncia
-`experimentalApi: false`, `requestAttestation: false` e
-`mcpServerOpenaiFormElicitation: false`. O parser defensivo continua tornando
-qualquer desvio visível em vez de aceitar silenciosamente.
+O `initialize` anuncia `experimentalApi: true` exclusivamente porque o retry de
+safety buffering usa os campos oficiais experimentais `beforeTurnId` e
+`deferGoalContinuation` de `thread/fork`, como a TUI da referência. Ferramentas
+dinâmicas, geração externa de atestados e formulários OpenAI estendidos continuam
+fora da superfície implementada; `requestAttestation` e
+`mcpServerOpenaiFormElicitation` permanecem falsos. O parser defensivo continua
+tornando qualquer desvio visível em vez de aceitar silenciosamente.
+
+## Safety buffering
+
+O evento `model/safetyBuffering/updated` possui parser fechado e limites para
+identificadores, modelo, motivos e casos de uso. Um controller por sessão é o
+único dono do estado e mantém no máximo 64 tarefas; ele tolera notificação antes
+da resposta de `turn/start`, fechamento e reabertura do aviso, duplicatas,
+conclusão fora de ordem e eventos tardios sem ressuscitar turnos finalizados.
+Uma tarefa em segundo plano nunca altera o aviso, o compositor ou o estado de
+execução da tarefa ativa.
+
+O retry só fica disponível enquanto nenhuma resposta do agente começou. Depois
+da confirmação do usuário, a sessão interrompe o turno, lê o histórico
+autoritativo, valida que o alvo é o último turno e não está mais em andamento,
+bifurca com `beforeTurnId` e `deferGoalContinuation: true`, e reenvia uma cópia
+imutável da entrada original no `fasterModel` com esforço `low`. O fork precisa
+conter exatamente o prefixo anterior ao alvo e nenhum turno em andamento.
+
+Se o novo `turn/start` falhar depois do fork, a sessão muda para o fork seguro e
+devolve texto e anexos originais ao compositor, acompanhados de erro visível.
+Se tiver sucesso, a sessão retoma imediatamente o fork para recuperar eventos
+que possam ter chegado durante a troca. O aviso fica próximo ao compositor e
+oferece somente continuar aguardando, tentar o modelo mais rápido ou abrir a
+[explicação oficial](https://help.openai.com/en/articles/20001326), cuja URL
+exata foi adicionada à allowlist do opener Tauri.
+
+A máquina de estados foi exercitada isoladamente com o pipeline TypeScript/Vite
+e validada ao vivo em uma janela Tauri por Computer Use. O fixture de execução
+foi removido depois da inspeção e nenhuma mensagem nem retry real foi enviado.
 
 ## Validação do login nativo
 

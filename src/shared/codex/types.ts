@@ -168,9 +168,9 @@ export interface ThreadReadResponse {
   thread: CodexThread;
 }
 
-export interface ThreadForkRequest {
+export interface ThreadForkBeforeTurnRequest {
   threadId: string;
-  lastTurnId: string | null;
+  beforeTurnId: string;
   model: string;
 }
 
@@ -325,6 +325,16 @@ export interface ModelVerificationNotification {
   threadId: string;
   turnId: string;
   verifications: ModelVerification[];
+}
+
+export interface ModelSafetyBufferingUpdatedNotification {
+  threadId: string;
+  turnId: string;
+  model: string;
+  useCases: string[];
+  reasons: string[];
+  showBufferingUi: boolean;
+  fasterModel: string | null;
 }
 
 export interface ReasoningEffortOption {

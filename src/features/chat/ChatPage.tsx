@@ -3,6 +3,7 @@ import { Show } from "solid-js";
 import { UsageLimitNotice } from "../account/UsageLimitNotice";
 import { InteractiveRequestPanel } from "../approvals/InteractiveRequestPanel";
 import { AppNoticeCard } from "../notices/AppNoticeCard";
+import { SafetyBufferingNotice } from "../notices/SafetyBufferingNotice";
 import { WindowsWorldWritableWarning } from "../security/WindowsWorldWritableWarning";
 import type { CodexSession } from "../session/createCodexSession";
 import { Composer } from "./Composer";
@@ -36,6 +37,7 @@ export function ChatPage(props: ChatPageProps) {
           />
         )}
       </Show>
+      <SafetyBufferingNotice session={props.session} />
       <AppNoticeCard
         onOpenSettings={props.onOpenSettings}
         session={props.session}
@@ -52,7 +54,9 @@ export function ChatPage(props: ChatPageProps) {
         onChooseWorkspace={props.session.chooseWorkspace}
         onInterrupt={props.session.interrupt}
         onOpenSettings={props.onOpenSettings}
+        onRestoredDraftConsumed={props.session.consumeComposerDraft}
         onSend={props.session.sendMessage}
+        restoredDraft={props.session.composerDraft()}
         saveClipboardImage={props.session.saveClipboardImage}
         workspace={props.session.workspace()}
         writeSetting={props.session.writeSetting}

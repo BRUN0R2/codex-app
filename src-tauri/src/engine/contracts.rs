@@ -174,9 +174,9 @@ pub enum EngineOperation {
     ReadThread {
         thread_id: String,
     },
-    ForkThread {
+    ForkThreadBeforeTurn {
         thread_id: String,
-        last_turn_id: Option<String>,
+        before_turn_id: String,
         model: String,
     },
     SetThreadName {
@@ -230,7 +230,7 @@ impl EngineOperation {
             Self::ListThreads { .. } => "thread.list",
             Self::ResumeThread { .. } => "thread.resume",
             Self::ReadThread { .. } => "thread.read",
-            Self::ForkThread { .. } => "thread.fork",
+            Self::ForkThreadBeforeTurn { .. } => "thread.fork_before_turn",
             Self::SetThreadName { .. } => "thread.name.set",
             Self::ArchiveThread { .. } => "thread.archive",
             Self::StartTurn { .. } => "turn.start",
@@ -249,7 +249,7 @@ impl EngineOperation {
         match self {
             Self::ResumeThread { thread_id }
             | Self::ReadThread { thread_id }
-            | Self::ForkThread { thread_id, .. }
+            | Self::ForkThreadBeforeTurn { thread_id, .. }
             | Self::SetThreadName { thread_id, .. }
             | Self::ArchiveThread { thread_id }
             | Self::StartTurn { thread_id, .. }
@@ -305,16 +305,18 @@ impl EngineOperation {
                 "thread/read",
                 Some(json!({ "threadId": thread_id, "includeTurns": true })),
             ),
-            Self::ForkThread {
+            Self::ForkThreadBeforeTurn {
                 thread_id,
-                last_turn_id,
+                before_turn_id,
                 model,
             } => (
                 "thread/fork",
                 Some(json!({
                     "threadId": thread_id,
-                    "lastTurnId": last_turn_id,
+                    "lastTurnId": null,
+                    "beforeTurnId": before_turn_id,
                     "model": model,
+                    "deferGoalContinuation": true,
                 })),
             ),
             Self::SetThreadName { thread_id, name } => (
@@ -494,10 +496,10 @@ mod tests {
     }
 
     #[test]
-    fn thread_fork_can_branch_before_the_first_turn() {
-        let (method, params) = EngineOperation::ForkThread {
+    fn thread_fork_excludes_the_target_turn_and_defers_goal_continuation() {
+        let (method, params) = EngineOperation::ForkThreadBeforeTurn {
             thread_id: "thread-1".into(),
-            last_turn_id: None,
+            before_turn_id: "turn-1".into(),
             model: "gpt-5.6-mini".into(),
         }
         .into_compatibility_rpc();
@@ -508,7 +510,9 @@ mod tests {
             Some(json!({
                 "threadId": "thread-1",
                 "lastTurnId": null,
+                "beforeTurnId": "turn-1",
                 "model": "gpt-5.6-mini",
+                "deferGoalContinuation": true,
             }))
         );
     }

@@ -460,7 +460,7 @@ fn initialize_params() -> Value {
             "version": env!("CARGO_PKG_VERSION")
         },
         "capabilities": {
-            "experimentalApi": false,
+            "experimentalApi": true,
             "requestAttestation": false,
             "mcpServerOpenaiFormElicitation": false
         }
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(
             params["capabilities"],
             json!({
-                "experimentalApi": false,
+                "experimentalApi": true,
                 "requestAttestation": false,
                 "mcpServerOpenaiFormElicitation": false,
             })

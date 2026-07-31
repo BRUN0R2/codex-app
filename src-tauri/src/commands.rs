@@ -46,9 +46,9 @@ pub struct ThreadReadRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ThreadForkRequest {
+pub struct ThreadForkBeforeTurnRequest {
     pub thread_id: String,
-    pub last_turn_id: Option<String>,
+    pub before_turn_id: String,
     pub model: String,
 }
 
@@ -344,19 +344,17 @@ pub async fn engine_thread_read(
 pub async fn engine_thread_fork(
     app: AppHandle,
     engine: State<'_, EngineManager>,
-    request: ThreadForkRequest,
+    request: ThreadForkBeforeTurnRequest,
 ) -> CommandResult<Value> {
     validate_thread_id(&request.thread_id)?;
-    if let Some(last_turn_id) = request.last_turn_id.as_deref() {
-        validate_turn_id(last_turn_id)?;
-    }
+    validate_turn_id(&request.before_turn_id)?;
     let model = validate_model_name(request.model)?;
     engine
         .execute(
             &app,
-            EngineOperation::ForkThread {
+            EngineOperation::ForkThreadBeforeTurn {
                 thread_id: request.thread_id,
-                last_turn_id: request.last_turn_id,
+                before_turn_id: request.before_turn_id,
                 model,
             },
         )

@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createEffect, createSignal } from "solid-js";
 
 import type {
   Attachment,
@@ -18,18 +18,21 @@ import {
 } from "../../shared/components/Icons";
 import { ModelPicker } from "./ModelPicker";
 import { PermissionPicker } from "./PermissionPicker";
+import type { ComposerDraft } from "./composerTypes";
 
 interface ComposerProps {
   busy: boolean;
   config: ConfigReadResponse | null;
   disabled: boolean;
   models: CodexModel[];
+  restoredDraft: ComposerDraft | null;
   workspace: string | null;
   inspectFiles: (paths: string[]) => Promise<Attachment[]>;
   loadCompatibilityContext: () => Promise<void>;
   onChooseWorkspace: () => Promise<void>;
   onInterrupt: () => Promise<void>;
   onOpenSettings: () => void;
+  onRestoredDraftConsumed: (id: string) => void;
   onSend: (text: string, attachments: Attachment[]) => Promise<boolean>;
   saveClipboardImage: (dataBase64: string) => Promise<Attachment>;
   writeSetting: (
@@ -48,6 +51,31 @@ export function Composer(props: ComposerProps) {
   const [attachmentError, setAttachmentError] = createSignal<string | null>(null);
   const [processing, setProcessing] = createSignal(false);
   let textarea: HTMLTextAreaElement | undefined;
+  let restoredDraftId: string | null = null;
+
+  createEffect(() => {
+    const draft = props.restoredDraft;
+    if (draft === null || draft.id === restoredDraftId) {
+      return;
+    }
+    restoredDraftId = draft.id;
+    setText(draft.text);
+    setAttachments(
+      draft.attachments.slice(0, MAX_ATTACHMENTS).map((attachment) => ({
+        ...attachment,
+      })),
+    );
+    setAttachmentError(null);
+    props.onRestoredDraftConsumed(draft.id);
+    queueMicrotask(() => {
+      if (textarea !== undefined) {
+        resizeTextarea(textarea);
+        if (!props.busy && !props.disabled) {
+          textarea.focus();
+        }
+      }
+    });
+  });
 
   async function selectFiles() {
     setAttachmentError(null);

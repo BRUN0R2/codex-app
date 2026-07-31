@@ -11,6 +11,7 @@ import {
   archiveThread as archiveCodexThread,
   cancelLogin as cancelChatGptLogin,
   describeCommandError,
+  forkThreadBeforeTurn,
   inspectAttachments,
   interruptTurn,
   listModels,
@@ -21,6 +22,7 @@ import {
   readAccountRateLimits,
   readConfig,
   readConfigRequirements,
+  readThread,
   readWindowsSandboxReadiness,
   respondToServerRequest,
   resumeThread as resumeCodexThread,
@@ -58,6 +60,7 @@ import {
   type RuntimeDiagnostic,
   type RuntimeStartResponse,
   type RuntimeStatus,
+  type TurnStartResponse,
   type WindowsSandboxReadinessResponse,
   type WindowsSandboxSetupCompletedNotification,
   type WindowsSandboxSetupMode,
@@ -69,6 +72,7 @@ import {
   type TurnProgressSummary,
 } from "../chat/createTurnProgress";
 import type { MessageEntry, TimelineEntry } from "../chat/timelineTypes";
+import type { ComposerDraft } from "../chat/composerTypes";
 import { createServerRequestQueue } from "../approvals/createServerRequestQueue";
 import type {
   InteractiveServerRequest,
@@ -98,12 +102,26 @@ import {
   readRequiredNotificationThreadId,
 } from "./threadNotificationRouting";
 import {
+  createSafetyBufferingController,
+  type SafetyBufferedTurnInput,
+  type SafetyBufferingViewState,
+} from "./createSafetyBufferingController";
+import { parseModelSafetyBufferingUpdatedNotification } from "./safetyBufferingProtocol";
+import {
+  threadTurnHasUserMessage,
+  validateSafetyRetryFork,
+  validateSafetyRetryForkPoint,
+} from "./safetyBufferingRetry";
+import {
   parseWindowsWorldWritableWarning,
   WORLD_WRITABLE_WARNING_CONFIG_KEY,
 } from "../security/windowsWorldWritableWarningProtocol";
 
 export type CompatibilityContextState = "failed" | "idle" | "loading" | "ready";
 export type AccountRateLimitsState = "failed" | "idle" | "loading" | "ready";
+const MAX_NOTIFICATION_ID_CHARACTERS = 256;
+const SAFETY_BUFFERING_HELP_URL =
+  "https://help.openai.com/en/articles/20001326";
 export type WindowsSandboxSetupState =
   | { type: "failed"; error: string; mode: WindowsSandboxSetupMode }
   | { type: "idle" }
@@ -133,6 +151,7 @@ export interface CodexSession {
   activeTurnId: Accessor<string | null>;
   pendingServerRequests: Accessor<PendingServerRequest[]>;
   busy: Accessor<boolean>;
+  composerDraft: Accessor<ComposerDraft | null>;
   compatibilityContextState: Accessor<CompatibilityContextState>;
   config: Accessor<ConfigReadResponse | null>;
   appNotices: Accessor<readonly AppNotice[]>;
@@ -149,6 +168,7 @@ export interface CodexSession {
   projects: Accessor<ProjectRecord[]>;
   runtime: Accessor<RuntimeStartResponse | null>;
   runtimeStatus: Accessor<RuntimeStatus>;
+  safetyBufferingState: Accessor<SafetyBufferingViewState>;
   signedIn: Accessor<boolean>;
   threadId: Accessor<string | null>;
   threadLibraryState: Accessor<ThreadLibraryState>;
@@ -160,6 +180,8 @@ export interface CodexSession {
   workspace: Accessor<string | null>;
   chooseWorkspace: () => Promise<void>;
   clearError: () => void;
+  consumeComposerDraft: (id: string) => void;
+  dismissSafetyBuffering: () => void;
   dismissAppNotice: (notice: AppNotice) => void;
   cancelLogin: () => Promise<void>;
   inspectFiles: (paths: string[]) => Promise<Attachment[]>;
@@ -172,6 +194,7 @@ export interface CodexSession {
   newThread: () => void;
   newThreadForProject: (path: string) => Promise<void>;
   openThread: (threadId: string) => Promise<void>;
+  openSafetyBufferingHelp: () => Promise<void>;
   archiveThread: (threadId: string) => Promise<void>;
   removeProject: (path: string) => Promise<void>;
   renameThread: (threadId: string, name: string) => Promise<boolean>;
@@ -182,6 +205,7 @@ export interface CodexSession {
     response: ServerResponseFor<T>,
   ) => Promise<boolean>;
   resolveWorldWritableWarning: (remember: boolean) => Promise<boolean>;
+  retrySafetyBufferedTurn: () => Promise<boolean>;
   saveClipboardImage: (dataBase64: string) => Promise<Attachment>;
   selectProject: (path: string) => Promise<void>;
   sendMessage: (text: string, attachments: Attachment[]) => Promise<boolean>;
@@ -225,7 +249,8 @@ export function createCodexSession(): CodexSession {
   const [threadId, setThreadId] = createSignal<string | null>(null);
   const [activeTurnId, setActiveTurnId] = createSignal<string | null>(null);
   const [openingThreadId, setOpeningThreadId] = createSignal<string | null>(null);
-  const [busy, setBusy] = createSignal(false);
+  const [turnBusy, setTurnBusy] = createSignal(false);
+  const [composerDraft, setComposerDraft] = createSignal<ComposerDraft | null>(null);
   const serverRequests = createServerRequestQueue();
   const pendingServerRequests = createMemo(() =>
     serverRequests
@@ -237,6 +262,18 @@ export function createCodexSession(): CodexSession {
   const appNotices = createAppNoticeCenter();
   const threadNotices = createThreadNoticeLibrary({
     reportDiagnostic: (message) => addDiagnostic("stderr", message),
+  });
+  const safetyBuffering = createSafetyBufferingController();
+  const busy = createMemo(
+    () => turnBusy() || safetyBuffering.retryingFor(threadId()),
+  );
+  const safetyBufferingState = createMemo<SafetyBufferingViewState>(() => {
+    const state = safetyBuffering.stateFor(threadId());
+    return state.type === "waiting"
+      && state.turnId === activeTurnId()
+      && turnBusy()
+      ? state
+      : { type: "idle" };
   });
   const [compatibilityContextState, setCompatibilityContextState] =
     createSignal<CompatibilityContextState>("idle");
@@ -419,6 +456,8 @@ export function createCodexSession(): CodexSession {
         setWorldWritableWarningState({ type: "idle" });
         serverRequests.clear();
         threadNotices.clear();
+        safetyBuffering.clear();
+        setComposerDraft(null);
         threadLibrary.reset();
         return;
       }
@@ -619,6 +658,8 @@ export function createCodexSession(): CodexSession {
       setWorldWritableWarningState({ type: "idle" });
       serverRequests.clear();
       threadNotices.clear();
+      safetyBuffering.clear();
+      setComposerDraft(null);
       threadLibrary.reset();
       setThreadId(null);
       timeline.reset();
@@ -723,6 +764,8 @@ export function createCodexSession(): CodexSession {
   function resetConversation() {
     setThreadId(null);
     setActiveTurnId(null);
+    setTurnBusy(false);
+    setComposerDraft(null);
     timeline.reset();
     turnProgress.reset();
   }
@@ -739,8 +782,13 @@ export function createCodexSession(): CodexSession {
         resumedTurnId = turn.id;
       }
     }
+    if (resumedTurnId === null) {
+      safetyBuffering.clearWaitingState(thread.id);
+    } else {
+      safetyBuffering.turnStarted(thread.id, resumedTurnId);
+    }
     setActiveTurnId(resumedTurnId);
-    setBusy(thread.status.type === "active" || resumedTurnId !== null);
+    setTurnBusy(thread.status.type === "active" || resumedTurnId !== null);
   }
 
   async function openThread(requestedThreadId: string) {
@@ -794,6 +842,7 @@ export function createCodexSession(): CodexSession {
       threadLibrary.remove(threadIdToArchive);
       serverRequests.removeForThread(threadIdToArchive);
       threadNotices.remove(threadIdToArchive);
+      safetyBuffering.remove(threadIdToArchive);
       if (threadIdToArchive === threadId()) {
         resetConversation();
       }
@@ -818,7 +867,7 @@ export function createCodexSession(): CodexSession {
 
     const clientUserMessageId = crypto.randomUUID();
     timeline.addOptimisticUserMessage(clientUserMessageId, text, attachments);
-    setBusy(true);
+    setTurnBusy(true);
     setError(null);
 
     try {
@@ -836,11 +885,23 @@ export function createCodexSession(): CodexSession {
         text,
         attachments: attachments.map(({ path }) => ({ path })),
       });
-      setActiveTurnId(response.turn.id);
+      if (!safetyBuffering.isCompleted(currentThreadId, response.turn.id)) {
+        safetyBuffering.turnStarted(currentThreadId, response.turn.id);
+        safetyBuffering.recordSubmittedTurn({
+          threadId: currentThreadId,
+          turnId: response.turn.id,
+          text,
+          attachments,
+        });
+        setActiveTurnId(response.turn.id);
+      } else {
+        setActiveTurnId(null);
+        setTurnBusy(false);
+      }
       timeline.markUserMessage(clientUserMessageId, "complete");
       return true;
     } catch (reason) {
-      setBusy(false);
+      setTurnBusy(false);
       timeline.markUserMessage(clientUserMessageId, "failed");
       setError(describeCommandError(reason));
       return false;
@@ -860,6 +921,167 @@ export function createCodexSession(): CodexSession {
       });
     } catch (reason) {
       setError(describeCommandError(reason));
+    }
+  }
+
+  function dismissSafetyBuffering() {
+    const current = safetyBufferingState();
+    if (current.type === "waiting" && !current.retrying) {
+      safetyBuffering.dismiss(current.threadId, current.turnId);
+    }
+  }
+
+  async function openSafetyBufferingHelp() {
+    try {
+      await openExternalUrl(SAFETY_BUFFERING_HELP_URL);
+    } catch (reason) {
+      setError(describeCommandError(reason));
+    }
+  }
+
+  function consumeComposerDraft(id: string) {
+    setComposerDraft((current) => current?.id === id ? null : current);
+  }
+
+  function restoreComposerInput(input: SafetyBufferedTurnInput) {
+    setComposerDraft({
+      id: crypto.randomUUID(),
+      text: input.text,
+      attachments: input.attachments.map((attachment) => ({ ...attachment })),
+    });
+  }
+
+  async function retrySafetyBufferedTurn(): Promise<boolean> {
+    const current = safetyBufferingState();
+    const currentThreadId = threadId();
+    const currentTurnId = activeTurnId();
+    if (
+      current.type !== "waiting"
+      || !current.canRetry
+      || current.retrying
+      || currentThreadId !== current.threadId
+      || currentTurnId !== current.turnId
+    ) {
+      return false;
+    }
+
+    const retry = safetyBuffering.beginRetry(
+      current.threadId,
+      current.turnId,
+    );
+    if (retry === null) {
+      return false;
+    }
+
+    let interrupted = false;
+    setError(null);
+    try {
+      await interruptTurn({
+        threadId: retry.threadId,
+        turnId: retry.turnId,
+      });
+      interrupted = true;
+      const source = await readThread({ threadId: retry.threadId });
+      validateSafetyRetryForkPoint(source.thread, retry.turnId);
+      const fork = await forkThreadBeforeTurn({
+        threadId: retry.threadId,
+        beforeTurnId: retry.turnId,
+        model: retry.fasterModel,
+      });
+      validateSafetyRetryFork(source.thread, fork.thread, retry.turnId);
+      projectWorkspace.add(fork.thread.cwd);
+      threadLibrary.merge([source.thread, fork.thread]);
+
+      const clientUserMessageId = crypto.randomUUID();
+      let retryTurn: TurnStartResponse;
+      try {
+        retryTurn = await startTurn({
+          threadId: fork.thread.id,
+          clientUserMessageId,
+          text: retry.input.text,
+          attachments: retry.input.attachments.map(({ path }) => ({ path })),
+          model: retry.fasterModel,
+          effort: "low",
+        });
+      } catch (reason) {
+        hydrateThread(fork.thread);
+        restoreComposerInput(retry.input);
+        safetyBuffering.finishRetry(retry);
+        const detail = describeCommandError(reason);
+        setError(
+          `A nova tarefa foi criada, mas a solicitação não pôde ser reenviada. `
+          + `A entrada original foi restaurada. ${detail}`,
+        );
+        return false;
+      }
+
+      const retryAlreadyCompleted = safetyBuffering.isCompleted(
+        fork.thread.id,
+        retryTurn.turn.id,
+      );
+      hydrateThread(fork.thread);
+      if (retryAlreadyCompleted) {
+        safetyBuffering.completeTurn(fork.thread.id, retryTurn.turn.id);
+      }
+      timeline.addOptimisticUserMessage(
+        clientUserMessageId,
+        retry.input.text,
+        [...retry.input.attachments],
+      );
+      timeline.markUserMessage(clientUserMessageId, "complete");
+      if (retryAlreadyCompleted) {
+        setActiveTurnId(null);
+        setTurnBusy(false);
+      } else {
+        safetyBuffering.turnStarted(fork.thread.id, retryTurn.turn.id);
+        safetyBuffering.recordSubmittedTurn({
+          threadId: fork.thread.id,
+          turnId: retryTurn.turn.id,
+          text: retry.input.text,
+          attachments: retry.input.attachments,
+        });
+        setActiveTurnId(retryTurn.turn.id);
+        setTurnBusy(true);
+      }
+      safetyBuffering.finishRetry(retry);
+
+      try {
+        const resumed = await resumeCodexThread({ threadId: fork.thread.id });
+        const completedWhileResuming = safetyBuffering.isCompleted(
+          fork.thread.id,
+          retryTurn.turn.id,
+        );
+        if (threadId() === fork.thread.id) {
+          hydrateThread(resumed.thread);
+          if (!threadTurnHasUserMessage(resumed.thread, retryTurn.turn.id)) {
+            timeline.addOptimisticUserMessage(
+              clientUserMessageId,
+              retry.input.text,
+              [...retry.input.attachments],
+            );
+            timeline.markUserMessage(clientUserMessageId, "complete");
+          }
+          if (completedWhileResuming) {
+            setActiveTurnId(null);
+            setTurnBusy(false);
+          }
+        }
+        threadLibrary.merge([resumed.thread]);
+      } catch (reason) {
+        addDiagnostic(
+          "stderr",
+          `O retry foi iniciado, mas a leitura imediata da nova tarefa falhou: ${describeCommandError(reason)}`,
+        );
+      }
+      return true;
+    } catch (reason) {
+      const message = describeCommandError(reason);
+      if (interrupted) {
+        restoreComposerInput(retry.input);
+      }
+      safetyBuffering.failRetry(retry, message);
+      setError(message);
+      return false;
     }
   }
 
@@ -1116,6 +1338,16 @@ export function createCodexSession(): CodexSession {
         }
         break;
       }
+      case "model/safetyBuffering/updated": {
+        try {
+          safetyBuffering.handle(
+            parseModelSafetyBufferingUpdatedNotification(notification.params),
+          );
+        } catch (reason) {
+          addDiagnostic("stderr", describeCommandError(reason));
+        }
+        break;
+      }
       case "windowsSandbox/setupCompleted": {
         try {
           const completed = parseWindowsSandboxSetupCompleted(params);
@@ -1212,6 +1444,7 @@ export function createCodexSession(): CodexSession {
           threadLibrary.remove(removedThreadId);
           serverRequests.removeForThread(removedThreadId);
           threadNotices.remove(removedThreadId);
+          safetyBuffering.remove(removedThreadId);
           if (removedThreadId === threadId()) {
             resetConversation();
           }
@@ -1225,29 +1458,62 @@ export function createCodexSession(): CodexSession {
         threadLibrary.refreshInBackground();
         break;
       case "turn/started": {
-        if (!notificationTargetsCurrentThread(notification.method, params)) {
+        const targetThreadId = readNotificationThreadId(
+          notification.method,
+          params,
+        );
+        const turn = asObject(params?.turn);
+        const startedTurnId = readNotificationTurnId(
+          notification.method,
+          readString(turn, "id"),
+        );
+        if (targetThreadId === undefined || startedTurnId === undefined) {
+          break;
+        }
+        if (safetyBuffering.isCompleted(targetThreadId, startedTurnId)) {
           threadLibrary.refreshInBackground();
           break;
         }
-        const turn = asObject(params?.turn);
+        safetyBuffering.turnStarted(targetThreadId, startedTurnId);
+        if (!isActiveThreadTarget(targetThreadId, threadId())) {
+          threadLibrary.refreshInBackground();
+          break;
+        }
         turnProgress.reset();
-        setActiveTurnId(readString(turn, "id") ?? null);
-        setBusy(true);
+        setActiveTurnId(startedTurnId);
+        setTurnBusy(true);
         break;
       }
       case "turn/completed": {
-        if (!notificationTargetsCurrentThread(notification.method, params)) {
+        const targetThreadId = readNotificationThreadId(
+          notification.method,
+          params,
+        );
+        const turn = asObject(params?.turn);
+        const completedTurnId = readNotificationTurnId(
+          notification.method,
+          readString(turn, "id"),
+        );
+        if (targetThreadId === undefined || completedTurnId === undefined) {
+          break;
+        }
+        safetyBuffering.completeTurn(targetThreadId, completedTurnId);
+        if (!isActiveThreadTarget(targetThreadId, threadId())) {
           threadLibrary.refreshInBackground();
           break;
         }
-        const turn = asObject(params?.turn);
+        const currentTurnId = activeTurnId();
+        if (currentTurnId !== completedTurnId) {
+          threadLibrary.refreshInBackground();
+          break;
+        }
         const turnError = asObject(turn?.error);
         const message = readString(turnError, "message");
         if (message !== undefined) {
           setError(message);
         }
         setActiveTurnId(null);
-        setBusy(false);
+        setTurnBusy(false);
         threadLibrary.refreshInBackground();
         break;
       }
@@ -1264,8 +1530,25 @@ export function createCodexSession(): CodexSession {
         turnProgress.updatePlan(params);
         break;
       case "item/started":
-      case "item/completed":
-        if (!notificationTargetsCurrentThread(notification.method, params)) {
+      case "item/completed": {
+        const targetThreadId = readNotificationThreadId(
+          notification.method,
+          params,
+        );
+        if (targetThreadId === undefined) {
+          break;
+        }
+        const item = asObject(params?.item);
+        if (readString(item, "type") === "agentMessage") {
+          const targetTurnId = readNotificationTurnId(
+            notification.method,
+            readString(params, "turnId"),
+          );
+          if (targetTurnId !== undefined) {
+            safetyBuffering.markResponseStarted(targetThreadId, targetTurnId);
+          }
+        }
+        if (!isActiveThreadTarget(targetThreadId, threadId())) {
           break;
         }
         timeline.handleItem(
@@ -1273,12 +1556,26 @@ export function createCodexSession(): CodexSession {
           notification.method === "item/completed",
         );
         break;
-      case "item/agentMessage/delta":
-        if (!notificationTargetsCurrentThread(notification.method, params)) {
+      }
+      case "item/agentMessage/delta": {
+        const targetThreadId = readNotificationThreadId(
+          notification.method,
+          params,
+        );
+        const targetTurnId = readNotificationTurnId(
+          notification.method,
+          readString(params, "turnId"),
+        );
+        if (targetThreadId === undefined || targetTurnId === undefined) {
+          break;
+        }
+        safetyBuffering.markResponseStarted(targetThreadId, targetTurnId);
+        if (!isActiveThreadTarget(targetThreadId, threadId())) {
           break;
         }
         timeline.appendAgentDelta(params);
         break;
+      }
       case "item/commandExecution/outputDelta":
         if (!notificationTargetsCurrentThread(notification.method, params)) {
           break;
@@ -1382,6 +1679,24 @@ export function createCodexSession(): CodexSession {
     }
   }
 
+  function readNotificationTurnId(
+    method: string,
+    value: string | undefined,
+  ): string | undefined {
+    if (
+      value === undefined
+      || value.trim().length === 0
+      || value.length > MAX_NOTIFICATION_ID_CHARACTERS
+    ) {
+      addDiagnostic(
+        "stderr",
+        `Notificação incompatível do Codex em ${method}: turnId ausente ou inválido.`,
+      );
+      return undefined;
+    }
+    return value;
+  }
+
   function notificationTargetsCurrentThread(
     method: string,
     params: JsonObject | undefined,
@@ -1408,6 +1723,7 @@ export function createCodexSession(): CodexSession {
     activeTurnId,
     pendingServerRequests,
     busy,
+    composerDraft,
     cancelLogin: cancelPendingLogin,
     compatibilityContextState,
     config,
@@ -1425,6 +1741,7 @@ export function createCodexSession(): CodexSession {
     projects: projectWorkspace.projects,
     runtime,
     runtimeStatus,
+    safetyBufferingState,
     signedIn,
     currentThreadTitle,
     threadId,
@@ -1436,6 +1753,8 @@ export function createCodexSession(): CodexSession {
     workspace,
     chooseWorkspace,
     clearError: () => setError(null),
+    consumeComposerDraft,
+    dismissSafetyBuffering,
     dismissAppNotice: appNotices.dismiss,
     inspectFiles: inspectAttachments,
     interrupt,
@@ -1447,6 +1766,7 @@ export function createCodexSession(): CodexSession {
     newThread,
     newThreadForProject,
     openThread,
+    openSafetyBufferingHelp,
     archiveThread,
     removeProject,
     renameThread,
@@ -1454,6 +1774,7 @@ export function createCodexSession(): CodexSession {
     refreshAccountRateLimits,
     respondToInteractiveRequest,
     resolveWorldWritableWarning,
+    retrySafetyBufferedTurn,
     saveClipboardImage: savePastedImage,
     selectProject,
     sendMessage,

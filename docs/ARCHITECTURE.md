@@ -122,6 +122,24 @@ um buffer binário. O componente cria e revoga a `Blob URL`, deixando falhas
 visíveis sem manter base64 na árvore reativa. Geração de imagem conserva apenas
 metadados e `savedPath`; o payload base64 do protocolo é descartado na fronteira.
 
+### Safety buffering
+
+`safetyBufferingProtocol` valida a notificação oficial e
+`createSafetyBufferingController` concentra sua máquina de estados. A sessão
+registra uma cópia limitada da entrada submetida, isola dados por tarefa e turno
+e mantém tombstones de conclusão para impedir que eventos tardios reabram um
+aviso. Fatos de lifecycle também possuem limite explícito e sobrevivem à troca
+do registro visual. O início de qualquer resposta do agente revoga o retry;
+fechar o aviso altera somente sua apresentação e nunca o estado do turno.
+
+O retry é uma transação explícita: interromper, ler a tarefa com turnos, validar
+o ponto de bifurcação, criar um fork antes do turno com continuação de goals
+adiada e iniciar uma cópia da entrada no modelo mais rápido. O fork retornado
+precisa ser uma tarefa nova, do mesmo workspace, conter exatamente o prefixo
+esperado e não possuir turno em andamento. Falha após a bifurcação preserva o
+fork e restaura texto e anexos no compositor; sucesso troca a tarefa ativa e a
+retoma imediatamente para reconciliar eventos concorrentes.
+
 ### Solicitações interativas
 
 `src/features/approvals` é uma fronteira de protocolo própria, não um modal
@@ -146,9 +164,13 @@ Cada contrato possui um renderer inline próximo ao compositor:
 - MCP separa formulário tipado, autorização por URL e formulário opaco não
   suportado, que só pode ser cancelado com segurança.
 
-O handshake da ponte declara `experimentalApi`, `requestAttestation` e
-`mcpServerOpenaiFormElicitation` como falsos. Assim, o cliente não anuncia
-ferramentas dinâmicas, atestados ou formulários opacos que ainda não implementa.
+O handshake da ponte declara `experimentalApi` como verdadeiro somente para os
+campos oficiais de fork `beforeTurnId` e `deferGoalContinuation` usados pelo
+safety buffering. `requestAttestation` e `mcpServerOpenaiFormElicitation`
+permanecem falsos: o cliente não anuncia atestados nem formulários opacos que
+ainda não implementa, e eventos desconhecidos continuam falhando visivelmente.
+O opener continua em allowlist: além da autorização OAuth, somente a URL exata
+da documentação oficial de safety buffering pode ser aberta por esse aviso.
 
 ### Configurações
 

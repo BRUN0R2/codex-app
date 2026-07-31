@@ -27,7 +27,7 @@ import type {
   RuntimeStatus,
   ServerResponseRequest,
   ThreadArchiveRequest,
-  ThreadForkRequest,
+  ThreadForkBeforeTurnRequest,
   ThreadForkResponse,
   ThreadListRequest,
   ThreadListResponse,
@@ -134,8 +134,8 @@ export function readThread(
   return invoke("engine_thread_read", { request });
 }
 
-export function forkThread(
-  request: ThreadForkRequest,
+export function forkThreadBeforeTurn(
+  request: ThreadForkBeforeTurnRequest,
 ): Promise<ThreadForkResponse> {
   return invoke("engine_thread_fork", { request });
 }

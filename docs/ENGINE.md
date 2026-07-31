@@ -26,7 +26,8 @@ independente da ponte.
 A superfície é uma enumeração fechada:
 
 - conta: ler, consultar limites de uso, entrar com ChatGPT, cancelar login e sair;
-- tarefa: listar, iniciar, retomar, renomear, arquivar, enviar turno e interromper;
+- tarefa: listar, iniciar, retomar, ler, bifurcar antes de um turno, renomear,
+  arquivar, enviar turno e interromper;
 - configuração: ler, ler requisitos, escrever e escrever em lote;
 - segurança: consultar a prontidão e iniciar a preparação confirmada do sandbox
   do Windows;
@@ -38,7 +39,8 @@ Somente o adaptador de compatibilidade conhece métodos como `thread/list`,
 invoca comandos Tauri pequenos e trabalha com tipos de domínio. A listagem usa
 paginação limitada, ordenação por recência e exclui tarefas arquivadas. Leitura
 completa e fork são operações fechadas: IDs e modelo são limitados na fronteira,
-e `turn/start` só aceita o enum oficial de esforço quando há override.
+o fork de retry exclui o turno alvo e adia a continuação automática de goals, e
+`turn/start` só aceita o enum oficial de esforço quando há override.
 
 `account/rateLimits/read` também fica atrás de uma operação fechada e sem
 parâmetros. A sessão o consulta apenas para contas ChatGPT, de forma deduplicada,
