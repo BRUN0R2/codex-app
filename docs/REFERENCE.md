@@ -26,6 +26,10 @@ O login nativo foi validado em runtime antes desta reescrita. Essa validação
 confirma o protocolo OAuth, não autoriza dependência da CLI nem compatibilidade
 com o armazenamento dela.
 
+O catálogo declara explicitamente `0.146.0` como versão de compatibilidade do
+cliente no parâmetro `client_version`. Esse contrato acompanha a versão estável
+do protocolo estudado e é independente da versão comercial do aplicativo.
+
 ## Decisões próprias
 
 Este projeto implementa do zero:

@@ -233,18 +233,35 @@ export function createAppController(): AppController {
   }
 
   async function loadAuthenticatedState(): Promise<void> {
-    const [configuration, catalog, threadPage] = await Promise.all([
-      readConfig(),
-      listModels(),
-      listThreads(null),
-    ]);
+    await Promise.all([loadLocalAuthenticatedState(), loadModelCatalog()]);
+    if (!disposed) {
+      void refreshRateLimits();
+    }
+  }
+
+  async function loadLocalAuthenticatedState(): Promise<void> {
+    const [configuration, threadPage] = await Promise.all([readConfig(), listThreads(null)]);
+    if (disposed) {
+      return;
+    }
     batch(() => {
       setConfig(configuration);
-      setModels(catalog.data.filter((model) => !model.hidden));
       setThreads(threadPage.data);
       setThreadsNextCursor(threadPage.nextCursor);
     });
-    void refreshRateLimits();
+  }
+
+  async function loadModelCatalog(): Promise<void> {
+    try {
+      const catalog = await listModels();
+      if (!disposed) {
+        setModels(catalog.data.filter((model) => !model.hidden));
+      }
+    } catch (reason) {
+      if (!disposed) {
+        reportError(reason);
+      }
+    }
   }
 
   function handleNotification(notification: EngineNotification): void {

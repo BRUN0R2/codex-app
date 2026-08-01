@@ -22,6 +22,7 @@ use crate::engine::native::auth::AuthSession;
 use crate::error::AppError;
 
 const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const MODEL_CATALOG_COMPATIBILITY_VERSION: &str = "0.146.0";
 pub const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -53,8 +54,7 @@ impl ProviderClient {
         session: &AuthSession,
         maximum_models: usize,
     ) -> Result<ModelCatalog, AppError> {
-        let version = env!("CARGO_PKG_VERSION");
-        let url = format!("{CODEX_BASE_URL}/models?client_version={version}");
+        let url = model_catalog_url();
         let value: super::models::ModelsWire = self
             .get_json(session, &url, "model catalog", 4 * 1_048_576)
             .await?;
@@ -168,6 +168,10 @@ impl ProviderClient {
             .header(AUTHORIZATION, bearer)
             .header("ChatGPT-Account-ID", account))
     }
+}
+
+fn model_catalog_url() -> String {
+    format!("{CODEX_BASE_URL}/models?client_version={MODEL_CATALOG_COMPATIBILITY_VERSION}")
 }
 
 fn build_client() -> Result<reqwest::Client, AppError> {
@@ -312,6 +316,22 @@ mod tests {
     use reqwest::header::HeaderValue;
 
     use super::CloudflareCookieStore;
+    use super::MODEL_CATALOG_COMPATIBILITY_VERSION;
+    use super::model_catalog_url;
+
+    #[test]
+    fn model_catalog_url_uses_the_explicit_compatibility_version() {
+        let url =
+            reqwest::Url::parse(&model_catalog_url()).expect("model catalog URL should parse");
+        let client_version = url
+            .query_pairs()
+            .find_map(|(name, value)| (name == "client_version").then(|| value.into_owned()));
+
+        assert_eq!(
+            client_version.as_deref(),
+            Some(MODEL_CATALOG_COMPATIBILITY_VERSION)
+        );
+    }
 
     #[test]
     fn cookie_store_retains_only_cloudflare_infrastructure_cookies() {
