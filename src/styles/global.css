@@ -33,6 +33,7 @@
   --content-radius: 14px;
   --font-caption: 0.76rem;
   --font-control: 0.84rem;
+  --font-prominent-control: 0.88rem;
   --font-body: 0.92rem;
   --shadow: 0 16px 55px rgb(0 0 0 / 42%);
 }
@@ -1381,7 +1382,7 @@ details.activity-card > summary::-webkit-details-marker {
 
 .composer-toolbar {
   display: flex;
-  min-height: 46px;
+  min-height: 48px;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
@@ -1430,7 +1431,7 @@ details.activity-card > summary::-webkit-details-marker {
 .composer-leading > button:not(.permission-button),
 .permission-button {
   display: inline-flex;
-  height: 30px;
+  height: 32px;
   align-items: center;
   justify-content: center;
   gap: 5px;
@@ -1456,7 +1457,10 @@ details.activity-card > summary::-webkit-details-marker {
   color: var(--orange);
 }
 
-.permission-button span { font-size: 0.8rem; }
+.permission-button span {
+  font-size: var(--font-prominent-control);
+  font-weight: 500;
+}
 
 .composer-menu-anchor {
   position: relative;
@@ -1469,14 +1473,15 @@ details.activity-card > summary::-webkit-details-marker {
 .model-button {
   display: inline-flex;
   max-width: 220px;
-  height: 30px;
+  height: 32px;
   align-items: center;
   gap: 5px;
   padding: 0 10px;
   border-radius: 99px;
   background: transparent;
   color: var(--text-soft);
-  font-size: 0.8rem;
+  font-size: var(--font-prominent-control);
+  font-weight: 500;
 }
 
 .model-button-name,
