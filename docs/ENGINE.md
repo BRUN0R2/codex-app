@@ -80,6 +80,9 @@ cancelamento interrompe o turno.
 versão lida; conflito retorna erro em vez de sobrescrever uma alteração
 concorrente. Modelo, esforço e tier pertencem a uma única mutação
 `modelDefaults`, evitando configurações intermediárias incoerentes.
+O compositor pode selecionar esses três valores para um único turno sem alterar
+a configuração. O tier enviado é sempre uma escolha fechada entre o padrão do
+modelo e um identificador anunciado pelo catálogo.
 
 Os três perfis válidos são:
 

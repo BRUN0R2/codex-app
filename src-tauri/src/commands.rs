@@ -58,6 +58,23 @@ pub struct TurnStartRequest {
     attachments: Vec<TurnAttachment>,
     model: Option<String>,
     effort: Option<ReasoningEffort>,
+    service_tier: TurnServiceTierSelection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+enum TurnServiceTierSelection {
+    Default,
+    Tier { id: String },
+}
+
+impl TurnServiceTierSelection {
+    fn into_option(self) -> Option<String> {
+        match self {
+            Self::Default => None,
+            Self::Tier { id } => Some(id),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,6 +280,7 @@ pub async fn engine_turn_start(
                 input,
                 model,
                 effort: request.effort,
+                service_tier: request.service_tier.into_option(),
             },
         )
         .await
@@ -374,6 +392,10 @@ fn validate_model_name(model: String) -> CommandResult<String> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    use super::TurnServiceTierSelection;
+
     #[test]
     fn canonical_windows_prefix_is_not_exposed_to_the_ui() {
         assert_eq!(
@@ -384,5 +406,19 @@ mod tests {
             super::normalize_windows_canonical_path(r"\\?\UNC\server\share"),
             r"\\server\share"
         );
+    }
+
+    #[test]
+    fn turn_service_tier_selection_distinguishes_default_from_a_tier() {
+        let default: TurnServiceTierSelection =
+            serde_json::from_value(json!({ "type": "default" })).expect("default should decode");
+        let tier: TurnServiceTierSelection = serde_json::from_value(json!({
+            "type": "tier",
+            "id": "priority"
+        }))
+        .expect("tier should decode");
+
+        assert_eq!(default.into_option(), None);
+        assert_eq!(tier.into_option().as_deref(), Some("priority"));
     }
 }

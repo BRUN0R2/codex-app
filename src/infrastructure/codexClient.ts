@@ -172,6 +172,7 @@ export interface StartTurnRequest {
   readonly attachments: readonly { readonly path: string }[];
   readonly model: string | null;
   readonly effort: ReasoningEffort | null;
+  readonly serviceTier: string | null;
 }
 
 export function startTurn(request: StartTurnRequest): Promise<TurnStartResponse> {
@@ -180,6 +181,7 @@ export function startTurn(request: StartTurnRequest): Promise<TurnStartResponse>
     clientUserMessageId: string;
     effort?: ReasoningEffort;
     model?: string;
+    serviceTier: { readonly type: "default" } | { readonly type: "tier"; readonly id: string };
     text: string;
     threadId: string;
   } = {
@@ -187,6 +189,10 @@ export function startTurn(request: StartTurnRequest): Promise<TurnStartResponse>
     clientUserMessageId: request.clientUserMessageId,
     text: request.text,
     attachments: request.attachments,
+    serviceTier:
+      request.serviceTier === null
+        ? { type: "default" }
+        : { type: "tier", id: request.serviceTier },
   };
   if (request.model !== null) {
     payload.model = request.model;

@@ -1,4 +1,13 @@
-import { createMemo, createSignal, For, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  type JSX,
+  onCleanup,
+  onMount,
+  Show,
+} from "solid-js";
 
 import type { CodexThread, ProjectRecord } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
@@ -14,6 +23,10 @@ export interface SidebarProps {
 export function Sidebar(props: SidebarProps) {
   const [renamingId, setRenamingId] = createSignal<string | null>(null);
   const [renameValue, setRenameValue] = createSignal("");
+  const [projectsExpanded, setProjectsExpanded] = createSignal(true);
+  const [recentsExpanded, setRecentsExpanded] = createSignal(true);
+  const [accountMenuOpen, setAccountMenuOpen] = createSignal(false);
+  let sidebarElement: HTMLElement | undefined;
   const grouped = createMemo(() =>
     props.controller.projects().map((project) => ({
       project,
@@ -33,6 +46,33 @@ export function Sidebar(props: SidebarProps) {
       .sort((left, right) => right.updatedAt - left.updatedAt),
   );
 
+  createEffect(() => {
+    if (props.collapsed) {
+      setAccountMenuOpen(false);
+    }
+  });
+
+  function closeAccountMenuFromPointer(event: PointerEvent): void {
+    if (event.target instanceof Node && !sidebarElement?.contains(event.target)) {
+      setAccountMenuOpen(false);
+    }
+  }
+
+  function closeAccountMenuFromKeyboard(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      setAccountMenuOpen(false);
+    }
+  }
+
+  onMount(() => {
+    document.addEventListener("pointerdown", closeAccountMenuFromPointer);
+    document.addEventListener("keydown", closeAccountMenuFromKeyboard);
+  });
+  onCleanup(() => {
+    document.removeEventListener("pointerdown", closeAccountMenuFromPointer);
+    document.removeEventListener("keydown", closeAccountMenuFromKeyboard);
+  });
+
   function beginRename(thread: CodexThread): void {
     setRenamingId(thread.id);
     setRenameValue(threadTitle(thread));
@@ -47,13 +87,15 @@ export function Sidebar(props: SidebarProps) {
   }
 
   return (
-    <aside class="sidebar" classList={{ collapsed: props.collapsed }}>
+    <aside class="sidebar" classList={{ collapsed: props.collapsed }} ref={sidebarElement}>
       <header class="sidebar-header">
         <button class="brand-button" onClick={props.onOpenSettings} type="button">
-          <span class="brand-mark">C</span>
+          <span class="brand-compact">
+            <Icon name="bot" size={18} />
+          </span>
           <Show when={!props.collapsed}>
-            <span>Codex</span>
-            <Icon name="chevronDown" size={14} />
+            <span class="brand-label">Codex</span>
+            <Icon name="chevronDown" size={13} />
           </Show>
         </button>
       </header>
@@ -62,106 +104,192 @@ export function Sidebar(props: SidebarProps) {
         class="new-thread-button"
         disabled={props.controller.busy()}
         onClick={() => void props.controller.newThread()}
-        title="Nova tarefa"
+        title="Novo chat"
         type="button"
       >
-        <Icon name="plus" />
+        <Icon name="edit" size={17} />
         <Show when={!props.collapsed}>
-          <span>Nova tarefa</span>
+          <span>Novo chat</span>
         </Show>
       </button>
 
       <div class="sidebar-scroll">
         <Show when={!props.collapsed}>
-          <div class="sidebar-section-heading">
-            <span>Projetos</span>
+          <SidebarSectionHeading
+            expanded={projectsExpanded()}
+            label="Projetos"
+            onToggle={() => setProjectsExpanded((value) => !value)}
+          >
             <button
               aria-label="Adicionar projeto"
               onClick={() => void props.controller.chooseWorkspace()}
+              title="Adicionar projeto"
               type="button"
             >
               <Icon name="plus" size={14} />
             </button>
-          </div>
+          </SidebarSectionHeading>
         </Show>
 
-        <Show
-          when={grouped().length > 0}
-          fallback={
-            <button
-              class="empty-project-button"
-              onClick={() => void props.controller.chooseWorkspace()}
-              title="Abrir uma pasta"
-              type="button"
-            >
-              <Icon name="folder" />
-              <Show when={!props.collapsed}>
-                <span>Abrir uma pasta</span>
-              </Show>
-            </button>
-          }
-        >
-          <For each={grouped()}>
-            {(group) => (
-              <ProjectGroup
-                collapsed={props.collapsed}
-                controller={props.controller}
-                onBeginRename={beginRename}
-                onSubmitRename={submitRename}
-                project={group.project}
-                renameValue={renameValue()}
-                renamingId={renamingId()}
-                setRenameValue={setRenameValue}
-                threads={group.threads}
-              />
-            )}
-          </For>
-        </Show>
-
-        <Show when={!props.collapsed && ungrouped().length > 0}>
-          <div class="sidebar-section-heading recent-heading">
-            <span>Outras tarefas</span>
-          </div>
-          <For each={ungrouped()}>
-            {(thread) => (
-              <ThreadButton
-                controller={props.controller}
-                onBeginRename={beginRename}
-                onSubmitRename={submitRename}
-                renameValue={renameValue()}
-                renaming={renamingId() === thread.id}
-                setRenameValue={setRenameValue}
-                thread={thread}
-              />
-            )}
-          </For>
-        </Show>
-
-        <Show when={!props.collapsed && props.controller.threadsNextCursor() !== null}>
-          <button
-            class="load-more-button"
-            disabled={props.controller.pendingOperations() > 0}
-            onClick={() => void props.controller.loadMoreThreads()}
-            type="button"
+        <Show when={props.collapsed || projectsExpanded()}>
+          <Show
+            when={grouped().length > 0}
+            fallback={
+              <button
+                class="empty-project-button"
+                onClick={() => void props.controller.chooseWorkspace()}
+                title="Abrir uma pasta"
+                type="button"
+              >
+                <Icon name="folder" />
+                <Show when={!props.collapsed}>
+                  <span>Abrir uma pasta</span>
+                </Show>
+              </button>
+            }
           >
-            Carregar mais
-          </button>
+            <For each={grouped()}>
+              {(group) => (
+                <ProjectGroup
+                  collapsed={props.collapsed}
+                  controller={props.controller}
+                  onBeginRename={beginRename}
+                  onSubmitRename={submitRename}
+                  project={group.project}
+                  renameValue={renameValue()}
+                  renamingId={renamingId()}
+                  setRenameValue={setRenameValue}
+                  threads={group.threads}
+                />
+              )}
+            </For>
+          </Show>
+        </Show>
+
+        <Show when={!props.collapsed}>
+          <SidebarSectionHeading
+            expanded={recentsExpanded()}
+            label="Recentes"
+            onToggle={() => setRecentsExpanded((value) => !value)}
+          />
+          <Show when={recentsExpanded()}>
+            <Show when={ungrouped().length > 0} fallback={<p class="sidebar-empty">Nenhum chat</p>}>
+              <For each={ungrouped()}>
+                {(thread) => (
+                  <ThreadButton
+                    controller={props.controller}
+                    onBeginRename={beginRename}
+                    onSubmitRename={submitRename}
+                    renameValue={renameValue()}
+                    renaming={renamingId() === thread.id}
+                    setRenameValue={setRenameValue}
+                    thread={thread}
+                  />
+                )}
+              </For>
+            </Show>
+            <Show when={props.controller.threadsNextCursor() !== null}>
+              <button
+                class="load-more-button"
+                disabled={props.controller.pendingOperations() > 0}
+                onClick={() => void props.controller.loadMoreThreads()}
+                type="button"
+              >
+                Carregar mais
+              </button>
+            </Show>
+          </Show>
         </Show>
       </div>
 
       <footer class="sidebar-footer">
-        <button onClick={props.onOpenSettings} title="Configurações" type="button">
+        <Show when={!props.collapsed && accountMenuOpen()}>
+          <div aria-label="Conta" class="account-menu" id="account-menu" role="menu">
+            <div class="account-menu-identity" role="presentation">
+              <span class="account-avatar">{accountInitial(props.controller)}</span>
+              <strong>{accountLabel(props.controller)}</strong>
+            </div>
+            <hr class="account-menu-separator" />
+            <button
+              onClick={() => void props.controller.refreshRateLimits()}
+              role="menuitem"
+              type="button"
+            >
+              <Icon name="reset" size={15} />
+              <span>Uso restante</span>
+              <small>{remainingUsageLabel(props.controller)}</small>
+            </button>
+            <button
+              onClick={() => {
+                setAccountMenuOpen(false);
+                props.onOpenSettings();
+              }}
+              role="menuitem"
+              type="button"
+            >
+              <Icon name="settings" size={15} />
+              <span>Configurações</span>
+              <kbd>Ctrl+,</kbd>
+            </button>
+            <button
+              onClick={() => {
+                setAccountMenuOpen(false);
+                void props.controller.logout();
+              }}
+              role="menuitem"
+              type="button"
+            >
+              <Icon name="logout" size={15} />
+              <span>Sair</span>
+            </button>
+          </div>
+        </Show>
+        <button
+          aria-controls="account-menu"
+          aria-expanded={accountMenuOpen()}
+          aria-haspopup="menu"
+          onClick={() => {
+            if (props.collapsed) {
+              props.onOpenSettings();
+              return;
+            }
+            setAccountMenuOpen((value) => !value);
+          }}
+          title="Conta"
+          type="button"
+        >
           <span class="account-avatar">{accountInitial(props.controller)}</span>
           <Show when={!props.collapsed}>
             <span class="account-label">
               <strong>{accountLabel(props.controller)}</strong>
-              <small>Configurações</small>
             </span>
-            <Icon name="settings" size={16} />
+            <Icon name="more" size={16} />
           </Show>
         </button>
       </footer>
     </aside>
+  );
+}
+
+function SidebarSectionHeading(props: {
+  readonly children?: JSX.Element;
+  readonly expanded: boolean;
+  readonly label: string;
+  readonly onToggle: () => void;
+}) {
+  return (
+    <div class="sidebar-section-heading">
+      <button
+        aria-expanded={props.expanded}
+        class="sidebar-section-toggle"
+        onClick={props.onToggle}
+        type="button"
+      >
+        <Icon name={props.expanded ? "chevronDown" : "chevronRight"} size={13} />
+        <span>{props.label}</span>
+      </button>
+      {props.children}
+    </div>
   );
 }
 
@@ -319,4 +447,12 @@ function accountLabel(controller: AppController): string {
 
 function accountInitial(controller: AppController): string {
   return accountLabel(controller).slice(0, 1).toLocaleUpperCase("pt-BR");
+}
+
+function remainingUsageLabel(controller: AppController): string {
+  const usedPercent = controller.rateLimits()?.rateLimits.primary?.usedPercent;
+  if (usedPercent === undefined) {
+    return "—";
+  }
+  return `${Math.max(0, Math.round(100 - usedPercent))}%`;
 }

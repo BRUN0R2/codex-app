@@ -1,4 +1,4 @@
-import { createSignal, Show } from "solid-js";
+import { createSignal, onCleanup, onMount, Show } from "solid-js";
 
 import type { RuntimeState } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
@@ -13,6 +13,16 @@ export function AppShell(props: { readonly controller: AppController }) {
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
   const [environmentOpen, setEnvironmentOpen] = createSignal(true);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+
+  function handleKeyboardShortcut(event: KeyboardEvent): void {
+    if (event.ctrlKey && event.key === ",") {
+      event.preventDefault();
+      setSettingsOpen(true);
+    }
+  }
+
+  onMount(() => window.addEventListener("keydown", handleKeyboardShortcut));
+  onCleanup(() => window.removeEventListener("keydown", handleKeyboardShortcut));
 
   return (
     <div
@@ -40,12 +50,14 @@ export function AppShell(props: { readonly controller: AppController }) {
               <Icon name="sidebar" size={17} />
             </button>
             <Icon name="folder" size={16} />
-            <h1>{props.controller.currentThreadTitle()}</h1>
+            <h1 title={props.controller.currentThreadTitle()}>
+              {props.controller.currentThreadTitle()}
+            </h1>
           </div>
+          <span class={`runtime-indicator state-${props.controller.runtimeStatus().state}`}>
+            <i /> {runtimeLabel(props.controller.runtimeStatus().state)}
+          </span>
           <div class="topbar-actions">
-            <span class={`runtime-indicator state-${props.controller.runtimeStatus().state}`}>
-              <i /> {runtimeLabel(props.controller.runtimeStatus().state)}
-            </span>
             <button
               aria-label="Alternar painel do ambiente"
               class="icon-button"
@@ -203,7 +215,7 @@ function permissionTitle(mode: string | undefined): string {
     case "workspace-write":
       return "Acesso ao projeto";
     case "danger-full-access":
-      return "Acesso total";
+      return "Acesso completo";
     default:
       return "Carregando";
   }

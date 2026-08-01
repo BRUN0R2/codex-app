@@ -42,6 +42,7 @@ pub struct StartTurn {
     pub input: Vec<TurnInput>,
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
+    pub service_tier: Option<String>,
 }
 
 struct ActiveTurn {
@@ -257,7 +258,7 @@ impl NativeEngine {
                 model.id()
             )));
         }
-        let service_tier = model.select_service_tier(config.service_tier.as_deref())?;
+        let service_tier = model.select_service_tier(request.service_tier.as_deref())?;
         let prepared =
             agent::prepare_user_input(request.client_user_message_id, request.input).await?;
         let user_item = prepared.user_item.clone();

@@ -1,4 +1,13 @@
-import { createEffect, createSignal, For, type JSX, Match, Show, Switch } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  type JSX,
+  Match,
+  Show,
+  Switch,
+} from "solid-js";
 
 import type {
   CodexModel,
@@ -11,7 +20,7 @@ import type {
   WebSearchMode,
 } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
-import { Icon } from "./Icon";
+import { Icon, type IconName } from "./Icon";
 
 type SettingsPage =
   | "account"
@@ -21,79 +30,109 @@ type SettingsPage =
   | "personalization"
   | "security";
 
+interface SettingsNavigationItem {
+  readonly icon: IconName;
+  readonly label: string;
+  readonly page: SettingsPage;
+}
+
+interface SettingsNavigationSection {
+  readonly items: readonly SettingsNavigationItem[];
+  readonly label: string;
+}
+
+const SETTINGS_NAVIGATION: readonly SettingsNavigationSection[] = [
+  {
+    label: "Pessoais",
+    items: [
+      { icon: "settings", label: "Geral", page: "general" },
+      { icon: "shield", label: "Permissões", page: "security" },
+      { icon: "user", label: "Personalização", page: "personalization" },
+      { icon: "panel", label: "Aparência", page: "appearance" },
+      { icon: "user", label: "Conta", page: "account" },
+    ],
+  },
+  {
+    label: "Sistema",
+    items: [{ icon: "terminal", label: "Diagnósticos", page: "diagnostics" }],
+  },
+];
+
 export function SettingsDialog(props: {
   readonly controller: AppController;
   readonly onClose: () => void;
 }) {
   const [page, setPage] = createSignal<SettingsPage>("general");
+  const [query, setQuery] = createSignal("");
   const [developerInstructions, setDeveloperInstructions] = createSignal("");
+  const visibleNavigation = createMemo(() => {
+    const normalizedQuery = normalizeSearch(query());
+    if (normalizedQuery.length === 0) {
+      return SETTINGS_NAVIGATION;
+    }
+    return SETTINGS_NAVIGATION.map((section) => ({
+      ...section,
+      items: section.items.filter((item) => normalizeSearch(item.label).includes(normalizedQuery)),
+    })).filter((section) => section.items.length > 0);
+  });
 
   createEffect(() => {
     setDeveloperInstructions(props.controller.config()?.config.developerInstructions ?? "");
   });
 
   return (
-    <div class="modal-backdrop">
-      <section aria-label="Configurações" aria-modal="true" class="settings-dialog" role="dialog">
+    <div class="settings-overlay">
+      <section
+        aria-label="Configurações"
+        aria-modal="true"
+        class="settings-dialog"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            props.onClose();
+          }
+        }}
+        role="dialog"
+      >
         <aside class="settings-nav">
-          <header>
-            <span class="brand-mark">C</span>
-            <strong>Configurações</strong>
-          </header>
-          <nav>
-            <SettingsNavButton
-              icon="settings"
-              label="Geral"
-              page="general"
-              selected={page()}
-              setPage={setPage}
+          <button class="settings-back" onClick={props.onClose} type="button">
+            <Icon name="arrowLeft" size={15} />
+            <span>Voltar ao aplicativo</span>
+          </button>
+          <label class="settings-search">
+            <Icon name="search" size={14} />
+            <input
+              aria-label="Pesquisar configurações"
+              onInput={(event) => setQuery(event.currentTarget.value)}
+              placeholder="Pesquisar configurações..."
+              type="search"
+              value={query()}
             />
-            <SettingsNavButton
-              icon="shield"
-              label="Permissões"
-              page="security"
-              selected={page()}
-              setPage={setPage}
-            />
-            <SettingsNavButton
-              icon="user"
-              label="Personalização"
-              page="personalization"
-              selected={page()}
-              setPage={setPage}
-            />
-            <SettingsNavButton
-              icon="panel"
-              label="Aparência"
-              page="appearance"
-              selected={page()}
-              setPage={setPage}
-            />
-            <SettingsNavButton
-              icon="user"
-              label="Conta"
-              page="account"
-              selected={page()}
-              setPage={setPage}
-            />
-            <SettingsNavButton
-              icon="terminal"
-              label="Diagnósticos"
-              page="diagnostics"
-              selected={page()}
-              setPage={setPage}
-            />
+          </label>
+          <nav aria-label="Seções de configurações">
+            <For each={visibleNavigation()}>
+              {(section) => (
+                <section class="settings-nav-section">
+                  <h2>{section.label}</h2>
+                  <For each={section.items}>
+                    {(item) => (
+                      <SettingsNavButton
+                        icon={item.icon}
+                        label={item.label}
+                        page={item.page}
+                        selected={page()}
+                        setPage={setPage}
+                      />
+                    )}
+                  </For>
+                </section>
+              )}
+            </For>
+            <Show when={visibleNavigation().length === 0}>
+              <p class="settings-search-empty">Nenhuma configuração encontrada.</p>
+            </Show>
           </nav>
         </aside>
         <main class="settings-main">
-          <button
-            aria-label="Fechar configurações"
-            class="settings-close"
-            onClick={props.onClose}
-            type="button"
-          >
-            <Icon name="close" />
-          </button>
           <Switch>
             <Match when={page() === "general"}>
               <GeneralSettings controller={props.controller} />
@@ -125,7 +164,7 @@ export function SettingsDialog(props: {
 }
 
 function SettingsNavButton(props: {
-  readonly icon: "panel" | "settings" | "shield" | "terminal" | "user";
+  readonly icon: IconName;
   readonly label: string;
   readonly page: SettingsPage;
   readonly selected: SettingsPage;
@@ -142,12 +181,29 @@ function SettingsNavButton(props: {
   );
 }
 
+function normalizeSearch(value: string): string {
+  return value
+    .trim()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLocaleLowerCase("pt-BR");
+}
+
 function SettingsHeading(props: { readonly title: string; readonly description: string }) {
   return (
     <header class="settings-heading">
       <h2>{props.title}</h2>
       <p>{props.description}</p>
     </header>
+  );
+}
+
+function SettingsSection(props: { readonly children: JSX.Element; readonly title: string }) {
+  return (
+    <section class="settings-section">
+      <h3>{props.title}</h3>
+      <div class="settings-card">{props.children}</div>
+    </section>
   );
 }
 
@@ -160,118 +216,125 @@ function GeneralSettings(props: { readonly controller: AppController }) {
   return (
     <div class="settings-page">
       <SettingsHeading title="Geral" description="Padrões usados ao iniciar cada novo turno." />
-      <SettingsRow label="Modelo" description="Catálogo autorizado pela conta ChatGPT.">
-        <select
-          onChange={(event) => {
-            const model = props.controller
-              .models()
-              .find((entry) => entry.id === event.currentTarget.value);
-            if (model !== undefined) {
-              saveModelDefaults(
-                props.controller,
-                model,
-                model.defaultReasoningEffort,
-                model.defaultServiceTier,
-              );
-            }
-          }}
-          value={configuration()?.model ?? selectedModel()?.id ?? ""}
-        >
-          <For each={props.controller.models()}>
-            {(model) => <option value={model.id}>{model.displayName}</option>}
-          </For>
-        </select>
-      </SettingsRow>
-      <SettingsRow
-        label="Raciocínio"
-        description="Nível padrão; só aparecem opções anunciadas pelo modelo."
-      >
-        <select
-          onChange={(event) => {
-            const value = parseReasoningEffort(
-              event.currentTarget.value,
-              selectedModel()?.supportedReasoningEfforts.map((option) => option.reasoningEffort) ??
-                [],
-            );
-            const model = selectedModel();
-            if (value !== undefined && model !== undefined) {
-              saveModelDefaults(
-                props.controller,
-                model,
-                value,
-                configuration()?.serviceTier ?? model.defaultServiceTier,
-              );
-            }
-          }}
-          value={
-            configuration()?.modelReasoningEffort ?? selectedModel()?.defaultReasoningEffort ?? ""
-          }
-        >
-          <option value="">Padrão do modelo</option>
-          <For each={selectedModel()?.supportedReasoningEfforts ?? []}>
-            {(option) => (
-              <option value={option.reasoningEffort}>{effortLabel(option.reasoningEffort)}</option>
-            )}
-          </For>
-        </select>
-      </SettingsRow>
-      <Show when={(selectedModel()?.serviceTiers.length ?? 0) > 0}>
-        <SettingsRow label="Tier de serviço" description="Perfil de serviço anunciado pelo modelo.">
+      <SettingsSection title="Modelo">
+        <SettingsRow label="Modelo" description="Catálogo autorizado pela conta ChatGPT.">
           <select
             onChange={(event) => {
-              const model = selectedModel();
+              const model = props.controller
+                .models()
+                .find((entry) => entry.id === event.currentTarget.value);
               if (model !== undefined) {
                 saveModelDefaults(
                   props.controller,
                   model,
-                  configuration()?.modelReasoningEffort ?? model.defaultReasoningEffort,
-                  event.currentTarget.value || null,
+                  model.defaultReasoningEffort,
+                  model.defaultServiceTier,
                 );
               }
             }}
-            value={configuration()?.serviceTier ?? selectedModel()?.defaultServiceTier ?? ""}
+            value={configuration()?.model ?? selectedModel()?.id ?? ""}
           >
-            <option value="">Padrão do modelo</option>
-            <For each={selectedModel()?.serviceTiers ?? []}>
-              {(tier) => <option value={tier.id}>{tier.name}</option>}
+            <For each={props.controller.models()}>
+              {(model) => <option value={model.id}>{model.displayName}</option>}
             </For>
           </select>
         </SettingsRow>
-      </Show>
-      <SettingsRow
-        label="Pesquisa na web"
-        description="Usa a ferramenta hospedada oficial quando habilitada."
-      >
-        <select
-          onChange={(event) => {
-            const value = parseWebSearch(event.currentTarget.value);
-            if (value !== undefined)
-              void props.controller.updateSetting({ type: "webSearch", value });
-          }}
-          value={configuration()?.webSearch ?? "disabled"}
+        <SettingsRow
+          label="Raciocínio"
+          description="Nível padrão; só aparecem opções anunciadas pelo modelo."
         >
-          <option value="disabled">Desativada</option>
-          <option value="live">Internet ao vivo</option>
-        </select>
-      </SettingsRow>
-      <SettingsRow
-        label="Verbosidade"
-        description="Controla o tamanho das respostas quando o modelo suporta."
-      >
-        <select
-          onChange={(event) => {
-            const value = parseVerbosity(event.currentTarget.value);
-            if (value !== undefined)
-              void props.controller.updateSetting({ type: "modelVerbosity", value });
-          }}
-          value={configuration()?.modelVerbosity ?? ""}
+          <select
+            onChange={(event) => {
+              const value = parseReasoningEffort(
+                event.currentTarget.value,
+                selectedModel()?.supportedReasoningEfforts.map(
+                  (option) => option.reasoningEffort,
+                ) ?? [],
+              );
+              const model = selectedModel();
+              if (value !== undefined && model !== undefined) {
+                saveModelDefaults(
+                  props.controller,
+                  model,
+                  value,
+                  configuration()?.serviceTier ?? model.defaultServiceTier,
+                );
+              }
+            }}
+            value={
+              configuration()?.modelReasoningEffort ?? selectedModel()?.defaultReasoningEffort ?? ""
+            }
+          >
+            <option value="">Padrão do modelo</option>
+            <For each={selectedModel()?.supportedReasoningEfforts ?? []}>
+              {(option) => (
+                <option value={option.reasoningEffort}>
+                  {effortLabel(option.reasoningEffort)}
+                </option>
+              )}
+            </For>
+          </select>
+        </SettingsRow>
+        <Show when={(selectedModel()?.serviceTiers.length ?? 0) > 0}>
+          <SettingsRow label="Velocidade" description="Perfil de serviço anunciado pelo modelo.">
+            <select
+              onChange={(event) => {
+                const model = selectedModel();
+                if (model !== undefined) {
+                  saveModelDefaults(
+                    props.controller,
+                    model,
+                    configuration()?.modelReasoningEffort ?? model.defaultReasoningEffort,
+                    event.currentTarget.value || null,
+                  );
+                }
+              }}
+              value={configuration()?.serviceTier ?? selectedModel()?.defaultServiceTier ?? ""}
+            >
+              <option value="">Padrão do modelo</option>
+              <For each={selectedModel()?.serviceTiers ?? []}>
+                {(tier) => <option value={tier.id}>{tier.name}</option>}
+              </For>
+            </select>
+          </SettingsRow>
+        </Show>
+        <SettingsRow
+          label="Verbosidade"
+          description="Controla o tamanho das respostas quando o modelo suporta."
         >
-          <option value="">Automática</option>
-          <option value="low">Baixa</option>
-          <option value="medium">Média</option>
-          <option value="high">Alta</option>
-        </select>
-      </SettingsRow>
+          <select
+            onChange={(event) => {
+              const value = parseVerbosity(event.currentTarget.value);
+              if (value !== undefined)
+                void props.controller.updateSetting({ type: "modelVerbosity", value });
+            }}
+            value={configuration()?.modelVerbosity ?? ""}
+          >
+            <option value="">Automática</option>
+            <option value="low">Baixa</option>
+            <option value="medium">Média</option>
+            <option value="high">Alta</option>
+          </select>
+        </SettingsRow>
+      </SettingsSection>
+      <SettingsSection title="Ferramentas">
+        <SettingsRow
+          label="Pesquisa na web"
+          description="Usa a ferramenta hospedada oficial quando habilitada."
+        >
+          <select
+            onChange={(event) => {
+              const value = parseWebSearch(event.currentTarget.value);
+              if (value !== undefined)
+                void props.controller.updateSetting({ type: "webSearch", value });
+            }}
+            value={configuration()?.webSearch ?? "disabled"}
+          >
+            <option value="disabled">Desativada</option>
+            <option value="live">Internet ao vivo</option>
+          </select>
+        </SettingsRow>
+      </SettingsSection>
     </div>
   );
 }
@@ -579,7 +642,7 @@ function permissionName(profile: PermissionProfile): string {
     case "workspace-write":
       return "Projeto";
     case "danger-full-access":
-      return "Acesso total";
+      return "Acesso completo";
   }
 }
 

@@ -72,6 +72,7 @@ export interface SendMessageInput {
   readonly attachments: readonly Attachment[];
   readonly model: string | null;
   readonly effort: ReasoningEffort | null;
+  readonly serviceTier: string | null;
 }
 
 export interface AppController {
@@ -658,6 +659,7 @@ export function createAppController(): AppController {
         attachments: input.attachments.map((attachment) => ({ path: attachment.path })),
         model: input.model,
         effort: input.effort,
+        serviceTier: input.serviceTier,
       });
       setActiveTurnId(response.turn.id);
       return true;

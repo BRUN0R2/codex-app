@@ -2,8 +2,11 @@ import type { JSX } from "solid-js";
 
 export type IconName =
   | "archive"
+  | "arrowLeft"
   | "bot"
+  | "check"
   | "chevronDown"
+  | "chevronRight"
   | "close"
   | "edit"
   | "file"
@@ -13,6 +16,8 @@ export type IconName =
   | "paperclip"
   | "panel"
   | "plus"
+  | "reset"
+  | "search"
   | "send"
   | "settings"
   | "shield"
@@ -54,6 +59,8 @@ function IconPath(props: { readonly name: IconName }): JSX.Element {
           <path d="M3 3h18v4H3zM9 11h6" />
         </>
       );
+    case "arrowLeft":
+      return <path d="m15 18-6-6 6-6M9 12h10" />;
     case "bot":
       return (
         <>
@@ -61,8 +68,12 @@ function IconPath(props: { readonly name: IconName }): JSX.Element {
           <path d="M12 4v4M8 13h.01M16 13h.01M9 17h6" />
         </>
       );
+    case "check":
+      return <path d="m5 12 4 4L19 6" />;
     case "chevronDown":
       return <path d="m7 10 5 5 5-5" />;
+    case "chevronRight":
+      return <path d="m9 18 6-6-6-6" />;
     case "close":
       return <path d="m6 6 12 12M18 6 6 18" />;
     case "edit":
@@ -107,6 +118,20 @@ function IconPath(props: { readonly name: IconName }): JSX.Element {
       );
     case "plus":
       return <path d="M12 5v14M5 12h14" />;
+    case "reset":
+      return (
+        <>
+          <path d="M4 4v6h6" />
+          <path d="M5.5 15a8 8 0 1 0 .5-7l-2 2" />
+        </>
+      );
+    case "search":
+      return (
+        <>
+          <circle cx="11" cy="11" r="7" />
+          <path d="m20 20-4-4" />
+        </>
+      );
     case "send":
       return (
         <>
