@@ -2,6 +2,8 @@ import { createEffect, For, Show } from "solid-js";
 
 import type { ActivityStatus, FileChange, ThreadItem, UserContent } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
+import { projectName } from "../state/projects";
+import { CodexGlyph } from "./CodexGlyph";
 import { Icon } from "./Icon";
 
 export function Timeline(props: { readonly controller: AppController }) {
@@ -20,7 +22,10 @@ export function Timeline(props: { readonly controller: AppController }) {
   return (
     <div class="timeline" ref={scrollElement}>
       <div class="timeline-inner">
-        <Show when={props.controller.items().length > 0} fallback={<EmptyConversation />}>
+        <Show
+          when={props.controller.items().length > 0}
+          fallback={<EmptyConversation workspace={props.controller.workspace()} />}
+        >
           <For each={props.controller.items()}>{(item) => <TimelineItem item={item} />}</For>
           <Show when={props.controller.turnBusy()}>
             <div class="thinking-row" role="status">
@@ -36,13 +41,23 @@ export function Timeline(props: { readonly controller: AppController }) {
   );
 }
 
-function EmptyConversation() {
+function EmptyConversation(props: { readonly workspace: string | null }) {
   return (
     <section class="empty-conversation">
       <div class="empty-orb">
-        <Icon name="terminalCloud" size={48} />
+        <CodexGlyph />
       </div>
-      <h2>O que devemos criar?</h2>
+      <h2>
+        O que devemos criar
+        <Show when={props.workspace} fallback="?">
+          {(workspace) => (
+            <>
+              {" em "}
+              <span>{projectName(workspace())}</span>?
+            </>
+          )}
+        </Show>
+      </h2>
     </section>
   );
 }

@@ -1,5 +1,15 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  Match,
+  onCleanup,
+  onMount,
+  Show,
+  Switch,
+} from "solid-js";
 
 import type {
   Attachment,
@@ -9,6 +19,7 @@ import type {
   RuntimeState,
 } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
+import { projectName } from "../state/projects";
 import { Icon } from "./Icon";
 
 export interface ComposerProps {
@@ -191,16 +202,33 @@ export function Composer(props: ComposerProps) {
           </For>
         </div>
       </Show>
-      <Show when={props.controller.workspace() === null}>
-        <button
-          class="composer-project-picker"
-          disabled={props.controller.turnBusy()}
-          onClick={() => void props.controller.chooseWorkspace()}
-          type="button"
-        >
-          <Icon name="folder" size={14} />
-          <span>Escolher projeto</span>
-        </button>
+      <Show
+        when={props.controller.workspace()}
+        fallback={
+          <button
+            class="composer-project-picker"
+            disabled={props.controller.turnBusy()}
+            onClick={() => void props.controller.chooseWorkspace()}
+            type="button"
+          >
+            <Icon name="folder" size={14} />
+            <span>Escolher projeto</span>
+          </button>
+        }
+      >
+        {(workspace) => (
+          <div class="composer-workspace-context" title={workspace()}>
+            <span>
+              <Icon name="folder" size={15} />
+              {projectName(workspace())}
+            </span>
+            <span>
+              <Icon name="computer" size={15} />
+              Local
+            </span>
+            <WorkspaceRepositoryLabel repository={props.controller.workspaceRepository()} />
+          </div>
+        )}
       </Show>
       <form
         aria-label="Compositor"
@@ -491,6 +519,31 @@ function ModelMenuRow(props: {
       <small>{props.value}</small>
       <Icon name="chevronRight" size={16} />
     </button>
+  );
+}
+
+function WorkspaceRepositoryLabel(props: {
+  readonly repository: ReturnType<AppController["workspaceRepository"]>;
+}) {
+  return (
+    <Switch>
+      <Match when={props.repository?.type === "gitBranch" ? props.repository : undefined}>
+        {(repository) => (
+          <span title={`Branch ${repository().branch}`}>
+            <Icon name="gitBranch" size={15} />
+            {repository().branch}
+          </span>
+        )}
+      </Match>
+      <Match when={props.repository?.type === "gitDetached" ? props.repository : undefined}>
+        {(repository) => (
+          <span title={`HEAD destacado em ${repository().revision}`}>
+            <Icon name="gitBranch" size={15} />
+            {repository().revision}
+          </span>
+        )}
+      </Match>
+    </Switch>
   );
 }
 

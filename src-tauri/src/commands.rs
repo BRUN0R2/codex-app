@@ -1,7 +1,11 @@
 use std::path::Path;
+use std::process::{Output, Stdio};
+use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
+use tokio::process::Command;
+use tokio::time::timeout;
 
 use crate::attachments::{AttachmentKind, inspect_path};
 use crate::engine::{
@@ -17,11 +21,27 @@ const MAX_PROTOCOL_ID_BYTES: usize = 256;
 const MAX_MODEL_NAME_BYTES: usize = 256;
 const MAX_TURN_TEXT_BYTES: usize = 1_048_576;
 const MAX_TURN_ATTACHMENTS: usize = 12;
+const MAX_GIT_REFERENCE_BYTES: usize = 256;
+const GIT_INSPECTION_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadStartRequest {
     cwd: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceRequest {
+    cwd: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum WorkspaceRepository {
+    None,
+    GitBranch { branch: String },
+    GitDetached { revision: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +184,16 @@ pub async fn engine_thread_start(
 ) -> CommandResult<ThreadStartResponse> {
     let cwd = validate_workspace(&request.cwd).await?;
     engine.thread_start(&app, cwd).await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn workspace_repository_read(
+    request: WorkspaceRequest,
+) -> CommandResult<WorkspaceRepository> {
+    let cwd = validate_workspace(&request.cwd).await?;
+    inspect_workspace_repository(Path::new(&cwd))
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -355,6 +385,58 @@ async fn validate_workspace(value: &str) -> CommandResult<String> {
     Ok(normalize_windows_canonical_path(
         &canonical.to_string_lossy(),
     ))
+}
+
+async fn inspect_workspace_repository(cwd: &Path) -> Result<WorkspaceRepository, AppError> {
+    let branch = run_git(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
+    if branch.status.success() {
+        return Ok(WorkspaceRepository::GitBranch {
+            branch: decode_git_reference(branch, "Git branch")?,
+        });
+    }
+
+    let revision = run_git(cwd, &["rev-parse", "--verify", "--short=12", "HEAD"]).await?;
+    if revision.status.success() {
+        return Ok(WorkspaceRepository::GitDetached {
+            revision: decode_git_reference(revision, "Git revision")?,
+        });
+    }
+
+    Ok(WorkspaceRepository::None)
+}
+
+async fn run_git(cwd: &Path, arguments: &[&str]) -> Result<Output, AppError> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(cwd)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+
+    timeout(GIT_INSPECTION_TIMEOUT, command.output())
+        .await
+        .map_err(|_| AppError::Timeout {
+            operation: "Git workspace inspection",
+        })?
+        .map_err(|error| AppError::FileSystem(format!("could not inspect Git metadata: {error}")))
+}
+
+fn decode_git_reference(output: Output, label: &str) -> Result<String, AppError> {
+    let value = String::from_utf8(output.stdout)
+        .map_err(|_| AppError::Protocol(format!("{label} is not valid UTF-8")))?;
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > MAX_GIT_REFERENCE_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(AppError::Protocol(format!(
+            "{label} must contain between 1 and {MAX_GIT_REFERENCE_BYTES} bytes without control characters"
+        )));
+    }
+    Ok(value.to_owned())
 }
 
 fn normalize_windows_canonical_path(value: &str) -> String {

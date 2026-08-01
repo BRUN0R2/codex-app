@@ -56,6 +56,7 @@ import type {
   TurnStatus,
   UserContent,
   WebSearchMode,
+  WorkspaceRepository,
 } from "./types";
 
 type UnknownRecord = Record<string, unknown>;
@@ -180,6 +181,26 @@ export function decodeRuntimeDiagnostic(value: unknown): RuntimeDiagnostic {
     stream: literal(object.stream, "$.stream", ["runtime"] as const),
     message: text(object.message, "$.message"),
   };
+}
+
+export function decodeWorkspaceRepository(value: unknown): WorkspaceRepository {
+  const object = record(value, "$");
+  const type = text(field(object, "type"), "$.type", 32);
+  switch (type) {
+    case "gitBranch": {
+      const repository = exactRecord(object, "$", ["branch", "type"]);
+      return { type, branch: identifier(repository.branch, "$.branch") };
+    }
+    case "gitDetached": {
+      const repository = exactRecord(object, "$", ["revision", "type"]);
+      return { type, revision: identifier(repository.revision, "$.revision") };
+    }
+    case "none":
+      exactRecord(object, "$", ["type"]);
+      return { type };
+    default:
+      throw new ContractError("$.type", `unsupported workspace repository ${JSON.stringify(type)}`);
+  }
 }
 
 export function decodeAccountReadResponse(value: unknown): AccountReadResponse {

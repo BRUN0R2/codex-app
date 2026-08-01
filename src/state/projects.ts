@@ -123,7 +123,7 @@ function normalizeForComparison(path: string): string {
     .toLocaleLowerCase("en-US");
 }
 
-function projectName(path: string): string {
+export function projectName(path: string): string {
   const parts = path.split(/[\\/]/u).filter((part) => part.length > 0);
   return parts.at(-1) ?? path;
 }

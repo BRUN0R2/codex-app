@@ -25,6 +25,7 @@ import {
   decodeThreadResumeResponse,
   decodeThreadStartResponse,
   decodeTurnStartResponse,
+  decodeWorkspaceRepository,
 } from "../contracts/decode";
 import type {
   AccountRateLimitsResponse,
@@ -50,6 +51,7 @@ import type {
   ThreadResumeResponse,
   ThreadStartResponse,
   TurnStartResponse,
+  WorkspaceRepository,
 } from "../contracts/types";
 
 const NOTIFICATION_EVENT = "engine://notification";
@@ -224,6 +226,12 @@ export function updateConfig(
 
 export function listModels(): Promise<ModelListResponse> {
   return invokeDecoded("engine_model_list", decodeModelListResponse);
+}
+
+export function readWorkspaceRepository(cwd: string): Promise<WorkspaceRepository> {
+  return invokeDecoded("workspace_repository_read", decodeWorkspaceRepository, {
+    request: { cwd },
+  });
 }
 
 export function inspectAttachments(paths: readonly string[]): Promise<readonly Attachment[]> {

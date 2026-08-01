@@ -32,6 +32,7 @@ pub fn run() {
             commands::engine_thread_read,
             commands::engine_thread_set_name,
             commands::engine_thread_archive,
+            commands::workspace_repository_read,
             commands::engine_turn_start,
             commands::engine_turn_interrupt,
             commands::engine_config_read,

@@ -19,6 +19,11 @@ export interface RuntimeDiagnostic {
   readonly message: string;
 }
 
+export type WorkspaceRepository =
+  | { readonly type: "gitBranch"; readonly branch: string }
+  | { readonly type: "gitDetached"; readonly revision: string }
+  | { readonly type: "none" };
+
 export interface EngineDescriptor {
   readonly id: string;
   readonly name: string;

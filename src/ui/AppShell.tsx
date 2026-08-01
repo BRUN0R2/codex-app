@@ -1,6 +1,5 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 
-import type { RuntimeState } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
 import { ApprovalCard } from "./ApprovalCard";
 import { Composer } from "./Composer";
@@ -10,8 +9,7 @@ import { Sidebar } from "./Sidebar";
 import { Timeline } from "./Timeline";
 
 export function AppShell(props: { readonly controller: AppController }) {
-  const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
-  const [environmentOpen, setEnvironmentOpen] = createSignal(true);
+  const [environmentOpen, setEnvironmentOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
 
   function handleKeyboardShortcut(event: KeyboardEvent): void {
@@ -29,56 +27,35 @@ export function AppShell(props: { readonly controller: AppController }) {
       class="app-shell"
       classList={{
         "environment-closed": !environmentOpen(),
-        "sidebar-collapsed": sidebarCollapsed(),
       }}
     >
       <Sidebar
-        collapsed={sidebarCollapsed()}
+        collapsed={false}
         controller={props.controller}
         onOpenSettings={() => setSettingsOpen(true)}
       />
       <main class="main-panel">
-        <header class="topbar">
-          <div class="topbar-leading">
-            <button
-              aria-label={sidebarCollapsed() ? "Mostrar barra lateral" : "Ocultar barra lateral"}
-              class="icon-button"
-              onClick={() => setSidebarCollapsed((value) => !value)}
-              title={sidebarCollapsed() ? "Mostrar barra lateral" : "Ocultar barra lateral"}
-              type="button"
-            >
-              <Icon name="sidebar" size={17} />
-            </button>
-            <Icon name="folder" size={16} />
-            <h1 title={props.controller.currentThreadTitle()}>
-              {props.controller.currentThreadTitle()}
-            </h1>
-          </div>
-          <span class={`runtime-indicator state-${props.controller.runtimeStatus().state}`}>
-            <i /> {runtimeLabel(props.controller.runtimeStatus().state)}
-          </span>
-          <div class="topbar-actions">
-            <button
-              aria-label="Alternar painel do ambiente"
-              class="icon-button"
-              classList={{ active: environmentOpen() }}
-              onClick={() => setEnvironmentOpen((value) => !value)}
-              title="Ambiente"
-              type="button"
-            >
-              <Icon name="panel" size={17} />
-            </button>
-            <button
-              aria-label="Abrir configurações"
-              class="icon-button"
-              onClick={() => setSettingsOpen(true)}
-              title="Configurações"
-              type="button"
-            >
-              <Icon name="settings" size={17} />
-            </button>
-          </div>
-        </header>
+        <div class="main-panel-actions">
+          <button
+            aria-label="Alternar painel do ambiente"
+            class="icon-button"
+            classList={{ active: environmentOpen() }}
+            onClick={() => setEnvironmentOpen((value) => !value)}
+            title="Ambiente"
+            type="button"
+          >
+            <Icon name="panel" size={17} />
+          </button>
+          <button
+            aria-label="Abrir configurações"
+            class="icon-button"
+            onClick={() => setSettingsOpen(true)}
+            title="Configurações"
+            type="button"
+          >
+            <Icon name="settings" size={17} />
+          </button>
+        </div>
         <section class="chat-page">
           <Timeline controller={props.controller} />
           <ApprovalCard controller={props.controller} />
@@ -193,19 +170,6 @@ function EnvironmentPanel(props: {
       </footer>
     </aside>
   );
-}
-
-function runtimeLabel(state: RuntimeState): string {
-  switch (state) {
-    case "ready":
-      return "Pronto";
-    case "starting":
-      return "Iniciando";
-    case "failed":
-      return "Falha";
-    case "stopped":
-      return "Parado";
-  }
 }
 
 function permissionTitle(mode: string | undefined): string {

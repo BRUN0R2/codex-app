@@ -26,6 +26,7 @@ import type {
   RuntimeDiagnostic,
   RuntimeStatus,
   ThreadItem,
+  WorkspaceRepository,
 } from "../contracts/types";
 import {
   archiveThread as archiveThreadCommand,
@@ -41,6 +42,7 @@ import {
   readAccount,
   readConfig,
   readRateLimits,
+  readWorkspaceRepository,
   respondToServerRequest,
   resumeThread,
   savePastedImage,
@@ -99,6 +101,7 @@ export interface AppController {
   readonly threadsNextCursor: Accessor<string | null>;
   readonly turnBusy: Accessor<boolean>;
   readonly workspace: Accessor<string | null>;
+  readonly workspaceRepository: Accessor<WorkspaceRepository | null>;
   readonly archiveThread: (threadId: string) => Promise<boolean>;
   readonly cancelLogin: () => Promise<void>;
   readonly chooseWorkspace: () => Promise<string | null>;
@@ -142,6 +145,9 @@ export function createAppController(): AppController {
   const [openingThreadId, setOpeningThreadId] = createSignal<string | null>(null);
   const [loginPending, setLoginPending] = createSignal(false);
   const [workspace, setWorkspace] = createSignal<string | null>(null);
+  const [workspaceRepository, setWorkspaceRepository] = createSignal<WorkspaceRepository | null>(
+    null,
+  );
   let loginId: string | null = null;
   let diagnosticSequence = 0;
   let disposed = false;
@@ -151,6 +157,7 @@ export function createAppController(): AppController {
     readonly expectedSignedIn: boolean;
     readonly promise: Promise<void>;
   } | null = null;
+  let repositoryRequestSequence = 0;
 
   let initialProjects: readonly ProjectRecord[] = [];
   let projectLoadError: Error | null = null;
@@ -181,6 +188,27 @@ export function createAppController(): AppController {
       preferences.pointerCursor ? "pointer" : "default",
     );
     document.documentElement.setAttribute("data-diff", preferences.diffDisplay);
+  });
+
+  createEffect(() => {
+    const cwd = workspace();
+    repositoryRequestSequence += 1;
+    const requestSequence = repositoryRequestSequence;
+    setWorkspaceRepository(null);
+    if (cwd === null) {
+      return;
+    }
+    void readWorkspaceRepository(cwd)
+      .then((repository) => {
+        if (!disposed && requestSequence === repositoryRequestSequence) {
+          setWorkspaceRepository(repository);
+        }
+      })
+      .catch((reason: unknown) => {
+        if (!disposed && requestSequence === repositoryRequestSequence) {
+          reportError(reason);
+        }
+      });
   });
 
   onMount(() => {
@@ -825,6 +853,7 @@ export function createAppController(): AppController {
     threadsNextCursor,
     turnBusy,
     workspace,
+    workspaceRepository,
     archiveThread,
     cancelLogin,
     chooseWorkspace,
