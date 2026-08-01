@@ -20,10 +20,7 @@ export function Timeline(props: { readonly controller: AppController }) {
   return (
     <div class="timeline" ref={scrollElement}>
       <div class="timeline-inner">
-        <Show
-          when={props.controller.items().length > 0}
-          fallback={<EmptyConversation controller={props.controller} />}
-        >
+        <Show when={props.controller.items().length > 0} fallback={<EmptyConversation />}>
           <For each={props.controller.items()}>{(item) => <TimelineItem item={item} />}</For>
           <Show when={props.controller.turnBusy()}>
             <div class="thinking-row" role="status">
@@ -39,26 +36,13 @@ export function Timeline(props: { readonly controller: AppController }) {
   );
 }
 
-function EmptyConversation(props: { readonly controller: AppController }) {
+function EmptyConversation() {
   return (
     <section class="empty-conversation">
       <div class="empty-orb">
-        <Icon name="bot" size={28} />
+        <Icon name="terminalCloud" size={48} />
       </div>
-      <h2>O que vamos construir?</h2>
-      <p>
-        Escolha um projeto e descreva o resultado. O engine lê, edita e executa comandos com limites
-        explícitos e aprovação quando necessária.
-      </p>
-      <Show when={props.controller.workspace() === null}>
-        <button
-          class="secondary-button"
-          onClick={() => void props.controller.chooseWorkspace()}
-          type="button"
-        >
-          <Icon name="folder" /> Abrir projeto
-        </button>
-      </Show>
+      <h2>O que devemos criar?</h2>
     </section>
   );
 }

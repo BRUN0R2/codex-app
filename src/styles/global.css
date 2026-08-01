@@ -903,28 +903,18 @@ pre {
 
 .empty-orb {
   display: grid;
-  width: 58px;
-  height: 58px;
-  margin-bottom: 18px;
+  width: 52px;
+  height: 52px;
+  margin-bottom: 20px;
   place-items: center;
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  background: linear-gradient(145deg, var(--panel-soft), var(--panel));
-  color: var(--text-soft);
-  box-shadow: 0 12px 30px rgb(0 0 0 / 20%);
+  color: #626262;
 }
 
 .empty-conversation h2 {
   margin: 0;
-  font-size: 1.45rem;
+  font-size: 1.65rem;
+  font-weight: 450;
   letter-spacing: -0.025em;
-}
-
-.empty-conversation p {
-  max-width: 520px;
-  margin: 10px 0 20px;
-  color: var(--muted);
-  font-size: 0.9rem;
 }
 
 .message-row {
@@ -1290,6 +1280,28 @@ details.activity-card > summary::-webkit-details-marker {
   padding: 0 0 14px;
 }
 
+.composer-project-picker {
+  display: flex;
+  width: calc(100% - 28px);
+  min-height: 40px;
+  align-items: center;
+  gap: 7px;
+  margin: 0 14px -5px;
+  padding: 0 15px 4px;
+  border: 1px solid #2f2f2f;
+  border-bottom: 0;
+  border-radius: 17px 17px 0 0;
+  background: #202020;
+  color: #8d8d8d;
+  font-size: var(--font-caption);
+  text-align: left;
+}
+
+.composer-project-picker:not(:disabled):hover {
+  background: #242424;
+  color: var(--text-soft);
+}
+
 .attachment-strip {
   display: flex;
   gap: 6px;
@@ -1332,6 +1344,7 @@ details.activity-card > summary::-webkit-details-marker {
 
 .composer {
   position: relative;
+  z-index: 1;
   border: 1px solid #414141;
   border-radius: 20px;
   background: #2b2b2b;
@@ -1388,6 +1401,30 @@ details.activity-card > summary::-webkit-details-marker {
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
+}
+
+.composer-runtime-state {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border: 2px solid #555;
+  border-top-color: #aaa;
+  border-radius: 50%;
+}
+
+.composer-runtime-state.state-starting,
+.composer-runtime-state.busy {
+  animation: spin 900ms linear infinite;
+}
+
+.composer-runtime-state.state-failed {
+  border-color: #6f3935;
+  border-top-color: var(--red);
+}
+
+.composer-runtime-state.state-stopped {
+  border-color: #4b4b4b;
+  border-top-color: #707070;
 }
 
 .composer-leading > button:not(.permission-button),
@@ -1583,15 +1620,16 @@ details.activity-card > summary::-webkit-details-marker {
 
 .model-menu-row > small {
   overflow: hidden;
-  color: #999;
-  font-size: var(--font-caption);
+  color: #b5b5b5;
+  font-size: var(--font-control);
+  font-weight: 450;
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .model-menu-row > svg {
-  color: #888;
+  color: #aaa;
 }
 
 .model-submenu {
@@ -1673,6 +1711,11 @@ details.activity-card > summary::-webkit-details-marker {
 }
 
 .send-button:not(:disabled):hover { background: #fff; }
+.send-button:disabled {
+  background: #f1f1f1;
+  color: #777;
+  opacity: 1;
+}
 .stop-button { background: var(--red-soft); color: var(--red); }
 .stop-button:hover { background: #452522 !important; }
 

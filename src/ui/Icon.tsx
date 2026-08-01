@@ -3,6 +3,7 @@ import type { JSX } from "solid-js";
 export type IconName =
   | "archive"
   | "arrowLeft"
+  | "arrowUp"
   | "bot"
   | "check"
   | "chevronDown"
@@ -24,6 +25,7 @@ export type IconName =
   | "sidebar"
   | "stop"
   | "terminal"
+  | "terminalCloud"
   | "user";
 
 export interface IconProps {
@@ -61,6 +63,8 @@ function IconPath(props: { readonly name: IconName }): JSX.Element {
       );
     case "arrowLeft":
       return <path d="m15 18-6-6 6-6M9 12h10" />;
+    case "arrowUp":
+      return <path d="m6 11 6-6 6 6M12 5v14" />;
     case "bot":
       return (
         <>
@@ -165,6 +169,13 @@ function IconPath(props: { readonly name: IconName }): JSX.Element {
         <>
           <path d="m4 7 5 5-5 5M12 17h8" />
           <rect height="18" rx="2" width="20" x="2" y="3" />
+        </>
+      );
+    case "terminalCloud":
+      return (
+        <>
+          <path d="M7.5 19h9.8a4.2 4.2 0 0 0 1.1-8.2A6.7 6.7 0 0 0 5.5 9 5.1 5.1 0 0 0 7.5 19Z" />
+          <path d="m8.5 12 2 2-2 2M13 16h2.5" />
         </>
       );
     case "user":

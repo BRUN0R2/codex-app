@@ -6,6 +6,7 @@ import type {
   CodexModel,
   PermissionProfile,
   ReasoningEffort,
+  RuntimeState,
 } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
 import { Icon } from "./Icon";
@@ -190,6 +191,17 @@ export function Composer(props: ComposerProps) {
           </For>
         </div>
       </Show>
+      <Show when={props.controller.workspace() === null}>
+        <button
+          class="composer-project-picker"
+          disabled={props.controller.turnBusy()}
+          onClick={() => void props.controller.chooseWorkspace()}
+          type="button"
+        >
+          <Icon name="folder" size={14} />
+          <span>Escolher projeto</span>
+        </button>
+      </Show>
       <form
         aria-label="Compositor"
         class="composer"
@@ -220,11 +232,7 @@ export function Composer(props: ComposerProps) {
             }
           }}
           onPaste={(event) => void handlePaste(event)}
-          placeholder={
-            props.controller.workspace() === null
-              ? "Descreva a tarefa — você escolherá um projeto ao enviar"
-              : "Peça uma mudança, análise ou implementação"
-          }
+          placeholder="Faça o que quiser"
           ref={textArea}
           rows={1}
           value={text()}
@@ -319,10 +327,17 @@ export function Composer(props: ComposerProps) {
             </div>
           </div>
           <div class="composer-trailing">
+            <span
+              aria-label={runtimeStatusLabel(props.controller.runtimeStatus().state)}
+              class={`composer-runtime-state state-${props.controller.runtimeStatus().state}`}
+              classList={{ busy: props.controller.turnBusy() }}
+              role="status"
+              title={runtimeStatusLabel(props.controller.runtimeStatus().state)}
+            />
             <div class="composer-menu-anchor model-menu-anchor">
               <button
                 aria-expanded={modelMenuOpen()}
-                aria-haspopup="dialog"
+                aria-haspopup="menu"
                 class="model-button"
                 classList={{ active: modelMenuOpen() }}
                 disabled={props.controller.turnBusy() || selectedModel() === undefined}
@@ -435,7 +450,7 @@ export function Composer(props: ComposerProps) {
                 title="Enviar"
                 type="button"
               >
-                <Icon name="send" size={15} />
+                <Icon name="arrowUp" size={15} />
               </button>
             </Show>
           </div>
@@ -474,7 +489,7 @@ function ModelMenuRow(props: {
     >
       <span>{props.label}</span>
       <small>{props.value}</small>
-      <Icon name="chevronRight" size={14} />
+      <Icon name="chevronRight" size={16} />
     </button>
   );
 }
@@ -656,6 +671,19 @@ function effortLabel(effort: ReasoningEffort): string {
 
 function selectedEffortLabel(effort: ReasoningEffort | null): string {
   return effort === null ? "Padrão" : effortLabel(effort);
+}
+
+function runtimeStatusLabel(state: RuntimeState): string {
+  switch (state) {
+    case "starting":
+      return "Mecanismo iniciando";
+    case "ready":
+      return "Mecanismo pronto";
+    case "failed":
+      return "Falha no mecanismo";
+    case "stopped":
+      return "Mecanismo parado";
+  }
 }
 
 function permissionLabel(mode: string | undefined): string {
