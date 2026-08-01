@@ -83,14 +83,14 @@ historico.
 * Vite como empacotador frontend.
 * Windows e o alvo operacional inicial.
 * O `NativeEngine` deste projeto e o dono da composicao do agente.
-* O `codex app-server` oficial e uma ponte de compatibilidade isolada para
-  autenticacao ChatGPT e capacidades ainda nao substituidas.
-* Configuracoes e credenciais do Codex pertencem ao perfil do usuario e nunca
-  devem ser copiadas, expostas ou reinterpretadas pela interface.
-
-Adaptadores de compatibilidade devem ser explicitos, observaveis, substituiveis
-e possuir criterios documentados de remocao. Nenhuma dependencia temporaria pode
-vazar para os contratos da interface.
+* OAuth ChatGPT, provider, ferramentas, configuracao e persistencia pertencem ao
+  backend Rust nativo deste projeto.
+* O Codex CLI aberto pode ser consultado somente como referencia de protocolo;
+  nunca pode ser dependencia de build, runtime, armazenamento ou configuracao.
+* Credenciais pertencem ao diretorio e ao cofre privados deste aplicativo;
+  nunca devem ser importadas da CLI, copiadas, expostas ou reinterpretadas pela
+  interface.
+* Nao criar adaptadores, aliases, migracoes ou caminhos de retrocompatibilidade.
 
 Qualquer tecnologia nova deve ter motivo claro, escopo isolado e custo de
 manutencao proporcional ao beneficio.

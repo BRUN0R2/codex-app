@@ -1,140 +1,90 @@
 # Contrato do engine
 
-## Objetivo
+## Identidade
 
-O `NativeEngine` é o dono da composição do aplicativo. Ele concentra
-autenticação, armazenamento, políticas e catálogo de ferramentas atrás de
-operações tipadas. O Codex CLI é somente um adaptador temporário para provider,
-modelos, configuração e execução de ferramentas.
+O único backend é `NativeEngine`:
 
-## Implementações
+- transporte: `httpsSse`;
+- provider: `ChatGPT Codex`;
+- autenticação: `ChatGPT OAuth`;
+- armazenamento: `sqlite`;
+- schema IPC: versão `1`.
 
-| Implementação | Seleção | Responsabilidade |
-| --- | --- | --- |
-| `NativeEngine` | padrão | auth, composição, SQLite, ferramentas, permissões e provider |
-| `CodexCompatibilityEngine` | `CODEX_APP_ENGINE=compatibility` | diagnóstico direto do protocolo oficial |
+Não existe variável de ambiente para trocar backend nem execução de binário
+externo. A CLI aberta é uma referência de estudo, não uma integração.
 
-O descritor expõe tipo, provider, autenticação, capacidades e disponibilidade da
-ponte. Disponibilidade não significa processo ativo: no engine nativo, a ponte é
-iniciada pela primeira operação compatível e encerrada no ciclo de vida do app ou
-antes do logout. Em uma sessão autenticada, a UI antecipa essa operação para
-carregar configuração e modelos em segundo plano; autenticação continua nativa e
-independente da ponte.
+## Comandos Tauri
 
-## Operações
+| Área | Comandos |
+| --- | --- |
+| lifecycle | `engine_start` |
+| conta | `engine_account_read`, `engine_account_rate_limits_read`, `engine_login_chatgpt`, `engine_login_cancel`, `engine_logout` |
+| tarefas | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive` |
+| turnos | `engine_turn_start`, `engine_turn_interrupt` |
+| configuração | `engine_config_read`, `engine_config_update`, `engine_model_list` |
+| aprovação | `engine_server_request_respond` |
+| anexos | `attachment_inspect`, `attachment_save_pasted_image` |
 
-A superfície é uma enumeração fechada:
+Cada comando tem request e response próprios. Não há método genérico que aceite
+nome de RPC ou JSON arbitrário.
 
-- conta: ler, consultar limites de uso, entrar com ChatGPT, cancelar login e sair;
-- tarefa: listar, iniciar, retomar, ler, bifurcar antes de um turno, renomear,
-  arquivar, enviar turno e interromper;
-- configuração: ler, ler requisitos, escrever e escrever em lote;
-- segurança: consultar a prontidão e iniciar a preparação confirmada do sandbox
-  do Windows;
-- modelos: listar;
-- aprovação: responder uma solicitação pendente.
+## Eventos
 
-Somente o adaptador de compatibilidade conhece métodos como `thread/list`,
-`thread/resume`, `thread/read`, `thread/fork`, `turn/start` ou `model/list`. A UI
-invoca comandos Tauri pequenos e trabalha com tipos de domínio. A listagem usa
-paginação limitada, ordenação por recência e exclui tarefas arquivadas. Leitura
-completa e fork são operações fechadas: IDs e modelo são limitados na fronteira,
-o fork de retry exclui o turno alvo e adia a continuação automática de goals, e
-`turn/start` só aceita o enum oficial de esforço quando há override.
+Quatro canais Tauri possuem payloads fechados:
 
-`account/rateLimits/read` também fica atrás de uma operação fechada e sem
-parâmetros. A sessão o consulta apenas para contas ChatGPT, de forma deduplicada,
-e passa a acompanhar `account/rateLimits/updated`; não existe RPC arbitrário nem
-estimativa local de cota.
+- `engine://runtime-status`: `starting`, `ready`, `failed` ou `stopped`;
+- `engine://runtime-diagnostic`: falhas operacionais não ocultáveis;
+- `engine://notification`: autenticação, tarefas, turnos, itens e deltas;
+- `engine://server-request`: somente `approval.command`.
 
-## Autenticação nativa
+Notificações suportadas:
 
-`ChatGptAuth` implementa diretamente o fluxo estudado em `codex-rs/login`:
+- `auth.loginCompleted`, `auth.sessionChanged`;
+- `thread.created`, `thread.updated`, `thread.archived`;
+- `turn.started`, `turn.completed`;
+- `item.started`, `item.completed`, `item.agentTextDelta`;
+- `item.reasoningSummaryDelta`, `item.reasoningTextDelta`.
 
-1. gera estado aleatório e PKCE S256;
-2. escuta `127.0.0.1` nas portas oficiais 1455 ou 1457;
-3. entrega somente a URL de autorização à UI;
-4. valida método, caminho, estado, duplicatas e limites do callback;
-5. troca o código em `https://auth.openai.com/oauth/token`;
-6. grava a sessão em um cofre local criptografado;
-7. renova preventivamente e revoga no logout.
+Qualquer método diferente falha na fronteira TypeScript e gera diagnóstico
+visível.
 
-O callback expira em dez minutos, aceita no máximo 32 conexões e limita os
-cabeçalhos a 16 KiB. Requisições OAuth e revogação possuem timeouts próprios.
-Login, renovação e logout são serializados por um dono único; cancelamento e
-trocas externas de credencial são tratados explicitamente.
+## Provider
 
-Tokens são tipos redigidos e zerados no descarte. Eles não entram em props,
-eventos Tauri, logs, diagnósticos ou SQLite. A UI recebe somente email, plano,
-estado de renovação e resultados sem segredos.
+O backend usa a sessão OAuth diretamente para:
 
-## Armazenamento de credenciais
+- catálogo em `https://chatgpt.com/backend-api/codex/models`;
+- respostas em `https://chatgpt.com/backend-api/codex/responses`;
+- uso em `https://chatgpt.com/backend-api/wham/usage`.
 
-O backend usa o contrato `Secrets` adotado pelo Codex atual no Windows:
+Headers de conta e sessão são montados somente no Rust. Tokens, cookies e
+respostas brutas não são expostos ao frontend. O parser aceita apenas a forma de
+catálogo e os eventos SSE implementados; novidades de protocolo exigem mudança
+explícita do contrato.
 
-- arquivo: `CODEX_HOME/secrets/codex_auth.age`;
-- envelope: age com recipient scrypt e schema versionado;
-- entrada: `global/CODEX_AUTH`, contendo o registro JSON compatível;
-- chave: 256 bits aleatórios, codificados em Base64;
-- Credential Manager: serviço `codex` e conta `secrets|` mais os primeiros 16
-  dígitos do SHA-256 do `CODEX_HOME` canônico.
+## Ferramentas e permissão
 
-Somente a chave curta entra no Credential Manager; o tamanho dos tokens não fica
-limitado pelo store do Windows. Plaintext e tipos de segredo são zerados no
-descarte, e a gravação do envelope usa arquivo temporário sincronizado antes da
-substituição.
+| Ferramenta | Somente leitura | Projeto | Acesso total |
+| --- | ---: | ---: | ---: |
+| `read_file`, `list_files`, `search_text` | sim | sim | sim |
+| `edit_file`, `write_file` | não | sim | sim |
+| `exec_command` | não | aprovação | sem aprovação |
 
-O app não lê nem escreve `auth.json`. A ponte é iniciada com keyring e
-`secret_auth_storage` habilitado para consumir o mesmo cofre sem copiá-lo.
+Todos os paths de ferramenta são relativos ao workspace. Escritas são atômicas,
+arquivos são UTF-8 e comandos são não interativos, limitados a 120 segundos e a
+1 MiB de saída agregada. Recusa de comando retorna um resultado tipado ao modelo;
+cancelamento interrompe o turno.
 
-## Persistência nativa
+## Configuração
 
-O schema SQLite atual tem versão 1:
+`AppConfig` é um schema fechado armazenado no SQLite. Toda escrita envia a
+versão lida; conflito retorna erro em vez de sobrescrever uma alteração
+concorrente. Modelo, esforço e tier pertencem a uma única mutação
+`modelDefaults`, evitando configurações intermediárias incoerentes.
 
-- `engine_threads`: identificador da tarefa, workspace e timestamps;
-- `engine_events`: sequência, tarefa opcional, nome da operação e timestamp.
+Os três perfis válidos são:
 
-O payload das mensagens e as credenciais não são persistidos nessa base.
-Migrações futuras devem ser explícitas, transacionais e monotônicas.
+- `read-only` + `untrusted`;
+- `workspace-write` + `on-request`;
+- `danger-full-access` + `never`.
 
-## Ferramentas e sandbox
-
-`ToolRegistry` classifica ferramentas como leitura, escrita no workspace,
-processo ou rede. `PermissionProfile` expressa os presets apresentados pela UI.
-A execução concreta e a aplicação efetiva do sandbox ainda pertencem à ponte.
-O engine já consulta `windowsSandbox/readiness` e expõe `ready`, `notConfigured`
-ou `updateRequired`. `windowsSandbox/setupStart` aceita apenas `elevated` ou
-`unelevated`, valida um workspace absoluto, respeita os requisitos administrados
-e retorna antes do trabalho terminar. O estado final vem na notificação
-`windowsSandbox/setupCompleted`. Setup e elevação nunca são iniciados
-implicitamente.
-
-O evento global `windows/worldWritableWarning` informa até três diretórios de
-exemplo, a quantidade omitida e se a varredura falhou. A ponte apenas preserva
-essa notificação; a UI valida o payload e exige uma escolha. A decisão persistente
-usa a escrita versionada de configuração já existente. Nenhuma operação do
-engine modifica ACLs automaticamente.
-
-`configWarning`, `deprecationNotice`, `warning` e `guardianWarning` também
-atravessam a ponte sem transformação. O app-server envia avisos globais após
-`initialize` e pode associar avisos comuns ou Guardian a um `threadId`. O
-frontend valida e limita cada payload, preserva o destino e mantém ocorrências
-transitórias por tarefa. O engine não tenta corrigir uma configuração rejeitada,
-reinterpretar uma advertência nem silenciar a falha.
-
-`model/verification` atravessa pelo mesmo transporte e continua associado ao
-`threadId` e `turnId` oficiais. A ponte não transforma verificações de segurança
-em texto; o frontend reconhece somente os discriminadores públicos suportados e
-apresenta a orientação correspondente no histórico da tarefa.
-
-## Critérios para remover a ponte
-
-A autenticação nativa já não depende da ponte. Para removê-la do produto ainda
-faltam, em conjunto:
-
-1. provider direto com streaming e catálogo de modelos;
-2. executor nativo de ferramentas com cancelamento;
-3. sandbox aplicado por plataforma;
-4. aprovações correlacionadas e testadas;
-5. persistência e retomada completas de tarefas;
-6. fixtures de paridade e testes end-to-end.
+Nenhuma outra combinação é aceita no Rust ou no TypeScript.

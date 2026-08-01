@@ -1,5 +1,9 @@
+#![allow(
+    linker_messages,
+    reason = "MSVC emits localized informational output while creating import libraries"
+)]
+
 mod attachments;
-mod codex;
 mod commands;
 mod engine;
 mod error;
@@ -15,7 +19,6 @@ pub fn run() {
         .manage(EngineManager::default())
         .invoke_handler(tauri::generate_handler![
             attachments::attachment_inspect,
-            attachments::attachment_read_image,
             attachments::attachment_save_pasted_image,
             commands::engine_start,
             commands::engine_account_read,
@@ -27,17 +30,12 @@ pub fn run() {
             commands::engine_thread_list,
             commands::engine_thread_resume,
             commands::engine_thread_read,
-            commands::engine_thread_fork,
             commands::engine_thread_set_name,
             commands::engine_thread_archive,
             commands::engine_turn_start,
             commands::engine_turn_interrupt,
             commands::engine_config_read,
-            commands::engine_config_requirements_read,
-            commands::engine_windows_sandbox_readiness,
-            commands::engine_windows_sandbox_setup_start,
-            commands::engine_config_write,
-            commands::engine_config_batch_write,
+            commands::engine_config_update,
             commands::engine_model_list,
             commands::engine_server_request_respond,
         ])
@@ -47,7 +45,7 @@ pub fn run() {
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
             let engine = app_handle.state::<EngineManager>();
-            tauri::async_runtime::block_on(engine.stop());
+            tauri::async_runtime::block_on(engine.stop(app_handle));
         }
     });
 }

@@ -1,11 +1,8 @@
 mod keyring;
 mod vault;
 
-use std::path::PathBuf;
-
 use tauri::AppHandle;
 use tauri::Manager as _;
-use zeroize::Zeroizing;
 
 use self::keyring::system_keyring;
 use self::vault::CredentialVault;
@@ -19,9 +16,17 @@ pub(super) struct CredentialStorage {
 
 impl CredentialStorage {
     pub fn new(app: &AppHandle) -> Result<Self, AuthError> {
-        let codex_home = resolve_codex_home(app)?;
+        let credentials_directory = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| {
+                AuthError::CredentialStorage(format!(
+                    "could not resolve the application data directory: {error}"
+                ))
+            })?
+            .join("credentials");
         Ok(Self {
-            vault: CredentialVault::new(codex_home, system_keyring()),
+            vault: CredentialVault::new(credentials_directory, system_keyring()),
         })
     }
 
@@ -34,11 +39,8 @@ impl CredentialStorage {
 
     pub async fn save(&self, record: &AuthRecord) -> Result<(), AuthError> {
         let vault = self.vault.clone();
-        let serialized = serde_json::to_string(record).map_err(|error| {
-            AuthError::CredentialStorage(format!("could not serialize credentials: {error}"))
-        })?;
-        let serialized = Zeroizing::new(serialized);
-        tokio::task::spawn_blocking(move || vault.save_serialized(&serialized))
+        let record = record.clone();
+        tokio::task::spawn_blocking(move || vault.save(record))
             .await
             .map_err(|error| AuthError::Task(error.to_string()))?
     }
@@ -48,21 +50,5 @@ impl CredentialStorage {
         tokio::task::spawn_blocking(move || vault.delete())
             .await
             .map_err(|error| AuthError::Task(error.to_string()))?
-    }
-}
-
-fn resolve_codex_home(app: &AppHandle) -> Result<PathBuf, AuthError> {
-    match std::env::var_os("CODEX_HOME") {
-        Some(value) if value.is_empty() => Err(AuthError::CredentialStorage(
-            "CODEX_HOME is set but empty".into(),
-        )),
-        Some(value) => Ok(PathBuf::from(value)),
-        None => app
-            .path()
-            .home_dir()
-            .map(|home| home.join(".codex"))
-            .map_err(|error| {
-                AuthError::CredentialStorage(format!("could not resolve the user profile: {error}"))
-            }),
     }
 }

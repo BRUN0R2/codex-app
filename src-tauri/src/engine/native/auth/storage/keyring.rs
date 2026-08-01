@@ -5,6 +5,7 @@ use super::super::error::AuthError;
 pub(super) trait KeyringStore: Send + Sync {
     fn load(&self, service: &str, account: &str) -> Result<Option<String>, AuthError>;
     fn save(&self, service: &str, account: &str, value: &str) -> Result<(), AuthError>;
+    fn delete(&self, service: &str, account: &str) -> Result<bool, AuthError>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +38,14 @@ impl KeyringStore for SystemKeyring {
             .set_password(value)
             .map_err(keyring_error)
     }
+
+    fn delete(&self, service: &str, account: &str) -> Result<bool, AuthError> {
+        match credential_entry(service, account)?.delete_credential() {
+            Ok(()) => Ok(true),
+            Err(keyring_core::Error::NoEntry) => Ok(false),
+            Err(error) => Err(keyring_error(error)),
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -51,6 +60,10 @@ impl KeyringStore for SystemKeyring {
     }
 
     fn save(&self, _service: &str, _account: &str, _value: &str) -> Result<(), AuthError> {
+        Err(AuthError::UnsupportedPlatform)
+    }
+
+    fn delete(&self, _service: &str, _account: &str) -> Result<bool, AuthError> {
         Err(AuthError::UnsupportedPlatform)
     }
 }

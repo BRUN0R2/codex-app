@@ -1,0 +1,342 @@
+use std::collections::HashSet;
+
+use serde::Deserialize;
+
+use crate::engine::CodexModel;
+use crate::engine::ModelServiceTier;
+use crate::engine::ReasoningEffort;
+use crate::engine::ReasoningEffortOption;
+use crate::error::AppError;
+
+const MAX_MODEL_ID_BYTES: usize = 128;
+const MAX_MODEL_TEXT_BYTES: usize = 16_384;
+const MAX_INSTRUCTIONS_BYTES: usize = 262_144;
+
+#[derive(Debug, Deserialize)]
+pub struct ModelsWire {
+    models: Vec<ModelWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelWire {
+    slug: String,
+    display_name: String,
+    description: Option<String>,
+    default_reasoning_level: Option<ReasoningEffort>,
+    supported_reasoning_levels: Vec<ReasoningPresetWire>,
+    visibility: ModelVisibility,
+    priority: i32,
+    #[serde(default)]
+    service_tiers: Vec<ServiceTierWire>,
+    default_service_tier: Option<String>,
+    base_instructions: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReasoningPresetWire {
+    effort: ReasoningEffort,
+    description: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceTierWire {
+    id: String,
+    name: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ModelVisibility {
+    List,
+    Hide,
+    None,
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectedModel {
+    summary: CodexModel,
+    instructions: String,
+}
+
+impl SelectedModel {
+    pub fn summary(&self) -> CodexModel {
+        self.summary.clone()
+    }
+
+    pub fn id(&self) -> &str {
+        &self.summary.id
+    }
+
+    pub fn instructions(&self) -> &str {
+        &self.instructions
+    }
+
+    pub fn default_reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.summary.default_reasoning_effort
+    }
+
+    pub fn supports_reasoning_effort(&self, effort: ReasoningEffort) -> bool {
+        self.summary
+            .supported_reasoning_efforts
+            .iter()
+            .any(|option| option.reasoning_effort == effort)
+    }
+
+    pub fn select_service_tier(&self, requested: Option<&str>) -> Result<Option<String>, AppError> {
+        let selected = requested
+            .map(str::to_string)
+            .or_else(|| self.summary.default_service_tier.clone());
+        if let Some(selected) = selected.as_deref()
+            && !self
+                .summary
+                .service_tiers
+                .iter()
+                .any(|tier| tier.id == selected)
+        {
+            return Err(AppError::Protocol(format!(
+                "service tier `{selected}` is not supported by model `{}`",
+                self.id()
+            )));
+        }
+        Ok(selected)
+    }
+}
+
+#[derive(Debug)]
+pub struct ModelCatalog {
+    models: Vec<SelectedModel>,
+}
+
+impl ModelCatalog {
+    pub fn from_wire(wire: ModelsWire, maximum_models: usize) -> Result<Self, AppError> {
+        if wire.models.is_empty() || wire.models.len() > maximum_models {
+            return Err(AppError::Provider(format!(
+                "model catalog must contain between 1 and {maximum_models} entries"
+            )));
+        }
+        let mut seen = HashSet::with_capacity(wire.models.len());
+        let mut models = Vec::with_capacity(wire.models.len());
+        let mut wire_models = wire.models;
+        wire_models.sort_by_key(|model| model.priority);
+        let default_slug = wire_models
+            .iter()
+            .find(|model| model.visibility == ModelVisibility::List)
+            .map(|model| model.slug.clone())
+            .ok_or_else(|| AppError::Provider("model catalog has no visible model".into()))?;
+
+        for model in wire_models {
+            validate_identifier("model slug", &model.slug, MAX_MODEL_ID_BYTES)?;
+            validate_text(
+                "model display name",
+                &model.display_name,
+                MAX_MODEL_TEXT_BYTES,
+            )?;
+            validate_text(
+                "model instructions",
+                &model.base_instructions,
+                MAX_INSTRUCTIONS_BYTES,
+            )?;
+            validate_optional_text(
+                "model description",
+                model.description.as_deref(),
+                MAX_MODEL_TEXT_BYTES,
+            )?;
+            if !seen.insert(model.slug.clone()) {
+                return Err(AppError::Provider(format!(
+                    "model catalog contains duplicate slug `{}`",
+                    model.slug
+                )));
+            }
+            let mut seen_reasoning_efforts = HashSet::new();
+            for preset in &model.supported_reasoning_levels {
+                if !seen_reasoning_efforts.insert(preset.effort) {
+                    return Err(AppError::Provider(format!(
+                        "model `{}` contains duplicate reasoning effort `{}`",
+                        model.slug,
+                        preset.effort.as_str()
+                    )));
+                }
+                validate_optional_text(
+                    "reasoning description",
+                    Some(&preset.description),
+                    MAX_MODEL_TEXT_BYTES,
+                )?;
+            }
+            let default_reasoning_effort = model.default_reasoning_level;
+            if let Some(default_reasoning_effort) = default_reasoning_effort
+                && !model
+                    .supported_reasoning_levels
+                    .iter()
+                    .any(|preset| preset.effort == default_reasoning_effort)
+            {
+                return Err(AppError::Provider(format!(
+                    "model `{}` advertises an unsupported default reasoning effort",
+                    model.slug
+                )));
+            }
+            let supported_reasoning_efforts = model
+                .supported_reasoning_levels
+                .into_iter()
+                .map(|preset| ReasoningEffortOption {
+                    reasoning_effort: preset.effort,
+                    description: preset.description,
+                })
+                .collect();
+            let mut seen_service_tiers = HashSet::new();
+            for tier in &model.service_tiers {
+                validate_identifier("service tier id", &tier.id, MAX_MODEL_ID_BYTES)?;
+                validate_text("service tier name", &tier.name, MAX_MODEL_TEXT_BYTES)?;
+                validate_optional_text(
+                    "service tier description",
+                    Some(&tier.description),
+                    MAX_MODEL_TEXT_BYTES,
+                )?;
+                if !seen_service_tiers.insert(tier.id.as_str()) {
+                    return Err(AppError::Provider(format!(
+                        "model `{}` contains duplicate service tier `{}`",
+                        model.slug, tier.id
+                    )));
+                }
+            }
+            if let Some(default_service_tier) = model.default_service_tier.as_deref()
+                && !seen_service_tiers.contains(default_service_tier)
+            {
+                return Err(AppError::Provider(format!(
+                    "model `{}` advertises unknown default service tier `{default_service_tier}`",
+                    model.slug
+                )));
+            }
+            let service_tiers = model
+                .service_tiers
+                .into_iter()
+                .map(|tier| ModelServiceTier {
+                    id: tier.id,
+                    name: tier.name,
+                    description: tier.description,
+                })
+                .collect();
+            models.push(SelectedModel {
+                summary: CodexModel {
+                    id: model.slug.clone(),
+                    model: model.slug.clone(),
+                    display_name: model.display_name,
+                    description: model.description,
+                    hidden: model.visibility != ModelVisibility::List,
+                    supported_reasoning_efforts,
+                    default_reasoning_effort,
+                    service_tiers,
+                    default_service_tier: model.default_service_tier,
+                    is_default: model.slug == default_slug,
+                },
+                instructions: model.base_instructions,
+            });
+        }
+        Ok(Self { models })
+    }
+
+    pub fn models(&self) -> &[SelectedModel] {
+        &self.models
+    }
+
+    pub fn select(&self, requested: Option<&str>) -> Result<SelectedModel, AppError> {
+        let selected = match requested {
+            Some(id) => self.models.iter().find(|model| model.id() == id),
+            None => self.models.iter().find(|model| model.summary.is_default),
+        };
+        selected.cloned().ok_or_else(|| {
+            AppError::Protocol(match requested {
+                Some(id) => format!("model `{id}` is not present in the current catalog"),
+                None => "the current model catalog has no default".into(),
+            })
+        })
+    }
+}
+
+fn validate_text(label: &str, value: &str, maximum_bytes: usize) -> Result<(), AppError> {
+    if value.trim().is_empty() || value.len() > maximum_bytes {
+        return Err(AppError::Provider(format!(
+            "{label} must contain between 1 and {maximum_bytes} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_identifier(label: &str, value: &str, maximum_bytes: usize) -> Result<(), AppError> {
+    validate_text(label, value, maximum_bytes)?;
+    if value.chars().any(char::is_control) {
+        return Err(AppError::Provider(format!(
+            "{label} cannot contain control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_optional_text(
+    label: &str,
+    value: Option<&str>,
+    maximum_bytes: usize,
+) -> Result<(), AppError> {
+    if value.is_some_and(|value| value.len() > maximum_bytes) {
+        return Err(AppError::Provider(format!(
+            "{label} exceeds {maximum_bytes} bytes"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelCatalog;
+    use super::ModelsWire;
+
+    #[test]
+    fn catalog_has_one_authoritative_models_shape() {
+        let wire: ModelsWire = serde_json::from_str(
+            r#"{
+                "models": [{
+                    "slug": "gpt-test",
+                    "display_name": "GPT Test",
+                    "description": "test",
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [{"effort":"medium","description":"balanced"}],
+                    "visibility": "list",
+                    "priority": 0,
+                    "service_tiers": [],
+                    "default_service_tier": null,
+                    "base_instructions": "Be useful."
+                }]
+            }"#,
+        )
+        .expect("fixture should decode");
+        let catalog = ModelCatalog::from_wire(wire, 100).expect("catalog should validate");
+        assert_eq!(catalog.models().len(), 1);
+        assert!(catalog.models()[0].summary().is_default);
+    }
+
+    #[test]
+    fn catalog_preserves_an_absent_reasoning_default() {
+        let wire: ModelsWire = serde_json::from_str(
+            r#"{
+                "models": [{
+                    "slug": "gpt-no-reasoning-default",
+                    "display_name": "GPT without reasoning default",
+                    "description": null,
+                    "supported_reasoning_levels": [],
+                    "visibility": "list",
+                    "priority": 0,
+                    "service_tiers": [],
+                    "default_service_tier": null,
+                    "base_instructions": "Be useful."
+                }]
+            }"#,
+        )
+        .expect("fixture should decode");
+        let catalog = ModelCatalog::from_wire(wire, 100).expect("catalog should validate");
+        let summary = catalog.models()[0].summary();
+
+        assert_eq!(summary.default_reasoning_effort, None);
+        assert!(summary.supported_reasoning_efforts.is_empty());
+        assert_eq!(summary.description, None);
+    }
+}

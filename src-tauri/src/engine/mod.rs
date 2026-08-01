@@ -1,109 +1,137 @@
-mod compatibility;
 mod contracts;
 mod native;
 
-use serde_json::Value;
 use tauri::AppHandle;
 
 use crate::error::AppError;
 
-pub use contracts::CompatibilityStatus;
-pub use contracts::EngineConfigEdit;
-pub use contracts::EngineDescriptor;
-pub use contracts::EngineKind;
-pub use contracts::EngineNotification;
-pub use contracts::EngineOperation;
-pub use contracts::EngineReasoningEffort;
-pub use contracts::EngineServerRequest;
-pub use contracts::EngineStartResponse;
-pub use contracts::EngineTurnInput;
-pub use contracts::EngineWindowsSandboxSetupMode;
-pub use contracts::RuntimeDiagnostic;
-pub use contracts::RuntimeState;
-pub use contracts::RuntimeStatus;
-
-use compatibility::CodexCompatibilityEngine;
+pub use contracts::*;
 use native::NativeEngine;
+pub use native::auth::{AccountReadResponse, CancelLoginResponse, LoginResponse, LogoutResponse};
 
 pub const NOTIFICATION_EVENT: &str = "engine://notification";
 pub const SERVER_REQUEST_EVENT: &str = "engine://server-request";
 pub const RUNTIME_DIAGNOSTIC_EVENT: &str = "engine://runtime-diagnostic";
 pub const RUNTIME_STATUS_EVENT: &str = "engine://runtime-status";
 
-pub(crate) trait AgentEngine: Send + Sync {
-    fn descriptor(&self) -> EngineDescriptor;
-
-    async fn start(&self, app: &AppHandle) -> Result<EngineStartResponse, AppError>;
-
-    async fn execute(&self, app: &AppHandle, operation: EngineOperation)
-    -> Result<Value, AppError>;
-
-    async fn respond(
-        &self,
-        app: &AppHandle,
-        request_id: Value,
-        response: Value,
-    ) -> Result<(), AppError>;
-
-    async fn stop(&self);
-}
-
-enum EngineBackend {
-    Native(NativeEngine),
-    Compatibility(CodexCompatibilityEngine),
-}
-
+#[derive(Default)]
 pub struct EngineManager {
-    backend: EngineBackend,
-}
-
-impl Default for EngineManager {
-    fn default() -> Self {
-        let backend = match std::env::var("CODEX_APP_ENGINE") {
-            Ok(value) if value.eq_ignore_ascii_case("compatibility") => {
-                EngineBackend::Compatibility(CodexCompatibilityEngine::default())
-            }
-            _ => EngineBackend::Native(NativeEngine::default()),
-        };
-        Self { backend }
-    }
+    engine: NativeEngine,
 }
 
 impl EngineManager {
     pub async fn start(&self, app: &AppHandle) -> Result<EngineStartResponse, AppError> {
-        match &self.backend {
-            EngineBackend::Native(engine) => engine.start(app).await,
-            EngineBackend::Compatibility(engine) => engine.start(app).await,
-        }
+        self.engine.start(app).await
     }
 
-    pub async fn execute(
+    pub async fn account_read(&self, app: &AppHandle) -> Result<AccountReadResponse, AppError> {
+        self.engine.account_read(app).await
+    }
+
+    pub async fn account_rate_limits_read(
         &self,
         app: &AppHandle,
-        operation: EngineOperation,
-    ) -> Result<Value, AppError> {
-        match &self.backend {
-            EngineBackend::Native(engine) => engine.execute(app, operation).await,
-            EngineBackend::Compatibility(engine) => engine.execute(app, operation).await,
-        }
+    ) -> Result<AccountRateLimitsResponse, AppError> {
+        self.engine.account_rate_limits_read(app).await
     }
 
-    pub async fn respond(
+    pub async fn login_chatgpt(&self, app: &AppHandle) -> Result<LoginResponse, AppError> {
+        self.engine.login_chatgpt(app).await
+    }
+
+    pub async fn login_cancel(&self, login_id: &str) -> CancelLoginResponse {
+        self.engine.login_cancel(login_id).await
+    }
+
+    pub async fn logout(&self, app: &AppHandle) -> Result<LogoutResponse, AppError> {
+        self.engine.logout(app).await
+    }
+
+    pub async fn thread_start(
         &self,
         app: &AppHandle,
-        request_id: Value,
-        response: Value,
-    ) -> Result<(), AppError> {
-        match &self.backend {
-            EngineBackend::Native(engine) => engine.respond(app, request_id, response).await,
-            EngineBackend::Compatibility(engine) => engine.respond(app, request_id, response).await,
-        }
+        cwd: String,
+    ) -> Result<ThreadStartResponse, AppError> {
+        self.engine.thread_start(app, cwd).await
     }
 
-    pub async fn stop(&self) {
-        match &self.backend {
-            EngineBackend::Native(engine) => engine.stop().await,
-            EngineBackend::Compatibility(engine) => engine.stop().await,
-        }
+    pub async fn thread_list(
+        &self,
+        cursor: Option<String>,
+    ) -> Result<ThreadListResponse, AppError> {
+        self.engine.thread_list(cursor).await
+    }
+
+    pub async fn thread_resume(&self, thread_id: String) -> Result<ThreadResumeResponse, AppError> {
+        self.engine.thread_resume(thread_id).await
+    }
+
+    pub async fn thread_read(&self, thread_id: String) -> Result<ThreadReadResponse, AppError> {
+        self.engine.thread_read(thread_id).await
+    }
+
+    pub async fn thread_set_name(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+        name: String,
+    ) -> Result<OperationAck, AppError> {
+        self.engine.thread_set_name(app, thread_id, name).await
+    }
+
+    pub async fn thread_archive(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+    ) -> Result<OperationAck, AppError> {
+        self.engine.thread_archive(app, thread_id).await
+    }
+
+    pub async fn turn_start(
+        &self,
+        app: &AppHandle,
+        request: native::StartTurn,
+    ) -> Result<TurnStartResponse, AppError> {
+        self.engine.turn_start(app, request).await
+    }
+
+    pub async fn turn_interrupt(
+        &self,
+        thread_id: String,
+        turn_id: String,
+    ) -> Result<OperationAck, AppError> {
+        self.engine.turn_interrupt(thread_id, turn_id).await
+    }
+
+    pub async fn config_read(&self) -> Result<ConfigReadResponse, AppError> {
+        self.engine.config_read().await
+    }
+
+    pub async fn config_update(
+        &self,
+        expected_version: u64,
+        update: ConfigUpdate,
+    ) -> Result<ConfigUpdateResponse, AppError> {
+        self.engine.config_update(expected_version, update).await
+    }
+
+    pub async fn model_list(&self, app: &AppHandle) -> Result<ModelListResponse, AppError> {
+        self.engine.model_list(app).await
+    }
+
+    pub async fn server_request_respond(
+        &self,
+        request_id: String,
+        response: ServerResponse,
+    ) -> Result<OperationAck, AppError> {
+        self.engine
+            .server_request_respond(request_id, response)
+            .await
+    }
+
+    pub async fn stop(&self, app: &AppHandle) {
+        self.engine.stop(app).await;
     }
 }
+
+pub use native::StartTurn;

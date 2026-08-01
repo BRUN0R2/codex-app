@@ -3,50 +3,64 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error(
-        "the temporary Codex compatibility bridge was not found; install Codex or set CODEX_APP_BINARY"
-    )]
-    CodexBinaryNotFound,
-    #[error("configured Codex executable does not exist: {0}")]
-    InvalidCodexBinary(String),
-    #[error("failed to start Codex app-server: {0}")]
-    CodexStart(String),
-    #[error("Codex app-server is not available")]
-    RuntimeUnavailable,
-    #[error("Codex app-server protocol error: {0}")]
-    Protocol(String),
-    #[error("Codex request `{method}` timed out")]
-    Timeout { method: String },
-    #[error("Codex request failed: {message}")]
-    Rpc { code: Option<i64>, message: String },
-    #[error("engine error: {0}")]
-    Engine(String),
-    #[error("native ChatGPT authentication error: {0}")]
+    #[error("authentication failed: {0}")]
     Auth(String),
-    #[error("native storage error: {0}")]
+    #[error("provider request failed: {0}")]
+    Provider(String),
+    #[error("provider returned HTTP {status}: {message}")]
+    ProviderHttp { status: u16, message: String },
+    #[error("{operation} exceeded its time limit")]
+    Timeout { operation: &'static str },
+    #[error("native storage failed: {0}")]
     Storage(String),
+    #[error("invalid command contract: {0}")]
+    Protocol(String),
     #[error("invalid attachment: {0}")]
     InvalidAttachment(String),
     #[error("filesystem operation failed: {0}")]
     FileSystem(String),
+    #[error("tool execution failed: {0}")]
+    Tool(String),
+    #[error("operation is not permitted: {0}")]
+    Permission(String),
+    #[error("operation was canceled: {0}")]
+    Cancelled(String),
+    #[error("engine state is invalid: {0}")]
+    State(String),
 }
 
 impl AppError {
-    fn code(&self) -> &'static str {
+    const fn code(&self) -> &'static str {
         match self {
-            Self::CodexBinaryNotFound => "codexBinaryNotFound",
-            Self::InvalidCodexBinary(_) => "invalidCodexBinary",
-            Self::CodexStart(_) => "codexStartFailed",
-            Self::RuntimeUnavailable => "codexRuntimeUnavailable",
-            Self::Protocol(_) => "codexProtocolError",
-            Self::Timeout { .. } => "codexRequestTimeout",
-            Self::Rpc { .. } => "codexRpcError",
-            Self::Engine(_) => "engineError",
-            Self::Auth(_) => "nativeAuthError",
-            Self::Storage(_) => "nativeStorageError",
+            Self::Auth(_) => "authFailed",
+            Self::Provider(_) => "providerFailed",
+            Self::ProviderHttp { .. } => "providerHttpError",
+            Self::Timeout { .. } => "operationTimeout",
+            Self::Storage(_) => "storageFailed",
+            Self::Protocol(_) => "invalidContract",
             Self::InvalidAttachment(_) => "invalidAttachment",
-            Self::FileSystem(_) => "fileSystemError",
+            Self::FileSystem(_) => "fileSystemFailed",
+            Self::Tool(_) => "toolFailed",
+            Self::Permission(_) => "permissionDenied",
+            Self::Cancelled(_) => "operationCanceled",
+            Self::State(_) => "invalidEngineState",
         }
+    }
+
+    const fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Provider(_)
+                | Self::ProviderHttp {
+                    status: 500..=599,
+                    ..
+                }
+                | Self::Timeout { .. }
+        )
+    }
+
+    pub(crate) const fn public_code(&self) -> &'static str {
+        self.code()
     }
 }
 
@@ -55,12 +69,14 @@ impl AppError {
 pub struct CommandError {
     pub code: &'static str,
     pub message: String,
+    pub retryable: bool,
 }
 
 impl From<AppError> for CommandError {
     fn from(error: AppError) -> Self {
         Self {
             code: error.code(),
+            retryable: error.retryable(),
             message: error.to_string(),
         }
     }

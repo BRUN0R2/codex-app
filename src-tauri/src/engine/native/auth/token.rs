@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fmt;
 
 use base64::Engine as _;
@@ -10,7 +9,6 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
 use zeroize::Zeroize;
 
 use super::error::AuthError;
@@ -70,12 +68,12 @@ impl<'de> Deserialize<'de> for SecretString {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct TokenSet {
     pub id_token: SecretString,
     pub access_token: SecretString,
     pub refresh_token: SecretString,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account_id: Option<String>,
+    pub account_id: String,
 }
 
 impl fmt::Debug for TokenSet {
@@ -91,45 +89,20 @@ impl fmt::Debug for TokenSet {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct AuthRecord {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    auth_mode: Option<String>,
-    #[serde(rename = "OPENAI_API_KEY", default)]
-    openai_api_key: Option<SecretString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    tokens: Option<TokenSet>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_refresh: Option<DateTime<Utc>>,
-    #[serde(flatten)]
-    extra: BTreeMap<String, Value>,
+    tokens: TokenSet,
+    last_refresh: DateTime<Utc>,
 }
 
 impl fmt::Debug for AuthRecord {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AuthRecord")
-            .field("auth_mode", &self.auth_mode)
-            .field("has_api_key", &self.openai_api_key.is_some())
             .field("tokens", &self.tokens)
             .field("last_refresh", &self.last_refresh)
-            .field("extra_fields", &self.extra.keys().collect::<Vec<_>>())
             .finish()
     }
-}
-
-impl Drop for AuthRecord {
-    fn drop(&mut self) {
-        for value in self.extra.values_mut() {
-            zeroize_json(value);
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum StoredAuthMode {
-    ChatGpt,
-    ApiKey,
-    Other(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,70 +115,73 @@ pub(super) struct AccountClaims {
 impl AuthRecord {
     pub fn from_exchange(tokens: ExchangedTokens) -> Result<Self, AuthError> {
         let claims = parse_account_claims(&tokens.id_token)?;
-        Ok(Self {
-            auth_mode: Some("chatgpt".into()),
-            openai_api_key: None,
-            tokens: Some(TokenSet {
+        let account_id = claims.account_id.ok_or_else(|| {
+            AuthError::InvalidToken("the ChatGPT identity token has no account id".into())
+        })?;
+        let record = Self {
+            tokens: TokenSet {
                 id_token: tokens.id_token,
                 access_token: tokens.access_token,
                 refresh_token: tokens.refresh_token,
-                account_id: claims.account_id,
-            }),
-            last_refresh: Some(Utc::now()),
-            extra: BTreeMap::new(),
-        })
+                account_id,
+            },
+            last_refresh: Utc::now(),
+        };
+        record.validate()?;
+        Ok(record)
     }
 
-    pub fn mode(&self) -> StoredAuthMode {
-        match self.auth_mode.as_deref() {
-            Some("chatgpt") => StoredAuthMode::ChatGpt,
-            Some("apikey") => StoredAuthMode::ApiKey,
-            Some(other) => StoredAuthMode::Other(other.to_owned()),
-            None if self.openai_api_key.is_some() => StoredAuthMode::ApiKey,
-            None => StoredAuthMode::ChatGpt,
+    pub fn validate(&self) -> Result<(), AuthError> {
+        if self.tokens.id_token.is_empty()
+            || self.tokens.access_token.is_empty()
+            || self.tokens.refresh_token.is_empty()
+            || self.tokens.account_id.trim().is_empty()
+            || self.tokens.account_id.len() > 256
+            || self.tokens.account_id.chars().any(char::is_control)
+        {
+            return Err(AuthError::InvalidToken(
+                "stored ChatGPT credentials contain an invalid token or account id".into(),
+            ));
         }
+        let claims = parse_account_claims(&self.tokens.id_token)?;
+        if claims.account_id.as_deref() != Some(self.tokens.account_id.as_str()) {
+            return Err(AuthError::InvalidToken(
+                "stored ChatGPT account id does not match the identity token".into(),
+            ));
+        }
+        Ok(())
     }
 
-    pub fn tokens(&self) -> Result<&TokenSet, AuthError> {
-        self.tokens.as_ref().ok_or_else(|| {
-            AuthError::InvalidToken("stored ChatGPT credentials do not contain tokens".into())
-        })
+    pub fn tokens(&self) -> &TokenSet {
+        &self.tokens
     }
 
     pub fn account_claims(&self) -> Result<AccountClaims, AuthError> {
-        let tokens = self.tokens()?;
+        let tokens = &self.tokens;
         let mut claims = parse_account_claims(&tokens.id_token)?;
-        if tokens.account_id.is_some() {
-            claims.account_id.clone_from(&tokens.account_id);
-        }
+        claims.account_id = Some(tokens.account_id.clone());
         Ok(claims)
     }
 
     pub fn should_refresh(&self, now: DateTime<Utc>) -> bool {
-        let Some(tokens) = self.tokens.as_ref() else {
-            return false;
-        };
-        if let Ok(Some(expires_at)) = parse_expiration(&tokens.access_token) {
+        if let Ok(Some(expires_at)) = parse_expiration(&self.tokens.access_token) {
             return expires_at <= now + ACCESS_TOKEN_REFRESH_WINDOW;
         }
-        self.last_refresh
-            .is_some_and(|last_refresh| last_refresh < now - LAST_REFRESH_FALLBACK_INTERVAL)
+        self.last_refresh < now - LAST_REFRESH_FALLBACK_INTERVAL
     }
 
     pub fn same_refresh_source(&self, other: &Self) -> bool {
-        match (self.tokens.as_ref(), other.tokens.as_ref()) {
-            (Some(left), Some(right)) => {
-                left.refresh_token == right.refresh_token && left.account_id == right.account_id
-            }
-            _ => false,
-        }
+        self.tokens.refresh_token == other.tokens.refresh_token
+            && self.tokens.account_id == other.tokens.account_id
     }
 
     pub fn apply_refresh(&mut self, patch: TokenPatch) -> Result<(), AuthError> {
-        let tokens = self.tokens.as_mut().ok_or_else(|| {
-            AuthError::InvalidToken("stored ChatGPT credentials do not contain tokens".into())
-        })?;
+        let tokens = &mut self.tokens;
         if let Some(id_token) = patch.id_token {
+            let claims = parse_account_claims(&id_token)?;
+            tokens.account_id = claims.account_id.ok_or_else(|| {
+                AuthError::InvalidToken("the refreshed identity token has no account id".into())
+            })?;
             tokens.id_token = id_token;
         }
         if let Some(access_token) = patch.access_token {
@@ -214,8 +190,8 @@ impl AuthRecord {
         if let Some(refresh_token) = patch.refresh_token {
             tokens.refresh_token = refresh_token;
         }
-        self.last_refresh = Some(Utc::now());
-        Ok(())
+        self.last_refresh = Utc::now();
+        self.validate()
     }
 }
 
@@ -303,19 +279,6 @@ where
         .map_err(|error| AuthError::InvalidToken(format!("JWT claims are invalid: {error}")))
 }
 
-fn zeroize_json(value: &mut Value) {
-    match value {
-        Value::String(string) => string.zeroize(),
-        Value::Array(values) => values.iter_mut().for_each(zeroize_json),
-        Value::Object(values) => {
-            for value in values.values_mut() {
-                zeroize_json(value);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use base64::Engine as _;
@@ -325,7 +288,6 @@ mod tests {
 
     use super::AuthRecord;
     use super::SecretString;
-    use super::StoredAuthMode;
 
     fn jwt(payload: serde_json::Value) -> SecretString {
         let payload = serde_json::to_vec(&payload).unwrap_or_default();
@@ -338,21 +300,19 @@ mod tests {
     #[test]
     fn parses_the_official_namespaced_chatgpt_claims() {
         let record: AuthRecord = serde_json::from_value(json!({
-            "auth_mode": "chatgpt",
-            "OPENAI_API_KEY": null,
             "tokens": {
-                "id_token": jwt(json!({
+                "idToken": jwt(json!({
                     "email": "person@example.com",
                     "https://api.openai.com/auth": {
                         "chatgpt_plan_type": "plus",
                         "chatgpt_account_id": "account-1"
                     }
                 })).expose(),
-                "access_token": jwt(json!({ "exp": Utc::now().timestamp() + 3600 })).expose(),
-                "refresh_token": "refresh",
-                "account_id": "account-1"
+                "accessToken": jwt(json!({ "exp": Utc::now().timestamp() + 3600 })).expose(),
+                "refreshToken": "refresh",
+                "accountId": "account-1"
             },
-            "last_refresh": Utc::now()
+            "lastRefresh": Utc::now()
         }))
         .unwrap_or_else(|error| panic!("fixture should deserialize: {error}"));
 
@@ -362,34 +322,23 @@ mod tests {
         assert_eq!(claims.email.as_deref(), Some("person@example.com"));
         assert_eq!(claims.plan_type.as_deref(), Some("plus"));
         assert_eq!(claims.account_id.as_deref(), Some("account-1"));
-        assert_eq!(record.mode(), StoredAuthMode::ChatGpt);
+        assert!(record.validate().is_ok());
         assert!(!record.should_refresh(Utc::now()));
     }
 
     #[test]
-    fn preserves_forward_compatible_fields_during_round_trip() {
-        let value = json!({
-            "auth_mode": "chatgpt",
-            "OPENAI_API_KEY": null,
-            "future_auth": { "private": "value", "enabled": true },
-            "last_refresh": Utc::now() - Duration::days(9)
-        });
-        let record: AuthRecord = serde_json::from_value(value.clone())
-            .unwrap_or_else(|error| panic!("fixture should deserialize: {error}"));
-        let serialized = serde_json::to_value(record)
-            .unwrap_or_else(|error| panic!("record should serialize: {error}"));
+    fn rejects_unknown_credential_fields() {
+        let record = serde_json::from_value::<AuthRecord>(json!({
+            "authMode": "chatgpt",
+            "tokens": {
+                "idToken": jwt(json!({})).expose(),
+                "accessToken": jwt(json!({})).expose(),
+                "refreshToken": "refresh",
+                "accountId": "account-1"
+            },
+            "lastRefresh": Utc::now() - Duration::days(9)
+        }));
 
-        assert_eq!(serialized["future_auth"], value["future_auth"]);
-    }
-
-    #[test]
-    fn recognizes_the_official_api_key_auth_mode() {
-        let record: AuthRecord = serde_json::from_value(json!({
-            "auth_mode": "apikey",
-            "OPENAI_API_KEY": "secret"
-        }))
-        .unwrap_or_else(|error| panic!("fixture should deserialize: {error}"));
-
-        assert_eq!(record.mode(), StoredAuthMode::ApiKey);
+        assert!(record.is_err());
     }
 }

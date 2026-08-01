@@ -1,66 +1,192 @@
-use serde::Serialize;
-use serde_json::Value;
-use serde_json::json;
+use std::collections::BTreeMap;
 
-const THREAD_PAGE_LIMIT: u32 = 100;
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum EngineKind {
-    Native,
-    Compatibility,
+pub enum EngineTransport {
+    HttpsSse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EngineStorage {
+    Sqlite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EngineCapability {
+    ChatGptOauth,
+    LocalThreads,
+    ModelStreaming,
+    NativeTools,
+    ExplicitApprovals,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineDescriptor {
-    pub id: String,
-    pub name: String,
-    pub kind: EngineKind,
-    pub provider: String,
-    pub auth: String,
-    pub capabilities: Vec<String>,
-    pub uses_compatibility_bridge: bool,
+    pub id: &'static str,
+    pub name: &'static str,
+    pub provider: &'static str,
+    pub auth: &'static str,
+    pub transport: EngineTransport,
+    pub storage: EngineStorage,
+    pub capabilities: Vec<EngineCapability>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStartResponse {
     pub engine: EngineDescriptor,
-    pub executable: Option<String>,
-    pub transport: String,
-    pub initialize: Value,
-    pub compatibility: CompatibilityStatus,
+    pub schema_version: u32,
+    pub permission_profile: PermissionProfile,
+    pub permission_profiles: Vec<PermissionProfile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "method", content = "params")]
+pub enum EngineNotification {
+    #[serde(rename = "auth.loginCompleted")]
+    AuthLoginCompleted(AuthLoginCompleted),
+    #[serde(rename = "auth.sessionChanged")]
+    AuthSessionChanged(AuthSessionChanged),
+    #[serde(rename = "thread.created")]
+    ThreadCreated(ThreadNotification),
+    #[serde(rename = "thread.updated")]
+    ThreadUpdated(ThreadNotification),
+    #[serde(rename = "thread.archived")]
+    ThreadArchived(ThreadArchivedNotification),
+    #[serde(rename = "turn.started")]
+    TurnStarted(TurnNotification),
+    #[serde(rename = "turn.completed")]
+    TurnCompleted(TurnCompletedNotification),
+    #[serde(rename = "item.started")]
+    ItemStarted(ItemNotification),
+    #[serde(rename = "item.completed")]
+    ItemCompleted(ItemNotification),
+    #[serde(rename = "item.agentTextDelta")]
+    AgentTextDelta(TextDeltaNotification),
+    #[serde(rename = "item.reasoningSummaryDelta")]
+    ReasoningSummaryDelta(IndexedTextDeltaNotification),
+    #[serde(rename = "item.reasoningTextDelta")]
+    ReasoningTextDelta(IndexedTextDeltaNotification),
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompatibilityStatus {
-    pub available: bool,
-    pub executable: Option<String>,
-    pub reason: Option<String>,
+pub struct AuthLoginCompleted {
+    pub login_id: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthSessionChanged {
+    pub signed_in: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadNotification {
+    pub thread: CodexThread,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EngineNotification {
-    pub method: String,
-    pub params: Value,
+pub struct ThreadArchivedNotification {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnNotification {
+    pub thread_id: String,
+    pub turn: TurnSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnCompletedNotification {
+    pub thread_id: String,
+    pub turn: TurnSummary,
+    pub error: Option<OperationFailure>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationFailure {
+    pub code: &'static str,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item: ThreadItem,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextDeltaNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub delta: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedTextDeltaNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub index: usize,
+    pub delta: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineServerRequest {
-    pub id: Value,
-    pub method: String,
-    pub params: Value,
+    pub id: String,
+    #[serde(flatten)]
+    pub request: ServerRequest,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "method", content = "params")]
+pub enum ServerRequest {
+    #[serde(rename = "approval.command")]
+    ApproveCommand(CommandApprovalRequest),
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RuntimeDiagnostic {
-    pub stream: &'static str,
-    pub message: String,
+pub struct CommandApprovalRequest {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub command: String,
+    pub cwd: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServerResponse {
+    pub decision: ApprovalDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalDecision {
+    Accept,
+    Decline,
+    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -79,50 +205,101 @@ pub struct RuntimeStatus {
     pub message: Option<String>,
 }
 
-#[derive(Debug)]
-pub enum EngineTurnInput {
-    Text(String),
-    LocalImage { path: String },
-    Mention { name: String, path: String },
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDiagnostic {
+    pub stream: DiagnosticStream,
+    pub message: String,
 }
 
-impl EngineTurnInput {
-    fn into_json(self) -> Value {
-        match self {
-            Self::Text(text) => json!({ "type": "text", "text": text }),
-            Self::LocalImage { path } => json!({ "type": "localImage", "path": path }),
-            Self::Mention { name, path } => {
-                json!({ "type": "mention", "name": name, "path": path })
-            }
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiagnosticStream {
+    Runtime,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationAck {
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalPolicy {
+    Untrusted,
+    OnRequest,
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PermissionProfile {
+    pub sandbox: SandboxMode,
+    pub approvals: ApprovalPolicy,
+}
+
+impl PermissionProfile {
+    pub const fn read_only() -> Self {
+        Self {
+            sandbox: SandboxMode::ReadOnly,
+            approvals: ApprovalPolicy::Untrusted,
         }
+    }
+
+    pub const fn workspace_write() -> Self {
+        Self {
+            sandbox: SandboxMode::WorkspaceWrite,
+            approvals: ApprovalPolicy::OnRequest,
+        }
+    }
+
+    pub const fn full_access() -> Self {
+        Self {
+            sandbox: SandboxMode::DangerFullAccess,
+            approvals: ApprovalPolicy::Never,
+        }
+    }
+
+    pub const fn is_supported(self) -> bool {
+        matches!(
+            (self.sandbox, self.approvals),
+            (SandboxMode::ReadOnly, ApprovalPolicy::Untrusted)
+                | (SandboxMode::WorkspaceWrite, ApprovalPolicy::OnRequest)
+                | (SandboxMode::DangerFullAccess, ApprovalPolicy::Never)
+        )
     }
 }
 
-#[derive(Debug)]
-pub struct EngineConfigEdit {
-    pub key_path: String,
-    pub value: Value,
-    pub merge_strategy: &'static str,
+impl Default for PermissionProfile {
+    fn default() -> Self {
+        Self::workspace_write()
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EngineWindowsSandboxSetupMode {
-    Elevated,
-    Unelevated,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EngineReasoningEffort {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
     None,
     Minimal,
     Low,
     Medium,
     High,
     XHigh,
+    Max,
+    Ultra,
 }
 
-impl EngineReasoningEffort {
-    fn as_str(self) -> &'static str {
+impl ReasoningEffort {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Minimal => "minimal",
@@ -130,469 +307,459 @@ impl EngineReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
 }
 
-impl EngineWindowsSandboxSetupMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Elevated => "elevated",
-            Self::Unelevated => "unelevated",
-        }
-    }
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningEffortOption {
+    pub reasoning_effort: ReasoningEffort,
+    pub description: String,
 }
 
-impl EngineConfigEdit {
-    fn into_json(self) -> Value {
-        json!({
-            "keyPath": self.key_path,
-            "value": self.value,
-            "mergeStrategy": self.merge_strategy,
-        })
-    }
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelServiceTier {
+    pub id: String,
+    pub name: String,
+    pub description: String,
 }
 
-#[derive(Debug)]
-pub enum EngineOperation {
-    AccountRead,
-    ReadAccountRateLimits,
-    LoginChatGpt,
-    CancelLogin {
-        login_id: String,
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModel {
+    pub id: String,
+    pub model: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub hidden: bool,
+    pub supported_reasoning_efforts: Vec<ReasoningEffortOption>,
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+    pub service_tiers: Vec<ModelServiceTier>,
+    pub default_service_tier: Option<String>,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelListResponse {
+    pub data: Vec<CodexModel>,
+}
+
+#[derive(Debug, Clone)]
+pub enum TurnInput {
+    Text(String),
+    LocalImage { path: String },
+    Mention { name: String, path: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TurnStatus {
+    Completed,
+    Failed,
+    InProgress,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActivityStatus {
+    Completed,
+    Declined,
+    Failed,
+    InProgress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MessagePhase {
+    Commentary,
+    FinalAnswer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum UserContent {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "localImage")]
+    LocalImage {
+        path: String,
+        detail: Option<ImageDetail>,
     },
-    Logout,
-    StartThread {
+    #[serde(rename = "mention")]
+    Mention { name: String, path: String },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageDetail {
+    Auto,
+    Low,
+    High,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileChange {
+    pub path: String,
+    pub kind: FileChangeKind,
+    pub diff: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum FileChangeKind {
+    Add,
+    Delete,
+    Update { move_path: Option<String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum ThreadItem {
+    #[serde(rename = "userMessage")]
+    UserMessage {
+        id: String,
+        content: Vec<UserContent>,
+    },
+    #[serde(rename = "agentMessage")]
+    AgentMessage {
+        id: String,
+        text: String,
+        phase: Option<MessagePhase>,
+    },
+    #[serde(rename = "reasoning")]
+    Reasoning {
+        id: String,
+        summary: Vec<String>,
+        content: Vec<String>,
+    },
+    #[serde(rename = "commandExecution")]
+    CommandExecution {
+        id: String,
+        command: String,
         cwd: String,
+        #[serde(rename = "processId")]
+        process_id: Option<String>,
+        source: CommandSource,
+        status: ActivityStatus,
+        #[serde(rename = "aggregatedOutput")]
+        aggregated_output: Option<String>,
+        #[serde(rename = "exitCode")]
+        exit_code: Option<i32>,
+        #[serde(rename = "durationMs")]
+        duration_ms: Option<u64>,
     },
-    ListThreads {
-        cursor: Option<String>,
+    #[serde(rename = "fileChange")]
+    FileChange {
+        id: String,
+        changes: Vec<FileChange>,
+        status: ActivityStatus,
     },
-    ResumeThread {
-        thread_id: String,
-    },
-    ReadThread {
-        thread_id: String,
-    },
-    ForkThreadBeforeTurn {
-        thread_id: String,
-        before_turn_id: String,
-        model: String,
-    },
-    SetThreadName {
-        thread_id: String,
+    #[serde(rename = "toolExecution")]
+    ToolExecution {
+        id: String,
         name: String,
+        description: String,
+        status: ActivityStatus,
+        output: Option<String>,
     },
-    ArchiveThread {
-        thread_id: String,
-    },
-    StartTurn {
-        thread_id: String,
-        client_user_message_id: String,
-        input: Vec<EngineTurnInput>,
-        model: Option<String>,
-        effort: Option<EngineReasoningEffort>,
-    },
-    InterruptTurn {
-        thread_id: String,
-        turn_id: String,
-    },
-    ReadConfig {
-        include_layers: bool,
-        cwd: Option<String>,
-    },
-    ReadConfigRequirements,
-    ReadWindowsSandboxReadiness,
-    StartWindowsSandboxSetup {
-        mode: EngineWindowsSandboxSetupMode,
-        cwd: Option<String>,
-    },
-    WriteConfig {
-        edit: EngineConfigEdit,
-        expected_version: Option<String>,
-    },
-    BatchWriteConfig {
-        edits: Vec<EngineConfigEdit>,
-        expected_version: Option<String>,
-    },
-    ListModels,
 }
 
-impl EngineOperation {
-    pub fn audit_name(&self) -> &'static str {
-        match self {
-            Self::AccountRead => "account.read",
-            Self::ReadAccountRateLimits => "account.rate_limits.read",
-            Self::LoginChatGpt => "auth.login_chatgpt",
-            Self::CancelLogin { .. } => "auth.cancel_login",
-            Self::Logout => "auth.logout",
-            Self::StartThread { .. } => "thread.start",
-            Self::ListThreads { .. } => "thread.list",
-            Self::ResumeThread { .. } => "thread.resume",
-            Self::ReadThread { .. } => "thread.read",
-            Self::ForkThreadBeforeTurn { .. } => "thread.fork_before_turn",
-            Self::SetThreadName { .. } => "thread.name.set",
-            Self::ArchiveThread { .. } => "thread.archive",
-            Self::StartTurn { .. } => "turn.start",
-            Self::InterruptTurn { .. } => "turn.interrupt",
-            Self::ReadConfig { .. } => "config.read",
-            Self::ReadConfigRequirements => "config.requirements.read",
-            Self::ReadWindowsSandboxReadiness => "sandbox.windows.readiness",
-            Self::StartWindowsSandboxSetup { .. } => "sandbox.windows.setup.start",
-            Self::WriteConfig { .. } => "config.write",
-            Self::BatchWriteConfig { .. } => "config.batch_write",
-            Self::ListModels => "models.list",
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CommandSource {
+    Agent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadTurn {
+    pub id: String,
+    pub items: Vec<ThreadItem>,
+    pub status: TurnStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum ThreadStatus {
+    #[serde(rename = "active")]
+    Active {
+        #[serde(rename = "activeFlags")]
+        active_flags: Vec<ThreadActiveFlag>,
+    },
+    #[serde(rename = "idle")]
+    Idle,
+    #[serde(rename = "systemError")]
+    SystemError,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadActiveFlag {
+    WaitingOnApproval,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CodexThread {
+    pub id: String,
+    pub preview: String,
+    pub name: Option<String>,
+    pub cwd: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub recency_at: Option<i64>,
+    pub status: ThreadStatus,
+    pub turns: Vec<ThreadTurn>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadStartResponse {
+    pub thread: CodexThread,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadListResponse {
+    pub data: Vec<CodexThread>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadReadResponse {
+    pub thread: CodexThread,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadResumeResponse {
+    pub thread: CodexThread,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TurnStartResponse {
+    pub turn: TurnSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TurnSummary {
+    pub id: String,
+    pub status: TurnStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppConfig {
+    pub model: Option<String>,
+    pub model_reasoning_effort: Option<ReasoningEffort>,
+    pub service_tier: Option<String>,
+    pub permission_profile: PermissionProfile,
+    pub web_search: WebSearchMode,
+    pub model_verbosity: Option<ModelVerbosity>,
+    pub personality: Personality,
+    pub developer_instructions: Option<String>,
+    pub desktop: DesktopPreferences,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelDefaults {
+    pub model: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub service_tier: Option<String>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            model_reasoning_effort: None,
+            service_tier: None,
+            permission_profile: PermissionProfile::default(),
+            web_search: WebSearchMode::Disabled,
+            model_verbosity: None,
+            personality: Personality::Pragmatic,
+            developer_instructions: None,
+            desktop: DesktopPreferences::default(),
         }
     }
+}
 
-    pub fn audit_thread_id(&self) -> Option<&str> {
-        match self {
-            Self::ResumeThread { thread_id }
-            | Self::ReadThread { thread_id }
-            | Self::ForkThreadBeforeTurn { thread_id, .. }
-            | Self::SetThreadName { thread_id, .. }
-            | Self::ArchiveThread { thread_id }
-            | Self::StartTurn { thread_id, .. }
-            | Self::InterruptTurn { thread_id, .. } => Some(thread_id),
-            _ => None,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchMode {
+    Disabled,
+    Live,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelVerbosity {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Personality {
+    Friendly,
+    Pragmatic,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopPreferences {
+    pub ui_font_size: u8,
+    pub motion: MotionPreference,
+    pub pointer_cursor: bool,
+    pub diff_display: DiffDisplay,
+}
+
+impl Default for DesktopPreferences {
+    fn default() -> Self {
+        Self {
+            ui_font_size: 15,
+            motion: MotionPreference::Full,
+            pointer_cursor: true,
+            diff_display: DiffDisplay::Unified,
         }
     }
+}
 
-    pub fn is_auth(&self) -> bool {
-        matches!(
-            self,
-            Self::AccountRead | Self::LoginChatGpt | Self::CancelLogin { .. } | Self::Logout
-        )
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MotionPreference {
+    Full,
+    Reduced,
+}
 
-    pub fn into_compatibility_rpc(self) -> (&'static str, Option<Value>) {
-        match self {
-            Self::AccountRead => ("account/read", Some(json!({ "refreshToken": false }))),
-            Self::ReadAccountRateLimits => ("account/rateLimits/read", None),
-            Self::LoginChatGpt => (
-                "account/login/start",
-                Some(json!({
-                    "type": "chatgpt",
-                    "useHostedLoginSuccessPage": true,
-                    "appBrand": "codex",
-                })),
-            ),
-            Self::CancelLogin { login_id } => {
-                ("account/login/cancel", Some(json!({ "loginId": login_id })))
-            }
-            Self::Logout => ("account/logout", None),
-            Self::StartThread { cwd } => (
-                "thread/start",
-                Some(json!({
-                    "cwd": cwd,
-                    "serviceName": "codex_desktop_next",
-                })),
-            ),
-            Self::ListThreads { cursor } => (
-                "thread/list",
-                Some(json!({
-                    "cursor": cursor,
-                    "limit": THREAD_PAGE_LIMIT,
-                    "sortKey": "recency_at",
-                    "sortDirection": "desc",
-                    "archived": false,
-                })),
-            ),
-            Self::ResumeThread { thread_id } => {
-                ("thread/resume", Some(json!({ "threadId": thread_id })))
-            }
-            Self::ReadThread { thread_id } => (
-                "thread/read",
-                Some(json!({ "threadId": thread_id, "includeTurns": true })),
-            ),
-            Self::ForkThreadBeforeTurn {
-                thread_id,
-                before_turn_id,
-                model,
-            } => (
-                "thread/fork",
-                Some(json!({
-                    "threadId": thread_id,
-                    "lastTurnId": null,
-                    "beforeTurnId": before_turn_id,
-                    "model": model,
-                    "deferGoalContinuation": true,
-                })),
-            ),
-            Self::SetThreadName { thread_id, name } => (
-                "thread/name/set",
-                Some(json!({ "threadId": thread_id, "name": name })),
-            ),
-            Self::ArchiveThread { thread_id } => {
-                ("thread/archive", Some(json!({ "threadId": thread_id })))
-            }
-            Self::StartTurn {
-                thread_id,
-                client_user_message_id,
-                input,
-                model,
-                effort,
-            } => {
-                let mut params = json!({
-                    "threadId": thread_id,
-                    "clientUserMessageId": client_user_message_id,
-                    "input": input
-                        .into_iter()
-                        .map(EngineTurnInput::into_json)
-                        .collect::<Vec<_>>(),
-                });
-                if let Some(model) = model {
-                    params["model"] = Value::String(model);
-                }
-                if let Some(effort) = effort {
-                    params["effort"] = Value::String(effort.as_str().to_string());
-                }
-                ("turn/start", Some(params))
-            }
-            Self::InterruptTurn { thread_id, turn_id } => (
-                "turn/interrupt",
-                Some(json!({ "threadId": thread_id, "turnId": turn_id })),
-            ),
-            Self::ReadConfig {
-                include_layers,
-                cwd,
-            } => {
-                let mut params = json!({ "includeLayers": include_layers });
-                if let Some(cwd) = cwd {
-                    params["cwd"] = Value::String(cwd);
-                }
-                ("config/read", Some(params))
-            }
-            Self::ReadConfigRequirements => ("configRequirements/read", None),
-            Self::ReadWindowsSandboxReadiness => ("windowsSandbox/readiness", None),
-            Self::StartWindowsSandboxSetup { mode, cwd } => {
-                let mut params = json!({ "mode": mode.as_str() });
-                if let Some(cwd) = cwd {
-                    params["cwd"] = Value::String(cwd);
-                }
-                ("windowsSandbox/setupStart", Some(params))
-            }
-            Self::WriteConfig {
-                edit,
-                expected_version,
-            } => {
-                let mut params = edit.into_json();
-                if let Some(expected_version) = expected_version {
-                    params["expectedVersion"] = Value::String(expected_version);
-                }
-                ("config/value/write", Some(params))
-            }
-            Self::BatchWriteConfig {
-                edits,
-                expected_version,
-            } => {
-                let mut params = json!({
-                    "edits": edits
-                        .into_iter()
-                        .map(EngineConfigEdit::into_json)
-                        .collect::<Vec<_>>(),
-                    "reloadUserConfig": false,
-                });
-                if let Some(expected_version) = expected_version {
-                    params["expectedVersion"] = Value::String(expected_version);
-                }
-                ("config/batchWrite", Some(params))
-            }
-            Self::ListModels => ("model/list", Some(json!({ "limit": 100 }))),
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffDisplay {
+    Split,
+    Unified,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigReadResponse {
+    pub config: AppConfig,
+    pub version: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ConfigUpdate {
+    ModelDefaults { value: ModelDefaults },
+    PermissionProfile { value: PermissionProfile },
+    WebSearch { value: WebSearchMode },
+    ModelVerbosity { value: Option<ModelVerbosity> },
+    Personality { value: Personality },
+    DeveloperInstructions { value: Option<String> },
+    Desktop { value: DesktopPreferences },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigUpdateResponse {
+    pub config: AppConfig,
+    pub version: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitWindow {
+    pub used_percent: f64,
+    pub window_duration_mins: Option<i64>,
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreditsSnapshot {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpendControlLimitSnapshot {
+    pub limit: String,
+    pub used: String,
+    pub remaining_percent: i64,
+    pub resets_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountPlanType {
+    Free,
+    Go,
+    Plus,
+    Pro,
+    Prolite,
+    Team,
+    SelfServeBusinessProlite,
+    SelfServeBusinessUsageBased,
+    Business,
+    Ent26,
+    EnterpriseCbpUsageBased,
+    Enterprise,
+    Edu,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitReachedType {
+    RateLimitReached,
+    WorkspaceOwnerCreditsDepleted,
+    WorkspaceMemberCreditsDepleted,
+    WorkspaceOwnerUsageLimitReached,
+    WorkspaceMemberUsageLimitReached,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitSnapshot {
+    pub limit_id: Option<String>,
+    pub limit_name: Option<String>,
+    pub primary: Option<RateLimitWindow>,
+    pub secondary: Option<RateLimitWindow>,
+    pub credits: Option<CreditsSnapshot>,
+    pub individual_limit: Option<SpendControlLimitSnapshot>,
+    pub spend_control_reached: Option<bool>,
+    pub plan_type: Option<AccountPlanType>,
+    pub rate_limit_reached_type: Option<RateLimitReachedType>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRateLimitsResponse {
+    pub rate_limits: RateLimitSnapshot,
+    pub rate_limits_by_limit_id: BTreeMap<String, RateLimitSnapshot>,
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
-    use super::EngineConfigEdit;
-    use super::EngineOperation;
-    use super::EngineReasoningEffort;
-    use super::EngineTurnInput;
-    use super::EngineWindowsSandboxSetupMode;
+    use super::AppConfig;
+    use super::PermissionProfile;
 
     #[test]
-    fn chatgpt_login_maps_to_the_official_compatibility_contract() {
-        let (method, params) = EngineOperation::LoginChatGpt.into_compatibility_rpc();
-
-        assert_eq!(method, "account/login/start");
+    fn default_configuration_is_explicit_and_safe() {
+        let config = AppConfig::default();
         assert_eq!(
-            params,
-            Some(json!({
-                "type": "chatgpt",
-                "useHostedLoginSuccessPage": true,
-                "appBrand": "codex",
-            }))
+            config.permission_profile,
+            PermissionProfile::workspace_write()
         );
-    }
-
-    #[test]
-    fn account_rate_limits_use_the_official_parameterless_contract() {
-        let (method, params) = EngineOperation::ReadAccountRateLimits.into_compatibility_rpc();
-
-        assert_eq!(method, "account/rateLimits/read");
-        assert_eq!(params, None);
-    }
-
-    #[test]
-    fn turn_input_mapping_preserves_typed_attachment_semantics() {
-        let operation = EngineOperation::StartTurn {
-            thread_id: "thread-1".into(),
-            client_user_message_id: "message-1".into(),
-            input: vec![
-                EngineTurnInput::Text("Revise este arquivo".into()),
-                EngineTurnInput::LocalImage {
-                    path: "C:\\workspace\\preview.png".into(),
-                },
-                EngineTurnInput::Mention {
-                    name: "main.rs".into(),
-                    path: "C:\\workspace\\src\\main.rs".into(),
-                },
-            ],
-            model: Some("gpt-5.6-codex".into()),
-            effort: Some(EngineReasoningEffort::Low),
-        };
-
-        let (method, params) = operation.into_compatibility_rpc();
-
-        assert_eq!(method, "turn/start");
-        assert_eq!(
-            params,
-            Some(json!({
-                "threadId": "thread-1",
-                "clientUserMessageId": "message-1",
-                "input": [
-                    { "type": "text", "text": "Revise este arquivo" },
-                    { "type": "localImage", "path": "C:\\workspace\\preview.png" },
-                    {
-                        "type": "mention",
-                        "name": "main.rs",
-                        "path": "C:\\workspace\\src\\main.rs",
-                    },
-                ],
-                "model": "gpt-5.6-codex",
-                "effort": "low",
-            }))
-        );
-    }
-
-    #[test]
-    fn thread_read_always_requests_complete_turns() {
-        let (method, params) = EngineOperation::ReadThread {
-            thread_id: "thread-1".into(),
-        }
-        .into_compatibility_rpc();
-
-        assert_eq!(method, "thread/read");
-        assert_eq!(
-            params,
-            Some(json!({
-                "threadId": "thread-1",
-                "includeTurns": true,
-            }))
-        );
-    }
-
-    #[test]
-    fn thread_fork_excludes_the_target_turn_and_defers_goal_continuation() {
-        let (method, params) = EngineOperation::ForkThreadBeforeTurn {
-            thread_id: "thread-1".into(),
-            before_turn_id: "turn-1".into(),
-            model: "gpt-5.6-mini".into(),
-        }
-        .into_compatibility_rpc();
-
-        assert_eq!(method, "thread/fork");
-        assert_eq!(
-            params,
-            Some(json!({
-                "threadId": "thread-1",
-                "lastTurnId": null,
-                "beforeTurnId": "turn-1",
-                "model": "gpt-5.6-mini",
-                "deferGoalContinuation": true,
-            }))
-        );
-    }
-
-    #[test]
-    fn thread_library_uses_the_official_paginated_contract() {
-        let (method, params) = EngineOperation::ListThreads {
-            cursor: Some("next-page".into()),
-        }
-        .into_compatibility_rpc();
-
-        assert_eq!(method, "thread/list");
-        assert_eq!(
-            params,
-            Some(json!({
-                "cursor": "next-page",
-                "limit": 100,
-                "sortKey": "recency_at",
-                "sortDirection": "desc",
-                "archived": false,
-            }))
-        );
-    }
-
-    #[test]
-    fn config_requirements_use_the_official_parameterless_contract() {
-        let (method, params) = EngineOperation::ReadConfigRequirements.into_compatibility_rpc();
-
-        assert_eq!(method, "configRequirements/read");
-        assert_eq!(params, None);
-    }
-
-    #[test]
-    fn windows_sandbox_readiness_uses_the_official_parameterless_contract() {
-        let (method, params) =
-            EngineOperation::ReadWindowsSandboxReadiness.into_compatibility_rpc();
-
-        assert_eq!(method, "windowsSandbox/readiness");
-        assert_eq!(params, None);
-    }
-
-    #[test]
-    fn windows_sandbox_setup_preserves_mode_and_absolute_workspace() {
-        let (method, params) = EngineOperation::StartWindowsSandboxSetup {
-            mode: EngineWindowsSandboxSetupMode::Elevated,
-            cwd: Some("C:\\workspace".to_string()),
-        }
-        .into_compatibility_rpc();
-
-        assert_eq!(method, "windowsSandbox/setupStart");
-        assert_eq!(
-            params,
-            Some(json!({
-                "mode": "elevated",
-                "cwd": "C:\\workspace",
-            }))
-        );
-    }
-
-    #[test]
-    fn config_write_preserves_the_expected_user_layer_version() {
-        let (method, params) = EngineOperation::WriteConfig {
-            edit: EngineConfigEdit {
-                key_path: "model".to_string(),
-                value: json!("gpt-5.6-codex"),
-                merge_strategy: "replace",
-            },
-            expected_version: Some("version-1".to_string()),
-        }
-        .into_compatibility_rpc();
-
-        assert_eq!(method, "config/value/write");
-        assert_eq!(
-            params,
-            Some(json!({
-                "keyPath": "model",
-                "value": "gpt-5.6-codex",
-                "mergeStrategy": "replace",
-                "expectedVersion": "version-1",
-            }))
-        );
+        assert!(config.model.is_none());
     }
 }

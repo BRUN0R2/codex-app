@@ -1,50 +1,40 @@
-import { Match, Show, Switch } from "solid-js";
+import { Match, Switch } from "solid-js";
 
-import { LoginScreen } from "./features/auth/LoginScreen";
-import { createCodexSession } from "./features/session/createCodexSession";
-import { AppShell } from "./features/shell/AppShell";
+import { createAppController } from "./state/createAppController";
+import { AppShell } from "./ui/AppShell";
+import { LoginScreen } from "./ui/LoginScreen";
 
 export default function App() {
-  const session = createCodexSession();
+  const controller = createAppController();
 
   return (
     <Switch>
-      <Match
-        when={
-          session.runtime() === null &&
-          session.runtimeStatus().state === "failed"
-        }
-      >
-        <main class="boot-screen">
-          <div class="boot-card boot-card-error">
-            <div class="brand-mark brand-mark-large">C</div>
-            <h1>Não foi possível iniciar o engine</h1>
-            <p>{session.runtimeStatus().message ?? session.error()}</p>
-            <code>O backend nativo não concluiu a inicialização.</code>
+      <Match when={controller.runtimeStatus().state === "failed" && controller.engine() === null}>
+        <main class="boot-screen error-state">
+          <div class="boot-card">
+            <span class="brand-mark large">C</span>
+            <p class="eyebrow">Falha de inicialização</p>
+            <h1>O engine nativo não iniciou</h1>
+            <p>
+              {controller.runtimeStatus().message ?? controller.error() ?? "Falha sem diagnóstico."}
+            </p>
           </div>
         </main>
       </Match>
-      <Match when={session.runtime() === null || session.account() === undefined}>
+      <Match when={controller.engine() === null || controller.account() === undefined}>
         <main class="boot-screen">
           <div class="boot-loader">
-            <div class="brand-mark brand-mark-large">C</div>
-            <span />
-            <p>Inicializando o Native Engine…</p>
+            <span class="brand-mark large">C</span>
+            <i />
+            <p>Inicializando o engine nativo…</p>
           </div>
         </main>
       </Match>
-      <Match when={!session.signedIn()}>
-        <LoginScreen
-          error={session.error()}
-          onCancel={session.cancelLogin}
-          onLogin={session.login}
-          pending={session.loginPending()}
-        />
+      <Match when={!controller.signedIn()}>
+        <LoginScreen controller={controller} />
       </Match>
-      <Match when={session.signedIn()}>
-        <Show when={session.account()}>
-          <AppShell session={session} />
-        </Show>
+      <Match when={controller.signedIn()}>
+        <AppShell controller={controller} />
       </Match>
     </Switch>
   );

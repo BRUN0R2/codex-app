@@ -1,14 +1,35 @@
-use std::path::PathBuf;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::Connection;
-use rusqlite::params;
-use tauri::AppHandle;
-use tauri::Manager as _;
+use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use tauri::{AppHandle, Manager as _};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
+use super::provider::ResponseItem;
+use crate::engine::{
+    AppConfig, CodexThread, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
+    DesktopPreferences, OperationAck, ThreadActiveFlag, ThreadItem, ThreadListResponse,
+    ThreadStatus, ThreadTurn, TurnStatus, TurnSummary,
+};
 use crate::error::AppError;
+
+const DATABASE_FILE_NAME: &str = "native-state-v1.sqlite3";
+const DATABASE_SCHEMA_VERSION: i64 = 1;
+const DATABASE_APPLICATION_ID: i64 = 1_128_552_526;
+const DATABASE_TABLES: &str = "app_config,provider_items,thread_items,threads,turns";
+const THREAD_PAGE_SIZE: usize = 50;
+const MAX_CURSOR_BYTES: usize = 20;
+const MAX_ITEM_BYTES: usize = 2 * 1_048_576;
+const MAX_HISTORY_BYTES: usize = 32 * 1_048_576;
+const MAX_HISTORY_ITEMS: usize = 20_000;
+const MAX_THREAD_TURNS: usize = 1_000;
+const MAX_THREAD_NAME_BYTES: usize = 256;
+const MAX_PREVIEW_BYTES: usize = 512;
+const MAX_DEVELOPER_INSTRUCTIONS_BYTES: usize = 262_144;
+const MAX_IDENTIFIER_BYTES: usize = 256;
 
 #[derive(Debug, Default)]
 pub struct NativeStorage {
@@ -21,8 +42,7 @@ impl NativeStorage {
             .path()
             .app_data_dir()
             .map_err(|error| AppError::Storage(error.to_string()))?;
-        self.initialize_at(directory.join("native-engine.sqlite3"))
-            .await
+        self.initialize_at(directory.join(DATABASE_FILE_NAME)).await
     }
 
     async fn initialize_at(&self, database_path: PathBuf) -> Result<(), AppError> {
@@ -37,84 +57,409 @@ impl NativeStorage {
             .map_err(|error| AppError::Storage(error.to_string()))?;
 
         let path = database_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-            let connection =
-                Connection::open(path).map_err(|error| AppError::Storage(error.to_string()))?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let version: i64 = connection
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .map_err(storage_error)?;
+            let application_id: i64 = connection
+                .query_row("PRAGMA application_id", [], |row| row.get(0))
+                .map_err(storage_error)?;
+            if version == 0 && application_id == 0 {
+                initialize_database(&mut connection)?;
+            } else {
+                validate_database(&connection, version, application_id)?;
+            }
+
             connection
-                .execute_batch(
-                    "PRAGMA journal_mode = WAL;
-                     PRAGMA foreign_keys = ON;
-                     CREATE TABLE IF NOT EXISTS engine_threads (
-                         id TEXT PRIMARY KEY,
-                         workspace TEXT NOT NULL,
-                         created_at INTEGER NOT NULL,
-                         updated_at INTEGER NOT NULL
-                     );
-                     CREATE TABLE IF NOT EXISTS engine_events (
-                         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                         thread_id TEXT,
-                         operation TEXT NOT NULL,
-                         created_at INTEGER NOT NULL
-                     );
-                     PRAGMA user_version = 1;",
+                .execute(
+                    "UPDATE turns SET status = 'interrupted', updated_at = ?1
+                     WHERE status = 'inProgress'",
+                    [unix_timestamp()?],
                 )
-                .map_err(|error| AppError::Storage(error.to_string()))?;
+                .map_err(storage_error)?;
             Ok(())
         })
-        .await
-        .map_err(|error| AppError::Storage(error.to_string()))??;
+        .await?;
 
         *self.database_path.write().await = Some(database_path);
         Ok(())
     }
 
-    pub async fn record_operation(
-        &self,
-        operation: &str,
-        thread_id: Option<&str>,
-    ) -> Result<(), AppError> {
+    pub async fn create_thread(&self, cwd: String) -> Result<CodexThread, AppError> {
         let path = self.path().await?;
-        let operation = operation.to_string();
-        let thread_id = thread_id.map(str::to_string);
-        let created_at = unix_timestamp()?;
-        tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-            let connection =
-                Connection::open(path).map_err(|error| AppError::Storage(error.to_string()))?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
+            let id = Uuid::now_v7().to_string();
+            let now = unix_timestamp()?;
             connection
                 .execute(
-                    "INSERT INTO engine_events (thread_id, operation, created_at)
-                     VALUES (?1, ?2, ?3)",
-                    params![thread_id, operation, created_at],
+                    "INSERT INTO threads (id, cwd, name, preview, archived, created_at, updated_at)
+                     VALUES (?1, ?2, NULL, '', 0, ?3, ?3)",
+                    params![id, cwd, now],
                 )
-                .map_err(|error| AppError::Storage(error.to_string()))?;
-            Ok(())
+                .map_err(storage_error)?;
+            read_thread(&connection, &id)
         })
         .await
-        .map_err(|error| AppError::Storage(error.to_string()))?
     }
 
-    pub async fn upsert_thread(&self, id: &str, workspace: &str) -> Result<(), AppError> {
+    pub async fn list_threads(
+        &self,
+        cursor: Option<String>,
+    ) -> Result<ThreadListResponse, AppError> {
+        let offset = parse_cursor(cursor.as_deref())?;
         let path = self.path().await?;
-        let id = id.to_string();
-        let workspace = workspace.to_string();
-        let now = unix_timestamp()?;
-        tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-            let connection =
-                Connection::open(path).map_err(|error| AppError::Storage(error.to_string()))?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
+            let requested = THREAD_PAGE_SIZE + 1;
+            let requested_sql = i64::try_from(requested)
+                .map_err(|error| AppError::Storage(error.to_string()))?;
+            let offset_sql = i64::try_from(offset)
+                .map_err(|error| AppError::Protocol(format!("thread cursor is too large: {error}")))?;
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, cwd, name, preview, created_at, updated_at,
+                            EXISTS(SELECT 1 FROM turns WHERE thread_id = threads.id AND status = 'inProgress')
+                     FROM threads
+                     WHERE archived = 0
+                     ORDER BY updated_at DESC, id DESC
+                     LIMIT ?1 OFFSET ?2",
+                )
+                .map_err(storage_error)?;
+            let rows = statement
+                .query_map(params![requested_sql, offset_sql], |row| {
+                    Ok(ThreadHeader {
+                        id: row.get(0)?,
+                        cwd: row.get(1)?,
+                        name: row.get(2)?,
+                        preview: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                        active: row.get(6)?,
+                    })
+                })
+                .map_err(storage_error)?;
+            let mut data = rows
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage_error)?;
+            let has_more = data.len() > THREAD_PAGE_SIZE;
+            data.truncate(THREAD_PAGE_SIZE);
+            let data = data.into_iter().map(ThreadHeader::without_turns).collect();
+            Ok(ThreadListResponse {
+                data,
+                next_cursor: has_more.then(|| (offset + THREAD_PAGE_SIZE).to_string()),
+            })
+        })
+        .await
+    }
+
+    pub async fn read_thread(&self, thread_id: String) -> Result<CodexThread, AppError> {
+        let path = self.path().await?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
+            read_thread(&connection, &thread_id)
+        })
+        .await
+    }
+
+    pub async fn set_thread_name(
+        &self,
+        thread_id: String,
+        name: String,
+    ) -> Result<CodexThread, AppError> {
+        validate_text("thread name", &name, MAX_THREAD_NAME_BYTES)?;
+        let path = self.path().await?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
+            let changed = connection
+                .execute(
+                    "UPDATE threads SET name = ?1, updated_at = ?2
+                     WHERE id = ?3 AND archived = 0",
+                    params![name, unix_timestamp()?, thread_id],
+                )
+                .map_err(storage_error)?;
+            require_changed(changed, "thread")?;
+            read_thread(&connection, &thread_id)
+        })
+        .await
+    }
+
+    pub async fn archive_thread(&self, thread_id: String) -> Result<OperationAck, AppError> {
+        let path = self.path().await?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(storage_error)?;
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM turns WHERE thread_id = ?1 AND status = 'inProgress')",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if active {
+                return Err(AppError::State(
+                    "an active thread cannot be archived; interrupt its turn first".into(),
+                ));
+            }
+            let changed = transaction
+                .execute(
+                    "UPDATE threads SET archived = 1, updated_at = ?1
+                     WHERE id = ?2 AND archived = 0",
+                    params![unix_timestamp()?, thread_id],
+                )
+                .map_err(storage_error)?;
+            require_changed(changed, "thread")?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(OperationAck { applied: true })
+        })
+        .await
+    }
+
+    pub async fn begin_turn(
+        &self,
+        thread_id: String,
+        model: String,
+        reasoning_effort: Option<String>,
+        user_item: ThreadItem,
+        provider_item: ResponseItem,
+        preview: String,
+    ) -> Result<TurnSummary, AppError> {
+        let item_id = user_item.id().to_string();
+        let item_payload = encode_bounded(&user_item, MAX_ITEM_BYTES, "thread item")?;
+        let provider_payload = encode_bounded(&provider_item, MAX_ITEM_BYTES, "provider item")?;
+        let preview = truncate_utf8(preview.trim(), MAX_PREVIEW_BYTES);
+        let path = self.path().await?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            require_available_thread(&transaction, &thread_id)?;
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM turns WHERE thread_id = ?1 AND status = 'inProgress')",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if active {
+                return Err(AppError::State("the thread already has an active turn".into()));
+            }
+            let turn_id = Uuid::now_v7().to_string();
+            let now = unix_timestamp()?;
+            transaction
+                .execute(
+                    "INSERT INTO turns
+                         (id, thread_id, status, model, reasoning_effort, error, created_at, updated_at)
+                     VALUES (?1, ?2, 'inProgress', ?3, ?4, NULL, ?5, ?5)",
+                    params![turn_id, thread_id, model, reasoning_effort, now],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
+                    params![turn_id, item_id, item_payload],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
+                    params![thread_id, provider_payload],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "UPDATE threads
+                     SET preview = CASE WHEN preview = '' THEN ?1 ELSE preview END,
+                         updated_at = ?2
+                     WHERE id = ?3",
+                    params![preview, now, thread_id],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(TurnSummary {
+                id: turn_id,
+                status: TurnStatus::InProgress,
+            })
+        })
+        .await
+    }
+
+    pub async fn append_thread_item(
+        &self,
+        turn_id: String,
+        item: ThreadItem,
+    ) -> Result<(), AppError> {
+        let item_id = item.id().to_string();
+        let payload = encode_bounded(&item, MAX_ITEM_BYTES, "thread item")?;
+        let path = self.path().await?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
             connection
                 .execute(
-                    "INSERT INTO engine_threads (id, workspace, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?3)
-                     ON CONFLICT(id) DO UPDATE SET
-                         workspace = excluded.workspace,
-                         updated_at = excluded.updated_at",
-                    params![id, workspace, now],
+                    "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
+                    params![turn_id, item_id, payload],
                 )
-                .map_err(|error| AppError::Storage(error.to_string()))?;
+                .map_err(storage_error)?;
             Ok(())
         })
         .await
-        .map_err(|error| AppError::Storage(error.to_string()))?
+    }
+
+    pub async fn append_provider_item(
+        &self,
+        thread_id: String,
+        item: ResponseItem,
+    ) -> Result<(), AppError> {
+        let payload = encode_bounded(&item, MAX_ITEM_BYTES, "provider item")?;
+        let path = self.path().await?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
+            connection
+                .execute(
+                    "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
+                    params![thread_id, payload],
+                )
+                .map_err(storage_error)?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn provider_history(&self, thread_id: String) -> Result<Vec<ResponseItem>, AppError> {
+        let path = self.path().await?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1 AND archived = 0)",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !exists {
+                return Err(AppError::State(
+                    "thread does not exist or is archived".into(),
+                ));
+            }
+            let mut statement = connection
+                .prepare(
+                    "SELECT payload FROM provider_items WHERE thread_id = ?1 ORDER BY sequence",
+                )
+                .map_err(storage_error)?;
+            let rows = statement
+                .query_map([thread_id], |row| row.get::<_, String>(0))
+                .map_err(storage_error)?;
+            let mut total_bytes = 0;
+            let mut total_items = 0;
+            decode_rows(rows, "provider history", &mut total_bytes, &mut total_items)
+        })
+        .await
+    }
+
+    pub async fn complete_turn(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        status: TurnStatus,
+        error: Option<String>,
+    ) -> Result<TurnSummary, AppError> {
+        if status == TurnStatus::InProgress {
+            return Err(AppError::State(
+                "complete_turn cannot preserve an in-progress status".into(),
+            ));
+        }
+        let path = self.path().await?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            let now = unix_timestamp()?;
+            let changed = transaction
+                .execute(
+                    "UPDATE turns SET status = ?1, error = ?2, updated_at = ?3
+                     WHERE id = ?4 AND thread_id = ?5 AND status = 'inProgress'",
+                    params![status_name(status), error, now, turn_id, thread_id],
+                )
+                .map_err(storage_error)?;
+            require_changed(changed, "active turn")?;
+            transaction
+                .execute(
+                    "UPDATE threads SET updated_at = ?1 WHERE id = ?2",
+                    params![now, thread_id],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(TurnSummary {
+                id: turn_id,
+                status,
+            })
+        })
+        .await
+    }
+
+    pub async fn read_config(&self) -> Result<ConfigReadResponse, AppError> {
+        let path = self.path().await?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
+            let (version, payload): (i64, String) = connection
+                .query_row(
+                    "SELECT version, payload FROM app_config WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(storage_error)?;
+            let version = u64::try_from(version)
+                .map_err(|error| AppError::Storage(format!("invalid config version: {error}")))?;
+            let config = decode_bounded(&payload, MAX_ITEM_BYTES, "config")?;
+            validate_config(&config)?;
+            Ok(ConfigReadResponse { config, version })
+        })
+        .await
+    }
+
+    pub async fn update_config(
+        &self,
+        expected_version: u64,
+        update: ConfigUpdate,
+    ) -> Result<ConfigUpdateResponse, AppError> {
+        let path = self.path().await?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            let (current_version, payload): (i64, String) = transaction
+                .query_row(
+                    "SELECT version, payload FROM app_config WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(storage_error)?;
+            let current_version = u64::try_from(current_version)
+                .map_err(|error| AppError::Storage(format!("invalid config version: {error}")))?;
+            if current_version != expected_version {
+                return Err(AppError::State(format!(
+                    "configuration version changed from {expected_version} to {current_version}"
+                )));
+            }
+            let mut config: AppConfig = decode_bounded(&payload, MAX_ITEM_BYTES, "config")?;
+            apply_config_update(&mut config, update)?;
+            validate_config(&config)?;
+            let version = current_version
+                .checked_add(1)
+                .ok_or_else(|| AppError::Storage("configuration version overflow".into()))?;
+            let payload = encode_bounded(&config, MAX_ITEM_BYTES, "config")?;
+            let version_sql = i64::try_from(version)
+                .map_err(|error| AppError::Storage(format!("config version overflow: {error}")))?;
+            transaction
+                .execute(
+                    "UPDATE app_config SET version = ?1, payload = ?2 WHERE singleton = 1",
+                    params![version_sql, payload],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(ConfigUpdateResponse { config, version })
+        })
+        .await
     }
 
     async fn path(&self) -> Result<PathBuf, AppError> {
@@ -126,6 +471,457 @@ impl NativeStorage {
     }
 }
 
+impl ThreadItem {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::UserMessage { id, .. }
+            | Self::AgentMessage { id, .. }
+            | Self::Reasoning { id, .. }
+            | Self::CommandExecution { id, .. }
+            | Self::FileChange { id, .. }
+            | Self::ToolExecution { id, .. } => id,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ThreadHeader {
+    id: String,
+    cwd: String,
+    name: Option<String>,
+    preview: String,
+    created_at: i64,
+    updated_at: i64,
+    active: bool,
+}
+
+impl ThreadHeader {
+    fn without_turns(self) -> CodexThread {
+        CodexThread {
+            id: self.id,
+            preview: self.preview,
+            name: self.name,
+            cwd: self.cwd,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            recency_at: Some(self.updated_at),
+            status: if self.active {
+                ThreadStatus::Active {
+                    active_flags: Vec::<ThreadActiveFlag>::new(),
+                }
+            } else {
+                ThreadStatus::Idle
+            },
+            turns: Vec::new(),
+        }
+    }
+}
+
+fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, AppError> {
+    let header = connection
+        .query_row(
+            "SELECT id, cwd, name, preview, created_at, updated_at,
+                    EXISTS(SELECT 1 FROM turns WHERE thread_id = threads.id AND status = 'inProgress')
+             FROM threads WHERE id = ?1 AND archived = 0",
+            [thread_id],
+            |row| {
+                Ok(ThreadHeader {
+                    id: row.get(0)?,
+                    cwd: row.get(1)?,
+                    name: row.get(2)?,
+                    preview: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    active: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(storage_error)?
+        .ok_or_else(|| AppError::State("thread does not exist or is archived".into()))?;
+    let mut turns_statement = connection
+        .prepare("SELECT id, status FROM turns WHERE thread_id = ?1 ORDER BY created_at, id")
+        .map_err(storage_error)?;
+    let turn_rows = turns_statement
+        .query_map([thread_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage_error)?;
+    let mut turns = Vec::new();
+    let mut total_item_bytes = 0;
+    let mut total_items = 0;
+    for turn in turn_rows {
+        if turns.len() >= MAX_THREAD_TURNS {
+            return Err(AppError::Storage(format!(
+                "thread exceeds {MAX_THREAD_TURNS} turns"
+            )));
+        }
+        let (turn_id, status) = turn.map_err(storage_error)?;
+        let mut items_statement = connection
+            .prepare("SELECT payload FROM thread_items WHERE turn_id = ?1 ORDER BY sequence")
+            .map_err(storage_error)?;
+        let item_rows = items_statement
+            .query_map([&turn_id], |row| row.get::<_, String>(0))
+            .map_err(storage_error)?;
+        let items = decode_rows(
+            item_rows,
+            "thread items",
+            &mut total_item_bytes,
+            &mut total_items,
+        )?;
+        turns.push(ThreadTurn {
+            id: turn_id,
+            items,
+            status: parse_status(&status)?,
+        });
+    }
+    let mut thread = header.without_turns();
+    thread.turns = turns;
+    Ok(thread)
+}
+
+fn require_available_thread(
+    transaction: &Transaction<'_>,
+    thread_id: &str,
+) -> Result<(), AppError> {
+    let exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1 AND archived = 0)",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::State(
+            "thread does not exist or is archived".into(),
+        ))
+    }
+}
+
+fn apply_config_update(config: &mut AppConfig, update: ConfigUpdate) -> Result<(), AppError> {
+    match update {
+        ConfigUpdate::ModelDefaults { value } => {
+            let model = validate_optional_id("model", value.model)?;
+            let service_tier = validate_optional_id("service tier", value.service_tier)?;
+            config.model = model;
+            config.model_reasoning_effort = value.reasoning_effort;
+            config.service_tier = service_tier;
+        }
+        ConfigUpdate::PermissionProfile { value } => config.permission_profile = value,
+        ConfigUpdate::WebSearch { value } => config.web_search = value,
+        ConfigUpdate::ModelVerbosity { value } => config.model_verbosity = value,
+        ConfigUpdate::Personality { value } => config.personality = value,
+        ConfigUpdate::DeveloperInstructions { value } => {
+            config.developer_instructions = value
+                .map(|value| {
+                    let value = value.trim().to_string();
+                    if value.is_empty() || value.len() > MAX_DEVELOPER_INSTRUCTIONS_BYTES {
+                        return Err(AppError::Protocol(format!(
+                            "developer instructions must contain between 1 and {MAX_DEVELOPER_INSTRUCTIONS_BYTES} bytes"
+                        )));
+                    }
+                    Ok(value)
+                })
+                .transpose()?;
+        }
+        ConfigUpdate::Desktop { value } => config.desktop = value,
+    }
+    Ok(())
+}
+
+fn validate_config(config: &AppConfig) -> Result<(), AppError> {
+    if !config.permission_profile.is_supported() {
+        return Err(AppError::Protocol(
+            "permission profile is not one of the supported presets".into(),
+        ));
+    }
+    validate_desktop(&config.desktop)?;
+    if let Some(model) = config.model.as_deref() {
+        validate_text("model", model, MAX_IDENTIFIER_BYTES)?;
+    }
+    if let Some(tier) = config.service_tier.as_deref() {
+        validate_text("service tier", tier, MAX_IDENTIFIER_BYTES)?;
+    }
+    if config
+        .developer_instructions
+        .as_ref()
+        .is_some_and(|value| value.is_empty() || value.len() > MAX_DEVELOPER_INSTRUCTIONS_BYTES)
+    {
+        return Err(AppError::Protocol("invalid developer instructions".into()));
+    }
+    Ok(())
+}
+
+fn validate_desktop(preferences: &DesktopPreferences) -> Result<(), AppError> {
+    if !(12..=24).contains(&preferences.ui_font_size) {
+        return Err(AppError::Protocol(
+            "UI font size must be between 12 and 24".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_optional_id(label: &str, value: Option<String>) -> Result<Option<String>, AppError> {
+    value
+        .map(|value| {
+            let value = value.trim().to_string();
+            validate_text(label, &value, MAX_IDENTIFIER_BYTES)?;
+            Ok(value)
+        })
+        .transpose()
+}
+
+fn validate_text(label: &str, value: &str, maximum_bytes: usize) -> Result<(), AppError> {
+    if value.trim().is_empty() || value.len() > maximum_bytes {
+        return Err(AppError::Protocol(format!(
+            "{label} must contain between 1 and {maximum_bytes} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
+    if value.len() <= maximum_bytes {
+        return value.to_string();
+    }
+    let mut end = maximum_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn parse_cursor(cursor: Option<&str>) -> Result<usize, AppError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    if cursor.is_empty()
+        || cursor.len() > MAX_CURSOR_BYTES
+        || !cursor.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(AppError::Protocol("thread cursor is invalid".into()));
+    }
+    cursor
+        .parse()
+        .map_err(|_| AppError::Protocol("thread cursor is outside the supported range".into()))
+}
+
+fn status_name(status: TurnStatus) -> &'static str {
+    match status {
+        TurnStatus::Completed => "completed",
+        TurnStatus::Failed => "failed",
+        TurnStatus::InProgress => "inProgress",
+        TurnStatus::Interrupted => "interrupted",
+    }
+}
+
+fn parse_status(status: &str) -> Result<TurnStatus, AppError> {
+    match status {
+        "completed" => Ok(TurnStatus::Completed),
+        "failed" => Ok(TurnStatus::Failed),
+        "inProgress" => Ok(TurnStatus::InProgress),
+        "interrupted" => Ok(TurnStatus::Interrupted),
+        _ => Err(AppError::Storage(format!(
+            "database contains unknown turn status `{status}`"
+        ))),
+    }
+}
+
+fn encode_bounded<T: Serialize>(
+    value: &T,
+    maximum_bytes: usize,
+    label: &str,
+) -> Result<String, AppError> {
+    let payload = serde_json::to_string(value)
+        .map_err(|error| AppError::Storage(format!("could not encode {label}: {error}")))?;
+    if payload.len() > maximum_bytes {
+        return Err(AppError::Storage(format!(
+            "{label} exceeds {maximum_bytes} bytes"
+        )));
+    }
+    Ok(payload)
+}
+
+fn decode_bounded<T: DeserializeOwned>(
+    payload: &str,
+    maximum_bytes: usize,
+    label: &str,
+) -> Result<T, AppError> {
+    if payload.len() > maximum_bytes {
+        return Err(AppError::Storage(format!(
+            "stored {label} exceeds {maximum_bytes} bytes"
+        )));
+    }
+    serde_json::from_str(payload)
+        .map_err(|error| AppError::Storage(format!("stored {label} is invalid: {error}")))
+}
+
+fn decode_rows<T: DeserializeOwned>(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<String>>,
+    label: &str,
+    total_bytes: &mut usize,
+    total_items: &mut usize,
+) -> Result<Vec<T>, AppError> {
+    let mut values = Vec::new();
+    for payload in rows {
+        let payload = payload.map_err(storage_error)?;
+        *total_bytes = total_bytes
+            .checked_add(payload.len())
+            .ok_or_else(|| AppError::Storage(format!("stored {label} size overflow")))?;
+        if *total_bytes > MAX_HISTORY_BYTES {
+            return Err(AppError::Storage(format!(
+                "stored {label} exceeds {MAX_HISTORY_BYTES} bytes"
+            )));
+        }
+        *total_items = total_items
+            .checked_add(1)
+            .ok_or_else(|| AppError::Storage(format!("stored {label} item count overflow")))?;
+        if *total_items > MAX_HISTORY_ITEMS {
+            return Err(AppError::Storage(format!(
+                "stored {label} exceeds {MAX_HISTORY_ITEMS} items"
+            )));
+        }
+        values.push(decode_bounded(&payload, MAX_ITEM_BYTES, label)?);
+    }
+    Ok(values)
+}
+
+fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
+    let existing_tables = database_tables(connection)?;
+    if !existing_tables.is_empty() {
+        return Err(AppError::Storage(format!(
+            "unversioned database contains unexpected tables: {existing_tables}"
+        )));
+    }
+    let default_payload = encode_bounded(&AppConfig::default(), MAX_ITEM_BYTES, "config")?;
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE threads (
+                 id TEXT PRIMARY KEY,
+                 cwd TEXT NOT NULL,
+                 name TEXT,
+                 preview TEXT NOT NULL,
+                 archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE turns (
+                 id TEXT PRIMARY KEY,
+                 thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                 status TEXT NOT NULL CHECK (status IN ('completed', 'failed', 'inProgress', 'interrupted')),
+                 model TEXT NOT NULL,
+                 reasoning_effort TEXT,
+                 error TEXT,
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL
+             );
+             CREATE INDEX turns_thread_created ON turns(thread_id, created_at, id);
+             CREATE TABLE thread_items (
+                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                 turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+                 item_id TEXT NOT NULL,
+                 payload TEXT NOT NULL,
+                 UNIQUE(turn_id, item_id)
+             );
+             CREATE INDEX thread_items_turn_sequence ON thread_items(turn_id, sequence);
+             CREATE TABLE provider_items (
+                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                 thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                 payload TEXT NOT NULL
+             );
+             CREATE INDEX provider_items_thread_sequence
+                 ON provider_items(thread_id, sequence);
+             CREATE TABLE app_config (
+                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                 version INTEGER NOT NULL CHECK (version >= 1),
+                 payload TEXT NOT NULL
+             );",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT INTO app_config (singleton, version, payload) VALUES (1, 1, ?1)",
+            [default_payload],
+        )
+        .map_err(storage_error)?;
+    transaction
+        .pragma_update(None, "application_id", DATABASE_APPLICATION_ID)
+        .map_err(storage_error)?;
+    transaction
+        .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn validate_database(
+    connection: &Connection,
+    version: i64,
+    application_id: i64,
+) -> Result<(), AppError> {
+    if version != DATABASE_SCHEMA_VERSION || application_id != DATABASE_APPLICATION_ID {
+        return Err(AppError::Storage(format!(
+            "database identity is unsupported; expected application {DATABASE_APPLICATION_ID} schema {DATABASE_SCHEMA_VERSION}, received application {application_id} schema {version}"
+        )));
+    }
+    let tables = database_tables(connection)?;
+    if tables != DATABASE_TABLES {
+        return Err(AppError::Storage(format!(
+            "database tables do not match schema {DATABASE_SCHEMA_VERSION}: {tables}"
+        )));
+    }
+    let integrity: String = connection
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+        .map_err(storage_error)?;
+    if integrity != "ok" {
+        return Err(AppError::Storage(format!(
+            "database integrity check failed: {integrity}"
+        )));
+    }
+    let (config_version, payload): (i64, String) = connection
+        .query_row(
+            "SELECT version, payload FROM app_config WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(storage_error)?;
+    if config_version < 1 {
+        return Err(AppError::Storage(
+            "database contains an invalid configuration version".into(),
+        ));
+    }
+    let config: AppConfig = decode_bounded(&payload, MAX_ITEM_BYTES, "config")?;
+    validate_config(&config)
+}
+
+fn database_tables(connection: &Connection) -> Result<String, AppError> {
+    connection
+        .query_row(
+            "SELECT COALESCE(group_concat(name, ','), '')
+             FROM (
+                 SELECT name FROM sqlite_schema
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
+fn open_connection(path: &Path) -> Result<Connection, AppError> {
+    let connection = Connection::open(path).map_err(storage_error)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(storage_error)?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
+        .map_err(storage_error)?;
+    Ok(connection)
+}
+
 fn unix_timestamp() -> Result<i64, AppError> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -134,44 +930,89 @@ fn unix_timestamp() -> Result<i64, AppError> {
     i64::try_from(seconds).map_err(|error| AppError::Storage(error.to_string()))
 }
 
+fn require_changed(changed: usize, label: &str) -> Result<(), AppError> {
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(AppError::State(format!(
+            "{label} does not exist in the expected state"
+        )))
+    }
+}
+
+fn storage_error(error: rusqlite::Error) -> AppError {
+    AppError::Storage(error.to_string())
+}
+
+async fn run_blocking<T, F>(operation: F) -> Result<T, AppError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, AppError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| AppError::Storage(format!("storage task failed: {error}")))?
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
-    use uuid::Uuid;
+    use tempfile::TempDir;
 
-    use super::NativeStorage;
+    use super::{DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, NativeStorage};
 
     #[tokio::test(flavor = "current_thread")]
-    async fn initializes_schema_and_records_metadata_without_payloads() {
-        let database_path = std::env::temp_dir().join(format!(
-            "codex-app-native-storage-{}.sqlite3",
-            Uuid::now_v7()
-        ));
+    async fn initializes_the_native_schema_directly() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("test.sqlite3");
         let storage = NativeStorage::default();
         storage
             .initialize_at(database_path.clone())
             .await
             .expect("storage should initialize");
-        storage
-            .upsert_thread("thread-1", "C:\\workspace")
+        let thread = storage
+            .create_thread(directory.path().display().to_string())
             .await
-            .expect("thread metadata should persist");
-        storage
-            .record_operation("turn.start", Some("thread-1"))
+            .expect("thread should persist");
+        let loaded = storage
+            .read_thread(thread.id.clone())
             .await
-            .expect("operation metadata should persist");
+            .expect("thread should load");
+        assert_eq!(loaded.id, thread.id);
+        assert!(loaded.turns.is_empty());
 
+        let connection = Connection::open(database_path).expect("database should reopen");
+        let application_id: i64 = connection
+            .query_row("PRAGMA application_id", [], |row| row.get(0))
+            .expect("application id should be readable");
+        let schema_version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version should be readable");
+        assert_eq!(application_id, DATABASE_APPLICATION_ID);
+        assert_eq!(schema_version, DATABASE_SCHEMA_VERSION);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_an_unversioned_existing_database() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("unexpected.sqlite3");
         let connection = Connection::open(&database_path).expect("database should open");
-        let thread_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM engine_threads", [], |row| row.get(0))
-            .expect("thread count should be readable");
-        let event_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM engine_events", [], |row| row.get(0))
-            .expect("event count should be readable");
-        assert_eq!(thread_count, 1);
-        assert_eq!(event_count, 1);
+        connection
+            .execute("CREATE TABLE legacy_state (value TEXT NOT NULL)", [])
+            .expect("fixture table should be created");
         drop(connection);
 
-        std::fs::remove_file(&database_path).expect("test database should be removable");
+        let storage = NativeStorage::default();
+        assert!(storage.initialize_at(database_path).await.is_err());
+    }
+
+    #[test]
+    fn rejects_ambiguous_cursors() {
+        assert!(super::parse_cursor(Some(" 1")).is_err());
+        assert!(super::parse_cursor(Some("-1")).is_err());
+        assert_eq!(
+            super::parse_cursor(Some("12")).expect("cursor should parse"),
+            12
+        );
     }
 }

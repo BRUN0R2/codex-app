@@ -1,322 +1,84 @@
 # Arquitetura
 
-## Visão geral
+## Composição
 
 ```mermaid
 flowchart LR
-    UI["Features SolidJS"] --> IPC["Cliente IPC tipado"]
-    IPC --> Commands["Comandos Tauri"]
+    UI["UI SolidJS"] --> State["AppController"]
+    State --> Decode["Cliente IPC e decoders"]
+    Decode --> Commands["Comandos Tauri fechados"]
     Commands --> Engine["NativeEngine"]
-    Engine --> Auth["ChatGptAuth"]
-    Auth --> OAuth["OAuth ChatGPT"]
-    Auth --> Vault["codex_auth.age criptografado"]
-    Vault --> Keyring["Chave no Credential Manager"]
-    Engine --> Store["SQLite nativo"]
-    Engine --> Policy["Ferramentas e permissões"]
-    Engine --> Provider["ChatGptCodexProvider"]
-    Provider --> Bridge["Ponte supervisionada"]
-    Bridge --> Server["codex app-server"]
-    Server --> Events["Eventos engine://"]
-    Events --> Session["Estado da sessão"]
-    Session --> UI
+    Engine --> Auth["OAuth e cofre privado"]
+    Engine --> Provider["ChatGPT HTTPS/SSE"]
+    Engine --> Agent["Loop do agente"]
+    Agent --> Tools["Ferramentas e aprovações"]
+    Engine --> Store["SQLite"]
+    Engine --> Events["Eventos tipados"]
+    Events --> Decode
 ```
 
-A interface não conhece processos, credenciais, SQLite ou JSON-RPC. O
-`NativeEngine` possui as responsabilidades próprias; somente capacidades ainda
-não substituídas seguem para a ponte.
+Não existe processo intermediário, JSON-RPC genérico, seleção dinâmica de
+backend ou dependência do Codex CLI. `EngineManager` possui exatamente uma
+instância de `NativeEngine` durante a vida do aplicativo.
 
-## Backend Rust
+## Backend
 
-### Contrato
+`src-tauri/src/engine/contracts.rs` contém o domínio serializado. Os comandos em
+`commands.rs` usam requests com `deny_unknown_fields`, validam tamanho e
+semântica e chamam uma operação específica do engine.
 
-`src-tauri/src/engine/contracts.rs` define operações fechadas. A UI não consegue
-enviar RPC arbitrário. `AgentEngine` expõe iniciar, executar, responder e
-encerrar; `EngineManager` escolhe o backend uma vez.
+O engine nativo divide ownership assim:
 
-### Módulos nativos
+- `auth/`: fluxo OAuth, callback, tokens e envelope criptografado privado;
+- `provider/`: cliente HTTP, cookies restritos, catálogo e stream de respostas;
+- `agent.rs`: composição das instruções, rodadas e ciclo das ferramentas;
+- `tools.rs`: schemas fechados, confinamento de paths, limites e processos;
+- `approval.rs`: solicitações de uso único, timeout e cancelamento;
+- `storage.rs`: schema SQLite próprio, transações e configuração versionada;
+- `mod.rs`: ciclo de vida e ownership dos turnos em execução.
 
-`src-tauri/src/engine/native` é dividido por ownership:
-
-- `auth/`: OAuth, PKCE, callback, tokens e armazenamento seguro;
-- `provider.rs`: fronteira das operações de modelo;
-- `tools.rs`: catálogo e risco das ferramentas;
-- `sandbox.rs`: políticas semânticas de permissão;
-- `storage.rs`: metadados versionados em SQLite;
-- `mod.rs`: composição, roteamento e ciclo de vida.
-
-### Ponte de compatibilidade
-
-`engine/compatibility.rs` traduz operações não nativas. `codex/runtime.rs` é o
-único dono do processo filho, do handshake JSONL, dos timeouts e da correlação de
-respostas. A inicialização do `NativeEngine` apenas verifica se o executável está
-disponível; o processo nasce na primeira operação compatível. Em uma sessão
-autenticada, essa primeira operação é o aquecimento assíncrono solicitado pela
-UI para configuração e modelos.
-
-No Windows, o filho não abre console. O logout nativo encerra a ponte antes de
-revogar e apagar a credencial, impedindo que uma sessão já carregada continue em
-memória.
+Um turno só se torna ativo após persistência e aquisição exclusiva do
+`thread_id`. Falha ao publicar seus eventos iniciais executa rollback antes de a
+operação retornar. Conclusão e interrupção removem o mesmo registro de ownership.
+No encerramento, novas operações são rejeitadas, aprovações são canceladas,
+processos recebem cancelamento e as tasks possuem prazo de drenagem de dez
+segundos.
 
 ## Frontend
 
-`src/features` é organizado por capacidade: autenticação, chat, aprovações,
-configurações, avisos, projetos, sessão e shell. `createCodexSession` compõe os
-donos de estado; `createProjectWorkspace` controla a seleção persistida e
-`createThreadLibrary` controla paginação, deduplicação e atualização da biblioteca
-de tarefas. Assim que a conta autenticada é conhecida, o shell aparece e modelos,
-configuração, requisitos administrativos, prontidão do sandbox, limites da conta
-e tarefas são carregados em segundo plano. Limites possuem um dono independente:
-uma indisponibilidade dessa consulta não atrasa modelos, configurações ou a
-abertura da conversa, e fica explícita junto à ação de tentar novamente.
+O frontend possui quatro camadas:
 
-A preferência de projetos contém somente caminhos locais e é versionada no
-perfil do WebView. Conversas continuam pertencendo ao armazenamento do Codex;
-abrir uma tarefa usa `thread/resume` e reidrata a linha do tempo retornada pelo
-contrato oficial, sem duplicar o conteúdo no frontend.
+1. `contracts/types.ts` define uniões discriminadas imutáveis;
+2. `contracts/decode.ts` aceita `unknown` e rejeita campos, variantes, pares e
+   relações semânticas inválidas;
+3. `infrastructure/codexClient.ts` é a única camada que usa `invoke` e `listen`;
+4. `state` e `ui` consomem somente valores já decodificados.
 
-### Roteamento por tarefa
+`createAppController` é o dono explícito do estado da sessão. Eventos são
+roteados por `threadId`; uma tarefa em segundo plano não altera a conversa
+visível. Configurações usam uma fila otimista e modelo, esforço e tier são
+gravados atomicamente. Login duplicado é coalescido e qualquer falha de contrato
+entra nos diagnósticos e no alerta visível.
 
-`threadNotificationRouting` valida o `threadId` obrigatório antes de qualquer
-mutação de conversa. Turnos, itens, deltas, progresso, patches e erros só podem
-alterar a linha do tempo cujo identificador está ativo. Eventos de ciclo de vida
-continuam atualizando a biblioteca inteira, mas `thread/started` nunca escolhe a
-tarefa visível: a resposta correlacionada de `thread/start` ou `thread/resume` é
-a única autoridade para essa transição.
+## Dados e segredos
 
-Solicitações interativas possuem fila compartilhada e ownership por tarefa. A
-interface deriva somente as entradas da tarefa ativa; trocar de conversa não
-apaga aprovações de outra tarefa. Arquivamento e exclusão removem apenas o escopo
-correspondente, enquanto logout limpa a fila completa. Uma solicitação inválida
-destinada a outra tarefa permanece visível quando ela for aberta, sem produzir
-um erro global na conversa atual.
+- SQLite: `native-state-v1.sqlite3` no diretório de dados do aplicativo;
+- sessão: `credentials/chatgpt-oauth.age` no mesmo domínio privado;
+- chave do envelope: serviço `codex-desktop-next`, conta
+  `chatgpt-oauth-v1`, no Windows Credential Manager;
+- projetos fixados: schema local `codex-desktop.projects.v1` no WebView.
 
-### Linha do tempo
+Não há leitura de `CODEX_HOME`, `auth.json`, `global/CODEX_AUTH`, banco da CLI ou
+outro formato anterior. O aplicativo não possui caminho de migração.
 
-A linha do tempo possui fronteiras pequenas e tipadas:
+## Falhas e limites
 
-- `parseTimelineItem` despacha exaustivamente a união oficial `ThreadItem`;
-- `parseUserMessage`, `parseToolItem` e `parseSpecialTimelineItem` validam suas
-  fronteiras e produzem uniões discriminadas menores;
-- `createTimeline` possui hidratação, deltas e substituição de itens por `id`;
-- `timelineGrouping` compõe mensagens, raciocínio e ações em blocos semânticos;
-- `ActivityGroup`, `ConversationEntry` e `DiffView` apenas renderizam o domínio;
-- `createTurnProgress` reduz snapshots de plano e diff a um resumo numérico.
+Erros atravessam o IPC como `{ code, message, retryable }`. O provider limita
+corpos HTTP e SSE, possui deadline total e de inatividade e só repete falhas
+transientes dentro do orçamento declarado. Arquivos e comandos possuem limites
+independentes; paths são canonicalizados e symlinks não podem escapar do
+workspace. Estados desconhecidos nunca viram fallback visual genérico.
 
-Raciocínio ativo e resumo de ações concluídas são cabeçalhos distintos no tipo,
-portanto ícone, cor e semântica não dependem de heurística CSS. Comandos e
-resultados de ferramentas possuem limites de memória explícitos e exibem toda
-omissão. O diff agregado do turno é processado em uma passagem e descartado; um
-diff por arquivo materializa inicialmente no máximo 400 linhas e só cria o
-restante após ação do usuário.
-
-O decoder cobre mensagens, hooks, raciocínio, plano, comandos, alterações,
-MCP, ferramentas dinâmicas, colaboração, subagentes, busca, espera, revisão,
-compactação, visualização e geração de imagens. Tipos ou campos obrigatórios
-desconhecidos geram diagnóstico visível; não são convertidos em atividades
-genéricas. O progresso incremental de MCP é limitado e preservado até o item
-final autoritativo.
-
-Miniaturas são carregadas sob demanda por `IntersectionObserver`. O Rust valida
-arquivo regular, tamanho e assinatura PNG, JPEG, GIF ou WebP antes de devolver
-um buffer binário. O componente cria e revoga a `Blob URL`, deixando falhas
-visíveis sem manter base64 na árvore reativa. Geração de imagem conserva apenas
-metadados e `savedPath`; o payload base64 do protocolo é descartado na fronteira.
-
-### Safety buffering
-
-`safetyBufferingProtocol` valida a notificação oficial e
-`createSafetyBufferingController` concentra sua máquina de estados. A sessão
-registra uma cópia limitada da entrada submetida, isola dados por tarefa e turno
-e mantém tombstones de conclusão para impedir que eventos tardios reabram um
-aviso. Fatos de lifecycle também possuem limite explícito e sobrevivem à troca
-do registro visual. O início de qualquer resposta do agente revoga o retry;
-fechar o aviso altera somente sua apresentação e nunca o estado do turno.
-
-O retry é uma transação explícita: interromper, ler a tarefa com turnos, validar
-o ponto de bifurcação, criar um fork antes do turno com continuação de goals
-adiada e iniciar uma cópia da entrada no modelo mais rápido. O fork retornado
-precisa ser uma tarefa nova, do mesmo workspace, conter exatamente o prefixo
-esperado e não possuir turno em andamento. Falha após a bifurcação preserva o
-fork e restaura texto e anexos no compositor; sucesso troca a tarefa ativa e a
-retoma imediatamente para reconciliar eventos concorrentes.
-
-### Solicitações interativas
-
-`src/features/approvals` é uma fronteira de protocolo própria, não um modal
-genérico. `parseServerRequest` mantém um catálogo fechado das solicitações do
-app-server e as converte em uma união discriminada. Parsers menores validam
-aprovações, perguntas, perfis de permissão e esquemas MCP antes que qualquer dado
-chegue aos componentes.
-
-`createServerRequestQueue` é o único dono da fila. Identificadores JSON-RPC
-numéricos e textuais permanecem distintos, uma atualização do mesmo `id`
-substitui a entrada e `serverRequest/resolved` remove a solicitação de forma
-idempotente. Erros de decodificação ficam visíveis como incompatibilidade; nunca
-viram aprovação automática.
-
-Cada contrato possui um renderer inline próximo ao compositor:
-
-- comando e arquivo exibem contexto, decisões permitidas e diff autoritativo;
-- `request_user_input` preserva opções, texto livre, segredo e resolução
-  automática;
-- `request_permissions` concede somente o subconjunto marcado, com escopo de
-  turno ou sessão e revisão estrita limitada ao turno;
-- MCP separa formulário tipado, autorização por URL e formulário opaco não
-  suportado, que só pode ser cancelado com segurança.
-
-O handshake da ponte declara `experimentalApi` como verdadeiro somente para os
-campos oficiais de fork `beforeTurnId` e `deferGoalContinuation` usados pelo
-safety buffering. `requestAttestation` e `mcpServerOpenaiFormElicitation`
-permanecem falsos: o cliente não anuncia atestados nem formulários opacos que
-ainda não implementa, e eventos desconhecidos continuam falhando visivelmente.
-O opener continua em allowlist: além da autorização OAuth, somente a URL exata
-da documentação oficial de safety buffering pode ser aberta por esse aviso.
-
-### Configurações
-
-`src/features/settings` separa navegação, controles reutilizáveis e uma página
-por capacidade. `SettingsDrawer` apenas coordena a página ativa, o estado de
-salvamento e erros; regras de política e preferências visuais vivem em módulos
-sem dependência do renderer.
-
-Configuração do agente usa somente `config/read`, `config/value/write`,
-`config/batchWrite` e `configRequirements/read`. As listas permitidas limitam
-as opções de aprovação, sandbox e busca; as origens de configuração bloqueiam
-valores administrados por sistema, MDM ou empresa. Os defaults administrados de
-modelo para novas tarefas continuam sendo defaults: uma seleção explícita não é
-tratada como proibida. Toda escrita envia a versão da camada de usuário lida por
-último, portanto uma edição externa gera conflito visível em vez de ser perdida.
-`windowsSandbox/readiness` completa esse contexto com um diagnóstico fechado.
-Quando o estado exige preparação, `WindowsSandboxSettings` apresenta os modos
-permitidos pela organização, explica o impacto e exige confirmação antes de
-invocar `windowsSandbox/setupStart`. A conclusão chega exclusivamente por
-`windowsSandbox/setupCompleted`; nenhum setup, UAC ou fallback começa sozinho.
-
-Preferências próprias da interface são persistidas no namespace fechado
-`desktop.codexDesktopNext`. Tamanho base, movimento, cursor e marcadores de diff
-são decodificados em uma união tipada antes de alterar atributos do elemento
-raiz. Todo tamanho tipográfico deriva de `rem`; o aplicativo não modifica DPI,
-zoom do WebView ou escala do Windows. A página avançada aceita um caminho e um
-valor JSON validados, mas deliberadamente não renderiza o objeto efetivo, que
-pode conter segredos de integrações.
-
-### Avisos de segurança do Windows
-
-`src/features/security` possui a fronteira do aviso
-`windows/worldWritableWarning`. O decoder exige os três campos oficiais, limita
-a renderização a três caminhos e converte qualquer excesso em contagem explícita.
-`failedScan` permanece um estado distinto: uma varredura incompleta nunca é
-apresentada como lista conclusiva de permissões inseguras.
-
-A sessão mantém uma união discriminada para pendência, persistência e falha. O
-compositor fica indisponível até a escolha explícita. **Continuar nesta sessão**
-suprime somente novas ocorrências no processo atual; **Continuar e não avisar
-novamente** grava `notice.hide_world_writable_warning = true` com a versão ativa
-da camada de usuário e confirma o valor efetivo após a releitura. Falhas mantêm o
-aviso aberto. O frontend não tenta editar ACLs nem executar uma correção.
-
-### Avisos do aplicativo e da tarefa
-
-`src/features/notices` separa escopo de aplicativo e escopo de tarefa. Os
-decoders acompanham os contratos oficiais de `configWarning`,
-`deprecationNotice`, `warning` e `guardianWarning`. Resumo, detalhes, mensagem,
-destino, caminho e intervalo de base um são validados antes de chegar à
-interface; identificadores ou índices fora dos limites locais viram diagnóstico
-de protocolo, nunca texto parcialmente confiável.
-
-`createAppNoticeCenter` mantém uma união discriminada para avisos globais. Uma
-ocorrência de configuração é deduplicada estruturalmente; avisos e deprecações
-repetidos permanecem ocorrências distintas. A fila conserva no máximo vinte
-entradas, limita resumo, detalhes e caminho e informa explicitamente qualquer
-descarte. O cartão mostra uma entrada por vez junto ao compositor, permite abrir
-configurações apenas quando existe localização configurável e nunca bloqueia a
-mensagem ou executa uma correção automática.
-
-`createThreadNoticeLibrary` preserva `warning` e `guardianWarning` pelo
-`threadId`, inclusive quando a tarefa está em segundo plano. O estado mantém no
-máximo quarenta avisos por tarefa e sessenta e quatro tarefas, explicita
-omissões e reconcilia a timeline ativa para que o limite também valha durante
-uma execução longa. Somente a mensagem oficial de fallback de metadados de um
-mesmo modelo é deduplicada; os demais avisos repetidos são mantidos, como na
-referência. Troca, arquivamento, exclusão e logout respeitam o mesmo ownership
-descrito no roteamento por tarefa.
-
-`model/verification` usa a mesma fronteira de retenção, mas preserva o domínio
-fechado `ModelVerification`. Destino, turno e lista são validados com limites
-antes de `modelVerificationNotice` converter `trustedAccessForCyber` na
-orientação equivalente à referência. Repetições dentro da mesma notificação
-produzem uma única ocorrência; notificações futuras desconhecidas falham
-visivelmente até receberem semântica explícita.
-
-### Uso da conta
-
-`src/shared/codex/rateLimits.ts` valida a resposta completa de
-`account/rateLimits/read` antes que ela entre no estado. O cartão da sidebar usa o
-bucket `codex`, prefere a janela semanal oficial e calcula o restante somente a
-partir de `usedPercent`. Timestamps são formatados no locale e fuso do usuário.
-Ao esgotar qualquer janela autoritativa, o cartão sai da sidebar e um aviso é
-mostrado junto ao compositor com o reset aplicável e uma releitura explícita.
-
-Não existe polling. `account/rateLimits/updated` atualiza as janelas recebidas e
-preserva metadados ausentes do último snapshot completo, conforme o contrato de
-notificação esparsa. Falha de parsing gera diagnóstico e nunca é convertida em
-zero de uso ou outro valor estimado.
-
-## Fluxos principais
-
-### Inicialização
-
-1. A UI assina `engine://*` e invoca `engine_start`.
-2. O engine valida ferramentas, inicializa SQLite e autenticação nativa.
-3. A disponibilidade da ponte é diagnosticada sem iniciar processo.
-4. A conta é lida do cofre criptografado com a chave do Credential Manager.
-5. A UI mostra login ou shell sem aguardar a ponte.
-6. Com sessão válida, configuração, requisitos, prontidão do sandbox, limites da
-   conta, modelos e a primeira página de tarefas são solicitados em paralelo;
-   cada dono expõe estado explícito de carregamento.
-
-A assinatura precede o handshake para que avisos globais enviados logo após
-`initialize`, como `configWarning`, não sejam perdidos durante o bootstrap.
-
-Sem sessão, a ponte permanece inativa. O aquecimento não usa temporizador,
-polling ou cache persistente paralelo: concorrência é deduplicada no dono da
-sessão e no runtime Rust.
-
-### Login ChatGPT
-
-1. `engine_login_chatgpt` cria listener, estado e PKCE.
-2. A UI abre a URL retornada no navegador.
-3. O backend valida o callback e troca o código.
-4. A credencial é persistida no cofre age e somente sua chave entra no keyring.
-5. Eventos públicos atualizam a tela.
-
-Falha ao abrir o navegador cancela o fluxo. Um logout concorrente cancela o
-login, aguarda a seção crítica e garante a remoção final. Revogação remota falha
-visivelmente, mas nunca impede a exclusão local.
-
-### Mensagem e anexos
-
-Arquivos comuns viram `mention`, imagens validadas viram `localImage` e texto
-vira `text`. Imagens coladas são decodificadas, verificadas por assinatura e
-gravadas no cache antes do envio. Imagens históricas usam a mesma validação para
-pré-visualização binária. O histórico distingue ainda imagem e áudio remotos,
-áudio local, skills e menções sem iniciar downloads externos automaticamente.
-A primeira tarefa inicia a ponte compatível.
-
-### Configuração e permissões
-
-Leitura, requisitos e escrita usam operações dedicadas. A UI filtra opções pelas
-restrições administrativas e desabilita chaves cuja origem é gerenciada. Presets
-de permissão são aplicados em lote:
-
-- **Somente leitura**: `read-only` + `untrusted`;
-- **Aprovar por mim**: `workspace-write` + `on-request`;
-- **Acesso completo**: `danger-full-access` + `never`;
-- qualquer outra combinação: **Personalizado**.
-
-## Regra de evolução
-
-Uma capacidade nova segue contrato de domínio, implementação nativa ou adaptador
-isolado, comando Tauri, transição no dono de estado, componente visual e
-validação ao vivo. Não se cria RPC genérico, armazenamento paralelo de
-credenciais nem fallback silencioso.
+O SQLite limita cada payload e o total de itens/histórico materializado. O
+frontend limita diagnósticos, aprovações, projetos e anexos. Quando um limite é
+atingido, a operação falha com motivo explícito.

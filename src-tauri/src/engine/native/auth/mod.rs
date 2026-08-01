@@ -11,8 +11,6 @@ use std::sync::atomic::Ordering;
 
 use chrono::Utc;
 use serde::Serialize;
-use serde_json::Value;
-use serde_json::json;
 use tauri::AppHandle;
 use tauri::Emitter as _;
 use tokio::sync::Mutex;
@@ -28,9 +26,10 @@ use self::pkce::generate_pkce;
 use self::pkce::generate_state;
 use self::storage::CredentialStorage;
 use self::token::AuthRecord;
-use self::token::StoredAuthMode;
+use super::super::AuthLoginCompleted;
+use super::super::AuthSessionChanged;
+use super::super::DiagnosticStream;
 use super::super::EngineNotification;
-use super::super::EngineOperation;
 use super::super::NOTIFICATION_EVENT;
 use super::super::RUNTIME_DIAGNOSTIC_EVENT;
 use super::super::RuntimeDiagnostic;
@@ -90,6 +89,21 @@ pub struct ChatGptAuth {
     inner: Arc<AuthInner>,
 }
 
+pub(crate) struct AuthSession {
+    access_token: token::SecretString,
+    account_id: String,
+}
+
+impl AuthSession {
+    pub fn access_token(&self) -> &str {
+        self.access_token.expose()
+    }
+
+    pub fn account_id(&self) -> &str {
+        &self.account_id
+    }
+}
+
 impl Default for ChatGptAuth {
     fn default() -> Self {
         Self {
@@ -110,29 +124,24 @@ impl ChatGptAuth {
             .map_err(Into::into)
     }
 
-    pub async fn execute(
-        &self,
-        app: &AppHandle,
-        operation: EngineOperation,
-    ) -> Result<Value, AppError> {
-        let value = match operation {
-            EngineOperation::AccountRead => {
-                serde_json::to_value(self.inner.read_account(app).await?)
-            }
-            EngineOperation::LoginChatGpt => {
-                serde_json::to_value(self.inner.start_login(app).await?)
-            }
-            EngineOperation::CancelLogin { login_id } => {
-                serde_json::to_value(self.inner.cancel_login(&login_id).await)
-            }
-            EngineOperation::Logout => serde_json::to_value(self.inner.logout(app).await?),
-            _ => {
-                return Err(AppError::Engine(
-                    "the ChatGPT auth module received a non-auth operation".into(),
-                ));
-            }
-        };
-        value.map_err(|error| AppError::Auth(format!("could not encode auth response: {error}")))
+    pub async fn read_account(&self, app: &AppHandle) -> Result<AccountReadResponse, AppError> {
+        self.inner.read_account(app).await.map_err(Into::into)
+    }
+
+    pub async fn start_login(&self, app: &AppHandle) -> Result<LoginResponse, AppError> {
+        self.inner.start_login(app).await.map_err(Into::into)
+    }
+
+    pub async fn cancel_login(&self, login_id: &str) -> CancelLoginResponse {
+        self.inner.cancel_login(login_id).await
+    }
+
+    pub async fn logout(&self, app: &AppHandle) -> Result<LogoutResponse, AppError> {
+        self.inner.logout(app).await.map_err(Into::into)
+    }
+
+    pub(crate) async fn session(&self, app: &AppHandle) -> Result<AuthSession, AppError> {
+        self.inner.session(app).await.map_err(Into::into)
     }
 
     pub async fn stop(&self) {
@@ -160,15 +169,14 @@ impl AuthInner {
             return Ok(AccountReadResponse::signed_out());
         };
 
-        let outcome =
-            if record.mode() == StoredAuthMode::ChatGpt && record.should_refresh(Utc::now()) {
-                self.refresh_record(app, context, record).await?
-            } else {
-                RefreshOutcome {
-                    record: Some(record),
-                    refresh: RefreshResult::not_required(),
-                }
-            };
+        let outcome = if record.should_refresh(Utc::now()) {
+            self.refresh_record(app, context, record).await?
+        } else {
+            RefreshOutcome {
+                record: Some(record),
+                refresh: RefreshResult::not_required(),
+            }
+        };
         let account = outcome
             .record
             .as_ref()
@@ -181,16 +189,42 @@ impl AuthInner {
         })
     }
 
+    async fn session(&self, app: &AppHandle) -> Result<AuthSession, AuthError> {
+        let context = self.context(app).await?;
+        let _operation_guard = context.operation_gate.lock().await;
+        let mut record = context
+            .storage
+            .load()
+            .await?
+            .ok_or_else(|| AuthError::InvalidToken("no ChatGPT account is connected".into()))?;
+        if record.should_refresh(Utc::now()) {
+            let outcome = self.refresh_record(app, context, record).await?;
+            if outcome.refresh.status == RefreshStatus::Failed {
+                return Err(AuthError::OAuth(
+                    outcome
+                        .refresh
+                        .error
+                        .unwrap_or_else(|| "token refresh failed".into()),
+                ));
+            }
+            record = outcome.record.ok_or_else(|| {
+                AuthError::InvalidToken("the ChatGPT session was removed during refresh".into())
+            })?;
+        }
+        let tokens = record.tokens();
+        Ok(AuthSession {
+            access_token: tokens.access_token.clone(),
+            account_id: tokens.account_id.clone(),
+        })
+    }
+
     async fn refresh_record(
         &self,
         app: &AppHandle,
         context: &AuthContext,
         mut record: AuthRecord,
     ) -> Result<RefreshOutcome, AuthError> {
-        let refresh_token = match record.tokens() {
-            Ok(tokens) => &tokens.refresh_token,
-            Err(error) => return Err(error),
-        };
+        let refresh_token = &record.tokens().refresh_token;
         let patch = match context.oauth.refresh(refresh_token).await {
             Ok(patch) => patch,
             Err(error) => {
@@ -213,9 +247,7 @@ impl AuthInner {
                 record.apply_refresh(patch)?;
                 if let Err(save_error) = context.storage.save(&record).await {
                     let mut failures = vec![save_error.to_string()];
-                    if let Ok(tokens) = record.tokens()
-                        && let Err(error) = context.oauth.revoke_tokens(tokens).await
-                    {
+                    if let Err(error) = context.oauth.revoke_tokens(record.tokens()).await {
                         failures.push(format!("refreshed token cleanup failed: {error}"));
                     }
                     if let Err(error) = context.storage.delete().await {
@@ -322,21 +354,17 @@ impl AuthInner {
         };
 
         if cancellation.is_cancelled() {
-            report_cleanup_error(app, context.oauth.revoke_tokens(record.tokens()?).await);
+            report_cleanup_error(app, context.oauth.revoke_tokens(record.tokens()).await);
             report_browser_response_error(app, callback.respond_failure().await);
             return Err(AuthError::LoginCancelled);
         }
         if let Err(error) = context.storage.save(&record).await {
-            let cleanup = match record.tokens() {
-                Ok(tokens) => context.oauth.revoke_tokens(tokens).await,
-                Err(error) => Err(error),
-            };
-            report_cleanup_error(app, cleanup);
+            report_cleanup_error(app, context.oauth.revoke_tokens(record.tokens()).await);
             report_browser_response_error(app, callback.respond_failure().await);
             return Err(error);
         }
         if cancellation.is_cancelled() {
-            report_cleanup_error(app, context.oauth.revoke_tokens(record.tokens()?).await);
+            report_cleanup_error(app, context.oauth.revoke_tokens(record.tokens()).await);
             context.storage.delete().await?;
             report_browser_response_error(app, callback.respond_failure().await);
             return Err(AuthError::LoginCancelled);
@@ -366,15 +394,17 @@ impl AuthInner {
         };
         emit_notification(
             app,
-            "account/login/completed",
-            json!({
-                "loginId": login_id,
-                "success": success,
-                "error": error,
+            EngineNotification::AuthLoginCompleted(AuthLoginCompleted {
+                login_id: login_id.into(),
+                success,
+                error,
             }),
         );
         if success {
-            emit_notification(app, "account/updated", json!({ "authMode": "chatgpt" }));
+            emit_notification(
+                app,
+                EngineNotification::AuthSessionChanged(AuthSessionChanged { signed_in: true }),
+            );
         }
     }
 
@@ -385,17 +415,17 @@ impl AuthInner {
         let record = context.storage.load().await?;
 
         let (remote_revocation, remote_revocation_error) = match record.as_ref() {
-            Some(record) if record.mode() == StoredAuthMode::ChatGpt => match record.tokens() {
-                Ok(tokens) => match context.oauth.revoke_tokens(tokens).await {
-                    Ok(()) => (RemoteRevocation::Succeeded, None),
-                    Err(error) => (RemoteRevocation::Failed, Some(error.to_string())),
-                },
+            Some(record) => match context.oauth.revoke_tokens(record.tokens()).await {
+                Ok(()) => (RemoteRevocation::Succeeded, None),
                 Err(error) => (RemoteRevocation::Failed, Some(error.to_string())),
             },
-            Some(_) | None => (RemoteRevocation::NotApplicable, None),
+            None => (RemoteRevocation::NotApplicable, None),
         };
         let local_credentials_removed = context.storage.delete().await?;
-        emit_notification(app, "account/updated", json!({ "authMode": null }));
+        emit_notification(
+            app,
+            EngineNotification::AuthSessionChanged(AuthSessionChanged { signed_in: false }),
+        );
         Ok(LogoutResponse {
             local_credentials_removed,
             remote_revocation,
@@ -441,7 +471,7 @@ struct RefreshOutcome {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LoginResponse {
+pub struct LoginResponse {
     #[serde(rename = "type")]
     account_type: &'static str,
     login_id: String,
@@ -450,7 +480,7 @@ struct LoginResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AccountReadResponse {
+pub struct AccountReadResponse {
     account: Option<Account>,
     requires_openai_auth: bool,
     refresh: RefreshResult,
@@ -468,36 +498,26 @@ impl AccountReadResponse {
 
 #[derive(Serialize)]
 #[serde(tag = "type")]
-enum Account {
+pub enum Account {
     #[serde(rename = "chatgpt")]
     ChatGpt {
         email: Option<String>,
         #[serde(rename = "planType")]
         plan_type: Option<String>,
     },
-    #[serde(rename = "apiKey")]
-    ApiKey,
 }
 
 fn account_from_record(record: &AuthRecord) -> Result<Account, AuthError> {
-    match record.mode() {
-        StoredAuthMode::ChatGpt => {
-            let claims = record.account_claims()?;
-            Ok(Account::ChatGpt {
-                email: claims.email,
-                plan_type: claims.plan_type,
-            })
-        }
-        StoredAuthMode::ApiKey => Ok(Account::ApiKey),
-        StoredAuthMode::Other(mode) => Err(AuthError::CredentialStorage(format!(
-            "stored authentication mode `{mode}` is not supported by the native engine"
-        ))),
-    }
+    let claims = record.account_claims()?;
+    Ok(Account::ChatGpt {
+        email: claims.email,
+        plan_type: claims.plan_type,
+    })
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RefreshResult {
+pub struct RefreshResult {
     status: RefreshStatus,
     error: Option<String>,
 }
@@ -532,9 +552,9 @@ impl RefreshResult {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-enum RefreshStatus {
+pub enum RefreshStatus {
     NotRequired,
     Succeeded,
     Superseded,
@@ -543,7 +563,7 @@ enum RefreshStatus {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LogoutResponse {
+pub struct LogoutResponse {
     local_credentials_removed: bool,
     remote_revocation: RemoteRevocation,
     remote_revocation_error: Option<String>,
@@ -551,42 +571,43 @@ struct LogoutResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-enum RemoteRevocation {
+pub enum RemoteRevocation {
     NotApplicable,
     Succeeded,
     Failed,
 }
 
 #[derive(Serialize)]
-struct CancelLoginResponse {
+pub struct CancelLoginResponse {
     status: CancelLoginStatus,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-enum CancelLoginStatus {
+pub enum CancelLoginStatus {
     Canceled,
     NotFound,
 }
 
-fn emit_notification(app: &AppHandle, method: &str, params: Value) {
-    let _ = app.emit(
-        NOTIFICATION_EVENT,
-        EngineNotification {
-            method: method.into(),
-            params,
-        },
-    );
+fn emit_notification(app: &AppHandle, notification: EngineNotification) {
+    if let Err(error) = app.emit(NOTIFICATION_EVENT, notification) {
+        emit_diagnostic(
+            app,
+            format!("could not emit authentication notification: {error}"),
+        );
+    }
 }
 
 fn emit_diagnostic(app: &AppHandle, message: String) {
-    let _ = app.emit(
+    if let Err(error) = app.emit(
         RUNTIME_DIAGNOSTIC_EVENT,
         RuntimeDiagnostic {
-            stream: "stderr",
+            stream: DiagnosticStream::Runtime,
             message,
         },
-    );
+    ) {
+        eprintln!("runtime diagnostic delivery failed: {error}");
+    }
 }
 
 fn report_cleanup_error(app: &AppHandle, result: Result<(), AuthError>) {

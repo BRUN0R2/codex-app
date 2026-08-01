@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tauri::AppHandle;
 use tauri::Manager;
-use tauri::ipc::Response;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -16,6 +16,7 @@ use crate::error::CommandResult;
 const MAX_ATTACHMENT_COUNT: usize = 12;
 const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_PASTED_IMAGE_BYTES: usize = 12 * 1024 * 1024;
+const MAX_PASTED_IMAGE_BASE64_BYTES: usize = MAX_PASTED_IMAGE_BYTES.div_ceil(3) * 4;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -36,7 +37,7 @@ pub struct Attachment {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PastedImageRequest {
     pub data_base64: String,
 }
@@ -71,6 +72,12 @@ pub async fn attachment_save_pasted_image(
     app: AppHandle,
     request: PastedImageRequest,
 ) -> CommandResult<Attachment> {
+    if request.data_base64.len() > MAX_PASTED_IMAGE_BASE64_BYTES {
+        return Err(AppError::InvalidAttachment(format!(
+            "encoded pasted images are limited to {MAX_PASTED_IMAGE_BASE64_BYTES} bytes"
+        ))
+        .into());
+    }
     let estimated_size = request.data_base64.len().saturating_mul(3) / 4;
     if estimated_size > MAX_PASTED_IMAGE_BYTES {
         return Err(AppError::InvalidAttachment(format!(
@@ -105,7 +112,7 @@ pub async fn attachment_save_pasted_image(
 
     let name = format!("pasted-{}.{}", Uuid::now_v7(), format.extension);
     let path = cache_directory.join(&name);
-    tokio::fs::write(&path, &bytes)
+    write_new_file_atomically(&path, &bytes)
         .await
         .map_err(|error| AppError::FileSystem(error.to_string()))?;
 
@@ -117,33 +124,6 @@ pub async fn attachment_save_pasted_image(
         size: bytes.len() as u64,
         media_type: Some(format.media_type.into()),
     })
-}
-
-#[tauri::command]
-pub async fn attachment_read_image(path: String) -> CommandResult<Response> {
-    let attachment = inspect_path(&path).await.map_err(CommandError::from)?;
-    if attachment.kind != AttachmentKind::Image {
-        return Err(AppError::InvalidAttachment("preview target is not an image".into()).into());
-    }
-
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|error| AppError::FileSystem(error.to_string()))?;
-    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
-        return Err(AppError::InvalidAttachment(format!(
-            "image preview exceeds the {} MiB attachment limit",
-            MAX_ATTACHMENT_BYTES / 1024 / 1024
-        ))
-        .into());
-    }
-    if detect_image_format(&bytes).is_none() {
-        return Err(AppError::InvalidAttachment(
-            "image preview has an unsupported file signature".into(),
-        )
-        .into());
-    }
-
-    Ok(Response::new(bytes))
 }
 
 pub async fn inspect_path(path: &str) -> Result<Attachment, AppError> {
@@ -177,6 +157,22 @@ pub async fn inspect_path(path: &str) -> Result<Attachment, AppError> {
         .ok_or_else(|| AppError::InvalidAttachment("file name is not valid UTF-8".into()))?
         .to_owned();
     let media_type = media_type_from_extension(path);
+    if let Some(expected_media_type) = media_type {
+        let mut file = tokio::fs::File::open(path)
+            .await
+            .map_err(|error| AppError::InvalidAttachment(error.to_string()))?;
+        let mut signature = [0_u8; 12];
+        let bytes_read = file
+            .read(&mut signature)
+            .await
+            .map_err(|error| AppError::InvalidAttachment(error.to_string()))?;
+        if detect_image_media_type(&signature[..bytes_read]) != Some(expected_media_type) {
+            return Err(AppError::InvalidAttachment(format!(
+                "image signature does not match its extension: {}",
+                path.display()
+            )));
+        }
+    }
     let kind = if media_type.is_some() {
         AttachmentKind::Image
     } else {
@@ -238,6 +234,45 @@ fn detect_image_format(bytes: &[u8]) -> Option<ImageFormat> {
         });
     }
     None
+}
+
+pub(crate) fn detect_image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    detect_image_format(bytes).map(|format| format.media_type)
+}
+
+async fn write_new_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| std::io::Error::other("generated attachment path is not valid UTF-8"))?;
+    let temporary_path = path.with_file_name(format!(".{file_name}.part"));
+    let result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary_path)
+            .await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&temporary_path, path).await
+    }
+    .await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(operation_error) => match tokio::fs::remove_file(&temporary_path).await {
+            Ok(()) => Err(operation_error),
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {
+                Err(operation_error)
+            }
+            Err(cleanup_error) => Err(std::io::Error::new(
+                operation_error.kind(),
+                format!(
+                    "{operation_error}; temporary attachment cleanup also failed: {cleanup_error}"
+                ),
+            )),
+        },
+    }
 }
 
 #[cfg(test)]

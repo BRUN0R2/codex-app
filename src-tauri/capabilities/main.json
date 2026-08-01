@@ -11,9 +11,6 @@
       "allow": [
         {
           "url": "https://auth.openai.com/oauth/authorize*"
-        },
-        {
-          "url": "https://help.openai.com/en/articles/20001326"
         }
       ]
     }

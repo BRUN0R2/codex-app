@@ -1,11 +1,13 @@
 use std::time::Duration;
 
+use futures_util::StreamExt as _;
 use reqwest::Client;
 use reqwest::Response;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderValue;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use url::Url;
 
 use super::error::AuthError;
@@ -25,6 +27,8 @@ const OAUTH_SCOPE: &str =
 const ORIGINATOR: &str = "codex_desktop_next";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const REVOKE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_TOKEN_RESPONSE_BYTES: usize = 65_536;
+const MAX_ERROR_RESPONSE_BYTES: usize = 16_384;
 const MAX_ERROR_MESSAGE_CHARS: usize = 320;
 
 pub(super) struct OAuthClient {
@@ -108,9 +112,7 @@ impl OAuthClient {
         if !response.status().is_success() {
             return Err(endpoint_error("token exchange", response).await);
         }
-        let response = response.json::<ExchangeResponse>().await.map_err(|error| {
-            AuthError::OAuth(format!("token exchange response is invalid: {error}"))
-        })?;
+        let response = decode_response::<ExchangeResponse>(response, "token exchange").await?;
         Ok(ExchangedTokens {
             id_token: SecretString::from(response.id_token),
             access_token: SecretString::from(response.access_token),
@@ -134,9 +136,7 @@ impl OAuthClient {
         if !response.status().is_success() {
             return Err(endpoint_error("token refresh", response).await);
         }
-        let response = response.json::<RefreshResponse>().await.map_err(|error| {
-            AuthError::OAuth(format!("token refresh response is invalid: {error}"))
-        })?;
+        let response = decode_response::<RefreshResponse>(response, "token refresh").await?;
         if response.id_token.is_none()
             && response.access_token.is_none()
             && response.refresh_token.is_none()
@@ -284,18 +284,54 @@ enum OAuthErrorValue {
 
 async fn endpoint_error(operation: &str, response: Response) -> AuthError {
     let status = response.status();
-    let detail = response
-        .json::<OAuthErrorResponse>()
-        .await
-        .ok()
-        .and_then(OAuthErrorResponse::description)
-        .unwrap_or_else(|| {
-            status
-                .canonical_reason()
-                .unwrap_or("request rejected")
-                .into()
-        });
+    let detail = match read_response_limited(response, MAX_ERROR_RESPONSE_BYTES, operation).await {
+        Ok(bytes) if bytes.is_empty() => "the OAuth endpoint returned an empty error body".into(),
+        Ok(bytes) => match serde_json::from_slice::<OAuthErrorResponse>(&bytes) {
+            Ok(error) => error.description().unwrap_or_else(|| {
+                "the OAuth endpoint returned an error without a description".into()
+            }),
+            Err(json_error) => match String::from_utf8(bytes) {
+                Ok(body) => sanitized_nonempty(&body).unwrap_or_else(|| {
+                    format!("the OAuth error body was invalid JSON: {json_error}")
+                }),
+                Err(utf8_error) => {
+                    format!("the OAuth error body was neither valid JSON nor UTF-8: {utf8_error}")
+                }
+            },
+        },
+        Err(error) => format!("the OAuth error body could not be read: {error}"),
+    };
     AuthError::OAuth(format!("{operation} returned {status}: {detail}"))
+}
+
+async fn decode_response<T: DeserializeOwned>(
+    response: Response,
+    operation: &'static str,
+) -> Result<T, AuthError> {
+    let bytes = read_response_limited(response, MAX_TOKEN_RESPONSE_BYTES, operation).await?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| AuthError::OAuth(format!("{operation} response is invalid: {error}")))
+}
+
+async fn read_response_limited(
+    response: Response,
+    maximum_bytes: usize,
+    operation: &str,
+) -> Result<Vec<u8>, AuthError> {
+    let mut output = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            AuthError::OAuth(format!("{operation} response could not be read: {error}"))
+        })?;
+        if output.len().saturating_add(chunk.len()) > maximum_bytes {
+            return Err(AuthError::OAuth(format!(
+                "{operation} response exceeds {maximum_bytes} bytes"
+            )));
+        }
+        output.extend_from_slice(&chunk);
+    }
+    Ok(output)
 }
 
 impl OAuthErrorResponse {
@@ -329,6 +365,11 @@ fn sanitize_error_message(message: &str) -> String {
         .filter(|character| !character.is_control())
         .take(MAX_ERROR_MESSAGE_CHARS)
         .collect()
+}
+
+fn sanitized_nonempty(message: &str) -> Option<String> {
+    let message = sanitize_error_message(message);
+    (!message.trim().is_empty()).then_some(message)
 }
 
 #[cfg(test)]
