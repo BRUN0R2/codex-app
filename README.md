@@ -64,6 +64,19 @@ Na primeira execução, **Continuar com ChatGPT** abre a autorização no navega
 A sessão é criada no diretório de dados deste aplicativo; credenciais existentes
 da CLI não são lidas ou migradas.
 
+Para validar somente a interface no navegador interno, inicie o Vite e abra o
+preview explícito:
+
+```powershell
+pnpm dev
+```
+
+`http://127.0.0.1:1420/?preview=1`
+
+Esse modo existe apenas em desenvolvimento, usa contratos determinísticos pelo
+mock oficial do Tauri e rejeita comandos que dependem do engine nativo. O módulo
+de preview é removido do build de produção.
+
 ## Verificação
 
 ```powershell
