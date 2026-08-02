@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 
 use crate::engine::CodexModel;
+use crate::engine::ModelContextWindow;
 use crate::engine::ModelServiceTier;
 use crate::engine::ReasoningEffort;
 use crate::engine::ReasoningEffortOption;
@@ -11,6 +12,8 @@ use crate::error::AppError;
 const MAX_MODEL_ID_BYTES: usize = 128;
 const MAX_MODEL_TEXT_BYTES: usize = 16_384;
 const MAX_INSTRUCTIONS_BYTES: usize = 262_144;
+const MAX_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000_000;
+const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u8 = 95;
 
 #[derive(Debug, Deserialize)]
 pub struct ModelsWire {
@@ -29,6 +32,16 @@ struct ModelWire {
     #[serde(default)]
     service_tiers: Vec<ServiceTierWire>,
     default_service_tier: Option<String>,
+    #[serde(default)]
+    context_window: Option<u64>,
+    #[serde(default)]
+    max_context_window: Option<u64>,
+    #[serde(default)]
+    auto_compact_token_limit: Option<u64>,
+    #[serde(default = "default_effective_context_window_percent")]
+    effective_context_window_percent: u8,
+    #[serde(default)]
+    supports_parallel_tool_calls: bool,
     base_instructions: String,
 }
 
@@ -57,6 +70,8 @@ enum ModelVisibility {
 pub struct SelectedModel {
     summary: CodexModel,
     instructions: String,
+    auto_compact_token_limit: Option<u64>,
+    supports_parallel_tool_calls: bool,
 }
 
 impl SelectedModel {
@@ -70,6 +85,18 @@ impl SelectedModel {
 
     pub fn instructions(&self) -> &str {
         &self.instructions
+    }
+
+    pub fn context_window(&self) -> Option<ModelContextWindow> {
+        self.summary.context_window.clone()
+    }
+
+    pub fn auto_compact_token_limit(&self) -> Option<u64> {
+        self.auto_compact_token_limit
+    }
+
+    pub fn supports_parallel_tool_calls(&self) -> bool {
+        self.supports_parallel_tool_calls
     }
 
     pub fn default_reasoning_effort(&self) -> Option<ReasoningEffort> {
@@ -175,6 +202,8 @@ impl ModelCatalog {
                     model.slug
                 )));
             }
+            let context_window = decode_context_window(&model)?;
+            let auto_compact_token_limit = decode_auto_compact_token_limit(&model)?;
             let supported_reasoning_efforts = model
                 .supported_reasoning_levels
                 .into_iter()
@@ -227,9 +256,12 @@ impl ModelCatalog {
                     default_reasoning_effort,
                     service_tiers,
                     default_service_tier: model.default_service_tier,
+                    context_window,
                     is_default: model.slug == default_slug,
                 },
                 instructions: model.base_instructions,
+                auto_compact_token_limit,
+                supports_parallel_tool_calls: model.supports_parallel_tool_calls,
             });
         }
         Ok(Self { models })
@@ -251,6 +283,74 @@ impl ModelCatalog {
             })
         })
     }
+}
+
+const fn default_effective_context_window_percent() -> u8 {
+    DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT
+}
+
+fn decode_context_window(model: &ModelWire) -> Result<Option<ModelContextWindow>, AppError> {
+    let percent = model.effective_context_window_percent;
+    if !(1..=100).contains(&percent) {
+        return Err(AppError::Provider(format!(
+            "model `{}` has an effective context-window percentage outside 1..=100",
+            model.slug
+        )));
+    }
+    for (label, tokens) in [
+        ("context_window", model.context_window),
+        ("max_context_window", model.max_context_window),
+    ] {
+        if tokens.is_some_and(|tokens| tokens == 0 || tokens > MAX_CONTEXT_WINDOW_TOKENS) {
+            return Err(AppError::Provider(format!(
+                "model `{}` has an invalid {label}",
+                model.slug
+            )));
+        }
+    }
+    if let (Some(tokens), Some(maximum)) = (model.context_window, model.max_context_window)
+        && tokens > maximum
+    {
+        return Err(AppError::Provider(format!(
+            "model `{}` has a context window above its advertised maximum",
+            model.slug
+        )));
+    }
+    let Some(tokens) = model.context_window.or(model.max_context_window) else {
+        return Ok(None);
+    };
+    let usable_tokens = tokens
+        .checked_mul(u64::from(percent))
+        .ok_or_else(|| AppError::Provider("context-window calculation overflowed".into()))?
+        / 100;
+    Ok(Some(ModelContextWindow {
+        tokens,
+        usable_tokens,
+        usable_percent: percent,
+        maximum_tokens: model.max_context_window,
+    }))
+}
+
+fn decode_auto_compact_token_limit(model: &ModelWire) -> Result<Option<u64>, AppError> {
+    if model
+        .auto_compact_token_limit
+        .is_some_and(|tokens| tokens == 0 || tokens > MAX_CONTEXT_WINDOW_TOKENS)
+    {
+        return Err(AppError::Provider(format!(
+            "model `{}` has an invalid auto_compact_token_limit",
+            model.slug
+        )));
+    }
+    let context_limit = model
+        .context_window
+        .or(model.max_context_window)
+        .and_then(|tokens| tokens.checked_mul(9))
+        .map(|tokens| tokens / 10);
+    Ok(match (context_limit, model.auto_compact_token_limit) {
+        (Some(context_limit), Some(advertised_limit)) => Some(context_limit.min(advertised_limit)),
+        (Some(context_limit), None) => Some(context_limit),
+        (None, advertised_limit) => advertised_limit,
+    })
 }
 
 fn validate_text(label: &str, value: &str, maximum_bytes: usize) -> Result<(), AppError> {
@@ -304,6 +404,9 @@ mod tests {
                     "priority": 0,
                     "service_tiers": [],
                     "default_service_tier": null,
+                    "context_window": 272000,
+                    "max_context_window": 400000,
+                    "effective_context_window_percent": 95,
                     "base_instructions": "Be useful."
                 }]
             }"#,
@@ -312,6 +415,15 @@ mod tests {
         let catalog = ModelCatalog::from_wire(wire, 100).expect("catalog should validate");
         assert_eq!(catalog.models().len(), 1);
         assert!(catalog.models()[0].summary().is_default);
+        let context = catalog.models()[0]
+            .context_window()
+            .expect("context metadata should be preserved");
+        assert_eq!(context.tokens, 272_000);
+        assert_eq!(context.usable_tokens, 258_400);
+        assert_eq!(
+            catalog.models()[0].auto_compact_token_limit(),
+            Some(244_800)
+        );
     }
 
     #[test]

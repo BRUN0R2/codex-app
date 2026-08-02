@@ -49,6 +49,15 @@ describe("project storage", () => {
     expect(() => addProject([], "D:project")).toThrow("absoluto");
   });
 
+  it("preserves project order when selecting an existing project", () => {
+    const projects = [
+      { name: "first", path: "D:\\code\\first" },
+      { name: "second", path: "D:\\code\\second" },
+    ] as const;
+
+    expect(addProject(projects, "D:/code/second/")).toBe(projects);
+  });
+
   it("round-trips only the closed versioned schema", () => {
     const projects = addProject([], "D:\\code\\project");
     saveProjects(projects);

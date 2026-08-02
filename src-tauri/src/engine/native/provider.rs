@@ -1,4 +1,5 @@
 mod client;
+mod history;
 mod models;
 mod responses;
 
@@ -21,12 +22,14 @@ use crate::engine::RateLimitWindow;
 use crate::engine::SpendControlLimitSnapshot;
 use crate::error::AppError;
 
+pub(crate) use self::history::normalize_provider_history;
 pub(crate) use self::models::SelectedModel;
 pub(crate) use self::responses::ResponseContent;
 pub(crate) use self::responses::ResponseEvent;
 pub(crate) use self::responses::ResponseItem;
 pub(crate) use self::responses::ResponseMessagePhase;
 pub(crate) use self::responses::ResponseRequest;
+pub(crate) use self::responses::ResponseRequestSettings;
 pub(crate) use self::responses::ResponseStream;
 
 const MAX_MODELS: usize = 100;
@@ -76,10 +79,12 @@ impl ChatGptCodexProvider {
         auth: &ChatGptAuth,
         request: ResponseRequest,
         thread_id: &str,
+        turn_state: Option<&str>,
+        cancellation: &mut tokio::sync::watch::Receiver<bool>,
     ) -> Result<ResponseStream, AppError> {
         let session = auth.session(app).await?;
         self.client
-            .start_response(&session, request, thread_id)
+            .start_response(&session, request, thread_id, turn_state, cancellation)
             .await
     }
 

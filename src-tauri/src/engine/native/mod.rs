@@ -27,9 +27,11 @@ use crate::engine::{
     EngineStorage, EngineTransport, ItemNotification, ModelListResponse, NOTIFICATION_EVENT,
     OperationAck, OperationFailure, PermissionProfile, RUNTIME_DIAGNOSTIC_EVENT,
     RUNTIME_STATUS_EVENT, ReasoningEffort, RuntimeDiagnostic, RuntimeState, RuntimeStatus,
-    ServerResponse, ThreadArchivedNotification, ThreadListResponse, ThreadNotification,
-    ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse, TurnCompletedNotification,
-    TurnInput, TurnNotification, TurnStartResponse, TurnStatus,
+    ServerResponse, ThreadArchivedNotification, ThreadCompactStartResponse,
+    ThreadDeletedNotification, ThreadForkResponse, ThreadListResponse, ThreadNotification,
+    ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse, ThreadUnarchiveResponse,
+    ThreadUnarchivedNotification, TurnCompletedNotification, TurnInput, TurnNotification,
+    TurnStartResponse, TurnStatus,
 };
 use crate::error::AppError;
 
@@ -45,9 +47,40 @@ pub struct StartTurn {
     pub service_tier: Option<String>,
 }
 
+pub struct SteerTurn {
+    pub thread_id: String,
+    pub expected_turn_id: String,
+    pub client_user_message_id: String,
+    pub input: Vec<TurnInput>,
+}
+
 struct ActiveTurn {
     turn_id: String,
     cancellation: watch::Sender<bool>,
+    accepting_steers: bool,
+    steer_pending: bool,
+}
+
+impl ActiveTurn {
+    fn can_accept_steer(&self) -> bool {
+        !*self.cancellation.borrow() && self.accepting_steers
+    }
+
+    fn queue_steer(&mut self) {
+        self.steer_pending = true;
+    }
+
+    fn should_continue_after_response(&mut self, has_pending_tools: bool) -> bool {
+        if has_pending_tools {
+            return true;
+        }
+        if self.steer_pending {
+            self.steer_pending = false;
+            return true;
+        }
+        self.accepting_steers = false;
+        false
+    }
 }
 
 pub(super) struct NativeEngineInner {
@@ -176,9 +209,10 @@ impl NativeEngine {
     pub async fn thread_list(
         &self,
         cursor: Option<String>,
+        archived: bool,
     ) -> Result<ThreadListResponse, AppError> {
         self.ensure_started()?;
-        self.inner.storage.list_threads(cursor).await
+        self.inner.storage.list_threads(cursor, archived).await
     }
 
     pub async fn thread_resume(&self, thread_id: String) -> Result<ThreadResumeResponse, AppError> {
@@ -218,12 +252,222 @@ impl NativeEngine {
         thread_id: String,
     ) -> Result<OperationAck, AppError> {
         self.ensure_started()?;
+        if self
+            .inner
+            .active_turns
+            .lock()
+            .await
+            .contains_key(&thread_id)
+        {
+            return Err(AppError::State(
+                "interrupt the active turn before archiving its thread".into(),
+            ));
+        }
         let response = self.inner.storage.archive_thread(thread_id.clone()).await?;
         self.inner.emit_notification(
             app,
             EngineNotification::ThreadArchived(ThreadArchivedNotification { thread_id }),
         )?;
         Ok(response)
+    }
+
+    pub async fn thread_unarchive(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+    ) -> Result<ThreadUnarchiveResponse, AppError> {
+        self.ensure_started()?;
+        let thread = self
+            .inner
+            .storage
+            .unarchive_thread(thread_id.clone())
+            .await?;
+        self.inner.emit_notification(
+            app,
+            EngineNotification::ThreadUnarchived(ThreadUnarchivedNotification { thread_id }),
+        )?;
+        self.inner.emit_notification(
+            app,
+            EngineNotification::ThreadUpdated(ThreadNotification {
+                thread: thread.clone(),
+            }),
+        )?;
+        Ok(ThreadUnarchiveResponse { thread })
+    }
+
+    pub async fn thread_delete(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+    ) -> Result<OperationAck, AppError> {
+        self.ensure_started()?;
+        if self
+            .inner
+            .active_turns
+            .lock()
+            .await
+            .contains_key(&thread_id)
+        {
+            return Err(AppError::State(
+                "interrupt the active turn before deleting its thread".into(),
+            ));
+        }
+        let response = self.inner.storage.delete_thread(thread_id.clone()).await?;
+        self.inner.emit_notification(
+            app,
+            EngineNotification::ThreadDeleted(ThreadDeletedNotification { thread_id }),
+        )?;
+        Ok(response)
+    }
+
+    pub async fn thread_fork(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+    ) -> Result<ThreadForkResponse, AppError> {
+        self.ensure_started()?;
+        if self
+            .inner
+            .active_turns
+            .lock()
+            .await
+            .contains_key(&thread_id)
+        {
+            return Err(AppError::State(
+                "wait for the active turn to complete before forking its thread".into(),
+            ));
+        }
+        let thread = self.inner.storage.fork_thread(thread_id).await?;
+        self.inner.emit_notification(
+            app,
+            EngineNotification::ThreadCreated(ThreadNotification {
+                thread: thread.clone(),
+            }),
+        )?;
+        Ok(ThreadForkResponse { thread })
+    }
+
+    pub async fn thread_compact_start(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+    ) -> Result<ThreadCompactStartResponse, AppError> {
+        self.ensure_started()?;
+        self.reap_finished_tasks().await;
+        let thread = self.inner.storage.read_thread(thread_id.clone()).await?;
+        let config = self.inner.storage.read_config().await?.config;
+        let model = self
+            .inner
+            .provider
+            .select_model(app, &self.inner.auth, config.model.as_deref())
+            .await?;
+        let reasoning_effort = config
+            .model_reasoning_effort
+            .or_else(|| model.default_reasoning_effort());
+        if let Some(reasoning_effort) = reasoning_effort
+            && !model.supports_reasoning_effort(reasoning_effort)
+        {
+            return Err(AppError::Protocol(format!(
+                "reasoning effort `{}` is not supported by model `{}`",
+                reasoning_effort.as_str(),
+                model.id()
+            )));
+        }
+        let service_tier = model.select_service_tier(None)?;
+        let turn = self
+            .inner
+            .storage
+            .begin_compaction_turn(
+                thread_id.clone(),
+                model.id().into(),
+                reasoning_effort.map(|effort| effort.as_str().to_string()),
+            )
+            .await?;
+        let (cancellation, receiver) = watch::channel(false);
+        let ownership_collision = {
+            let mut active_turns = self.inner.active_turns.lock().await;
+            match active_turns.entry(thread_id.clone()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(ActiveTurn {
+                        turn_id: turn.id.clone(),
+                        cancellation,
+                        accepting_steers: false,
+                        steer_pending: false,
+                    });
+                    false
+                }
+                Entry::Occupied(_) => true,
+            }
+        };
+        if ownership_collision {
+            let message = "active-turn ownership collision".to_string();
+            self.inner
+                .storage
+                .complete_turn(
+                    thread_id.clone(),
+                    turn.id.clone(),
+                    TurnStatus::Failed,
+                    Some(message.clone()),
+                )
+                .await?;
+            return Err(AppError::State(message));
+        }
+
+        if let Err(error) = self.inner.emit_notification(
+            app,
+            EngineNotification::TurnStarted(TurnNotification {
+                thread_id: thread_id.clone(),
+                turn: turn.clone(),
+            }),
+        ) {
+            return Err(self
+                .inner
+                .rollback_unspawned_turn(app, &thread_id, &turn.id, error)
+                .await);
+        }
+        let active_thread = match self.inner.storage.read_thread(thread_id.clone()).await {
+            Ok(thread) => thread,
+            Err(error) => {
+                return Err(self
+                    .inner
+                    .rollback_unspawned_turn(app, &thread_id, &turn.id, error)
+                    .await);
+            }
+        };
+        if let Err(error) = self.inner.emit_notification(
+            app,
+            EngineNotification::ThreadUpdated(ThreadNotification {
+                thread: active_thread,
+            }),
+        ) {
+            return Err(self
+                .inner
+                .rollback_unspawned_turn(app, &thread_id, &turn.id, error)
+                .await);
+        }
+
+        let run = TurnRun {
+            thread_id,
+            turn_id: turn.id.clone(),
+            workspace: thread.cwd.into(),
+            model,
+            config,
+            reasoning_effort,
+            service_tier,
+            cancellation: receiver,
+        };
+        let inner = Arc::clone(&self.inner);
+        let task_inner = Arc::clone(&self.inner);
+        let app_handle = app.clone();
+        let background_turn_id = turn.id.clone();
+        self.inner.tasks.lock().await.spawn(async move {
+            let result = agent::run_compaction(task_inner, app_handle.clone(), run).await;
+            inner
+                .finalize_turn(&app_handle, result, &background_turn_id)
+                .await;
+        });
+
+        Ok(ThreadCompactStartResponse {})
     }
 
     pub async fn turn_start(
@@ -282,6 +526,8 @@ impl NativeEngine {
                     entry.insert(ActiveTurn {
                         turn_id: turn.id.clone(),
                         cancellation,
+                        accepting_steers: true,
+                        steer_pending: false,
                     });
                     false
                 }
@@ -327,6 +573,31 @@ impl NativeEngine {
                 .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
                 .await);
         }
+        let active_thread = match self
+            .inner
+            .storage
+            .read_thread(request.thread_id.clone())
+            .await
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                return Err(self
+                    .inner
+                    .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
+                    .await);
+            }
+        };
+        if let Err(error) = self.inner.emit_notification(
+            app,
+            EngineNotification::ThreadUpdated(ThreadNotification {
+                thread: active_thread,
+            }),
+        ) {
+            return Err(self
+                .inner
+                .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
+                .await);
+        }
 
         let run = TurnRun {
             thread_id: request.thread_id,
@@ -350,6 +621,73 @@ impl NativeEngine {
         });
 
         Ok(TurnStartResponse { turn })
+    }
+
+    pub async fn turn_steer(
+        &self,
+        app: &AppHandle,
+        request: SteerTurn,
+    ) -> Result<OperationAck, AppError> {
+        self.ensure_started()?;
+        let prepared =
+            agent::prepare_user_input(request.client_user_message_id, request.input).await?;
+        let user_item = prepared.user_item.clone();
+
+        {
+            let mut active_turns = self.inner.active_turns.lock().await;
+            let active = active_turns
+                .get_mut(&request.thread_id)
+                .ok_or_else(|| AppError::State("thread has no active turn".into()))?;
+            if active.turn_id != request.expected_turn_id {
+                return Err(AppError::State(
+                    "expected turn id does not match the active turn".into(),
+                ));
+            }
+            if !active.can_accept_steer() {
+                return Err(AppError::State(
+                    "active turn is already completing and cannot accept more input".into(),
+                ));
+            }
+            self.inner
+                .storage
+                .append_turn_input(
+                    request.thread_id.clone(),
+                    request.expected_turn_id.clone(),
+                    prepared.user_item,
+                    prepared.provider_item,
+                )
+                .await?;
+            active.queue_steer();
+        }
+
+        if let Err(error) = self.inner.emit_notification(
+            app,
+            EngineNotification::ItemCompleted(ItemNotification {
+                thread_id: request.thread_id.clone(),
+                turn_id: request.expected_turn_id,
+                item: user_item,
+            }),
+        ) {
+            self.inner
+                .emit_diagnostic(app, DiagnosticStream::Runtime, error.to_string());
+        }
+        match self.inner.storage.read_thread(request.thread_id).await {
+            Ok(thread) => {
+                if let Err(error) = self.inner.emit_notification(
+                    app,
+                    EngineNotification::ThreadUpdated(ThreadNotification { thread }),
+                ) {
+                    self.inner
+                        .emit_diagnostic(app, DiagnosticStream::Runtime, error.to_string());
+                }
+            }
+            Err(error) => self.inner.emit_diagnostic(
+                app,
+                DiagnosticStream::Runtime,
+                format!("could not refresh steered thread: {error}"),
+            ),
+        }
+        Ok(OperationAck { applied: true })
     }
 
     pub async fn turn_interrupt(
@@ -493,6 +831,24 @@ impl NativeEngineInner {
         ) {
             eprintln!("runtime diagnostic delivery failed: {error}");
         }
+    }
+
+    pub(super) async fn should_continue_turn(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        has_pending_tools: bool,
+    ) -> Result<bool, AppError> {
+        let mut active_turns = self.active_turns.lock().await;
+        let active = active_turns
+            .get_mut(thread_id)
+            .ok_or_else(|| AppError::State("active-turn ownership was lost".into()))?;
+        if active.turn_id != turn_id {
+            return Err(AppError::State(
+                "active-turn ownership changed during execution".into(),
+            ));
+        }
+        Ok(active.should_continue_after_response(has_pending_tools))
     }
 
     async fn finalize_turn(
@@ -653,5 +1009,49 @@ fn descriptor() -> EngineDescriptor {
             EngineCapability::NativeTools,
             EngineCapability::ExplicitApprovals,
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::watch;
+
+    use super::ActiveTurn;
+
+    fn active_turn() -> ActiveTurn {
+        let (cancellation, _receiver) = watch::channel(false);
+        ActiveTurn {
+            turn_id: "turn-1".into(),
+            cancellation,
+            accepting_steers: true,
+            steer_pending: false,
+        }
+    }
+
+    #[test]
+    fn a_queued_steer_forces_exactly_one_follow_up_sampling_round() {
+        let mut active = active_turn();
+        active.queue_steer();
+
+        assert!(active.should_continue_after_response(false));
+        assert!(active.can_accept_steer());
+        assert!(!active.should_continue_after_response(false));
+        assert!(!active.can_accept_steer());
+    }
+
+    #[test]
+    fn pending_tools_keep_the_steer_window_open() {
+        let mut active = active_turn();
+
+        assert!(active.should_continue_after_response(true));
+        assert!(active.can_accept_steer());
+    }
+
+    #[test]
+    fn cancellation_closes_the_steer_window() {
+        let active = active_turn();
+        active.cancellation.send_replace(true);
+
+        assert!(!active.can_accept_steer());
     }
 }

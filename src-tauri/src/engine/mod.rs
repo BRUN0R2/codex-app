@@ -58,8 +58,9 @@ impl EngineManager {
     pub async fn thread_list(
         &self,
         cursor: Option<String>,
+        archived: bool,
     ) -> Result<ThreadListResponse, AppError> {
-        self.engine.thread_list(cursor).await
+        self.engine.thread_list(cursor, archived).await
     }
 
     pub async fn thread_resume(&self, thread_id: String) -> Result<ThreadResumeResponse, AppError> {
@@ -87,12 +88,52 @@ impl EngineManager {
         self.engine.thread_archive(app, thread_id).await
     }
 
+    pub async fn thread_unarchive(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+    ) -> Result<ThreadUnarchiveResponse, AppError> {
+        self.engine.thread_unarchive(app, thread_id).await
+    }
+
+    pub async fn thread_delete(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+    ) -> Result<OperationAck, AppError> {
+        self.engine.thread_delete(app, thread_id).await
+    }
+
+    pub async fn thread_fork(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+    ) -> Result<ThreadForkResponse, AppError> {
+        self.engine.thread_fork(app, thread_id).await
+    }
+
+    pub async fn thread_compact_start(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+    ) -> Result<ThreadCompactStartResponse, AppError> {
+        self.engine.thread_compact_start(app, thread_id).await
+    }
+
     pub async fn turn_start(
         &self,
         app: &AppHandle,
         request: native::StartTurn,
     ) -> Result<TurnStartResponse, AppError> {
         self.engine.turn_start(app, request).await
+    }
+
+    pub async fn turn_steer(
+        &self,
+        app: &AppHandle,
+        request: native::SteerTurn,
+    ) -> Result<OperationAck, AppError> {
+        self.engine.turn_steer(app, request).await
     }
 
     pub async fn turn_interrupt(
@@ -134,4 +175,4 @@ impl EngineManager {
     }
 }
 
-pub use native::StartTurn;
+pub use native::{StartTurn, SteerTurn};

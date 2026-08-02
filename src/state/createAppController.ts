@@ -1,4 +1,4 @@
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import {
   type Accessor,
   batch,
@@ -18,20 +18,27 @@ import type {
   CodexThread,
   ConfigReadResponse,
   ConfigUpdate,
+  ContextUsageItem,
   EngineNotification,
   EngineServerRequest,
   EngineStartResponse,
+  ModelReroutedNotification,
+  ModelSafetyBufferingUpdatedNotification,
+  ModelVerification,
   ProjectRecord,
   ReasoningEffort,
   RuntimeDiagnostic,
   RuntimeStatus,
-  ThreadItem,
+  VisibleThreadItem,
   WorkspaceRepository,
 } from "../contracts/types";
 import {
   archiveThread as archiveThreadCommand,
   cancelLogin as cancelLoginCommand,
+  compactThread as compactThreadCommand,
+  deleteThread as deleteThreadCommand,
   describeError,
+  forkThread as forkThreadCommand,
   inspectAttachments,
   interruptTurn,
   listModels,
@@ -39,6 +46,7 @@ import {
   loginWithChatGpt,
   logout as logoutCommand,
   openExternalUrl,
+  openWorkspacePath,
   readAccount,
   readConfig,
   readRateLimits,
@@ -50,19 +58,35 @@ import {
   startEngine,
   startThread,
   startTurn,
+  steerTurn,
   subscribeToEvents,
+  unarchiveThread as unarchiveThreadCommand,
   updateConfig,
 } from "../infrastructure/codexClient";
 import {
   appendAgentText,
   appendReasoningText,
-  flattenThreadItems,
+  readLatestTurnFailure,
   upsertItem,
 } from "./conversation";
+import {
+  loadPinnedThreadIds,
+  removePinnedThreadId,
+  savePinnedThreadIds,
+  togglePinnedThreadId,
+} from "./pins";
 import { addProject, loadProjects, pathsEqual, removeProject, saveProjects } from "./projects";
+import {
+  readVisibleThreadTurns,
+  deleteThreadRuntime as reduceDeleteThreadRuntime,
+  synchronizeThreadRuntime as reduceSynchronizeThreadRuntime,
+  updateThreadRuntime as reduceUpdateThreadRuntime,
+  type ThreadRuntimeState,
+  type VisibleThreadTurn,
+} from "./threadRuntime";
 
 const MAX_DIAGNOSTICS = 50;
-const MAX_PENDING_APPROVALS = 16;
+const MAX_PENDING_APPROVALS = 64;
 
 export interface DiagnosticEntry extends RuntimeDiagnostic {
   readonly id: number;
@@ -81,46 +105,63 @@ export interface AppController {
   readonly account: Accessor<AccountReadResponse | undefined>;
   readonly activeTurnId: Accessor<string | null>;
   readonly approvals: Accessor<readonly EngineServerRequest[]>;
+  readonly archivedThreads: Accessor<readonly CodexThread[]>;
+  readonly archivedThreadsNextCursor: Accessor<string | null>;
   readonly busy: Accessor<boolean>;
   readonly config: Accessor<ConfigReadResponse | null>;
+  readonly contextUsage: Accessor<ContextUsageItem | null>;
   readonly currentThread: Accessor<CodexThread | null>;
   readonly currentThreadTitle: Accessor<string>;
   readonly diagnostics: Accessor<readonly DiagnosticEntry[]>;
   readonly engine: Accessor<EngineStartResponse | null>;
   readonly error: Accessor<string | null>;
-  readonly items: Accessor<readonly ThreadItem[]>;
+  readonly items: Accessor<readonly VisibleThreadItem[]>;
+  readonly lastTurnFailure: Accessor<string | null>;
   readonly loginPending: Accessor<boolean>;
   readonly models: Accessor<readonly CodexModel[]>;
+  readonly modelReroute: Accessor<ModelReroutedNotification["params"] | null>;
+  readonly modelVerifications: Accessor<readonly ModelVerification[]>;
   readonly openingThreadId: Accessor<string | null>;
   readonly pendingOperations: Accessor<number>;
+  readonly pinnedThreadIds: Accessor<readonly string[]>;
   readonly projects: Accessor<readonly ProjectRecord[]>;
   readonly rateLimits: Accessor<AccountRateLimitsResponse | null>;
   readonly runtimeStatus: Accessor<RuntimeStatus>;
   readonly signedIn: Accessor<boolean>;
+  readonly safetyBuffering: Accessor<ModelSafetyBufferingUpdatedNotification["params"] | null>;
   readonly threads: Accessor<readonly CodexThread[]>;
   readonly threadsNextCursor: Accessor<string | null>;
   readonly turnBusy: Accessor<boolean>;
+  readonly turns: Accessor<readonly VisibleThreadTurn[]>;
   readonly workspace: Accessor<string | null>;
   readonly workspaceRepository: Accessor<WorkspaceRepository | null>;
   readonly archiveThread: (threadId: string) => Promise<boolean>;
   readonly cancelLogin: () => Promise<void>;
   readonly chooseWorkspace: () => Promise<string | null>;
   readonly clearError: () => void;
+  readonly compactThread: (threadId: string) => Promise<boolean>;
+  readonly deleteThread: (threadId: string) => Promise<boolean>;
+  readonly forkThread: (threadId: string) => Promise<boolean>;
   readonly inspectFiles: (paths: readonly string[]) => Promise<readonly Attachment[]>;
   readonly interrupt: () => Promise<boolean>;
   readonly loadMoreThreads: () => Promise<boolean>;
+  readonly loadMoreArchivedThreads: () => Promise<boolean>;
   readonly login: () => Promise<boolean>;
   readonly logout: () => Promise<boolean>;
-  readonly newThread: (workspace?: string) => Promise<CodexThread | null>;
+  readonly newThread: (workspace?: string) => boolean;
   readonly openThread: (threadId: string) => Promise<boolean>;
+  readonly openWorkspace: () => Promise<boolean>;
   readonly refreshRateLimits: () => Promise<boolean>;
+  readonly refreshWorkspaceRepository: () => Promise<boolean>;
   readonly removeProject: (path: string) => void;
   readonly renameThread: (threadId: string, name: string) => Promise<boolean>;
   readonly respondToApproval: (requestId: string, decision: ApprovalDecision) => Promise<boolean>;
   readonly saveClipboardImage: (dataBase64: string) => Promise<Attachment | null>;
   readonly selectProject: (path: string) => boolean;
   readonly sendMessage: (input: SendMessageInput) => Promise<boolean>;
+  readonly togglePinnedThread: (threadId: string) => void;
   readonly updateSetting: (update: ConfigUpdate) => Promise<boolean>;
+  readonly unarchiveThread: (threadId: string) => Promise<boolean>;
 }
 
 export function createAppController(): AppController {
@@ -135,10 +176,23 @@ export function createAppController(): AppController {
   const [rateLimits, setRateLimits] = createSignal<AccountRateLimitsResponse | null>(null);
   const [threads, setThreads] = createSignal<readonly CodexThread[]>([]);
   const [threadsNextCursor, setThreadsNextCursor] = createSignal<string | null>(null);
+  const [archivedThreads, setArchivedThreads] = createSignal<readonly CodexThread[]>([]);
+  const [archivedThreadsNextCursor, setArchivedThreadsNextCursor] = createSignal<string | null>(
+    null,
+  );
   const [currentThread, setCurrentThread] = createSignal<CodexThread | null>(null);
-  const [items, setItems] = createSignal<readonly ThreadItem[]>([]);
-  const [activeTurnId, setActiveTurnId] = createSignal<string | null>(null);
-  const [approvals, setApprovals] = createSignal<readonly EngineServerRequest[]>([]);
+  let initialPinnedThreadIds: readonly string[] = [];
+  let pinLoadError: Error | null = null;
+  try {
+    initialPinnedThreadIds = loadPinnedThreadIds();
+  } catch (reason) {
+    pinLoadError = asError(reason);
+  }
+  const [pinnedThreadIds, setPinnedThreadIds] = createSignal(initialPinnedThreadIds);
+  const [threadRuntime, setThreadRuntime] = createSignal<ReadonlyMap<string, ThreadRuntimeState>>(
+    new Map(),
+  );
+  const [pendingApprovals, setPendingApprovals] = createSignal<readonly EngineServerRequest[]>([]);
   const [diagnostics, setDiagnostics] = createSignal<readonly DiagnosticEntry[]>([]);
   const [error, setError] = createSignal<string | null>(null);
   const [pendingOperations, setPendingOperations] = createSignal(0);
@@ -167,13 +221,41 @@ export function createAppController(): AppController {
     projectLoadError = asError(reason);
   }
   const [projects, setProjects] = createSignal(initialProjects);
+  setWorkspace(initialProjects.at(0)?.path ?? null);
 
   const signedIn = createMemo(() => account()?.account !== null && account() !== undefined);
+  const selectedRuntime = createMemo<ThreadRuntimeState | null>(() => {
+    const threadId = currentThread()?.id;
+    return threadId === undefined ? null : (threadRuntime().get(threadId) ?? null);
+  });
+  const activeTurnId = createMemo(() => selectedRuntime()?.activeTurnId ?? null);
+  const contextUsage = createMemo(() => selectedRuntime()?.contextUsage ?? null);
+  const items = createMemo(() => selectedRuntime()?.items ?? []);
+  const turns = createMemo<readonly VisibleThreadTurn[]>(() => {
+    const thread = currentThread();
+    const runtime = selectedRuntime();
+    return thread === null
+      ? []
+      : readVisibleThreadTurns(thread, runtime?.items ?? [], runtime?.activeTurnId ?? null);
+  });
+  const modelReroute = createMemo(() => selectedRuntime()?.modelReroute ?? null);
+  const modelVerifications = createMemo(() => selectedRuntime()?.modelVerifications ?? []);
+  const safetyBuffering = createMemo(() => selectedRuntime()?.safetyBuffering ?? null);
+  const approvals = createMemo(() => {
+    const threadId = currentThread()?.id;
+    return threadId === undefined
+      ? []
+      : pendingApprovals().filter((request) => request.params.threadId === threadId);
+  });
   const turnBusy = createMemo(() => activeTurnId() !== null);
   const busy = createMemo(() => turnBusy() || pendingOperations() > 0);
   const currentThreadTitle = createMemo(() => {
     const thread = currentThread();
     return thread?.name ?? thread?.preview ?? "Nova tarefa";
+  });
+  const lastTurnFailure = createMemo(() => {
+    const thread = currentThread();
+    return thread === null ? null : readLatestTurnFailure(thread);
   });
 
   createEffect(() => {
@@ -192,28 +274,15 @@ export function createAppController(): AppController {
 
   createEffect(() => {
     const cwd = workspace();
-    repositoryRequestSequence += 1;
-    const requestSequence = repositoryRequestSequence;
-    setWorkspaceRepository(null);
-    if (cwd === null) {
-      return;
-    }
-    void readWorkspaceRepository(cwd)
-      .then((repository) => {
-        if (!disposed && requestSequence === repositoryRequestSequence) {
-          setWorkspaceRepository(repository);
-        }
-      })
-      .catch((reason: unknown) => {
-        if (!disposed && requestSequence === repositoryRequestSequence) {
-          reportError(reason);
-        }
-      });
+    void synchronizeWorkspaceRepository(cwd, true);
   });
 
   onMount(() => {
     if (projectLoadError !== null) {
       reportError(projectLoadError);
+    }
+    if (pinLoadError !== null) {
+      reportError(pinLoadError);
     }
     void initialize();
   });
@@ -269,7 +338,11 @@ export function createAppController(): AppController {
   }
 
   async function loadLocalAuthenticatedState(): Promise<void> {
-    const [configuration, threadPage] = await Promise.all([readConfig(), listThreads(null)]);
+    const [configuration, threadPage, archivedPage] = await Promise.all([
+      readConfig(),
+      listThreads(null),
+      listThreads(null, true),
+    ]);
     if (disposed) {
       return;
     }
@@ -277,6 +350,8 @@ export function createAppController(): AppController {
       setConfig(configuration);
       setThreads(threadPage.data);
       setThreadsNextCursor(threadPage.nextCursor);
+      setArchivedThreads(archivedPage.data);
+      setArchivedThreadsNextCursor(archivedPage.nextCursor);
     });
   }
 
@@ -313,77 +388,149 @@ export function createAppController(): AppController {
       case "thread.created":
       case "thread.updated":
         mergeThread(notification.params.thread);
+        synchronizeThreadRuntime(notification.params.thread);
         if (currentThread()?.id === notification.params.thread.id) {
-          batch(() => {
-            setCurrentThread(notification.params.thread);
-            setItems(flattenThreadItems(notification.params.thread));
-          });
+          setCurrentThread(notification.params.thread);
         }
         return;
       case "thread.archived":
+        {
+          const archived = threads().find((thread) => thread.id === notification.params.threadId);
+          if (archived !== undefined) {
+            setArchivedThreads((current) => mergeThreadPages(current, [archived]));
+          }
+        }
         setThreads((current) =>
           current.filter((thread) => thread.id !== notification.params.threadId),
         );
         if (currentThread()?.id === notification.params.threadId) {
           clearCurrentThread();
         }
+        deleteThreadRuntime(notification.params.threadId);
+        setPendingApprovals((current) =>
+          current.filter((request) => request.params.threadId !== notification.params.threadId),
+        );
+        return;
+      case "thread.unarchived":
+        setArchivedThreads((current) =>
+          current.filter((thread) => thread.id !== notification.params.threadId),
+        );
+        return;
+      case "thread.deleted":
+        setThreads((current) =>
+          current.filter((thread) => thread.id !== notification.params.threadId),
+        );
+        setArchivedThreads((current) =>
+          current.filter((thread) => thread.id !== notification.params.threadId),
+        );
+        if (currentThread()?.id === notification.params.threadId) {
+          clearCurrentThread();
+        }
+        deleteThreadRuntime(notification.params.threadId);
+        setPendingApprovals((current) =>
+          current.filter((request) => request.params.threadId !== notification.params.threadId),
+        );
+        removePinnedThread(notification.params.threadId);
         return;
       case "turn.started":
-        if (currentThread()?.id === notification.params.threadId) {
-          setActiveTurnId(notification.params.turn.id);
-        }
+        updateThreadRuntime(notification.params.threadId, (runtime) => ({
+          ...runtime,
+          activeTurnId: notification.params.turn.id,
+          modelReroute: null,
+          modelVerifications: [],
+          moderationMetadata: null,
+          safetyBuffering: null,
+        }));
         return;
       case "turn.completed":
-        if (currentThread()?.id === notification.params.threadId) {
-          if (activeTurnId() === notification.params.turn.id) {
-            setActiveTurnId(null);
-          }
-          if (notification.params.error !== null) {
-            setError(notification.params.error.message);
-          }
+        updateThreadRuntime(notification.params.threadId, (runtime) => ({
+          ...runtime,
+          activeTurnId:
+            runtime.activeTurnId === notification.params.turn.id ? null : runtime.activeTurnId,
+          safetyBuffering:
+            runtime.activeTurnId === notification.params.turn.id ? null : runtime.safetyBuffering,
+        }));
+        if (
+          currentThread()?.id === notification.params.threadId &&
+          notification.params.error !== null
+        ) {
+          setError(notification.params.error.message);
         }
-        setApprovals((current) =>
+        setPendingApprovals((current) =>
           current.filter((request) => request.params.turnId !== notification.params.turn.id),
         );
         return;
+      case "model.rerouted":
+        updateThreadRuntime(notification.params.threadId, (runtime) => ({
+          ...runtime,
+          modelReroute: notification.params,
+        }));
+        return;
+      case "model.verification":
+        updateThreadRuntime(notification.params.threadId, (runtime) => ({
+          ...runtime,
+          modelVerifications: notification.params.verifications,
+        }));
+        return;
+      case "turn.moderationMetadata":
+        updateThreadRuntime(notification.params.threadId, (runtime) => ({
+          ...runtime,
+          moderationMetadata: notification.params.metadata,
+        }));
+        return;
+      case "model.safetyBufferingUpdated":
+        updateThreadRuntime(notification.params.threadId, (runtime) => ({
+          ...runtime,
+          safetyBuffering: notification.params,
+        }));
+        return;
       case "item.started":
       case "item.completed":
-        if (currentThread()?.id === notification.params.threadId) {
-          setItems((current) => upsertItem(current, notification.params.item));
-        }
+        updateThreadRuntime(notification.params.threadId, (runtime) => {
+          const item = notification.params.item;
+          if (item.type === "contextUsage") {
+            return { ...runtime, contextUsage: item };
+          }
+          return {
+            ...runtime,
+            contextUsage: item.type === "contextCompaction" ? null : runtime.contextUsage,
+            items: upsertItem(runtime.items, item),
+          };
+        });
         return;
       case "item.agentTextDelta":
-        if (currentThread()?.id === notification.params.threadId) {
-          setItems((current) =>
-            appendAgentText(current, notification.params.itemId, notification.params.delta),
-          );
-        }
+        updateThreadRuntime(notification.params.threadId, (runtime) => ({
+          ...runtime,
+          items: appendAgentText(
+            runtime.items,
+            notification.params.itemId,
+            notification.params.delta,
+          ),
+        }));
         return;
       case "item.reasoningSummaryDelta":
-        if (currentThread()?.id === notification.params.threadId) {
-          setItems((current) =>
-            appendReasoningText(
-              current,
-              notification.params.itemId,
-              notification.params.index,
-              notification.params.delta,
-              "summary",
-            ),
-          );
-        }
+        updateThreadRuntime(notification.params.threadId, (runtime) => ({
+          ...runtime,
+          items: appendReasoningText(
+            runtime.items,
+            notification.params.itemId,
+            notification.params.index,
+            notification.params.delta,
+            "summary",
+          ),
+        }));
         return;
       case "item.reasoningTextDelta":
-        if (currentThread()?.id === notification.params.threadId) {
-          setItems((current) =>
-            appendReasoningText(
-              current,
-              notification.params.itemId,
-              notification.params.index,
-              notification.params.delta,
-              "content",
-            ),
-          );
-        }
+        updateThreadRuntime(notification.params.threadId, (runtime) => ({
+          ...runtime,
+          items: appendReasoningText(
+            runtime.items,
+            notification.params.itemId,
+            notification.params.index,
+            notification.params.delta,
+            "content",
+          ),
+        }));
         return;
       default:
         assertNever(notification);
@@ -391,7 +538,7 @@ export function createAppController(): AppController {
   }
 
   function handleServerRequest(request: EngineServerRequest): void {
-    setApprovals((current) => {
+    setPendingApprovals((current) => {
       if (current.some((entry) => entry.id === request.id)) {
         throw new Error(`A aprovação ${request.id} foi recebida duas vezes.`);
       }
@@ -494,6 +641,10 @@ export function createAppController(): AppController {
         setRateLimits(null);
         setThreads([]);
         setThreadsNextCursor(null);
+        setArchivedThreads([]);
+        setArchivedThreadsNextCursor(null);
+        setThreadRuntime(new Map());
+        setPendingApprovals([]);
         clearCurrentThread();
       });
       if (response.remoteRevocation === "failed") {
@@ -527,10 +678,6 @@ export function createAppController(): AppController {
 
   function selectProject(path: string): boolean {
     const thread = currentThread();
-    if (turnBusy() && thread !== null && !pathsEqual(thread.cwd, path)) {
-      setError("Interrompa o turno atual antes de trocar de projeto.");
-      return false;
-    }
     try {
       const next = addProject(projects(), path);
       saveProjects(next);
@@ -559,18 +706,42 @@ export function createAppController(): AppController {
     }
   }
 
-  async function newThread(targetWorkspace?: string): Promise<CodexThread | null> {
-    if (turnBusy()) {
-      setError("Interrompa o turno atual antes de criar outra tarefa.");
-      return null;
+  function togglePinnedThread(threadId: string): void {
+    if (!threads().some((thread) => thread.id === threadId)) {
+      setError("A tarefa precisa estar disponível antes de ser fixada.");
+      return;
     }
-    let cwd = targetWorkspace ?? workspace();
-    if (cwd === null) {
-      cwd = await chooseWorkspace();
+    try {
+      const next = togglePinnedThreadId(pinnedThreadIds(), threadId);
+      savePinnedThreadIds(next);
+      setPinnedThreadIds(next);
+    } catch (reason) {
+      reportError(reason);
     }
-    if (cwd === null) {
-      return null;
+  }
+
+  function removePinnedThread(threadId: string): void {
+    const next = removePinnedThreadId(pinnedThreadIds(), threadId);
+    if (next.length === pinnedThreadIds().length) {
+      return;
     }
+    try {
+      savePinnedThreadIds(next);
+      setPinnedThreadIds(next);
+    } catch (reason) {
+      reportError(reason);
+    }
+  }
+
+  function newThread(targetWorkspace?: string): boolean {
+    if (targetWorkspace !== undefined && !selectProject(targetWorkspace)) {
+      return false;
+    }
+    clearCurrentThread();
+    return true;
+  }
+
+  async function materializeThread(cwd: string): Promise<CodexThread | null> {
     try {
       const response = await withPending(() => startThread(cwd));
       if (!pathsEqual(response.thread.cwd, cwd)) {
@@ -582,9 +753,7 @@ export function createAppController(): AppController {
       batch(() => {
         mergeThread(response.thread);
         setCurrentThread(response.thread);
-        setItems([]);
-        setActiveTurnId(null);
-        setApprovals([]);
+        synchronizeThreadRuntime(response.thread);
       });
       return response.thread;
     } catch (reason) {
@@ -594,10 +763,6 @@ export function createAppController(): AppController {
   }
 
   async function openThread(threadId: string): Promise<boolean> {
-    if (turnBusy() && currentThread()?.id !== threadId) {
-      setError("Interrompa o turno atual antes de abrir outra tarefa.");
-      return false;
-    }
     setOpeningThreadId(threadId);
     try {
       const response = await resumeThread(threadId);
@@ -605,12 +770,8 @@ export function createAppController(): AppController {
         return false;
       }
       batch(() => {
+        synchronizeThreadRuntime(response.thread);
         setCurrentThread(response.thread);
-        setItems(flattenThreadItems(response.thread));
-        setActiveTurnId(activeTurnFromThread(response.thread));
-        setApprovals((current) =>
-          current.filter((request) => request.params.threadId === response.thread.id),
-        );
       });
       mergeThread(response.thread);
       return true;
@@ -619,6 +780,21 @@ export function createAppController(): AppController {
       return false;
     } finally {
       setOpeningThreadId(null);
+    }
+  }
+
+  async function openWorkspace(): Promise<boolean> {
+    const path = workspace();
+    if (path === null) {
+      setError("Selecione um projeto antes de abri-lo no sistema.");
+      return false;
+    }
+    try {
+      await openWorkspacePath(path);
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
     }
   }
 
@@ -646,6 +822,73 @@ export function createAppController(): AppController {
     }
   }
 
+  async function unarchiveThread(threadId: string): Promise<boolean> {
+    try {
+      const response = await withPending(() => unarchiveThreadCommand(threadId));
+      mergeThread(response.thread);
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  async function deleteThread(threadId: string): Promise<boolean> {
+    const thread = [...threads(), ...archivedThreads()].find((entry) => entry.id === threadId);
+    if (thread === undefined) {
+      setError("A tarefa que seria excluída não está mais disponível.");
+      return false;
+    }
+    try {
+      const title = thread.name ?? thread.preview ?? "Nova tarefa";
+      const confirmed = await confirm(
+        `A tarefa “${title}” e todo o histórico serão excluídos permanentemente.`,
+        {
+          cancelLabel: "Cancelar",
+          kind: "warning",
+          okLabel: "Excluir",
+          title: "Excluir tarefa?",
+        },
+      );
+      if (!confirmed) {
+        return false;
+      }
+      await withPending(() => deleteThreadCommand(threadId));
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  async function compactThread(threadId: string): Promise<boolean> {
+    try {
+      await withPending(() => compactThreadCommand(threadId));
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  async function forkThread(threadId: string): Promise<boolean> {
+    try {
+      const response = await withPending(() => forkThreadCommand(threadId));
+      if (!selectProject(response.thread.cwd)) {
+        return false;
+      }
+      batch(() => {
+        mergeThread(response.thread);
+        synchronizeThreadRuntime(response.thread);
+        setCurrentThread(response.thread);
+      });
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
   async function loadMoreThreads(): Promise<boolean> {
     const cursor = threadsNextCursor();
     if (cursor === null) {
@@ -664,17 +907,59 @@ export function createAppController(): AppController {
     }
   }
 
-  async function sendMessage(input: SendMessageInput): Promise<boolean> {
-    if (turnBusy()) {
-      setError("Aguarde ou interrompa o turno atual.");
+  async function loadMoreArchivedThreads(): Promise<boolean> {
+    const cursor = archivedThreadsNextCursor();
+    if (cursor === null) {
       return false;
     }
+    try {
+      const page = await withPending(() => listThreads(cursor, true));
+      batch(() => {
+        setArchivedThreads((current) => mergeThreadPages(current, page.data));
+        setArchivedThreadsNextCursor(page.nextCursor);
+      });
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  async function sendMessage(input: SendMessageInput): Promise<boolean> {
     if (input.text.trim().length === 0 && input.attachments.length === 0) {
       return false;
     }
+    const runningTurnId = activeTurnId();
+    if (runningTurnId !== null) {
+      const thread = currentThread();
+      if (thread === null) {
+        setError("O turno ativo não está associado a uma tarefa aberta.");
+        return false;
+      }
+      try {
+        await steerTurn({
+          threadId: thread.id,
+          expectedTurnId: runningTurnId,
+          clientUserMessageId: crypto.randomUUID(),
+          text: input.text,
+          attachments: input.attachments.map((attachment) => ({ path: attachment.path })),
+        });
+        return true;
+      } catch (reason) {
+        reportError(reason);
+        return false;
+      }
+    }
     let thread = currentThread();
     if (thread === null) {
-      thread = await newThread();
+      let cwd = workspace();
+      if (cwd === null) {
+        cwd = await chooseWorkspace();
+      }
+      if (cwd === null) {
+        return false;
+      }
+      thread = await materializeThread(cwd);
     }
     if (thread === null) {
       return false;
@@ -689,7 +974,10 @@ export function createAppController(): AppController {
         effort: input.effort,
         serviceTier: input.serviceTier,
       });
-      setActiveTurnId(response.turn.id);
+      updateThreadRuntime(thread.id, (runtime) => ({
+        ...runtime,
+        activeTurnId: response.turn.id,
+      }));
       return true;
     } catch (reason) {
       reportError(reason);
@@ -718,7 +1006,7 @@ export function createAppController(): AppController {
   ): Promise<boolean> {
     try {
       await respondToServerRequest(requestId, decision);
-      setApprovals((current) => current.filter((request) => request.id !== requestId));
+      setPendingApprovals((current) => current.filter((request) => request.id !== requestId));
       return true;
     } catch (reason) {
       reportError(reason);
@@ -779,6 +1067,21 @@ export function createAppController(): AppController {
     }
   }
 
+  function updateThreadRuntime(
+    threadId: string,
+    update: (current: ThreadRuntimeState) => ThreadRuntimeState,
+  ): void {
+    setThreadRuntime((current) => reduceUpdateThreadRuntime(current, threadId, update));
+  }
+
+  function synchronizeThreadRuntime(thread: CodexThread): void {
+    setThreadRuntime((current) => reduceSynchronizeThreadRuntime(current, thread));
+  }
+
+  function deleteThreadRuntime(threadId: string): void {
+    setThreadRuntime((current) => reduceDeleteThreadRuntime(current, threadId));
+  }
+
   function mergeThread(thread: CodexThread): void {
     setThreads((current) => {
       const index = current.findIndex((entry) => entry.id === thread.id);
@@ -790,12 +1093,7 @@ export function createAppController(): AppController {
   }
 
   function clearCurrentThread(): void {
-    batch(() => {
-      setCurrentThread(null);
-      setItems([]);
-      setActiveTurnId(null);
-      setApprovals([]);
-    });
+    setCurrentThread(null);
   }
 
   function surfaceRefreshFailure(value: AccountReadResponse): void {
@@ -829,56 +1127,99 @@ export function createAppController(): AppController {
     }
   }
 
+  async function synchronizeWorkspaceRepository(
+    cwd: string | null,
+    clearCurrent: boolean,
+  ): Promise<boolean> {
+    repositoryRequestSequence += 1;
+    const requestSequence = repositoryRequestSequence;
+    if (clearCurrent) {
+      setWorkspaceRepository(null);
+    }
+    if (cwd === null) {
+      return false;
+    }
+    try {
+      const repository = await readWorkspaceRepository(cwd);
+      if (disposed || requestSequence !== repositoryRequestSequence) {
+        return false;
+      }
+      setWorkspaceRepository(repository);
+      return true;
+    } catch (reason) {
+      if (!disposed && requestSequence === repositoryRequestSequence) {
+        reportError(reason);
+      }
+      return false;
+    }
+  }
+
+  async function refreshWorkspaceRepository(): Promise<boolean> {
+    return synchronizeWorkspaceRepository(workspace(), false);
+  }
+
   return {
     account,
     activeTurnId,
     approvals,
+    archivedThreads,
+    archivedThreadsNextCursor,
     busy,
     config,
+    contextUsage,
     currentThread,
     currentThreadTitle,
     diagnostics,
     engine,
     error,
     items,
+    lastTurnFailure,
     loginPending,
     models,
+    modelReroute,
+    modelVerifications,
     openingThreadId,
     pendingOperations,
+    pinnedThreadIds,
     projects,
     rateLimits,
     runtimeStatus,
     signedIn,
+    safetyBuffering,
     threads,
     threadsNextCursor,
     turnBusy,
+    turns,
     workspace,
     workspaceRepository,
     archiveThread,
     cancelLogin,
     chooseWorkspace,
     clearError: () => setError(null),
+    compactThread,
+    deleteThread,
+    forkThread,
     inspectFiles,
     interrupt,
     loadMoreThreads,
+    loadMoreArchivedThreads,
     login,
     logout,
     newThread,
     openThread,
+    openWorkspace,
     refreshRateLimits,
+    refreshWorkspaceRepository,
     removeProject: removeProjectFromSidebar,
     renameThread,
     respondToApproval,
     saveClipboardImage: saveClipboard,
     selectProject,
     sendMessage,
+    togglePinnedThread,
     updateSetting,
+    unarchiveThread,
   };
-}
-
-function activeTurnFromThread(thread: CodexThread): string | null {
-  const active = [...thread.turns].reverse().find((turn) => turn.status === "inProgress");
-  return active?.id ?? null;
 }
 
 function mergeThreadPages(

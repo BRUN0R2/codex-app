@@ -19,7 +19,10 @@ alterar estado.
 - catálogo de modelos, tiers e esforços obtido diretamente da sessão ChatGPT;
 - respostas incrementais por HTTPS/SSE, raciocínio e pesquisa web hospedada;
 - tarefas e histórico locais em SQLite com WAL, transações e concorrência
-  otimista de configuração;
+  otimista de configuração, incluindo reparo explícito de pares chamada/saída
+  deixados incompletos por interrupção;
+- execução simultânea de tarefas em segundo plano, direcionamento do turno
+  ativo, compactação, fork, arquivamento e exclusão confirmada;
 - ferramentas nativas fechadas para leitura, listagem, busca, edição, escrita e
   comandos;
 - três perfis de permissão sem combinações implícitas: somente leitura, projeto
@@ -83,14 +86,19 @@ de preview é removido do build de produção.
 pnpm verify
 ```
 
-O gate executa lint, testes TypeScript, tipagem, build de produção, `cargo check`,
-`rustfmt`, Clippy com warnings como erros e testes Rust.
+O gate executa lint, testes TypeScript, tipagem, build de produção, auditoria da
+exceção transitiva conhecida, `cargo check`, `rustfmt`, Clippy com warnings como
+erros e testes Rust.
 
 Para gerar o instalador NSIS:
 
 ```powershell
 pnpm tauri build
 ```
+
+Publicações oficiais usam somente o pipeline assinado descrito em
+[docs/RELEASE.md](docs/RELEASE.md). O baseline local do executável otimizado é
+coletado conforme [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Organização
 
@@ -103,5 +111,5 @@ pnpm tauri build
 - `docs`: regras, arquitetura, contrato do engine e estudo da referência.
 
 Consulte [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
-[docs/ENGINE.md](docs/ENGINE.md), [docs/REFERENCE.md](docs/REFERENCE.md) e
-[docs/RULES.md](docs/RULES.md).
+[docs/ENGINE.md](docs/ENGINE.md), [docs/REFERENCE.md](docs/REFERENCE.md),
+[docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) e [docs/RULES.md](docs/RULES.md).

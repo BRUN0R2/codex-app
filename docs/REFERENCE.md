@@ -3,7 +3,7 @@
 ## Snapshot estudado
 
 O diretório local ignorado `.reference/openai-codex` aponta para o commit
-`6751b54cae32b23786001e2414d749a9916201e1`, de 1 de agosto de 2026, do
+`ee0247f95a6fe2b094ba2253d82cae2a2b4c2dff`, de 1 de agosto de 2026, do
 repositório [openai/codex](https://github.com/openai/codex).
 
 A referência serve para confirmar protocolos e semântica. Nenhum crate, pacote,
@@ -29,6 +29,27 @@ com o armazenamento dela.
 O catálogo declara explicitamente `0.146.0` como versão de compatibilidade do
 cliente no parâmetro `client_version`. Esse contrato acompanha a versão estável
 do protocolo estudado e é independente da versão comercial do aplicativo.
+
+## Desktop oficial e limites do agente
+
+O aplicativo oficial para Windows validado é o build `26.727.6591.0`. Seu
+processo Electron `ChatGPT.exe` inicia o executável embarcado como
+`codex.exe -c features.code_mode_host=true app-server
+--analytics-default-enabled` e também inicia `codex-code-mode-host.exe`. A
+versão embarcada reporta `codex-cli 0.146.0-alpha.9.2`. Portanto, o Desktop usa
+o `app-server` e o core como engine; ele não executa o fluxo interativo da CLI.
+
+Nem o snapshot da referência nem os binários oficiais contêm os limites fixos
+`MAX_AGENT_ROUNDS = 128` ou `MAX_TOOL_CALLS_PER_TURN = 512`. O loop oficial
+continua enquanto houver itens que exigem outra rodada e termina por resposta
+final, cancelamento, erro/limite do provider ou compactação de contexto. O
+contador de chamadas de ferramenta é telemetria, não um teto de execução. Esta
+aplicação segue essa mesma semântica e não impõe aqueles dois limites.
+
+O `ContextManager` oficial também normaliza o prompt antes da rede: insere uma
+saída `aborted` para chamadas sem resultado e remove resultados órfãos. O engine
+local segue essa invariável e ainda persiste a correção atomicamente, porque seu
+SQLite próprio é a fonte autoritativa entre reinícios.
 
 ## Decisões próprias
 
@@ -58,3 +79,86 @@ Antes de alterar OAuth ou provider:
 
 Mudanças da referência nunca são copiadas mecanicamente e nunca criam um caminho
 de compatibilidade automática.
+
+## Validação visual do desktop oficial
+
+Em 1 de agosto de 2026, a interface foi comparada com os artefatos do aplicativo
+Codex oficial para Windows, build `26.727.6591.0`. A inspeção cobriu o shell, o
+estado vazio, uma tarefa ativa, a rolagem, projetos/pastas e os menus do
+compositor, ambiente, permissões e modelo.
+
+Os parâmetros usados como referência visual são:
+
+- barra lateral responsiva com `275px` preferidos, mínimo de `240px`, máximo de
+  `520px`, toolbar de `46px` e linhas de `30px`;
+- coluna da conversa limitada a `768px`, com `16px` de respiro lateral, e
+  compositor limitado a `784px` pelo overhang oficial;
+- escala tipográfica de `11px`, `12px`, `14px` e `16px`, usando a pilha de fonte
+  do sistema e peso base `445` no Windows;
+- compositor sobreposto e medido em runtime; o inset inferior da timeline
+  acompanha sua altura sem criar uma segunda área rolável;
+- mensagem do usuário em balão discreto alinhado à direita, resposta do agente
+  plana e renderizada como Markdown sanitizado à esquerda, com ação contextual
+  de cópia em ambas;
+- raciocínio, comandos, ferramentas e alterações organizados como uma trilha
+  visual leve; apenas o conteúdo expandido recebe contorno próprio;
+- scrollbar da conversa ocupando toda a viewport, botão circular de retorno ao
+  fim e o último item sempre integralmente acima do compositor;
+- donut de contexto oficial de `12px`, calculado sobre a janela declarada pelo
+  modelo e oculto até existir uma medição;
+- projetos expansíveis sem reordenação ao selecionar, no máximo cinco projetos
+  e cinco tarefas por grupo antes de “Mostrar mais”, com ações secundárias
+  reveladas por hover/foco.
+
+A aplicação própria preserva essa hierarquia e semântica, mas só apresenta
+ações ligadas a capacidades já implementadas. Itens oficiais sem contrato local
+real não são simulados nem mantidos como controles inertes.
+
+O teste funcional comparativo usou a mensagem `Responda apenas com: OK.` em um
+chat novo do mesmo projeto. As duas aplicações criaram a tarefa no primeiro
+envio e responderam `OK.`. O desktop próprio registrou `8,5k / 258k` tokens
+(3%) e o oficial indicou 8%; a diferença é esperada porque cada aplicação monta
+seu próprio contexto e conjunto de capacidades.
+
+## Cobertura funcional
+
+A comparação do aplicativo próprio com o Codex CLI `0.146.0`, o protocolo
+`app-server` e o desktop oficial separa o núcleo do agente das superfícies de
+produto. O estado atual é:
+
+| Área | Cobertura local |
+| --- | --- |
+| Login ChatGPT, renovação, logout e uso da conta | implementada |
+| Modelos, esforço, tier, permissões e janela de contexto | implementada |
+| Criar, listar, abrir, renomear e arquivar tarefas | implementada |
+| Turno incremental com raciocínio, ferramentas, aprovação e interrupção | implementada |
+| Histórico persistido, anexos, pesquisa web e falhas visíveis | implementada |
+| Troca de tarefa e múltiplos turnos simultâneos em background | implementada por runtime isolado por tarefa |
+| Compactação automática/manual e direcionamento de turno ativo | implementada |
+| Fork, arquivamento, desarquivamento e exclusão de tarefa | implementada |
+| Markdown sanitizado, scroll medido e janela de contexto | implementada |
+| Worktrees e fluxo Git completo de diff, revisão e commit | não implementada |
+| Terminal e navegador integrados, tarefas agendadas, plugins, skills e MCP | não implementada |
+
+O aplicativo executa o fluxo essencial moderno de um agente Codex para PC sem
+depender da CLI. As superfícies ainda ausentes não são representadas por botões
+inertes; cada uma exige um contrato nativo próprio antes de aparecer na
+interface.
+
+## Validação live do transporte
+
+Em 1 de agosto de 2026, uma tarefa real autenticada percorreu 56 itens de
+provider, com múltiplas rodadas de leitura, busca e comando, persistiu a resposta
+final e concluiu um segundo turno após o reinício de desenvolvimento. O teste
+encontrou o marcador válido
+`response.reasoning_summary_part.done`, que passou a ser aceito explicitamente.
+Eventos desconhecidos continuam falhando na fronteira.
+
+Falhas de turno persistidas agora fazem parte do contrato de leitura e são
+mostradas na timeline. Isso evita que reabrir uma tarefa transforme uma falha de
+provider em silêncio visual.
+
+No transporte Responses, um status HTTP de sucesso pode iniciar um stream SSE
+sem o header `Content-Type`. O corpo, e não esse header opcional, é a fronteira
+autoritativa: o parser local continua rejeitando eventos desconhecidos, linhas
+excessivas, uso incoerente e streams malformados.

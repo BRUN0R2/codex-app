@@ -12,7 +12,7 @@ use super::provider::ResponseItem;
 use crate::engine::{
     AppConfig, CodexThread, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
     DesktopPreferences, OperationAck, ThreadActiveFlag, ThreadItem, ThreadListResponse,
-    ThreadStatus, ThreadTurn, TurnStatus, TurnSummary,
+    ThreadStatus, ThreadTurn, TokenUsage, TurnStatus, TurnSummary,
 };
 use crate::error::AppError;
 
@@ -107,6 +107,7 @@ impl NativeStorage {
     pub async fn list_threads(
         &self,
         cursor: Option<String>,
+        archived: bool,
     ) -> Result<ThreadListResponse, AppError> {
         let offset = parse_cursor(cursor.as_deref())?;
         let path = self.path().await?;
@@ -122,13 +123,13 @@ impl NativeStorage {
                     "SELECT id, cwd, name, preview, created_at, updated_at,
                             EXISTS(SELECT 1 FROM turns WHERE thread_id = threads.id AND status = 'inProgress')
                      FROM threads
-                     WHERE archived = 0
+                     WHERE archived = ?3
                      ORDER BY updated_at DESC, id DESC
                      LIMIT ?1 OFFSET ?2",
                 )
                 .map_err(storage_error)?;
             let rows = statement
-                .query_map(params![requested_sql, offset_sql], |row| {
+                .query_map(params![requested_sql, offset_sql, archived], |row| {
                     Ok(ThreadHeader {
                         id: row.get(0)?,
                         cwd: row.get(1)?,
@@ -218,6 +219,198 @@ impl NativeStorage {
         .await
     }
 
+    pub async fn unarchive_thread(&self, thread_id: String) -> Result<CodexThread, AppError> {
+        let path = self.path().await?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
+            let changed = connection
+                .execute(
+                    "UPDATE threads SET archived = 0, updated_at = ?1
+                     WHERE id = ?2 AND archived = 1",
+                    params![unix_timestamp()?, thread_id],
+                )
+                .map_err(storage_error)?;
+            require_changed(changed, "archived thread")?;
+            read_thread(&connection, &thread_id)
+        })
+        .await
+    }
+
+    pub async fn delete_thread(&self, thread_id: String) -> Result<OperationAck, AppError> {
+        let path = self.path().await?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM turns
+                         WHERE thread_id = ?1 AND status = 'inProgress'
+                     )",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if active {
+                return Err(AppError::State(
+                    "an active thread cannot be deleted; interrupt its turn first".into(),
+                ));
+            }
+            let changed = transaction
+                .execute("DELETE FROM threads WHERE id = ?1", [&thread_id])
+                .map_err(storage_error)?;
+            require_changed(changed, "thread")?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(OperationAck { applied: true })
+        })
+        .await
+    }
+
+    pub async fn fork_thread(&self, source_thread_id: String) -> Result<CodexThread, AppError> {
+        let path = self.path().await?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            let source = transaction
+                .query_row(
+                    "SELECT cwd, name, preview
+                     FROM threads
+                     WHERE id = ?1",
+                    [&source_thread_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(storage_error)?
+                .ok_or_else(|| AppError::State("source thread does not exist".into()))?;
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM turns
+                         WHERE thread_id = ?1 AND status = 'inProgress'
+                     )",
+                    [&source_thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if active {
+                return Err(AppError::State(
+                    "an active thread cannot be forked until its current turn completes".into(),
+                ));
+            }
+
+            let turn_count: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM turns WHERE thread_id = ?1",
+                    [&source_thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if turn_count > MAX_THREAD_TURNS as i64 {
+                return Err(AppError::Storage(format!(
+                    "source thread exceeds {MAX_THREAD_TURNS} turns"
+                )));
+            }
+            let provider_item_count: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_items WHERE thread_id = ?1",
+                    [&source_thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if provider_item_count > MAX_HISTORY_ITEMS as i64 {
+                return Err(AppError::Storage(format!(
+                    "source provider history exceeds {MAX_HISTORY_ITEMS} items"
+                )));
+            }
+
+            let fork_id = Uuid::now_v7().to_string();
+            let now = unix_timestamp()?;
+            transaction
+                .execute(
+                    "INSERT INTO threads (id, cwd, name, preview, archived, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
+                    params![fork_id, source.0, source.1, source.2, now],
+                )
+                .map_err(storage_error)?;
+
+            let source_turns = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT id, status, model, reasoning_effort, error, created_at, updated_at
+                         FROM turns
+                         WHERE thread_id = ?1
+                         ORDER BY created_at, id",
+                    )
+                    .map_err(storage_error)?;
+                let rows = statement
+                    .query_map([&source_thread_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                        ))
+                    })
+                    .map_err(storage_error)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?
+            };
+            for (source_turn_id, status, model, effort, error, created_at, updated_at) in
+                source_turns
+            {
+                let fork_turn_id = Uuid::now_v7().to_string();
+                transaction
+                    .execute(
+                        "INSERT INTO turns
+                             (id, thread_id, status, model, reasoning_effort, error, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            fork_turn_id,
+                            fork_id,
+                            status,
+                            model,
+                            effort,
+                            error,
+                            created_at,
+                            updated_at
+                        ],
+                    )
+                    .map_err(storage_error)?;
+                transaction
+                    .execute(
+                        "INSERT INTO thread_items (turn_id, item_id, payload)
+                         SELECT ?1, item_id, payload
+                         FROM thread_items
+                         WHERE turn_id = ?2
+                         ORDER BY sequence",
+                        params![fork_turn_id, source_turn_id],
+                    )
+                    .map_err(storage_error)?;
+            }
+            transaction
+                .execute(
+                    "INSERT INTO provider_items (thread_id, payload)
+                     SELECT ?1, payload
+                     FROM provider_items
+                     WHERE thread_id = ?2
+                     ORDER BY sequence",
+                    params![fork_id, source_thread_id],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)?;
+            read_thread(&connection, &fork_id)
+        })
+        .await
+    }
+
     pub async fn begin_turn(
         &self,
         thread_id: String,
@@ -286,6 +479,52 @@ impl NativeStorage {
         .await
     }
 
+    pub async fn begin_compaction_turn(
+        &self,
+        thread_id: String,
+        model: String,
+        reasoning_effort: Option<String>,
+    ) -> Result<TurnSummary, AppError> {
+        let path = self.path().await?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            require_available_thread(&transaction, &thread_id)?;
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM turns WHERE thread_id = ?1 AND status = 'inProgress')",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if active {
+                return Err(AppError::State("the thread already has an active turn".into()));
+            }
+            let turn_id = Uuid::now_v7().to_string();
+            let now = unix_timestamp()?;
+            transaction
+                .execute(
+                    "INSERT INTO turns
+                         (id, thread_id, status, model, reasoning_effort, error, created_at, updated_at)
+                     VALUES (?1, ?2, 'inProgress', ?3, ?4, NULL, ?5, ?5)",
+                    params![turn_id, thread_id, model, reasoning_effort, now],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "UPDATE threads SET updated_at = ?1 WHERE id = ?2",
+                    params![now, thread_id],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(TurnSummary {
+                id: turn_id,
+                status: TurnStatus::InProgress,
+            })
+        })
+        .await
+    }
+
     pub async fn append_thread_item(
         &self,
         turn_id: String,
@@ -303,6 +542,64 @@ impl NativeStorage {
                 )
                 .map_err(storage_error)?;
             Ok(())
+        })
+        .await
+    }
+
+    pub async fn append_turn_input(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        user_item: ThreadItem,
+        provider_item: ResponseItem,
+    ) -> Result<(), AppError> {
+        let item_id = user_item.id().to_string();
+        let item_payload = encode_bounded(&user_item, MAX_ITEM_BYTES, "steered thread item")?;
+        let provider_payload =
+            encode_bounded(&provider_item, MAX_ITEM_BYTES, "steered provider item")?;
+        let path = self.path().await?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM turns
+                         JOIN threads ON threads.id = turns.thread_id
+                         WHERE turns.id = ?1
+                           AND turns.thread_id = ?2
+                           AND turns.status = 'inProgress'
+                           AND threads.archived = 0
+                     )",
+                    params![turn_id, thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !active {
+                return Err(AppError::State(
+                    "turn is no longer active or does not belong to the thread".into(),
+                ));
+            }
+            transaction
+                .execute(
+                    "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
+                    params![turn_id, item_id, item_payload],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
+                    params![thread_id, provider_payload],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "UPDATE threads SET updated_at = ?1 WHERE id = ?2",
+                    params![unix_timestamp()?, thread_id],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)
         })
         .await
     }
@@ -354,6 +651,115 @@ impl NativeStorage {
             let mut total_bytes = 0;
             let mut total_items = 0;
             decode_rows(rows, "provider history", &mut total_bytes, &mut total_items)
+        })
+        .await
+    }
+
+    pub async fn replace_provider_history(
+        &self,
+        thread_id: String,
+        items: Vec<ResponseItem>,
+    ) -> Result<(), AppError> {
+        if items.is_empty() || items.len() > MAX_HISTORY_ITEMS {
+            return Err(AppError::Provider(format!(
+                "provider history must contain between 1 and {MAX_HISTORY_ITEMS} items"
+            )));
+        }
+        let mut total_bytes = 0usize;
+        let mut payloads = Vec::with_capacity(items.len());
+        for item in items {
+            let payload = encode_bounded(&item, MAX_ITEM_BYTES, "provider history item")?;
+            total_bytes = total_bytes
+                .checked_add(payload.len())
+                .ok_or_else(|| AppError::Provider("provider history size overflowed".into()))?;
+            if total_bytes > MAX_HISTORY_BYTES {
+                return Err(AppError::Provider(format!(
+                    "provider history exceeds {MAX_HISTORY_BYTES} bytes"
+                )));
+            }
+            payloads.push(payload);
+        }
+        let path = self.path().await?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            let exists: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1 AND archived = 0)",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !exists {
+                return Err(AppError::State(
+                    "thread does not exist or is archived".into(),
+                ));
+            }
+            transaction
+                .execute(
+                    "DELETE FROM provider_items WHERE thread_id = ?1",
+                    [&thread_id],
+                )
+                .map_err(storage_error)?;
+            for payload in payloads {
+                transaction
+                    .execute(
+                        "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
+                        params![&thread_id, payload],
+                    )
+                    .map_err(storage_error)?;
+            }
+            transaction.commit().map_err(storage_error)
+        })
+        .await
+    }
+
+    pub async fn latest_context_usage(
+        &self,
+        thread_id: String,
+    ) -> Result<Option<TokenUsage>, AppError> {
+        let path = self.path().await?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1 AND archived = 0)",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !exists {
+                return Err(AppError::State(
+                    "thread does not exist or is archived".into(),
+                ));
+            }
+            let payload = connection
+                .query_row(
+                    "SELECT thread_items.payload
+                     FROM thread_items
+                     JOIN turns ON turns.id = thread_items.turn_id
+                     WHERE turns.thread_id = ?1
+                       AND json_extract(thread_items.payload, '$.type') IN (
+                           'contextUsage',
+                           'contextCompaction'
+                       )
+                     ORDER BY thread_items.sequence DESC
+                     LIMIT 1",
+                    [thread_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(storage_error)?;
+            let Some(payload) = payload else {
+                return Ok(None);
+            };
+            match decode_bounded::<ThreadItem>(&payload, MAX_ITEM_BYTES, "context usage")? {
+                ThreadItem::ContextUsage { usage, .. } => Ok(Some(usage)),
+                ThreadItem::ContextCompaction { .. } => Ok(None),
+                _ => Err(AppError::Storage(
+                    "context-state query returned a different item type".into(),
+                )),
+            }
         })
         .await
     }
@@ -474,7 +880,9 @@ impl NativeStorage {
 impl ThreadItem {
     pub fn id(&self) -> &str {
         match self {
-            Self::UserMessage { id, .. }
+            Self::ContextUsage { id, .. }
+            | Self::ContextCompaction { id }
+            | Self::UserMessage { id, .. }
             | Self::AgentMessage { id, .. }
             | Self::Reasoning { id, .. }
             | Self::CommandExecution { id, .. }
@@ -540,11 +948,20 @@ fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, 
         .map_err(storage_error)?
         .ok_or_else(|| AppError::State("thread does not exist or is archived".into()))?;
     let mut turns_statement = connection
-        .prepare("SELECT id, status FROM turns WHERE thread_id = ?1 ORDER BY created_at, id")
+        .prepare(
+            "SELECT id, status, error, created_at, updated_at
+             FROM turns WHERE thread_id = ?1 ORDER BY created_at, id",
+        )
         .map_err(storage_error)?;
     let turn_rows = turns_statement
         .query_map([thread_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
         })
         .map_err(storage_error)?;
     let mut turns = Vec::new();
@@ -556,7 +973,13 @@ fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, 
                 "thread exceeds {MAX_THREAD_TURNS} turns"
             )));
         }
-        let (turn_id, status) = turn.map_err(storage_error)?;
+        let (turn_id, status, error, created_at, updated_at) = turn.map_err(storage_error)?;
+        let status = parse_status(&status)?;
+        if (status == TurnStatus::Failed) != error.is_some() {
+            return Err(AppError::Storage(format!(
+                "turn `{turn_id}` has an incoherent failure status"
+            )));
+        }
         let mut items_statement = connection
             .prepare("SELECT payload FROM thread_items WHERE turn_id = ?1 ORDER BY sequence")
             .map_err(storage_error)?;
@@ -572,7 +995,10 @@ fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, 
         turns.push(ThreadTurn {
             id: turn_id,
             items,
-            status: parse_status(&status)?,
+            status,
+            error,
+            created_at,
+            updated_at,
         });
     }
     let mut thread = header.without_turns();
@@ -956,10 +1382,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
     use tempfile::TempDir;
 
     use super::{DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, NativeStorage};
+    use crate::engine::native::provider::{ResponseContent, ResponseItem};
+    use crate::engine::{ThreadItem, TokenUsage, TurnStatus, UserContent};
 
     #[tokio::test(flavor = "current_thread")]
     async fn initializes_the_native_schema_directly() {
@@ -990,6 +1418,24 @@ mod tests {
             .expect("schema version should be readable");
         assert_eq!(application_id, DATABASE_APPLICATION_ID);
         assert_eq!(schema_version, DATABASE_SCHEMA_VERSION);
+
+        connection
+            .execute(
+                "INSERT INTO turns
+                     (id, thread_id, status, model, reasoning_effort, error, created_at, updated_at)
+                 VALUES (?1, ?2, 'failed', 'gpt-test', NULL, ?3, 1, 1)",
+                params!["failed-turn", thread.id, "provider stream failed"],
+            )
+            .expect("failed turn fixture should persist");
+        drop(connection);
+
+        let loaded = storage
+            .read_thread(thread.id)
+            .await
+            .expect("thread with failed turn should load");
+        let failed_turn = loaded.turns.first().expect("failed turn should be present");
+        assert_eq!(failed_turn.status, TurnStatus::Failed);
+        assert_eq!(failed_turn.error.as_deref(), Some("provider stream failed"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1004,6 +1450,299 @@ mod tests {
 
         let storage = NativeStorage::default();
         assert!(storage.initialize_at(database_path).await.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn begins_manual_compaction_without_synthesizing_user_history() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("manual-compaction.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(directory.path().display().to_string())
+            .await
+            .expect("thread should persist");
+
+        let turn = storage
+            .begin_compaction_turn(thread.id.clone(), "gpt-test".into(), Some("medium".into()))
+            .await
+            .expect("compaction turn should begin");
+        let loaded = storage
+            .read_thread(thread.id.clone())
+            .await
+            .expect("thread should load");
+        let history = storage
+            .provider_history(thread.id.clone())
+            .await
+            .expect("provider history should load");
+        assert_eq!(loaded.turns.len(), 1);
+        assert!(loaded.turns[0].items.is_empty());
+        assert!(history.is_empty());
+
+        storage
+            .complete_turn(thread.id, turn.id, TurnStatus::Completed, None)
+            .await
+            .expect("compaction turn should complete");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn replaces_only_the_active_provider_context_transactionally() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("compaction.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(directory.path().display().to_string())
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "user-1".into(),
+                    content: vec![UserContent::Text { text: "old".into() }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText { text: "old".into() }]),
+                "old".into(),
+            )
+            .await
+            .expect("turn should begin");
+        storage
+            .append_thread_item(
+                turn.id.clone(),
+                ThreadItem::ContextUsage {
+                    id: "usage-1".into(),
+                    model: "gpt-test".into(),
+                    usage: TokenUsage {
+                        input_tokens: 95,
+                        cached_input_tokens: 0,
+                        output_tokens: 5,
+                        reasoning_output_tokens: 0,
+                        total_tokens: 100,
+                    },
+                    context_window: None,
+                },
+            )
+            .await
+            .expect("usage should persist");
+        storage
+            .replace_provider_history(
+                thread.id.clone(),
+                vec![ResponseItem::user_content(vec![
+                    ResponseContent::InputText {
+                        text: "replacement".into(),
+                    },
+                ])],
+            )
+            .await
+            .expect("history should be replaced");
+
+        let history = storage
+            .provider_history(thread.id.clone())
+            .await
+            .expect("replacement history should load");
+        let usage = storage
+            .latest_context_usage(thread.id.clone())
+            .await
+            .expect("usage lookup should succeed")
+            .expect("usage should exist");
+        assert_eq!(history.len(), 1);
+        assert!(
+            serde_json::to_string(&history[0])
+                .expect("history should encode")
+                .contains("replacement")
+        );
+        assert_eq!(usage.total_tokens, 100);
+
+        storage
+            .append_thread_item(
+                turn.id,
+                ThreadItem::ContextCompaction {
+                    id: "compaction-1".into(),
+                },
+            )
+            .await
+            .expect("compaction marker should persist");
+        assert!(
+            storage
+                .latest_context_usage(thread.id)
+                .await
+                .expect("context state should load")
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn appends_steered_input_to_the_active_turn_and_provider_history_atomically() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("steer.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(directory.path().display().to_string())
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "user-1".into(),
+                    content: vec![UserContent::Text {
+                        text: "initial".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "initial".into(),
+                }]),
+                "initial".into(),
+            )
+            .await
+            .expect("turn should begin");
+
+        storage
+            .append_turn_input(
+                thread.id.clone(),
+                turn.id.clone(),
+                ThreadItem::UserMessage {
+                    id: "user-2".into(),
+                    content: vec![UserContent::Text {
+                        text: "steer".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "steer".into(),
+                }]),
+            )
+            .await
+            .expect("steer should append");
+
+        let loaded = storage
+            .read_thread(thread.id.clone())
+            .await
+            .expect("thread should load");
+        let history = storage
+            .provider_history(thread.id.clone())
+            .await
+            .expect("provider history should load");
+        assert_eq!(loaded.turns[0].items.len(), 2);
+        assert_eq!(history.len(), 2);
+
+        storage
+            .complete_turn(
+                thread.id.clone(),
+                turn.id.clone(),
+                TurnStatus::Completed,
+                None,
+            )
+            .await
+            .expect("turn should complete");
+        assert!(
+            storage
+                .append_turn_input(
+                    thread.id,
+                    turn.id,
+                    ThreadItem::UserMessage {
+                        id: "user-3".into(),
+                        content: vec![UserContent::Text {
+                            text: "late".into(),
+                        }],
+                    },
+                    ResponseItem::user_content(vec![ResponseContent::InputText {
+                        text: "late".into(),
+                    }]),
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn thread_lifecycle_forks_archives_restores_and_deletes_transactionally() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("thread-lifecycle.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let source = storage
+            .create_thread(directory.path().display().to_string())
+            .await
+            .expect("source thread should persist");
+        let turn = storage
+            .begin_turn(
+                source.id.clone(),
+                "gpt-test".into(),
+                Some("high".into()),
+                ThreadItem::UserMessage {
+                    id: "user-source".into(),
+                    content: vec![UserContent::Text {
+                        text: "fork me".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "fork me".into(),
+                }]),
+                "fork me".into(),
+            )
+            .await
+            .expect("source turn should begin");
+        storage
+            .complete_turn(source.id.clone(), turn.id, TurnStatus::Completed, None)
+            .await
+            .expect("source turn should complete");
+
+        let fork = storage
+            .fork_thread(source.id.clone())
+            .await
+            .expect("thread should fork");
+        assert_ne!(fork.id, source.id);
+        assert_eq!(fork.cwd, source.cwd);
+        assert_eq!(fork.turns.len(), 1);
+        assert_eq!(fork.turns[0].items.len(), 1);
+        assert_eq!(
+            storage
+                .provider_history(fork.id.clone())
+                .await
+                .expect("fork history should load")
+                .len(),
+            1
+        );
+
+        storage
+            .archive_thread(source.id.clone())
+            .await
+            .expect("source should archive");
+        let archived = storage
+            .list_threads(None, true)
+            .await
+            .expect("archived threads should list");
+        assert_eq!(archived.data.len(), 1);
+        assert_eq!(archived.data[0].id, source.id);
+        storage
+            .unarchive_thread(source.id.clone())
+            .await
+            .expect("source should restore");
+        let active = storage
+            .list_threads(None, false)
+            .await
+            .expect("active threads should list");
+        assert_eq!(active.data.len(), 2);
+
+        storage
+            .delete_thread(fork.id.clone())
+            .await
+            .expect("fork should delete");
+        assert!(storage.read_thread(fork.id).await.is_err());
     }
 
     #[test]

@@ -8,12 +8,18 @@ use tokio::sync::watch;
 
 use crate::engine::ImageDetail;
 use crate::engine::ModelVerbosity;
+use crate::engine::ModelVerification;
 use crate::engine::ReasoningEffort;
+use crate::engine::TokenUsage;
 use crate::error::AppError;
 
 const MAX_SSE_LINE_BYTES: usize = 1_048_576;
 const MAX_SSE_EVENT_BYTES: usize = 2_097_152;
 const MAX_DELTA_BYTES: usize = 262_144;
+const MAX_HEADER_VALUE_BYTES: usize = 4_096;
+const MAX_METADATA_LIST_ITEMS: usize = 64;
+const MAX_METADATA_STRING_BYTES: usize = 1_024;
+const MAX_USAGE_TOKENS: u64 = 1_000_000_000;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Serialize)]
@@ -32,7 +38,18 @@ pub struct ResponseRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<TextOptions>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResponseRequestSettings {
+    pub parallel_tool_calls: bool,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub service_tier: Option<String>,
+    pub prompt_cache_key: Option<String>,
+    pub verbosity: Option<ModelVerbosity>,
 }
 
 impl ResponseRequest {
@@ -41,9 +58,7 @@ impl ResponseRequest {
         instructions: String,
         input: Vec<ResponseItem>,
         tools: Vec<Value>,
-        reasoning_effort: Option<ReasoningEffort>,
-        service_tier: Option<String>,
-        verbosity: Option<ModelVerbosity>,
+        settings: ResponseRequestSettings,
     ) -> Self {
         Self {
             model,
@@ -51,16 +66,19 @@ impl ResponseRequest {
             input,
             tools,
             tool_choice: "auto".into(),
-            parallel_tool_calls: false,
-            reasoning: reasoning_effort.map(|effort| ReasoningOptions {
+            parallel_tool_calls: settings.parallel_tool_calls,
+            reasoning: settings.reasoning_effort.map(|effort| ReasoningOptions {
                 effort,
                 summary: "auto",
             }),
             store: false,
             stream: true,
             include: vec!["reasoning.encrypted_content".into()],
-            service_tier,
-            text: verbosity.map(|verbosity| TextOptions { verbosity }),
+            service_tier: settings.service_tier,
+            prompt_cache_key: settings.prompt_cache_key,
+            text: settings
+                .verbosity
+                .map(|verbosity| TextOptions { verbosity }),
         }
     }
 }
@@ -127,6 +145,20 @@ pub enum ResponseItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<WebSearchAction>,
     },
+    Compaction {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        encrypted_content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+    },
+    CompactionTrigger {},
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct InternalChatMessageMetadataPassthrough {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
 }
 
 impl ResponseItem {
@@ -143,14 +175,21 @@ impl ResponseItem {
         Self::FunctionCallOutput { call_id, output }
     }
 
+    pub fn compaction_trigger() -> Self {
+        Self::CompactionTrigger {}
+    }
+
     pub fn id(&self) -> Option<&str> {
         match self {
             Self::Message { id, .. }
             | Self::Reasoning { id, .. }
             | Self::FunctionCall { id, .. }
             | Self::CustomToolCall { id, .. }
-            | Self::WebSearchCall { id, .. } => id.as_deref(),
-            Self::FunctionCallOutput { .. } | Self::CustomToolCallOutput { .. } => None,
+            | Self::WebSearchCall { id, .. }
+            | Self::Compaction { id, .. } => id.as_deref(),
+            Self::FunctionCallOutput { .. }
+            | Self::CustomToolCallOutput { .. }
+            | Self::CompactionTrigger { .. } => None,
         }
     }
 
@@ -188,6 +227,27 @@ impl ResponseItem {
                 .flatten()
                 .map(|part| part.text.clone())
                 .collect(),
+        ))
+    }
+
+    pub fn is_compaction_checkpoint(&self) -> bool {
+        matches!(self, Self::Compaction { .. })
+    }
+
+    pub fn compaction_checkpoint(&self) -> Option<(&str, Option<&str>)> {
+        let Self::Compaction {
+            encrypted_content,
+            internal_chat_message_metadata_passthrough,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some((
+            encrypted_content,
+            internal_chat_message_metadata_passthrough
+                .as_ref()
+                .and_then(|metadata| metadata.turn_id.as_deref()),
         ))
     }
 }
@@ -290,9 +350,21 @@ pub enum ResponseEvent {
         content_index: usize,
         delta: String,
     },
+    ServerModel(String),
+    TurnState(String),
+    ModelVerifications(Vec<ModelVerification>),
+    TurnModerationMetadata(Value),
+    SafetyBuffering(SafetyBuffering),
     OutputItemDone(ResponseItem),
-    Completed,
+    Completed(Option<TokenUsage>),
     Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafetyBuffering {
+    pub use_cases: Vec<String>,
+    pub reasons: Vec<String>,
+    pub faster_model: Option<String>,
 }
 
 pub struct ResponseStream {
@@ -303,13 +375,24 @@ pub struct ResponseStream {
 }
 
 impl ResponseStream {
-    pub(super) fn new(response: reqwest::Response) -> Self {
-        Self {
-            response,
-            parser: SseParser::default(),
-            pending: VecDeque::new(),
-            ended: false,
+    pub(super) fn new(response: reqwest::Response) -> Result<Self, AppError> {
+        let mut pending = VecDeque::new();
+        if let Some(model) = response_header(&response, "openai-model", 256)? {
+            pending.push_back(ResponseEvent::ServerModel(model));
         }
+        if let Some(turn_state) =
+            response_header(&response, "x-codex-turn-state", MAX_HEADER_VALUE_BYTES)?
+        {
+            pending.push_back(ResponseEvent::TurnState(turn_state));
+        }
+        let safety_faster_model =
+            response_header(&response, "x-codex-safety-buffering-faster-model", 256)?;
+        Ok(Self {
+            response,
+            parser: SseParser::new(safety_faster_model),
+            pending,
+            ended: false,
+        })
     }
 
     pub async fn next_event(
@@ -358,9 +441,17 @@ struct SseParser {
     line: Vec<u8>,
     data: Vec<String>,
     event_bytes: usize,
+    safety_faster_model: Option<String>,
 }
 
 impl SseParser {
+    fn new(safety_faster_model: Option<String>) -> Self {
+        Self {
+            safety_faster_model,
+            ..Self::default()
+        }
+    }
+
     fn push(&mut self, chunk: &[u8], output: &mut VecDeque<ResponseEvent>) -> Result<(), AppError> {
         for byte in chunk {
             if *byte == b'\n' {
@@ -428,10 +519,7 @@ impl SseParser {
         if data == "[DONE]" {
             return Ok(());
         }
-        if let Some(event) = decode_event(&data)? {
-            output.push_back(event);
-        }
-        Ok(())
+        decode_event(&data, self.safety_faster_model.as_deref(), output)
     }
 }
 
@@ -439,6 +527,12 @@ impl SseParser {
 struct StreamEventWire {
     #[serde(rename = "type")]
     kind: String,
+    #[serde(default)]
+    headers: Option<Value>,
+    #[serde(default)]
+    metadata: Option<Value>,
+    #[serde(default)]
+    safety_buffering: Option<Value>,
     #[serde(default)]
     item: Option<Value>,
     #[serde(default)]
@@ -458,9 +552,44 @@ struct StreamEventWire {
 #[derive(Debug, Deserialize)]
 struct ResponseStateWire {
     #[serde(default)]
+    headers: Option<Value>,
+    #[serde(default)]
     error: Option<ResponseErrorWire>,
     #[serde(default)]
     incomplete_details: Option<IncompleteDetailsWire>,
+    #[serde(default)]
+    usage: Option<ResponseUsageWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SafetyBufferingWire {
+    use_cases: Vec<String>,
+    reasons: Vec<String>,
+    #[serde(default, rename = "retry_model")]
+    faster_model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseUsageWire {
+    input_tokens: u64,
+    #[serde(default)]
+    input_tokens_details: InputTokenDetailsWire,
+    output_tokens: u64,
+    #[serde(default)]
+    output_tokens_details: OutputTokenDetailsWire,
+    total_tokens: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct InputTokenDetailsWire {
+    #[serde(default)]
+    cached_tokens: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OutputTokenDetailsWire {
+    #[serde(default)]
+    reasoning_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -477,28 +606,33 @@ struct IncompleteDetailsWire {
     reason: Option<String>,
 }
 
-fn decode_event(data: &str) -> Result<Option<ResponseEvent>, AppError> {
+fn decode_event(
+    data: &str,
+    safety_faster_model: Option<&str>,
+    output: &mut VecDeque<ResponseEvent>,
+) -> Result<(), AppError> {
     let event: StreamEventWire = serde_json::from_str(data)
         .map_err(|error| AppError::Provider(format!("invalid SSE event: {error}")))?;
-    match event.kind.as_str() {
-        "response.output_text.delta" => Ok(Some(ResponseEvent::OutputTextDelta {
+    emit_metadata_events(&event, safety_faster_model, output)?;
+    let decoded = match event.kind.as_str() {
+        "response.output_text.delta" => Some(ResponseEvent::OutputTextDelta {
             item_id: required_id(event.item_id, &event.kind)?,
             delta: required_delta(event.delta, &event.kind)?,
-        })),
-        "response.reasoning_summary_text.delta" => Ok(Some(ResponseEvent::ReasoningSummaryDelta {
+        }),
+        "response.reasoning_summary_text.delta" => Some(ResponseEvent::ReasoningSummaryDelta {
             item_id: required_id(event.item_id, &event.kind)?,
             summary_index: event.summary_index.ok_or_else(|| {
                 AppError::Provider(format!("{} is missing summary_index", event.kind))
             })?,
             delta: required_delta(event.delta, &event.kind)?,
-        })),
-        "response.reasoning_text.delta" => Ok(Some(ResponseEvent::ReasoningContentDelta {
+        }),
+        "response.reasoning_text.delta" => Some(ResponseEvent::ReasoningContentDelta {
             item_id: required_id(event.item_id, &event.kind)?,
             content_index: event.content_index.ok_or_else(|| {
                 AppError::Provider(format!("{} is missing content_index", event.kind))
             })?,
             delta: required_delta(event.delta, &event.kind)?,
-        })),
+        }),
         "response.output_item.done" => {
             let item = event.item.ok_or_else(|| {
                 AppError::Provider("response.output_item.done is missing item".into())
@@ -506,19 +640,21 @@ fn decode_event(data: &str) -> Result<Option<ResponseEvent>, AppError> {
             let item = serde_json::from_value(item).map_err(|error| {
                 AppError::Provider(format!("unsupported response output item: {error}"))
             })?;
-            Ok(Some(ResponseEvent::OutputItemDone(item)))
+            Some(ResponseEvent::OutputItemDone(item))
         }
-        "response.completed" => Ok(Some(ResponseEvent::Completed)),
-        "response.failed" | "error" => Err(stream_failure(event)),
+        "response.completed" => Some(ResponseEvent::Completed(decode_completed_usage(
+            event.response,
+        )?)),
+        "response.failed" | "error" => return Err(stream_failure(event)),
         "response.incomplete" => {
             let reason = event
                 .response
                 .and_then(|response| response.incomplete_details)
                 .and_then(|details| details.reason)
                 .unwrap_or_else(|| "unknown reason".into());
-            Err(AppError::Provider(format!(
+            return Err(AppError::Provider(format!(
                 "provider returned an incomplete response: {reason}"
-            )))
+            )));
         }
         "response.created"
         | "response.in_progress"
@@ -527,17 +663,240 @@ fn decode_event(data: &str) -> Result<Option<ResponseEvent>, AppError> {
         | "response.content_part.added"
         | "response.content_part.done"
         | "response.output_text.done"
+        | "response.reasoning_summary_part.done"
         | "response.reasoning_summary_part.added"
         | "response.reasoning_summary_text.done"
         | "response.reasoning_text.done"
         | "response.function_call_arguments.delta"
         | "response.function_call_arguments.done"
         | "response.custom_tool_call_input.delta"
-        | "response.custom_tool_call_input.done" => Ok(None),
-        unknown => Err(AppError::Provider(format!(
-            "provider returned unsupported SSE event `{unknown}`"
-        ))),
+        | "response.custom_tool_call_input.done" => None,
+        unknown => {
+            return Err(AppError::Provider(format!(
+                "provider returned unsupported SSE event `{unknown}`"
+            )));
+        }
+    };
+    if let Some(event) = decoded {
+        output.push_back(event);
     }
+    Ok(())
+}
+
+fn emit_metadata_events(
+    event: &StreamEventWire,
+    safety_faster_model: Option<&str>,
+    output: &mut VecDeque<ResponseEvent>,
+) -> Result<(), AppError> {
+    let response_model = event
+        .response
+        .as_ref()
+        .and_then(|response| response.headers.as_ref())
+        .and_then(|headers| json_header(headers, &["openai-model", "x-openai-model"]))
+        .or_else(|| {
+            event
+                .headers
+                .as_ref()
+                .and_then(|headers| json_header(headers, &["openai-model", "x-openai-model"]))
+        });
+    if let Some(model) = response_model {
+        output.push_back(ResponseEvent::ServerModel(validated_metadata_text(
+            model,
+            "server model",
+            256,
+        )?));
+    }
+
+    if event.kind == "response.metadata" {
+        if let Some(turn_state) = event
+            .headers
+            .as_ref()
+            .and_then(|headers| json_header(headers, &["x-codex-turn-state"]))
+        {
+            output.push_back(ResponseEvent::TurnState(validated_metadata_text(
+                turn_state,
+                "turn state",
+                MAX_HEADER_VALUE_BYTES,
+            )?));
+        }
+        if let Some(value) = event
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("openai_verification_recommendation"))
+        {
+            let verifications = decode_model_verifications(value)?;
+            if !verifications.is_empty() {
+                output.push_back(ResponseEvent::ModelVerifications(verifications));
+            }
+        }
+        if let Some(metadata) = event
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("openai_chatgpt_moderation_metadata"))
+        {
+            output.push_back(ResponseEvent::TurnModerationMetadata(metadata.clone()));
+        }
+    }
+
+    if let Some(buffering) =
+        decode_safety_buffering(event.safety_buffering.as_ref(), safety_faster_model)?
+    {
+        output.push_back(ResponseEvent::SafetyBuffering(buffering));
+    }
+    Ok(())
+}
+
+fn decode_model_verifications(value: &Value) -> Result<Vec<ModelVerification>, AppError> {
+    let Some(values) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    if values.len() > MAX_METADATA_LIST_ITEMS {
+        return Err(AppError::Provider(format!(
+            "model verification list exceeds {MAX_METADATA_LIST_ITEMS} entries"
+        )));
+    }
+    let mut decoded = Vec::new();
+    for value in values {
+        let Some(value) = value.as_str() else {
+            continue;
+        };
+        if value == "trusted_access_for_cyber"
+            && !decoded.contains(&ModelVerification::TrustedAccessForCyber)
+        {
+            decoded.push(ModelVerification::TrustedAccessForCyber);
+        }
+    }
+    Ok(decoded)
+}
+
+fn decode_safety_buffering(
+    value: Option<&Value>,
+    safety_faster_model: Option<&str>,
+) -> Result<Option<SafetyBuffering>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() || value == &Value::Bool(false) {
+        return Ok(None);
+    }
+    let retry_model_present = value
+        .as_object()
+        .is_some_and(|object| object.contains_key("retry_model"));
+    let wire: SafetyBufferingWire = serde_json::from_value(value.clone()).map_err(|error| {
+        AppError::Provider(format!("invalid safety buffering metadata: {error}"))
+    })?;
+    validate_metadata_list(&wire.use_cases, "safety buffering use cases")?;
+    validate_metadata_list(&wire.reasons, "safety buffering reasons")?;
+    let faster_model = if retry_model_present {
+        wire.faster_model
+    } else {
+        safety_faster_model.map(str::to_owned)
+    }
+    .map(|model| validated_metadata_text(&model, "safety fallback model", 256))
+    .transpose()?;
+    Ok(Some(SafetyBuffering {
+        use_cases: wire.use_cases,
+        reasons: wire.reasons,
+        faster_model,
+    }))
+}
+
+fn validate_metadata_list(values: &[String], field: &str) -> Result<(), AppError> {
+    if values.len() > MAX_METADATA_LIST_ITEMS {
+        return Err(AppError::Provider(format!(
+            "{field} exceed {MAX_METADATA_LIST_ITEMS} entries"
+        )));
+    }
+    for value in values {
+        validated_metadata_text(value, field, MAX_METADATA_STRING_BYTES)?;
+    }
+    Ok(())
+}
+
+fn validated_metadata_text(value: &str, field: &str, maximum: usize) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > maximum {
+        return Err(AppError::Provider(format!("{field} is invalid")));
+    }
+    Ok(value.to_owned())
+}
+
+fn json_header<'a>(headers: &'a Value, names: &[&str]) -> Option<&'a str> {
+    let headers = headers.as_object()?;
+    headers.iter().find_map(|(name, value)| {
+        names
+            .iter()
+            .any(|expected| name.eq_ignore_ascii_case(expected))
+            .then(|| match value {
+                Value::String(value) => Some(value.as_str()),
+                Value::Array(values) => values.first().and_then(Value::as_str),
+                _ => None,
+            })
+            .flatten()
+    })
+}
+
+fn response_header(
+    response: &reqwest::Response,
+    name: &str,
+    maximum: usize,
+) -> Result<Option<String>, AppError> {
+    response
+        .headers()
+        .get(name)
+        .map(|value| {
+            value
+                .to_str()
+                .map_err(|_| AppError::Provider(format!("response header `{name}` is not text")))
+                .and_then(|value| validated_metadata_text(value, name, maximum))
+        })
+        .transpose()
+}
+
+fn decode_completed_usage(
+    response: Option<ResponseStateWire>,
+) -> Result<Option<TokenUsage>, AppError> {
+    let Some(usage) = response.and_then(|response| response.usage) else {
+        return Ok(None);
+    };
+    let values = [
+        usage.input_tokens,
+        usage.input_tokens_details.cached_tokens,
+        usage.output_tokens,
+        usage.output_tokens_details.reasoning_tokens,
+        usage.total_tokens,
+    ];
+    if values.into_iter().any(|value| value > MAX_USAGE_TOKENS) {
+        return Err(AppError::Provider(format!(
+            "response usage exceeds {MAX_USAGE_TOKENS} tokens"
+        )));
+    }
+    if usage.input_tokens_details.cached_tokens > usage.input_tokens {
+        return Err(AppError::Provider(
+            "response cached tokens exceed input tokens".into(),
+        ));
+    }
+    if usage.output_tokens_details.reasoning_tokens > usage.output_tokens {
+        return Err(AppError::Provider(
+            "response reasoning tokens exceed output tokens".into(),
+        ));
+    }
+    let expected_total = usage
+        .input_tokens
+        .checked_add(usage.output_tokens)
+        .ok_or_else(|| AppError::Provider("response token total overflowed".into()))?;
+    if usage.total_tokens != expected_total {
+        return Err(AppError::Provider(
+            "response total tokens do not equal input plus output tokens".into(),
+        ));
+    }
+    Ok(Some(TokenUsage {
+        input_tokens: usage.input_tokens,
+        cached_input_tokens: usage.input_tokens_details.cached_tokens,
+        output_tokens: usage.output_tokens,
+        reasoning_output_tokens: usage.output_tokens_details.reasoning_tokens,
+        total_tokens: usage.total_tokens,
+    }))
 }
 
 fn required_id(value: Option<String>, event: &str) -> Result<String, AppError> {
@@ -584,8 +943,12 @@ fn stream_failure(event: StreamEventWire) -> AppError {
 mod tests {
     use std::collections::VecDeque;
 
+    use crate::engine::ModelVerification;
+
     use super::ResponseEvent;
+    use super::ResponseItem;
     use super::ResponseRequest;
+    use super::ResponseRequestSettings;
     use super::SseParser;
 
     #[test]
@@ -608,19 +971,162 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_validates_completed_response_usage() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+        parser
+            .push(
+                br#"data: {"type":"response.completed","response":{"usage":{"input_tokens":164000,"input_tokens_details":{"cached_tokens":120000},"output_tokens":10000,"output_tokens_details":{"reasoning_tokens":8000},"total_tokens":174000}}}
+
+"#,
+                &mut events,
+            )
+            .expect("completed usage should decode");
+        let Some(ResponseEvent::Completed(Some(usage))) = events.pop_front() else {
+            panic!("completed usage event should be emitted");
+        };
+
+        assert_eq!(usage.cached_input_tokens, 120_000);
+        assert_eq!(usage.total_tokens, 174_000);
+    }
+
+    #[test]
+    fn accepts_completed_response_without_usage() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+        parser
+            .push(
+                br#"data: {"type":"response.completed","response":{"id":"response-1"}}
+
+"#,
+                &mut events,
+            )
+            .expect("usage is optional on a completed response");
+
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::Completed(None))
+        ));
+    }
+
+    #[test]
+    fn emits_current_response_metadata_as_typed_events() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+        parser
+            .push(
+                br#"data: {"type":"response.metadata","headers":{"OpenAI-Model":"gpt-fallback","x-codex-turn-state":"route-1"},"metadata":{"openai_verification_recommendation":["trusted_access_for_cyber","trusted_access_for_cyber"],"openai_chatgpt_moderation_metadata":{"presentation":"inline"}}}
+
+"#,
+                &mut events,
+            )
+            .expect("response metadata should decode");
+
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::ServerModel(model)) if model == "gpt-fallback"
+        ));
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::TurnState(state)) if state == "route-1"
+        ));
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::ModelVerifications(verifications))
+                if verifications == [ModelVerification::TrustedAccessForCyber]
+        ));
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::TurnModerationMetadata(metadata))
+                if metadata["presentation"] == "inline"
+        ));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn emits_safety_buffering_before_the_underlying_response_event() {
+        let mut parser = SseParser::new(Some("gpt-fast-header".into()));
+        let mut events = VecDeque::new();
+        parser
+            .push(
+                br#"data: {"type":"response.output_text.delta","item_id":"message-1","delta":"hello","safety_buffering":{"use_cases":["cyber"],"reasons":["policy-check"]}}
+
+"#,
+                &mut events,
+            )
+            .expect("safety metadata should not drop the response delta");
+
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::SafetyBuffering(buffering))
+                if buffering.faster_model.as_deref() == Some("gpt-fast-header")
+                    && buffering.use_cases == ["cyber"]
+        ));
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::OutputTextDelta { delta, .. }) if delta == "hello"
+        ));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn rejects_incoherent_completed_response_usage() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+        let result = parser.push(
+            br#"data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":11},"output_tokens":2,"output_tokens_details":{"reasoning_tokens":1},"total_tokens":12}}}
+
+"#,
+            &mut events,
+        );
+
+        assert!(result.is_err());
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn omits_reasoning_when_the_model_has_no_selected_effort() {
         let request = ResponseRequest::new(
             "gpt-test".into(),
             "Be useful.".into(),
             Vec::new(),
             Vec::new(),
-            None,
-            None,
-            None,
+            ResponseRequestSettings::default(),
         );
         let encoded = serde_json::to_value(request).expect("request should serialize");
 
         assert!(encoded.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn compaction_uses_the_current_streaming_trigger() {
+        let request = ResponseRequest::new(
+            "gpt-test".into(),
+            "Be useful.".into(),
+            vec![ResponseItem::compaction_trigger()],
+            Vec::new(),
+            ResponseRequestSettings::default(),
+        );
+        let encoded = serde_json::to_value(request).expect("request should serialize");
+
+        assert_eq!(encoded["parallel_tool_calls"], false);
+        assert_eq!(encoded["input"][0]["type"], "compaction_trigger");
+        assert_eq!(encoded["stream"], true);
+        assert_eq!(encoded["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn decodes_the_remote_compaction_checkpoint() {
+        let item: ResponseItem = serde_json::from_str(
+            r#"{"type":"compaction","encrypted_content":"encrypted","internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}"#,
+        )
+        .expect("compaction output should decode");
+
+        assert!(item.is_compaction_checkpoint());
+        assert_eq!(
+            item.compaction_checkpoint(),
+            Some(("encrypted", Some("turn-1")))
+        );
     }
 
     #[test]
@@ -629,5 +1135,21 @@ mod tests {
         let mut events = VecDeque::new();
         let result = parser.push(b"data: {\"type\":\"response.future\"}\n\n", &mut events);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn accepts_reasoning_summary_part_completion_marker() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+        parser
+            .push(
+                br#"data: {"type":"response.reasoning_summary_part.done","item_id":"rs-1","summary_index":0}
+
+"#,
+                &mut events,
+            )
+            .expect("reasoning summary lifecycle marker should be accepted");
+
+        assert!(events.is_empty());
     }
 }

@@ -16,15 +16,22 @@ import type {
   CodexModel,
   PermissionProfile,
   ReasoningEffort,
-  RuntimeState,
 } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
 import { projectName } from "../state/projects";
+import { ContextWindowIndicator } from "./ContextWindowIndicator";
 import { Icon } from "./Icon";
 
 export interface ComposerProps {
   readonly controller: AppController;
+  readonly draftRequest: ComposerDraftRequest | null;
+  readonly onDraftConsumed: (requestId: number) => void;
   readonly onOpenSettings: () => void;
+}
+
+export interface ComposerDraftRequest {
+  readonly id: number;
+  readonly text: string;
 }
 
 type ModelMenuSection = "effort" | "model" | "serviceTier";
@@ -40,6 +47,7 @@ export function Composer(props: ComposerProps) {
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [modelMenuSection, setModelMenuSection] = createSignal<ModelMenuSection | null>(null);
   const [permissionMenuOpen, setPermissionMenuOpen] = createSignal(false);
+  const [addMenuOpen, setAddMenuOpen] = createSignal(false);
   let composerElement: HTMLFormElement | undefined;
   let textArea: HTMLTextAreaElement | undefined;
 
@@ -52,10 +60,7 @@ export function Composer(props: ComposerProps) {
   );
   const reasoningOptions = createMemo(() => selectedModel()?.supportedReasoningEfforts ?? []);
   const canSend = createMemo(
-    () =>
-      !props.controller.turnBusy() &&
-      !sending() &&
-      (text().trim().length > 0 || attachments().length > 0),
+    () => !sending() && (text().trim().length > 0 || attachments().length > 0),
   );
 
   createEffect(() => {
@@ -70,15 +75,41 @@ export function Composer(props: ComposerProps) {
     setServiceTier(configured.serviceTier ?? nextModel?.defaultServiceTier ?? null);
   });
 
+  createEffect(() => {
+    const request = props.draftRequest;
+    if (request === null) {
+      return;
+    }
+    setText(request.text);
+    queueMicrotask(() => {
+      resizeTextArea(textArea);
+      textArea?.focus();
+      textArea?.setSelectionRange(request.text.length, request.text.length);
+      props.onDraftConsumed(request.id);
+    });
+  });
+
   function closeComposerMenus(): void {
+    setAddMenuOpen(false);
     setModelMenuOpen(false);
     setModelMenuSection(null);
     setPermissionMenuOpen(false);
   }
 
   function handleDocumentPointerDown(event: PointerEvent): void {
-    if (event.target instanceof Node && !composerElement?.contains(event.target)) {
+    if (!(event.target instanceof Element) || !composerElement?.contains(event.target)) {
       closeComposerMenus();
+      return;
+    }
+    if (event.target.closest(".add-menu-anchor") === null) {
+      setAddMenuOpen(false);
+    }
+    if (event.target.closest(".permission-menu-anchor") === null) {
+      setPermissionMenuOpen(false);
+    }
+    if (event.target.closest(".model-menu-anchor") === null) {
+      setModelMenuOpen(false);
+      setModelMenuSection(null);
     }
   }
 
@@ -247,7 +278,6 @@ export function Composer(props: ComposerProps) {
       >
         <textarea
           aria-label="Mensagem para o Codex"
-          disabled={props.controller.turnBusy()}
           maxlength={1_048_576}
           onInput={(event) => {
             setText(event.currentTarget.value);
@@ -267,16 +297,71 @@ export function Composer(props: ComposerProps) {
         />
         <div class="composer-toolbar">
           <div class="composer-leading">
-            <button
-              aria-label="Anexar arquivos"
-              disabled={props.controller.turnBusy() || attachments().length >= 12}
-              onClick={() => void attachFiles()}
-              title="Anexar arquivos"
-              type="button"
-            >
-              <Icon name="plus" size={17} />
-            </button>
-            <div class="composer-menu-anchor">
+            <div class="composer-menu-anchor add-menu-anchor">
+              <button
+                aria-controls="composer-add-menu"
+                aria-expanded={addMenuOpen()}
+                aria-haspopup="menu"
+                aria-label="Adicionar arquivos ou projeto"
+                class="add-button"
+                classList={{ active: addMenuOpen() }}
+                disabled={props.controller.turnBusy()}
+                onClick={() => {
+                  setAddMenuOpen((value) => !value);
+                  setPermissionMenuOpen(false);
+                  setModelMenuOpen(false);
+                  setModelMenuSection(null);
+                }}
+                title="Adicionar"
+                type="button"
+              >
+                <Icon name="plus" size={17} />
+              </button>
+              <Show when={addMenuOpen()}>
+                <div
+                  aria-label="Adicionar"
+                  class="composer-popover add-menu"
+                  id="composer-add-menu"
+                  role="menu"
+                >
+                  <header>Adicionar</header>
+                  <button
+                    disabled={attachments().length >= 12}
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      void attachFiles();
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <Icon name="paperclip" size={16} />
+                    <span>
+                      <strong>Arquivos</strong>
+                      <small>Até 12 anexos por mensagem</small>
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      void props.controller.chooseWorkspace();
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <Icon name="folder" size={16} />
+                    <span>
+                      <strong>
+                        {props.controller.workspace() === null
+                          ? "Escolher projeto"
+                          : "Trocar projeto"}
+                      </strong>
+                      <small>Defina a pasta de trabalho desta tarefa</small>
+                    </span>
+                  </button>
+                </div>
+              </Show>
+            </div>
+            <div class="composer-menu-anchor permission-menu-anchor">
               <button
                 aria-expanded={permissionMenuOpen()}
                 aria-haspopup="menu"
@@ -290,6 +375,7 @@ export function Composer(props: ComposerProps) {
                 disabled={props.controller.turnBusy() || props.controller.config() === null}
                 onClick={() => {
                   setPermissionMenuOpen((value) => !value);
+                  setAddMenuOpen(false);
                   setModelMenuOpen(false);
                   setModelMenuSection(null);
                 }}
@@ -355,13 +441,7 @@ export function Composer(props: ComposerProps) {
             </div>
           </div>
           <div class="composer-trailing">
-            <span
-              aria-label={runtimeStatusLabel(props.controller.runtimeStatus().state)}
-              class={`composer-runtime-state state-${props.controller.runtimeStatus().state}`}
-              classList={{ busy: props.controller.turnBusy() }}
-              role="status"
-              title={runtimeStatusLabel(props.controller.runtimeStatus().state)}
-            />
+            <ContextWindowIndicator usage={props.controller.contextUsage()} />
             <div class="composer-menu-anchor model-menu-anchor">
               <button
                 aria-expanded={modelMenuOpen()}
@@ -371,6 +451,7 @@ export function Composer(props: ComposerProps) {
                 disabled={props.controller.turnBusy() || selectedModel() === undefined}
                 onClick={() => {
                   setModelMenuOpen((value) => !value);
+                  setAddMenuOpen(false);
                   setModelMenuSection(null);
                   setPermissionMenuOpen(false);
                 }}
@@ -384,7 +465,12 @@ export function Composer(props: ComposerProps) {
                 </span>
                 <Show when={effort()}>
                   {(selectedEffort) => (
-                    <span class="model-button-effort">{effortLabel(selectedEffort())}</span>
+                    <span
+                      class="model-button-effort"
+                      classList={{ ultra: selectedEffort() === "ultra" }}
+                    >
+                      {effortLabel(selectedEffort())}
+                    </span>
                   )}
                 </Show>
                 <Icon name="chevronDown" size={13} />
@@ -411,6 +497,7 @@ export function Composer(props: ComposerProps) {
                     label="Esforço"
                     onActivate={() => setModelMenuSection("effort")}
                     value={selectedEffortLabel(effort())}
+                    valueTone={effort() === "ultra" ? "ultra" : undefined}
                   />
                   <ModelMenuRow
                     active={modelMenuSection() === "serviceTier"}
@@ -457,7 +544,7 @@ export function Composer(props: ComposerProps) {
               </Show>
             </div>
             <Show
-              when={!props.controller.turnBusy()}
+              when={!props.controller.turnBusy() || canSend()}
               fallback={
                 <button
                   aria-label="Interromper turno"
@@ -501,6 +588,7 @@ function ModelMenuRow(props: {
   readonly label: string;
   readonly onActivate: () => void;
   readonly value: string;
+  readonly valueTone?: "ultra" | undefined;
 }) {
   return (
     <button
@@ -516,7 +604,7 @@ function ModelMenuRow(props: {
       type="button"
     >
       <span>{props.label}</span>
-      <small>{props.value}</small>
+      <small classList={{ "tone-ultra": props.valueTone === "ultra" }}>{props.value}</small>
       <Icon name="chevronRight" size={16} />
     </button>
   );
@@ -594,7 +682,9 @@ function ModelMenuOptions(props: {
                 role="menuitemradio"
                 type="button"
               >
-                <span>{effortLabel(option.reasoningEffort)}</span>
+                <span classList={{ "tone-ultra": option.reasoningEffort === "ultra" }}>
+                  {effortLabel(option.reasoningEffort)}
+                </span>
                 <Show when={option.reasoningEffort === props.effort}>
                   <Icon name="check" size={15} />
                 </Show>
@@ -605,13 +695,16 @@ function ModelMenuOptions(props: {
         <Show when={props.section === "serviceTier"}>
           <button
             aria-checked={props.serviceTier === null}
-            class="model-menu-option"
+            class="model-menu-option described"
             classList={{ selected: props.serviceTier === null }}
             onClick={() => props.onSelectServiceTier(null)}
             role="menuitemradio"
             type="button"
           >
-            <span>Padrão</span>
+            <span class="model-menu-option-copy">
+              <strong>Padrão</strong>
+              <small>Velocidade padrão</small>
+            </span>
             <Show when={props.serviceTier === null}>
               <Icon name="check" size={15} />
             </Show>
@@ -620,13 +713,16 @@ function ModelMenuOptions(props: {
             {(tier) => (
               <button
                 aria-checked={tier.id === props.serviceTier}
-                class="model-menu-option"
+                class="model-menu-option described"
                 classList={{ selected: tier.id === props.serviceTier }}
                 onClick={() => props.onSelectServiceTier(tier.id)}
                 role="menuitemradio"
                 type="button"
               >
-                <span>{tier.name}</span>
+                <span class="model-menu-option-copy">
+                  <strong>{tier.name}</strong>
+                  <small>{tier.description}</small>
+                </span>
                 <Show when={tier.id === props.serviceTier}>
                   <Icon name="check" size={15} />
                 </Show>
@@ -724,19 +820,6 @@ function effortLabel(effort: ReasoningEffort): string {
 
 function selectedEffortLabel(effort: ReasoningEffort | null): string {
   return effort === null ? "Padrão" : effortLabel(effort);
-}
-
-function runtimeStatusLabel(state: RuntimeState): string {
-  switch (state) {
-    case "starting":
-      return "Mecanismo iniciando";
-    case "ready":
-      return "Mecanismo pronto";
-    case "failed":
-      return "Falha no mecanismo";
-    case "stopped":
-      return "Mecanismo parado";
-  }
 }
 
 function permissionLabel(mode: string | undefined): string {

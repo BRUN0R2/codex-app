@@ -54,11 +54,14 @@ O frontend possui quatro camadas:
 3. `infrastructure/codexClient.ts` é a única camada que usa `invoke` e `listen`;
 4. `state` e `ui` consomem somente valores já decodificados.
 
-`createAppController` é o dono explícito do estado da sessão. Eventos são
-roteados por `threadId`; uma tarefa em segundo plano não altera a conversa
-visível. Configurações usam uma fila otimista e modelo, esforço e tier são
-gravados atomicamente. Login duplicado é coalescido e qualquer falha de contrato
-entra nos diagnósticos e no alerta visível.
+`createAppController` é o dono explícito do estado da sessão. Cada tarefa ativa
+possui um runtime isolado em `threadRuntime.ts`; eventos são roteados por
+`threadId`, e uma tarefa em segundo plano não altera a conversa visível. A
+timeline agrupa itens pelos turnos persistidos, preserva falhas e timestamps e
+mantém o scroll medido acima do compositor sobreposto. Configurações usam uma
+fila otimista e modelo, esforço e tier são gravados atomicamente. Login duplicado
+é coalescido e qualquer falha de contrato entra nos diagnósticos e no alerta
+visível.
 
 ## Dados e segredos
 
@@ -66,7 +69,8 @@ entra nos diagnósticos e no alerta visível.
 - sessão: `credentials/chatgpt-oauth.age` no mesmo domínio privado;
 - chave do envelope: serviço `codex-desktop-next`, conta
   `chatgpt-oauth-v1`, no Windows Credential Manager;
-- projetos fixados: schema local `codex-desktop.projects.v1` no WebView.
+- projetos conhecidos: schema local `codex-desktop.projects.v1` no WebView;
+- tarefas fixadas: schema local `codex-desktop.pins.v1` no WebView.
 
 Não há leitura de `CODEX_HOME`, `auth.json`, `global/CODEX_AUTH`, banco da CLI ou
 outro formato anterior. O aplicativo não possui caminho de migração.
@@ -82,3 +86,9 @@ workspace. Estados desconhecidos nunca viram fallback visual genérico.
 O SQLite limita cada payload e o total de itens/histórico materializado. O
 frontend limita diagnósticos, aprovações, projetos e anexos. Quando um limite é
 atingido, a operação falha com motivo explícito.
+
+O histórico do provider é normalizado antes da rede. Resultados abortados são
+inseridos para chamadas interrompidas e resultados sem chamada são removidos;
+a forma reparada substitui o histórico atomicamente e gera um diagnóstico
+visível. Assim, uma interrupção ou encerramento no meio de um lote de ferramentas
+não pode invalidar os turnos seguintes.

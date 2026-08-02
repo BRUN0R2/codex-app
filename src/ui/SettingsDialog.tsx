@@ -5,6 +5,8 @@ import {
   For,
   type JSX,
   Match,
+  onCleanup,
+  onMount,
   Show,
   Switch,
 } from "solid-js";
@@ -65,6 +67,9 @@ export function SettingsDialog(props: {
   const [page, setPage] = createSignal<SettingsPage>("general");
   const [query, setQuery] = createSignal("");
   const [developerInstructions, setDeveloperInstructions] = createSignal("");
+  let dialogElement: HTMLElement | undefined;
+  let searchInput: HTMLInputElement | undefined;
+  let previouslyFocusedElement: HTMLElement | null = null;
   const visibleNavigation = createMemo(() => {
     const normalizedQuery = normalizeSearch(query());
     if (normalizedQuery.length === 0) {
@@ -80,17 +85,49 @@ export function SettingsDialog(props: {
     setDeveloperInstructions(props.controller.config()?.config.developerInstructions ?? "");
   });
 
+  onMount(() => {
+    previouslyFocusedElement =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    queueMicrotask(() => searchInput?.focus());
+  });
+
+  onCleanup(() => previouslyFocusedElement?.focus());
+
+  function handleDialogKeyDown(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      props.onClose();
+      return;
+    }
+    if (event.key !== "Tab" || dialogElement === undefined) {
+      return;
+    }
+    const focusable = [...dialogElement.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
+      (element) => element.getClientRects().length > 0,
+    );
+    const first = focusable.at(0);
+    const last = focusable.at(-1);
+    if (first === undefined || last === undefined) {
+      event.preventDefault();
+      return;
+    }
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   return (
     <div class="settings-overlay">
       <section
         aria-label="Configurações"
         aria-modal="true"
         class="settings-dialog"
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            props.onClose();
-          }
-        }}
+        onKeyDown={handleDialogKeyDown}
+        ref={dialogElement}
         role="dialog"
       >
         <aside class="settings-nav">
@@ -104,6 +141,7 @@ export function SettingsDialog(props: {
               aria-label="Pesquisar configurações"
               onInput={(event) => setQuery(event.currentTarget.value)}
               placeholder="Pesquisar configurações..."
+              ref={searchInput}
               type="search"
               value={query()}
             />
@@ -162,6 +200,15 @@ export function SettingsDialog(props: {
     </div>
   );
 }
+
+const FOCUSABLE_SELECTOR = [
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[href]",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 
 function SettingsNavButton(props: {
   readonly icon: IconName;

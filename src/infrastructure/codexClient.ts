@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 
 import {
   decodeAccountRateLimitsResponse,
@@ -20,10 +20,13 @@ import {
   decodeOperationAck,
   decodeRuntimeDiagnostic,
   decodeRuntimeStatus,
+  decodeThreadCompactStartResponse,
+  decodeThreadForkResponse,
   decodeThreadListResponse,
   decodeThreadReadResponse,
   decodeThreadResumeResponse,
   decodeThreadStartResponse,
+  decodeThreadUnarchiveResponse,
   decodeTurnStartResponse,
   decodeWorkspaceRepository,
 } from "../contracts/decode";
@@ -46,10 +49,13 @@ import type {
   ReasoningEffort,
   RuntimeDiagnostic,
   RuntimeStatus,
+  ThreadCompactStartResponse,
+  ThreadForkResponse,
   ThreadListResponse,
   ThreadReadResponse,
   ThreadResumeResponse,
   ThreadStartResponse,
+  ThreadUnarchiveResponse,
   TurnStartResponse,
   WorkspaceRepository,
 } from "../contracts/types";
@@ -137,9 +143,9 @@ export function startThread(cwd: string): Promise<ThreadStartResponse> {
   });
 }
 
-export function listThreads(cursor: string | null): Promise<ThreadListResponse> {
+export function listThreads(cursor: string | null, archived = false): Promise<ThreadListResponse> {
   return invokeDecoded("engine_thread_list", decodeThreadListResponse, {
-    request: { cursor },
+    request: { cursor, archived },
   });
 }
 
@@ -163,6 +169,30 @@ export function setThreadName(threadId: string, name: string): Promise<Operation
 
 export function archiveThread(threadId: string): Promise<OperationAck> {
   return invokeDecoded("engine_thread_archive", decodeOperationAck, {
+    request: { threadId },
+  });
+}
+
+export function unarchiveThread(threadId: string): Promise<ThreadUnarchiveResponse> {
+  return invokeDecoded("engine_thread_unarchive", decodeThreadUnarchiveResponse, {
+    request: { threadId },
+  });
+}
+
+export function deleteThread(threadId: string): Promise<OperationAck> {
+  return invokeDecoded("engine_thread_delete", decodeOperationAck, {
+    request: { threadId },
+  });
+}
+
+export function forkThread(threadId: string): Promise<ThreadForkResponse> {
+  return invokeDecoded("engine_thread_fork", decodeThreadForkResponse, {
+    request: { threadId },
+  });
+}
+
+export function compactThread(threadId: string): Promise<ThreadCompactStartResponse> {
+  return invokeDecoded("engine_thread_compact_start", decodeThreadCompactStartResponse, {
     request: { threadId },
   });
 }
@@ -203,6 +233,18 @@ export function startTurn(request: StartTurnRequest): Promise<TurnStartResponse>
     payload.effort = request.effort;
   }
   return invokeDecoded("engine_turn_start", decodeTurnStartResponse, { request: payload });
+}
+
+export interface SteerTurnRequest {
+  readonly threadId: string;
+  readonly expectedTurnId: string;
+  readonly clientUserMessageId: string;
+  readonly text: string;
+  readonly attachments: readonly { readonly path: string }[];
+}
+
+export function steerTurn(request: SteerTurnRequest): Promise<OperationAck> {
+  return invokeDecoded("engine_turn_steer", decodeOperationAck, { request });
 }
 
 export function interruptTurn(threadId: string, turnId: string): Promise<OperationAck> {
@@ -255,6 +297,10 @@ export function respondToServerRequest(
 
 export function openExternalUrl(url: string): Promise<void> {
   return openUrl(url);
+}
+
+export function openWorkspacePath(path: string): Promise<void> {
+  return openPath(path);
 }
 
 export function describeError(reason: unknown): string {

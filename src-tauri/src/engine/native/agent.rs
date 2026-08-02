@@ -5,22 +5,24 @@ use base64::{Engine as _, prelude::BASE64_STANDARD};
 use serde_json::json;
 use tauri::AppHandle;
 use tokio::sync::watch;
+use uuid::Uuid;
 
 use super::NativeEngineInner;
 use super::provider::{
     ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseRequest,
-    SelectedModel,
+    ResponseRequestSettings, SelectedModel, normalize_provider_history,
 };
 use super::tools::{PreparedTool, ToolExecutionContext};
 use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
 use crate::engine::{
-    ActivityStatus, AppConfig, ImageDetail, IndexedTextDeltaNotification, ItemNotification,
-    MessagePhase, Personality, TextDeltaNotification, ThreadItem, TurnInput, WebSearchMode,
+    ActivityStatus, AppConfig, DiagnosticStream, ImageDetail, IndexedTextDeltaNotification,
+    ItemNotification, MessagePhase, ModelRerouteReason, ModelReroutedNotification,
+    ModelSafetyBufferingUpdatedNotification, ModelVerificationNotification, Personality,
+    TextDeltaNotification, ThreadItem, TokenUsage, TurnInput, TurnModerationMetadataNotification,
+    WebSearchMode,
 };
 use crate::error::AppError;
 
-const MAX_AGENT_ROUNDS: usize = 32;
-const MAX_TOOL_CALLS_PER_TURN: usize = 128;
 const MAX_USER_TEXT_BYTES: usize = 1_048_576;
 const MAX_ATTACHMENT_TEXT_BYTES: usize = 2 * 1_048_576;
 const MAX_IMAGE_BYTES: usize = 10 * 1_048_576;
@@ -28,6 +30,7 @@ const MAX_RAW_INPUT_BYTES: usize = 16 * 1_048_576;
 const MAX_INSTRUCTIONS_BYTES: usize = 524_288;
 const MAX_PROVIDER_ITEM_ID_BYTES: usize = 256;
 const MAX_PROVIDER_TEXT_BYTES: usize = 2 * 1_048_576;
+const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 
 pub(super) struct PreparedTurn {
     pub user_item: ThreadItem,
@@ -168,40 +171,64 @@ pub(super) async fn run_turn(
     mut run: TurnRun,
 ) -> Result<RunCompletion, AppError> {
     let instructions = compose_instructions(&run.model, &run.workspace, &run.config)?;
-    let mut tool_count = 0usize;
+    let mut provider_state = TurnProviderState::default();
+    let previous_usage = inner
+        .storage
+        .latest_context_usage(run.thread_id.clone())
+        .await?;
+    if context_limit_reached(
+        previous_usage.as_ref(),
+        run.model.auto_compact_token_limit(),
+    ) && !compact_context(&inner, &app, &mut run, &instructions, &mut provider_state).await?
+    {
+        return Ok(RunCompletion::Interrupted);
+    }
 
-    for _round in 0..MAX_AGENT_ROUNDS {
+    loop {
         if *run.cancellation.borrow() {
             return Ok(RunCompletion::Interrupted);
         }
-        let history = inner
-            .storage
-            .provider_history(run.thread_id.clone())
-            .await?;
-        let mut tools = inner.tools.definitions();
-        if run.config.web_search == WebSearchMode::Live {
-            tools.push(json!({
-                "type": "web_search",
-                "external_web_access": true
-            }));
-        }
+        let history = load_prompt_history(&inner, &app, &run.thread_id).await?;
+        let tools = provider_tools(&inner, &run.config);
         let request = ResponseRequest::new(
             run.model.id().into(),
             instructions.clone(),
             history,
             tools,
-            run.reasoning_effort,
-            run.service_tier.clone(),
-            run.config.model_verbosity,
+            ResponseRequestSettings {
+                parallel_tool_calls: run.model.supports_parallel_tool_calls(),
+                reasoning_effort: run.reasoning_effort,
+                service_tier: run.service_tier.clone(),
+                prompt_cache_key: Some(run.thread_id.clone()),
+                verbosity: run.config.model_verbosity,
+            },
         );
-        let mut stream = inner
+        let mut stream = match inner
             .provider
-            .start_response(&app, &inner.auth, request, &run.thread_id)
-            .await?;
+            .start_response(
+                &app,
+                &inner.auth,
+                request,
+                &run.thread_id,
+                provider_state.turn_state.as_deref(),
+                &mut run.cancellation,
+            )
+            .await
+        {
+            Ok(stream) => stream,
+            Err(AppError::Cancelled(_)) => return Ok(RunCompletion::Interrupted),
+            Err(error) => return Err(error),
+        };
         let mut pending_tools = Vec::new();
-        let mut completed = false;
+        let mut completed_usage = None;
+        let mut saw_completed = false;
 
         while let Some(event) = stream.next_event(&mut run.cancellation).await? {
+            let Some(event) =
+                handle_provider_control_event(&inner, &app, &run, &mut provider_state, event)?
+            else {
+                continue;
+            };
             match event {
                 ResponseEvent::OutputTextDelta { item_id, delta } => {
                     validate_delta(&item_id, &delta)?;
@@ -277,14 +304,6 @@ pub(super) async fn run_turn(
                             arguments,
                             call_id,
                         } => {
-                            tool_count = tool_count.checked_add(1).ok_or_else(|| {
-                                AppError::State("tool-call counter overflow".into())
-                            })?;
-                            if tool_count > MAX_TOOL_CALLS_PER_TURN {
-                                return Err(AppError::State(format!(
-                                    "turn exceeded {MAX_TOOL_CALLS_PER_TURN} tool calls"
-                                )));
-                            }
                             let item_id = id.unwrap_or_else(|| call_id.clone());
                             let prepared = inner.tools.prepare(item_id, &name, &arguments)?;
                             pending_tools.push(PendingTool { call_id, prepared });
@@ -297,19 +316,48 @@ pub(super) async fn run_turn(
                         _ => {}
                     }
                 }
-                ResponseEvent::Completed => {
-                    completed = true;
+                ResponseEvent::Completed(usage) => {
+                    if let Some(usage) = usage {
+                        persist_and_emit_item(
+                            &inner,
+                            &app,
+                            &run.thread_id,
+                            &run.turn_id,
+                            ThreadItem::ContextUsage {
+                                id: Uuid::now_v7().to_string(),
+                                model: run.model.id().into(),
+                                usage: usage.clone(),
+                                context_window: run.model.context_window(),
+                            },
+                            false,
+                        )
+                        .await?;
+                        completed_usage = Some(usage);
+                    }
+                    saw_completed = true;
                     break;
                 }
                 ResponseEvent::Interrupted => return Ok(RunCompletion::Interrupted),
+                ResponseEvent::ServerModel(_)
+                | ResponseEvent::TurnState(_)
+                | ResponseEvent::ModelVerifications(_)
+                | ResponseEvent::TurnModerationMetadata(_)
+                | ResponseEvent::SafetyBuffering(_) => {
+                    return Err(AppError::State(
+                        "provider control event escaped its handler".into(),
+                    ));
+                }
             }
         }
-        if !completed {
+        if !saw_completed {
             return Err(AppError::Provider(
                 "response stream ended before response.completed".into(),
             ));
         }
-        if pending_tools.is_empty() {
+        if !inner
+            .should_continue_turn(&run.thread_id, &run.turn_id, !pending_tools.is_empty())
+            .await?
+        {
             return Ok(RunCompletion::Completed);
         }
 
@@ -371,11 +419,336 @@ pub(super) async fn run_turn(
                 )
                 .await?;
         }
+        if context_limit_reached(
+            completed_usage.as_ref(),
+            run.model.auto_compact_token_limit(),
+        ) && !compact_context(&inner, &app, &mut run, &instructions, &mut provider_state).await?
+        {
+            return Ok(RunCompletion::Interrupted);
+        }
+    }
+}
+
+pub(super) async fn run_compaction(
+    inner: Arc<NativeEngineInner>,
+    app: AppHandle,
+    mut run: TurnRun,
+) -> Result<RunCompletion, AppError> {
+    let instructions = compose_instructions(&run.model, &run.workspace, &run.config)?;
+    let mut provider_state = TurnProviderState::default();
+    if compact_context(&inner, &app, &mut run, &instructions, &mut provider_state).await? {
+        Ok(RunCompletion::Completed)
+    } else {
+        Ok(RunCompletion::Interrupted)
+    }
+}
+
+fn provider_tools(inner: &NativeEngineInner, config: &AppConfig) -> Vec<serde_json::Value> {
+    let mut tools = inner.tools.definitions();
+    if config.web_search == WebSearchMode::Live {
+        tools.push(json!({
+            "type": "web_search",
+            "external_web_access": true
+        }));
+    }
+    tools
+}
+
+async fn load_prompt_history(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    thread_id: &str,
+) -> Result<Vec<ResponseItem>, AppError> {
+    let history = inner.storage.provider_history(thread_id.into()).await?;
+    let normalized = normalize_provider_history(history)?;
+    if !normalized.changed() {
+        return Ok(normalized.items);
     }
 
-    Err(AppError::State(format!(
-        "turn exceeded {MAX_AGENT_ROUNDS} model rounds"
-    )))
+    inner
+        .storage
+        .replace_provider_history(thread_id.into(), normalized.items.clone())
+        .await?;
+    inner.emit_diagnostic(
+        app,
+        DiagnosticStream::Runtime,
+        format!(
+            "Provider history normalized before the request: {} aborted output(s) inserted and {} orphan output(s) removed.",
+            normalized.inserted_aborted_outputs, normalized.removed_orphan_outputs
+        ),
+    );
+    Ok(normalized.items)
+}
+
+fn context_limit_reached(
+    usage: Option<&TokenUsage>,
+    auto_compact_token_limit: Option<u64>,
+) -> bool {
+    usage
+        .zip(auto_compact_token_limit)
+        .is_some_and(|(usage, limit)| usage.total_tokens >= limit)
+}
+
+async fn compact_context(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    run: &mut TurnRun,
+    instructions: &str,
+    provider_state: &mut TurnProviderState,
+) -> Result<bool, AppError> {
+    if *run.cancellation.borrow() {
+        return Ok(false);
+    }
+    let history = load_prompt_history(inner, app, &run.thread_id).await?;
+    let compaction_item = ThreadItem::ContextCompaction {
+        id: Uuid::now_v7().to_string(),
+    };
+    persist_and_emit_item(
+        inner,
+        app,
+        &run.thread_id,
+        &run.turn_id,
+        compaction_item.clone(),
+        true,
+    )
+    .await?;
+
+    let mut compaction_input = history.clone();
+    compaction_input.push(ResponseItem::compaction_trigger());
+    let request = ResponseRequest::new(
+        run.model.id().into(),
+        instructions.into(),
+        compaction_input,
+        provider_tools(inner, &run.config),
+        ResponseRequestSettings {
+            parallel_tool_calls: run.model.supports_parallel_tool_calls(),
+            reasoning_effort: run.reasoning_effort,
+            service_tier: run.service_tier.clone(),
+            prompt_cache_key: Some(run.thread_id.clone()),
+            verbosity: run.config.model_verbosity,
+        },
+    );
+    let mut stream = match inner
+        .provider
+        .start_response(
+            app,
+            &inner.auth,
+            request,
+            &run.thread_id,
+            provider_state.turn_state.as_deref(),
+            &mut run.cancellation,
+        )
+        .await
+    {
+        Ok(stream) => stream,
+        Err(AppError::Cancelled(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut output_item_count = 0usize;
+    let mut checkpoint = None;
+    let mut saw_completed = false;
+    while let Some(event) = stream.next_event(&mut run.cancellation).await? {
+        let Some(event) = handle_provider_control_event(inner, app, run, provider_state, event)?
+        else {
+            continue;
+        };
+        match event {
+            ResponseEvent::OutputItemDone(item) => {
+                output_item_count = output_item_count
+                    .checked_add(1)
+                    .ok_or_else(|| AppError::State("compaction output counter overflow".into()))?;
+                validate_response_item(&item)?;
+                if item.is_compaction_checkpoint() && checkpoint.replace(item).is_some() {
+                    return Err(AppError::Provider(
+                        "context compaction returned more than one checkpoint".into(),
+                    ));
+                }
+            }
+            ResponseEvent::Completed(_) => {
+                saw_completed = true;
+                break;
+            }
+            ResponseEvent::Interrupted => return Ok(false),
+            ResponseEvent::OutputTextDelta { .. }
+            | ResponseEvent::ReasoningSummaryDelta { .. }
+            | ResponseEvent::ReasoningContentDelta { .. } => {}
+            ResponseEvent::ServerModel(_)
+            | ResponseEvent::TurnState(_)
+            | ResponseEvent::ModelVerifications(_)
+            | ResponseEvent::TurnModerationMetadata(_)
+            | ResponseEvent::SafetyBuffering(_) => {
+                return Err(AppError::State(
+                    "provider control event escaped its handler".into(),
+                ));
+            }
+        }
+    }
+    if !saw_completed {
+        return Err(AppError::Provider(
+            "context compaction stream ended before response.completed".into(),
+        ));
+    }
+    let Some(checkpoint) = checkpoint else {
+        return Err(AppError::Provider(format!(
+            "context compaction returned no checkpoint in {output_item_count} output items"
+        )));
+    };
+    let compacted = build_compacted_history(history, checkpoint);
+    inner
+        .storage
+        .replace_provider_history(run.thread_id.clone(), compacted)
+        .await?;
+    persist_and_emit_item(
+        inner,
+        app,
+        &run.thread_id,
+        &run.turn_id,
+        compaction_item,
+        false,
+    )
+    .await?;
+    Ok(true)
+}
+
+#[derive(Default)]
+struct TurnProviderState {
+    turn_state: Option<String>,
+    rerouted_models: Vec<String>,
+    verification_emitted: bool,
+}
+
+fn handle_provider_control_event(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    run: &TurnRun,
+    state: &mut TurnProviderState,
+    event: ResponseEvent,
+) -> Result<Option<ResponseEvent>, AppError> {
+    match event {
+        ResponseEvent::TurnState(turn_state) => {
+            record_turn_state(&mut state.turn_state, turn_state)?;
+            Ok(None)
+        }
+        ResponseEvent::ServerModel(server_model) => {
+            if !server_model.eq_ignore_ascii_case(run.model.id())
+                && !state
+                    .rerouted_models
+                    .iter()
+                    .any(|model| model.eq_ignore_ascii_case(&server_model))
+            {
+                state.rerouted_models.push(server_model.clone());
+                inner.emit_notification(
+                    app,
+                    crate::engine::EngineNotification::ModelRerouted(ModelReroutedNotification {
+                        thread_id: run.thread_id.clone(),
+                        turn_id: run.turn_id.clone(),
+                        from_model: run.model.id().into(),
+                        to_model: server_model,
+                        reason: ModelRerouteReason::HighRiskCyberActivity,
+                    }),
+                )?;
+            }
+            Ok(None)
+        }
+        ResponseEvent::ModelVerifications(verifications) => {
+            if !state.verification_emitted {
+                state.verification_emitted = true;
+                inner.emit_notification(
+                    app,
+                    crate::engine::EngineNotification::ModelVerification(
+                        ModelVerificationNotification {
+                            thread_id: run.thread_id.clone(),
+                            turn_id: run.turn_id.clone(),
+                            verifications,
+                        },
+                    ),
+                )?;
+            }
+            Ok(None)
+        }
+        ResponseEvent::TurnModerationMetadata(metadata) => {
+            inner.emit_notification(
+                app,
+                crate::engine::EngineNotification::TurnModerationMetadata(
+                    TurnModerationMetadataNotification {
+                        thread_id: run.thread_id.clone(),
+                        turn_id: run.turn_id.clone(),
+                        metadata,
+                    },
+                ),
+            )?;
+            Ok(None)
+        }
+        ResponseEvent::SafetyBuffering(buffering) => {
+            inner.emit_notification(
+                app,
+                crate::engine::EngineNotification::ModelSafetyBufferingUpdated(
+                    ModelSafetyBufferingUpdatedNotification {
+                        thread_id: run.thread_id.clone(),
+                        turn_id: run.turn_id.clone(),
+                        model: run.model.id().into(),
+                        use_cases: buffering.use_cases,
+                        reasons: buffering.reasons,
+                        show_buffering_ui: true,
+                        faster_model: buffering.faster_model,
+                    },
+                ),
+            )?;
+            Ok(None)
+        }
+        event => Ok(Some(event)),
+    }
+}
+
+fn record_turn_state(current: &mut Option<String>, incoming: String) -> Result<(), AppError> {
+    match current.as_deref() {
+        None => *current = Some(incoming),
+        Some(value) if value == incoming => {}
+        Some(_) => {
+            return Err(AppError::Provider(
+                "provider changed x-codex-turn-state within one turn".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn build_compacted_history(
+    history: Vec<ResponseItem>,
+    checkpoint: ResponseItem,
+) -> Vec<ResponseItem> {
+    let mut remaining_tokens = RETAINED_MESSAGE_TOKEN_BUDGET;
+    let mut retained = Vec::new();
+    for item in history.into_iter().rev() {
+        if !matches!(&item, ResponseItem::Message { role, .. } if role == "user") {
+            continue;
+        }
+        let estimated_tokens = estimate_message_tokens(&item).max(1);
+        if estimated_tokens > remaining_tokens {
+            continue;
+        }
+        remaining_tokens -= estimated_tokens;
+        retained.push(item);
+    }
+    retained.reverse();
+    retained.push(checkpoint);
+    retained
+}
+
+fn estimate_message_tokens(item: &ResponseItem) -> usize {
+    let ResponseItem::Message { content, .. } = item else {
+        return 0;
+    };
+    content
+        .iter()
+        .map(|part| match part {
+            ResponseContent::InputText { text } | ResponseContent::OutputText { text } => {
+                text.len().div_ceil(4)
+            }
+            ResponseContent::Refusal { refusal } => refusal.len().div_ceil(4),
+            ResponseContent::InputImage { .. } => 1_024,
+        })
+        .sum()
 }
 
 struct PendingTool {
@@ -452,7 +825,9 @@ fn visible_item(item: &ResponseItem) -> Result<Option<ThreadItem>, AppError> {
         ResponseItem::FunctionCall { .. }
         | ResponseItem::FunctionCallOutput { .. }
         | ResponseItem::CustomToolCall { .. }
-        | ResponseItem::CustomToolCallOutput { .. } => Ok(None),
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger { .. } => Ok(None),
     }
 }
 
@@ -519,6 +894,22 @@ fn validate_response_item(item: &ResponseItem) -> Result<(), AppError> {
                 return Err(AppError::Provider("custom tool name is invalid".into()));
             }
         }
+        ResponseItem::Compaction { .. } => {
+            let (encrypted_content, turn_id) = item.compaction_checkpoint().ok_or_else(|| {
+                AppError::Provider("compaction checkpoint could not be decoded".into())
+            })?;
+            if encrypted_content.is_empty() {
+                return Err(AppError::Provider("compaction checkpoint is empty".into()));
+            }
+            if let Some(turn_id) = turn_id {
+                validate_provider_id(turn_id)?;
+            }
+        }
+        ResponseItem::CompactionTrigger { .. } => {
+            return Err(AppError::Provider(
+                "provider returned a compaction trigger as output".into(),
+            ));
+        }
         _ => {}
     }
     Ok(())
@@ -568,11 +959,36 @@ fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::add_input_bytes;
+    use super::{add_input_bytes, context_limit_reached, record_turn_state};
+    use crate::engine::TokenUsage;
 
     #[test]
     fn combined_input_is_bounded() {
         let mut total = super::MAX_RAW_INPUT_BYTES;
         assert!(add_input_bytes(&mut total, 1).is_err());
+    }
+
+    #[test]
+    fn compaction_is_driven_by_the_models_auto_compact_limit() {
+        let usage = |tokens_in_context_window| TokenUsage {
+            input_tokens: tokens_in_context_window,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: tokens_in_context_window,
+        };
+
+        assert!(!context_limit_reached(Some(&usage(244_799)), Some(244_800)));
+        assert!(context_limit_reached(Some(&usage(244_800)), Some(244_800)));
+        assert!(!context_limit_reached(Some(&usage(400_000)), None));
+    }
+
+    #[test]
+    fn turn_routing_state_is_sticky_within_one_turn() {
+        let mut state = None;
+        record_turn_state(&mut state, "route-1".into()).expect("first route should be recorded");
+        record_turn_state(&mut state, "route-1".into()).expect("same route should be idempotent");
+        assert!(record_turn_state(&mut state, "route-2".into()).is_err());
+        assert_eq!(state.as_deref(), Some("route-1"));
     }
 }

@@ -10,14 +10,18 @@ export type IconName =
   | "chevronRight"
   | "close"
   | "computer"
+  | "copy"
   | "edit"
   | "file"
   | "folder"
+  | "folderOpen"
   | "gitBranch"
+  | "layers"
   | "logout"
   | "more"
   | "paperclip"
   | "panel"
+  | "pin"
   | "plus"
   | "reset"
   | "search"
@@ -88,6 +92,13 @@ function IconPath(props: { readonly name: IconName }): JSX.Element {
           <path d="M8 21h8M12 17v4" />
         </>
       );
+    case "copy":
+      return (
+        <>
+          <rect height="13" rx="2" width="13" x="8" y="8" />
+          <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" />
+        </>
+      );
     case "edit":
       return (
         <>
@@ -104,6 +115,13 @@ function IconPath(props: { readonly name: IconName }): JSX.Element {
       );
     case "folder":
       return <path d="M3 6h7l2 2h9v11H3z" />;
+    case "folderOpen":
+      return (
+        <>
+          <path d="M3 7V5h7l2 2h8a1 1 0 0 1 1 1v2" />
+          <path d="M3 10h19l-3 9H4z" />
+        </>
+      );
     case "gitBranch":
       return (
         <>
@@ -111,6 +129,13 @@ function IconPath(props: { readonly name: IconName }): JSX.Element {
           <circle cx="18" cy="7" r="2" />
           <circle cx="6" cy="19" r="2" />
           <path d="M6 7v10M8 11h4a6 6 0 0 0 6-6" />
+        </>
+      );
+    case "layers":
+      return (
+        <>
+          <path d="m12 3 9 5-9 5-9-5 9-5Z" />
+          <path d="m3 12 9 5 9-5M3 16l9 5 9-5" />
         </>
       );
     case "logout":
@@ -135,6 +160,13 @@ function IconPath(props: { readonly name: IconName }): JSX.Element {
         <>
           <rect height="18" rx="2" width="20" x="2" y="3" />
           <path d="M15 3v18" />
+        </>
+      );
+    case "pin":
+      return (
+        <>
+          <path d="M6 3h12l-2 8 3 3v2H5v-2l3-3-2-8Z" />
+          <path d="M12 16v6" />
         </>
       );
     case "plus":

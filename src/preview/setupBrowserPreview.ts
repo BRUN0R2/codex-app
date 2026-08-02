@@ -5,12 +5,14 @@ import type {
   AccountRateLimitsResponse,
   AccountReadResponse,
   CodexModel,
+  CodexThread,
   ConfigReadResponse,
   EngineStartResponse,
   ModelListResponse,
   PermissionProfile,
   ProjectRecord,
   ThreadListResponse,
+  VisibleThreadItem,
   WorkspaceRepository,
 } from "../contracts/types";
 import { saveProjects } from "../state/projects";
@@ -73,7 +75,7 @@ const PREVIEW_CONFIG = {
     personality: "pragmatic",
     developerInstructions: null,
     desktop: {
-      uiFontSize: 15,
+      uiFontSize: 14,
       motion: "full",
       pointerCursor: true,
       diffDisplay: "unified",
@@ -100,8 +102,87 @@ const PREVIEW_MODEL_CATALOG = {
   data: PREVIEW_MODELS,
 } satisfies ModelListResponse;
 
+const PREVIEW_SCROLL_ITEMS: readonly VisibleThreadItem[] = [
+  {
+    type: "userMessage",
+    id: "preview-user-message",
+    content: [{ type: "text", text: "Inspecione o projeto e valide o fluxo completo." }],
+  },
+  {
+    type: "agentMessage",
+    id: "preview-commentary",
+    text: "Vou percorrer a arquitetura e validar as fronteiras do aplicativo.",
+    phase: "commentary",
+  },
+  ...Array.from({ length: 18 }, (_, index): VisibleThreadItem => {
+    const step = index + 1;
+    return index % 2 === 0
+      ? {
+          type: "reasoning",
+          id: `preview-reasoning-${step}`,
+          summary: [`Analisando etapa ${step} do fluxo nativo`],
+          content: [],
+        }
+      : {
+          type: "toolExecution",
+          id: `preview-tool-${step}`,
+          name: "read_file",
+          description: `Leitura de contrato ${step}`,
+          status: "completed",
+          output: null,
+        };
+  }),
+  {
+    type: "agentMessage",
+    id: "preview-final-answer",
+    text: "A inspeção terminou e o **último item** permanece totalmente visível acima do `compositor`.",
+    phase: "finalAnswer",
+  },
+];
+
+const PREVIEW_CONTEXT_THREAD = {
+  id: "preview-context-thread",
+  preview: "Inspecionar janela de contexto",
+  name: "Inspecionar janela de contexto",
+  cwd: "D:\\ARQUIVOS IMPORTANTES\\REPOSITORIOS\\apps\\streamplay-app",
+  createdAt: 1_785_552_000,
+  updatedAt: 1_785_552_060,
+  recencyAt: 1_785_552_060,
+  status: { type: "idle" },
+  turns: [
+    {
+      id: "preview-turn",
+      status: "completed",
+      error: null,
+      createdAt: 1_785_552_000,
+      updatedAt: 1_785_552_060,
+      items: [
+        ...PREVIEW_SCROLL_ITEMS,
+        {
+          type: "contextUsage",
+          id: "context-preview-turn-0",
+          model: "gpt-5.6-sol",
+          usage: {
+            inputTokens: 164_000,
+            cachedInputTokens: 120_000,
+            outputTokens: 10_000,
+            reasoningOutputTokens: 8_000,
+            totalTokens: 174_000,
+          },
+          contextWindow: {
+            tokens: 272_000,
+            usableTokens: 258_400,
+            usablePercent: 95,
+            maximumTokens: 400_000,
+          },
+        },
+      ],
+    },
+  ],
+} as const satisfies CodexThread;
+
 const PREVIEW_THREADS = {
-  data: [],
+  data: [PREVIEW_CONTEXT_THREAD],
   nextCursor: null,
 } as const satisfies ThreadListResponse;
 
@@ -123,6 +204,10 @@ const PREVIEW_RATE_LIMITS = {
 const PREVIEW_REPOSITORY = {
   type: "gitBranch",
   branch: "main",
+  changes: [
+    { status: " M", path: "src/ui/Timeline.tsx" },
+    { status: "??", path: "src/ui/MessageNavigator.tsx" },
+  ],
 } as const satisfies WorkspaceRepository;
 
 export function setupBrowserPreview(): void {
@@ -145,6 +230,8 @@ export function setupBrowserPreview(): void {
           return PREVIEW_MODEL_CATALOG;
         case "engine_thread_list":
           return PREVIEW_THREADS;
+        case "engine_thread_resume":
+          return { thread: PREVIEW_CONTEXT_THREAD, cwd: PREVIEW_CONTEXT_THREAD.cwd };
         case "engine_account_rate_limits_read":
           return PREVIEW_RATE_LIMITS;
         case "workspace_repository_read":
@@ -182,6 +269,12 @@ function createPreviewModel(id: string, displayName: string, isDefault: boolean)
       },
     ],
     defaultServiceTier: null,
+    contextWindow: {
+      tokens: 272_000,
+      usableTokens: 258_400,
+      usablePercent: 95,
+      maximumTokens: 400_000,
+    },
     isDefault,
   };
 }

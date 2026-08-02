@@ -19,9 +19,22 @@ export interface RuntimeDiagnostic {
   readonly message: string;
 }
 
+export interface WorkspaceChange {
+  readonly status: string;
+  readonly path: string;
+}
+
 export type WorkspaceRepository =
-  | { readonly type: "gitBranch"; readonly branch: string }
-  | { readonly type: "gitDetached"; readonly revision: string }
+  | {
+      readonly type: "gitBranch";
+      readonly branch: string;
+      readonly changes: readonly WorkspaceChange[];
+    }
+  | {
+      readonly type: "gitDetached";
+      readonly revision: string;
+      readonly changes: readonly WorkspaceChange[];
+    }
   | { readonly type: "none" };
 
 export interface EngineDescriptor {
@@ -105,6 +118,13 @@ export interface ModelServiceTier {
   readonly description: string;
 }
 
+export interface ModelContextWindow {
+  readonly tokens: number;
+  readonly usableTokens: number;
+  readonly usablePercent: number;
+  readonly maximumTokens: number | null;
+}
+
 export interface CodexModel {
   readonly id: string;
   readonly model: string;
@@ -115,6 +135,7 @@ export interface CodexModel {
   readonly defaultReasoningEffort: ReasoningEffort | null;
   readonly serviceTiers: readonly ModelServiceTier[];
   readonly defaultServiceTier: string | null;
+  readonly contextWindow: ModelContextWindow | null;
   readonly isDefault: boolean;
 }
 
@@ -143,7 +164,28 @@ export interface FileChange {
   readonly diff: string;
 }
 
+export interface TokenUsage {
+  readonly inputTokens: number;
+  readonly cachedInputTokens: number;
+  readonly outputTokens: number;
+  readonly reasoningOutputTokens: number;
+  readonly totalTokens: number;
+}
+
+export interface ContextUsageItem {
+  readonly type: "contextUsage";
+  readonly id: string;
+  readonly model: string;
+  readonly usage: TokenUsage;
+  readonly contextWindow: ModelContextWindow | null;
+}
+
 export type ThreadItem =
+  | ContextUsageItem
+  | {
+      readonly type: "contextCompaction";
+      readonly id: string;
+    }
   | {
       readonly type: "agentMessage";
       readonly id: string;
@@ -188,10 +230,15 @@ export type ThreadItem =
       readonly content: readonly UserContent[];
     };
 
+export type VisibleThreadItem = Exclude<ThreadItem, ContextUsageItem>;
+
 export interface ThreadTurn {
   readonly id: string;
   readonly items: readonly ThreadItem[];
   readonly status: TurnStatus;
+  readonly error: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
 }
 
 export type ThreadStatus =
@@ -213,6 +260,16 @@ export interface CodexThread {
 export interface ThreadStartResponse {
   readonly thread: CodexThread;
 }
+
+export interface ThreadForkResponse {
+  readonly thread: CodexThread;
+}
+
+export interface ThreadUnarchiveResponse {
+  readonly thread: CodexThread;
+}
+
+export type ThreadCompactStartResponse = Record<string, never>;
 
 export interface ThreadListResponse {
   readonly data: readonly CodexThread[];
@@ -385,6 +442,16 @@ export interface ThreadArchivedNotification {
   readonly params: { readonly threadId: string };
 }
 
+export interface ThreadUnarchivedNotification {
+  readonly method: "thread.unarchived";
+  readonly params: { readonly threadId: string };
+}
+
+export interface ThreadDeletedNotification {
+  readonly method: "thread.deleted";
+  readonly params: { readonly threadId: string };
+}
+
 export interface TurnNotification {
   readonly method: "turn.started";
   readonly params: { readonly threadId: string; readonly turn: TurnSummary };
@@ -429,14 +496,65 @@ export interface IndexedTextDeltaNotification {
   };
 }
 
+export type ModelRerouteReason = "highRiskCyberActivity";
+export type ModelVerification = "trustedAccessForCyber";
+
+export interface ModelReroutedNotification {
+  readonly method: "model.rerouted";
+  readonly params: {
+    readonly threadId: string;
+    readonly turnId: string;
+    readonly fromModel: string;
+    readonly toModel: string;
+    readonly reason: ModelRerouteReason;
+  };
+}
+
+export interface ModelVerificationNotification {
+  readonly method: "model.verification";
+  readonly params: {
+    readonly threadId: string;
+    readonly turnId: string;
+    readonly verifications: readonly ModelVerification[];
+  };
+}
+
+export interface TurnModerationMetadataNotification {
+  readonly method: "turn.moderationMetadata";
+  readonly params: {
+    readonly threadId: string;
+    readonly turnId: string;
+    readonly metadata: unknown;
+  };
+}
+
+export interface ModelSafetyBufferingUpdatedNotification {
+  readonly method: "model.safetyBufferingUpdated";
+  readonly params: {
+    readonly threadId: string;
+    readonly turnId: string;
+    readonly model: string;
+    readonly useCases: readonly string[];
+    readonly reasons: readonly string[];
+    readonly showBufferingUi: boolean;
+    readonly fasterModel: string | null;
+  };
+}
+
 export type EngineNotification =
   | AuthLoginCompletedNotification
   | AuthSessionChangedNotification
   | IndexedTextDeltaNotification
   | ItemNotification
+  | ModelReroutedNotification
+  | ModelSafetyBufferingUpdatedNotification
+  | ModelVerificationNotification
   | TextDeltaNotification
   | ThreadArchivedNotification
+  | ThreadDeletedNotification
   | ThreadNotification
+  | ThreadUnarchivedNotification
+  | TurnModerationMetadataNotification
   | TurnCompletedNotification
   | TurnNotification;
 

@@ -28,6 +28,7 @@ import type {
   LoginResponse,
   LogoutResponse,
   MessagePhase,
+  ModelContextWindow,
   ModelListResponse,
   ModelServiceTier,
   ModelVerbosity,
@@ -45,6 +46,8 @@ import type {
   RuntimeStatus,
   SandboxMode,
   SpendControlLimitSnapshot,
+  ThreadCompactStartResponse,
+  ThreadForkResponse,
   ThreadItem,
   ThreadListResponse,
   ThreadReadResponse,
@@ -52,6 +55,8 @@ import type {
   ThreadStartResponse,
   ThreadStatus,
   ThreadTurn,
+  ThreadUnarchiveResponse,
+  TokenUsage,
   TurnStartResponse,
   TurnStatus,
   UserContent,
@@ -117,6 +122,8 @@ const RATE_LIMIT_REACHED_TYPES = [
   "workspace_owner_credits_depleted",
   "workspace_owner_usage_limit_reached",
 ] as const;
+const MODEL_REROUTE_REASONS = ["highRiskCyberActivity"] as const;
+const MODEL_VERIFICATIONS = ["trustedAccessForCyber"] as const;
 
 export class ContractError extends Error {
   public readonly path: string;
@@ -188,12 +195,20 @@ export function decodeWorkspaceRepository(value: unknown): WorkspaceRepository {
   const type = text(field(object, "type"), "$.type", 32);
   switch (type) {
     case "gitBranch": {
-      const repository = exactRecord(object, "$", ["branch", "type"]);
-      return { type, branch: identifier(repository.branch, "$.branch") };
+      const repository = exactRecord(object, "$", ["branch", "changes", "type"]);
+      return {
+        type,
+        branch: identifier(repository.branch, "$.branch"),
+        changes: decodeWorkspaceChanges(repository.changes, "$.changes"),
+      };
     }
     case "gitDetached": {
-      const repository = exactRecord(object, "$", ["revision", "type"]);
-      return { type, revision: identifier(repository.revision, "$.revision") };
+      const repository = exactRecord(object, "$", ["changes", "revision", "type"]);
+      return {
+        type,
+        revision: identifier(repository.revision, "$.revision"),
+        changes: decodeWorkspaceChanges(repository.changes, "$.changes"),
+      };
     }
     case "none":
       exactRecord(object, "$", ["type"]);
@@ -201,6 +216,21 @@ export function decodeWorkspaceRepository(value: unknown): WorkspaceRepository {
     default:
       throw new ContractError("$.type", `unsupported workspace repository ${JSON.stringify(type)}`);
   }
+}
+
+function decodeWorkspaceChanges(value: unknown, path: string) {
+  return array(
+    value,
+    path,
+    (entry, entryPath) => {
+      const change = exactRecord(entry, entryPath, ["path", "status"]);
+      return {
+        status: text(change.status, `${entryPath}.status`, 2),
+        path: text(change.path, `${entryPath}.path`, 4_096),
+      };
+    },
+    512,
+  );
 }
 
 export function decodeAccountReadResponse(value: unknown): AccountReadResponse {
@@ -269,6 +299,21 @@ export function decodeModelListResponse(value: unknown): ModelListResponse {
 export function decodeThreadStartResponse(value: unknown): ThreadStartResponse {
   const object = exactRecord(value, "$", ["thread"]);
   return { thread: decodeThread(object.thread, "$.thread") };
+}
+
+export function decodeThreadForkResponse(value: unknown): ThreadForkResponse {
+  const object = exactRecord(value, "$", ["thread"]);
+  return { thread: decodeThread(object.thread, "$.thread") };
+}
+
+export function decodeThreadUnarchiveResponse(value: unknown): ThreadUnarchiveResponse {
+  const object = exactRecord(value, "$", ["thread"]);
+  return { thread: decodeThread(object.thread, "$.thread") };
+}
+
+export function decodeThreadCompactStartResponse(value: unknown): ThreadCompactStartResponse {
+  exactRecord(value, "$", []);
+  return {};
 }
 
 export function decodeThreadListResponse(value: unknown): ThreadListResponse {
@@ -368,7 +413,9 @@ export function decodeEngineNotification(value: unknown): EngineNotification {
       const params = exactRecord(root.params, "$.params", ["thread"]);
       return { method, params: { thread: decodeThread(params.thread, "$.params.thread") } };
     }
-    case "thread.archived": {
+    case "thread.archived":
+    case "thread.deleted":
+    case "thread.unarchived": {
       exactKeys(root, "$", ["method", "params"]);
       const params = exactRecord(root.params, "$.params", ["threadId"]);
       return { method, params: { threadId: identifier(params.threadId, "$.params.threadId") } };
@@ -394,6 +441,88 @@ export function decodeEngineNotification(value: unknown): EngineNotification {
           turn: decodeTurnSummary(params.turn, "$.params.turn"),
           error:
             params.error === null ? null : decodeOperationFailure(params.error, "$.params.error"),
+        },
+      };
+    }
+    case "model.rerouted": {
+      const params = exactRecord(root.params, "$.params", [
+        "fromModel",
+        "reason",
+        "threadId",
+        "toModel",
+        "turnId",
+      ]);
+      return {
+        method,
+        params: {
+          threadId: identifier(params.threadId, "$.params.threadId"),
+          turnId: identifier(params.turnId, "$.params.turnId"),
+          fromModel: identifier(params.fromModel, "$.params.fromModel"),
+          toModel: identifier(params.toModel, "$.params.toModel"),
+          reason: literal(params.reason, "$.params.reason", MODEL_REROUTE_REASONS),
+        },
+      };
+    }
+    case "model.verification": {
+      const params = exactRecord(root.params, "$.params", ["threadId", "turnId", "verifications"]);
+      return {
+        method,
+        params: {
+          threadId: identifier(params.threadId, "$.params.threadId"),
+          turnId: identifier(params.turnId, "$.params.turnId"),
+          verifications: array(
+            params.verifications,
+            "$.params.verifications",
+            (value, path) => literal(value, path, MODEL_VERIFICATIONS),
+            64,
+          ),
+        },
+      };
+    }
+    case "turn.moderationMetadata": {
+      const params = exactRecord(root.params, "$.params", ["metadata", "threadId", "turnId"]);
+      return {
+        method,
+        params: {
+          threadId: identifier(params.threadId, "$.params.threadId"),
+          turnId: identifier(params.turnId, "$.params.turnId"),
+          metadata: boundedJsonValue(params.metadata, "$.params.metadata"),
+        },
+      };
+    }
+    case "model.safetyBufferingUpdated": {
+      const params = exactRecord(root.params, "$.params", [
+        "fasterModel",
+        "model",
+        "reasons",
+        "showBufferingUi",
+        "threadId",
+        "turnId",
+        "useCases",
+      ]);
+      return {
+        method,
+        params: {
+          threadId: identifier(params.threadId, "$.params.threadId"),
+          turnId: identifier(params.turnId, "$.params.turnId"),
+          model: identifier(params.model, "$.params.model"),
+          useCases: array(
+            params.useCases,
+            "$.params.useCases",
+            (value, path) => text(value, path, 1_024),
+            64,
+          ),
+          reasons: array(
+            params.reasons,
+            "$.params.reasons",
+            (value, path) => text(value, path, 1_024),
+            64,
+          ),
+          showBufferingUi: booleanValue(params.showBufferingUi, "$.params.showBufferingUi"),
+          fasterModel:
+            params.fasterModel === null
+              ? null
+              : identifier(params.fasterModel, "$.params.fasterModel"),
         },
       };
     }
@@ -532,6 +661,7 @@ function decodeModel(value: unknown, path: string): CodexModel {
     "id",
     "isDefault",
     "model",
+    "contextWindow",
     "serviceTiers",
     "supportedReasoningEfforts",
   ]);
@@ -593,8 +723,33 @@ function decodeModel(value: unknown, path: string): CodexModel {
     defaultReasoningEffort,
     serviceTiers,
     defaultServiceTier,
+    contextWindow:
+      object.contextWindow === null
+        ? null
+        : decodeModelContextWindow(object.contextWindow, `${path}.contextWindow`),
     isDefault: booleanValue(object.isDefault, `${path}.isDefault`),
   };
+}
+
+function decodeModelContextWindow(value: unknown, path: string): ModelContextWindow {
+  const object = exactRecord(value, path, [
+    "maximumTokens",
+    "tokens",
+    "usablePercent",
+    "usableTokens",
+  ]);
+  const tokens = integer(object.tokens, `${path}.tokens`, 1, 1_000_000_000);
+  const usablePercent = integer(object.usablePercent, `${path}.usablePercent`, 1, 100);
+  const usableTokens = integer(object.usableTokens, `${path}.usableTokens`, 1, tokens);
+  const expectedUsableTokens = Math.floor((tokens * usablePercent) / 100);
+  if (usableTokens !== expectedUsableTokens) {
+    throw new ContractError(`${path}.usableTokens`, "does not match tokens and usablePercent");
+  }
+  const maximumTokens =
+    object.maximumTokens === null
+      ? null
+      : integer(object.maximumTokens, `${path}.maximumTokens`, tokens, 1_000_000_000);
+  return { tokens, usableTokens, usablePercent, maximumTokens };
 }
 
 function decodeReasoningOption(value: unknown, path: string): ReasoningEffortOption {
@@ -626,17 +781,26 @@ function decodeThread(value: unknown, path: string): CodexThread {
     "turns",
     "updatedAt",
   ]);
+  const createdAt = integer(object.createdAt, `${path}.createdAt`, 0, Number.MAX_SAFE_INTEGER);
+  const updatedAt = integer(object.updatedAt, `${path}.updatedAt`, 0, Number.MAX_SAFE_INTEGER);
+  if (updatedAt < createdAt) {
+    throw new ContractError(path, "thread updatedAt must not precede createdAt");
+  }
+  const recencyAt =
+    object.recencyAt === null
+      ? null
+      : integer(object.recencyAt, `${path}.recencyAt`, 0, Number.MAX_SAFE_INTEGER);
+  if (recencyAt !== null && recencyAt < createdAt) {
+    throw new ContractError(path, "thread recencyAt must not precede createdAt");
+  }
   return {
     id: identifier(object.id, `${path}.id`),
     preview: text(object.preview, `${path}.preview`, 512, true),
     name: nullableText(object.name, `${path}.name`),
     cwd: text(object.cwd, `${path}.cwd`, 4_096),
-    createdAt: integer(object.createdAt, `${path}.createdAt`, 0, Number.MAX_SAFE_INTEGER),
-    updatedAt: integer(object.updatedAt, `${path}.updatedAt`, 0, Number.MAX_SAFE_INTEGER),
-    recencyAt:
-      object.recencyAt === null
-        ? null
-        : integer(object.recencyAt, `${path}.recencyAt`, 0, Number.MAX_SAFE_INTEGER),
+    createdAt,
+    updatedAt,
+    recencyAt,
     status: decodeThreadStatus(object.status, `${path}.status`),
     turns: array(object.turns, `${path}.turns`, decodeThreadTurn),
   };
@@ -666,11 +830,34 @@ function decodeThreadStatus(value: unknown, path: string): ThreadStatus {
 }
 
 function decodeThreadTurn(value: unknown, path: string): ThreadTurn {
-  const object = exactRecord(value, path, ["id", "items", "status"]);
+  const object = exactRecord(value, path, [
+    "createdAt",
+    "error",
+    "id",
+    "items",
+    "status",
+    "updatedAt",
+  ]);
+  const status = literal(object.status, `${path}.status`, TURN_STATUSES);
+  const error = nullableText(object.error, `${path}.error`);
+  if ((status === "failed") !== (error !== null)) {
+    throw new ContractError(
+      path,
+      "failed turns require an error and all other turn states must not contain one",
+    );
+  }
+  const createdAt = integer(object.createdAt, `${path}.createdAt`, 0, Number.MAX_SAFE_INTEGER);
+  const updatedAt = integer(object.updatedAt, `${path}.updatedAt`, 0, Number.MAX_SAFE_INTEGER);
+  if (updatedAt < createdAt) {
+    throw new ContractError(path, "turn updatedAt must not precede createdAt");
+  }
   return {
     id: identifier(object.id, `${path}.id`),
     items: array(object.items, `${path}.items`, decodeThreadItem),
-    status: literal(object.status, `${path}.status`, TURN_STATUSES),
+    status,
+    error,
+    createdAt,
+    updatedAt,
   };
 }
 
@@ -678,6 +865,26 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
   const object = record(value, path);
   const type = text(field(object, "type"), `${path}.type`, 64);
   switch (type) {
+    case "contextUsage": {
+      const item = exactRecord(object, path, ["contextWindow", "id", "model", "type", "usage"]);
+      return {
+        type,
+        id: identifier(item.id, `${path}.id`),
+        model: identifier(item.model, `${path}.model`),
+        usage: decodeTokenUsage(item.usage, `${path}.usage`),
+        contextWindow:
+          item.contextWindow === null
+            ? null
+            : decodeModelContextWindow(item.contextWindow, `${path}.contextWindow`),
+      };
+    }
+    case "contextCompaction": {
+      const item = exactRecord(object, path, ["id", "type"]);
+      return {
+        type,
+        id: identifier(item.id, `${path}.id`),
+      };
+    }
     case "userMessage": {
       const item = exactRecord(object, path, ["content", "id", "type"]);
       return {
@@ -770,6 +977,41 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
     default:
       throw new ContractError(`${path}.type`, `unsupported item ${JSON.stringify(type)}`);
   }
+}
+
+function decodeTokenUsage(value: unknown, path: string): TokenUsage {
+  const object = exactRecord(value, path, [
+    "cachedInputTokens",
+    "inputTokens",
+    "outputTokens",
+    "reasoningOutputTokens",
+    "totalTokens",
+  ]);
+  const inputTokens = integer(object.inputTokens, `${path}.inputTokens`, 0, 1_000_000_000);
+  const cachedInputTokens = integer(
+    object.cachedInputTokens,
+    `${path}.cachedInputTokens`,
+    0,
+    inputTokens,
+  );
+  const outputTokens = integer(object.outputTokens, `${path}.outputTokens`, 0, 1_000_000_000);
+  const reasoningOutputTokens = integer(
+    object.reasoningOutputTokens,
+    `${path}.reasoningOutputTokens`,
+    0,
+    outputTokens,
+  );
+  const totalTokens = integer(object.totalTokens, `${path}.totalTokens`, 0, 1_000_000_000);
+  if (totalTokens !== inputTokens + outputTokens) {
+    throw new ContractError(`${path}.totalTokens`, "must equal inputTokens plus outputTokens");
+  }
+  return {
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    totalTokens,
+  };
 }
 
 function decodeUserContent(value: unknown, path: string): UserContent {
@@ -1006,6 +1248,43 @@ function exactRecord<const Keys extends readonly string[]>(
   const object = record(value, path);
   exactKeys(object, path, keys);
   return object as Record<Keys[number], unknown>;
+}
+
+function boundedJsonValue(value: unknown, path: string, depth = 0): unknown {
+  if (depth > 32) {
+    throw new ContractError(path, "JSON nesting exceeds 32 levels");
+  }
+  if (value === null || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return text(value, path, 1_048_576, true);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new ContractError(path, "expected a finite JSON number");
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return array(
+      value,
+      path,
+      (entry, entryPath) => boundedJsonValue(entry, entryPath, depth + 1),
+      MAX_COLLECTION_LENGTH,
+    );
+  }
+  const object = record(value, path);
+  const entries = Object.entries(object);
+  if (entries.length > MAX_COLLECTION_LENGTH) {
+    throw new ContractError(path, `object exceeds ${MAX_COLLECTION_LENGTH} entries`);
+  }
+  return Object.fromEntries(
+    entries.map(([key, entry]) => [
+      text(key, `${path} key`, 1_024),
+      boundedJsonValue(entry, `${path}.${key}`, depth + 1),
+    ]),
+  );
 }
 
 function field(object: UnknownRecord, key: string): unknown {

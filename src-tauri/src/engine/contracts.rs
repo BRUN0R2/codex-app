@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +60,10 @@ pub enum EngineNotification {
     ThreadUpdated(ThreadNotification),
     #[serde(rename = "thread.archived")]
     ThreadArchived(ThreadArchivedNotification),
+    #[serde(rename = "thread.unarchived")]
+    ThreadUnarchived(ThreadUnarchivedNotification),
+    #[serde(rename = "thread.deleted")]
+    ThreadDeleted(ThreadDeletedNotification),
     #[serde(rename = "turn.started")]
     TurnStarted(TurnNotification),
     #[serde(rename = "turn.completed")]
@@ -73,6 +78,14 @@ pub enum EngineNotification {
     ReasoningSummaryDelta(IndexedTextDeltaNotification),
     #[serde(rename = "item.reasoningTextDelta")]
     ReasoningTextDelta(IndexedTextDeltaNotification),
+    #[serde(rename = "model.rerouted")]
+    ModelRerouted(ModelReroutedNotification),
+    #[serde(rename = "model.verification")]
+    ModelVerification(ModelVerificationNotification),
+    #[serde(rename = "turn.moderationMetadata")]
+    TurnModerationMetadata(TurnModerationMetadataNotification),
+    #[serde(rename = "model.safetyBufferingUpdated")]
+    ModelSafetyBufferingUpdated(ModelSafetyBufferingUpdatedNotification),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +110,18 @@ pub struct ThreadNotification {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadArchivedNotification {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadUnarchivedNotification {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadDeletedNotification {
     pub thread_id: String,
 }
 
@@ -147,6 +172,56 @@ pub struct IndexedTextDeltaNotification {
     pub item_id: String,
     pub index: usize,
     pub delta: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelReroutedNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub from_model: String,
+    pub to_model: String,
+    pub reason: ModelRerouteReason,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelRerouteReason {
+    HighRiskCyberActivity,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelVerificationNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub verifications: Vec<ModelVerification>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelVerification {
+    TrustedAccessForCyber,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnModerationMetadataNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSafetyBufferingUpdatedNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub model: String,
+    pub use_cases: Vec<String>,
+    pub reasons: Vec<String>,
+    pub show_buffering_ui: bool,
+    pub faster_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -328,6 +403,15 @@ pub struct ModelServiceTier {
     pub description: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelContextWindow {
+    pub tokens: u64,
+    pub usable_tokens: u64,
+    pub usable_percent: u8,
+    pub maximum_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexModel {
@@ -340,6 +424,7 @@ pub struct CodexModel {
     pub default_reasoning_effort: Option<ReasoningEffort>,
     pub service_tiers: Vec<ModelServiceTier>,
     pub default_service_tier: Option<String>,
+    pub context_window: Option<ModelContextWindow>,
     pub is_default: bool,
 }
 
@@ -412,6 +497,16 @@ pub struct FileChange {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum FileChangeKind {
     Add,
@@ -422,6 +517,16 @@ pub enum FileChangeKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum ThreadItem {
+    #[serde(rename = "contextUsage")]
+    ContextUsage {
+        id: String,
+        model: String,
+        usage: TokenUsage,
+        #[serde(rename = "contextWindow")]
+        context_window: Option<ModelContextWindow>,
+    },
+    #[serde(rename = "contextCompaction")]
+    ContextCompaction { id: String },
     #[serde(rename = "userMessage")]
     UserMessage {
         id: String,
@@ -483,6 +588,9 @@ pub struct ThreadTurn {
     pub id: String,
     pub items: Vec<ThreadItem>,
     pub status: TurnStatus,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -523,6 +631,19 @@ pub struct CodexThread {
 pub struct ThreadStartResponse {
     pub thread: CodexThread,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadForkResponse {
+    pub thread: CodexThread,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadUnarchiveResponse {
+    pub thread: CodexThread,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadCompactStartResponse {}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -626,7 +747,7 @@ pub struct DesktopPreferences {
 impl Default for DesktopPreferences {
     fn default() -> Self {
         Self {
-            ui_font_size: 15,
+            ui_font_size: 14,
             motion: MotionPreference::Full,
             pointer_cursor: true,
             diff_display: DiffDisplay::Unified,

@@ -52,6 +52,8 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Verify transitive dependency exception
+        run: pnpm verify:transitive
       - name: Check formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
       - name: Check native code

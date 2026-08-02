@@ -5,14 +5,10 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "dialog:allow-message",
     "dialog:allow-open",
-    {
-      "identifier": "opener:allow-open-url",
-      "allow": [
-        {
-          "url": "https://auth.openai.com/oauth/authorize*"
-        }
-      ]
-    }
+    "opener:allow-open-path",
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
   ]
 }

@@ -35,7 +35,7 @@ export function addProject(
   const normalized = validatePath(path);
   const existing = projects.find((project) => pathsEqual(project.path, normalized));
   if (existing !== undefined) {
-    return [existing, ...projects.filter((project) => project !== existing)];
+    return projects;
   }
   if (projects.length >= MAX_PROJECTS) {
     throw new Error(`O aplicativo aceita no máximo ${MAX_PROJECTS} projetos fixados.`);

@@ -1,13 +1,37 @@
-import type { CodexThread, ThreadItem } from "../contracts/types";
+import type { CodexThread, ContextUsageItem, VisibleThreadItem } from "../contracts/types";
 
-export function flattenThreadItems(thread: CodexThread): readonly ThreadItem[] {
-  return thread.turns.flatMap((turn) => turn.items);
+export interface ConversationState {
+  readonly items: readonly VisibleThreadItem[];
+  readonly contextUsage: ContextUsageItem | null;
+}
+
+export function readLatestTurnFailure(thread: CodexThread): string | null {
+  const turn = thread.turns.at(-1);
+  return turn?.status === "failed" ? turn.error : null;
+}
+
+export function readConversationState(thread: CodexThread): ConversationState {
+  const items: VisibleThreadItem[] = [];
+  let contextUsage: ContextUsageItem | null = null;
+  for (const turn of thread.turns) {
+    for (const item of turn.items) {
+      if (item.type === "contextUsage") {
+        contextUsage = item;
+      } else if (item.type === "contextCompaction") {
+        contextUsage = null;
+        items.push(item);
+      } else {
+        items.push(item);
+      }
+    }
+  }
+  return { items, contextUsage };
 }
 
 export function upsertItem(
-  items: readonly ThreadItem[],
-  incoming: ThreadItem,
-): readonly ThreadItem[] {
+  items: readonly VisibleThreadItem[],
+  incoming: VisibleThreadItem,
+): readonly VisibleThreadItem[] {
   const index = items.findIndex((item) => item.id === incoming.id);
   if (index === -1) {
     return [...items, incoming];
@@ -25,10 +49,10 @@ export function upsertItem(
 }
 
 export function appendAgentText(
-  items: readonly ThreadItem[],
+  items: readonly VisibleThreadItem[],
   itemId: string,
   delta: string,
-): readonly ThreadItem[] {
+): readonly VisibleThreadItem[] {
   const current = items.find((item) => item.id === itemId);
   if (current === undefined) {
     return [...items, { type: "agentMessage", id: itemId, text: delta, phase: null }];
@@ -40,12 +64,12 @@ export function appendAgentText(
 }
 
 export function appendReasoningText(
-  items: readonly ThreadItem[],
+  items: readonly VisibleThreadItem[],
   itemId: string,
   index: number,
   delta: string,
   target: "content" | "summary",
-): readonly ThreadItem[] {
+): readonly VisibleThreadItem[] {
   const current = items.find((item) => item.id === itemId);
   const reasoning =
     current === undefined

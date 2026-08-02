@@ -14,6 +14,9 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderValue;
 use reqwest::header::USER_AGENT;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
+use tokio::sync::watch;
+use uuid::Uuid;
 
 use super::models::ModelCatalog;
 use super::responses::ResponseRequest;
@@ -27,6 +30,7 @@ pub const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_BYTES: usize = 65_536;
+const MAX_PUBLIC_ERROR_CHARACTERS: usize = 2_000;
 const MAX_REQUEST_ATTEMPTS: usize = 3;
 const ORIGINATOR: &str = "codex_desktop_next";
 
@@ -108,45 +112,68 @@ impl ProviderClient {
         session: &AuthSession,
         request: ResponseRequest,
         thread_id: &str,
+        turn_state: Option<&str>,
+        cancellation: &mut watch::Receiver<bool>,
     ) -> Result<ResponseStream, AppError> {
         let url = format!("{CODEX_BASE_URL}/responses");
-        let response = tokio::time::timeout(
-            REQUEST_TIMEOUT,
-            self.authorized(Method::POST, &url, session)?
+        let request_id = Uuid::now_v7().to_string();
+        for attempt in 0..MAX_REQUEST_ATTEMPTS {
+            if *cancellation.borrow() {
+                return Err(AppError::Cancelled(
+                    "response connection was cancelled".into(),
+                ));
+            }
+            let mut request_builder = self
+                .authorized(Method::POST, &url, session)?
                 .header(ACCEPT, "text/event-stream")
                 .header(CONTENT_TYPE, "application/json")
                 .header("session-id", thread_id)
                 .header("thread-id", thread_id)
-                .header("x-client-request-id", thread_id)
-                .json(&request)
-                .send(),
-        )
-        .await
-        .map_err(|_| AppError::Timeout {
-            operation: "response connection",
-        })?
-        .map_err(|error| AppError::Provider(error.to_string()))?;
-        if !response.status().is_success() {
-            return Err(response_error(response).await);
+                .header("x-client-request-id", &request_id);
+            if let Some(turn_state) = turn_state {
+                request_builder = request_builder.header("x-codex-turn-state", turn_state);
+            }
+            let send = tokio::time::timeout(REQUEST_TIMEOUT, request_builder.json(&request).send());
+            let response = tokio::select! {
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() {
+                        return Err(AppError::Cancelled("response connection was cancelled".into()));
+                    }
+                    continue;
+                }
+                result = send => match result {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(error)) if (error.is_connect() || error.is_timeout())
+                        && attempt + 1 < MAX_REQUEST_ATTEMPTS =>
+                    {
+                        if retry_delay_or_cancel(attempt, cancellation).await {
+                            return Err(AppError::Cancelled("response retry was cancelled".into()));
+                        }
+                        continue;
+                    }
+                    Ok(Err(error)) => return Err(AppError::Provider(error.to_string())),
+                    Err(_) if attempt + 1 < MAX_REQUEST_ATTEMPTS => {
+                        if retry_delay_or_cancel(attempt, cancellation).await {
+                            return Err(AppError::Cancelled("response retry was cancelled".into()));
+                        }
+                        continue;
+                    }
+                    Err(_) => return Err(AppError::Timeout {
+                        operation: "response connection",
+                    }),
+                }
+            };
+            if response.status().is_server_error() && attempt + 1 < MAX_REQUEST_ATTEMPTS {
+                if retry_delay_or_cancel(attempt, cancellation).await {
+                    return Err(AppError::Cancelled("response retry was cancelled".into()));
+                }
+                continue;
+            }
+            return open_response_stream(response).await;
         }
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .ok_or_else(|| {
-                AppError::Provider("responses endpoint omitted the content-type header".into())
-            })?
-            .to_str()
-            .map_err(|error| {
-                AppError::Provider(format!(
-                    "responses endpoint returned an invalid content-type header: {error}"
-                ))
-            })?;
-        if !content_type.starts_with("text/event-stream") {
-            return Err(AppError::Provider(format!(
-                "responses endpoint returned unexpected content type `{content_type}`"
-            )));
-        }
-        Ok(ResponseStream::new(response))
+        Err(AppError::Provider(
+            "response connection exhausted its retry budget".into(),
+        ))
     }
 
     fn authorized(
@@ -167,6 +194,22 @@ impl ProviderClient {
             .request(method, url)
             .header(AUTHORIZATION, bearer)
             .header("ChatGPT-Account-ID", account))
+    }
+}
+
+async fn open_response_stream(response: Response) -> Result<ResponseStream, AppError> {
+    if !response.status().is_success() {
+        return Err(response_error(response).await);
+    }
+    // Successful ChatGPT streams may omit Content-Type. The SSE parser is the
+    // authoritative protocol boundary and rejects malformed or unbounded input.
+    ResponseStream::new(response)
+}
+
+async fn retry_delay_or_cancel(attempt: usize, cancellation: &mut watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        _ = retry_delay(attempt) => false,
+        changed = cancellation.changed() => changed.is_err() || *cancellation.borrow(),
     }
 }
 
@@ -209,20 +252,85 @@ async fn response_error(response: Response) -> AppError {
     let status = response.status().as_u16();
     let message = match read_limited(response, MAX_ERROR_BYTES).await {
         Ok(bytes) if bytes.is_empty() => "the provider returned an empty error body".into(),
-        Ok(bytes) => String::from_utf8(bytes)
-            .map(|message| {
-                if message.trim().is_empty() {
-                    "the provider returned a blank error body".into()
-                } else {
-                    message
-                }
-            })
-            .unwrap_or_else(|error| {
-                format!("the provider returned a non-UTF-8 error body: {error}")
-            }),
+        Ok(bytes) => format_provider_error_body(bytes),
         Err(error) => format!("the provider error body could not be read: {error}"),
     };
     AppError::ProviderHttp { status, message }
+}
+
+fn format_provider_error_body(bytes: Vec<u8>) -> String {
+    let body = match String::from_utf8(bytes) {
+        Ok(body) if !body.trim().is_empty() => body,
+        Ok(_) => return "the provider returned a blank error body".into(),
+        Err(error) => return format!("the provider returned a non-UTF-8 error body: {error}"),
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&body) else {
+        return bounded_error_text(&body);
+    };
+    let error = value.get("error").unwrap_or(&value);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(bounded_error_text)
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "the provider rejected the request".into());
+    let kind = error
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("code").and_then(Value::as_str));
+    let reset = error
+        .get("resets_in_seconds")
+        .and_then(Value::as_u64)
+        .filter(|seconds| *seconds > 0)
+        .map(format_reset_duration);
+
+    let mut formatted = message;
+    if let Some(reset) = reset {
+        formatted.push_str("; reset in approximately ");
+        formatted.push_str(&reset);
+    }
+    if let Some(kind) = kind {
+        formatted.push_str(" (provider type: ");
+        formatted.push_str(&bounded_error_text(kind));
+        formatted.push(')');
+    }
+    bounded_error_text(&formatted)
+}
+
+fn bounded_error_text(value: &str) -> String {
+    let mut output = String::new();
+    let mut previous_was_space = false;
+    for character in value.trim().chars().take(MAX_PUBLIC_ERROR_CHARACTERS) {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if character.is_whitespace() {
+            if previous_was_space {
+                continue;
+            }
+            output.push(' ');
+            previous_was_space = true;
+        } else {
+            output.push(character);
+            previous_was_space = false;
+        }
+    }
+    output
+}
+
+fn format_reset_duration(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{}m", minutes.max(1))
+    }
 }
 
 async fn read_limited(response: Response, maximum_bytes: usize) -> Result<Vec<u8>, AppError> {
@@ -314,10 +422,74 @@ fn allowed_cloudflare_cookie(name: &str) -> bool {
 mod tests {
     use reqwest::cookie::CookieStore as _;
     use reqwest::header::HeaderValue;
+    use tokio::io::AsyncReadExt as _;
+    use tokio::io::AsyncWriteExt as _;
+    use tokio::net::TcpListener;
+    use tokio::sync::watch;
 
     use super::CloudflareCookieStore;
     use super::MODEL_CATALOG_COMPATIBILITY_VERSION;
+    use super::format_provider_error_body;
     use super::model_catalog_url;
+    use super::open_response_stream;
+    use crate::engine::native::provider::responses::ResponseEvent;
+
+    #[tokio::test]
+    async fn accepts_a_headerless_successful_sse_stream() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("loopback listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback listener should expose its address");
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.expect("request should connect");
+            let mut request = [0_u8; 2_048];
+            let _ = connection
+                .read(&mut request)
+                .await
+                .expect("request should be readable");
+            let body = b"data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-1\",\"delta\":\"OK.\"}\n\n";
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            connection
+                .write_all(headers.as_bytes())
+                .await
+                .expect("response headers should be writable");
+            connection
+                .write_all(body)
+                .await
+                .expect("response body should be writable");
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .expect("loopback response should arrive");
+        assert!(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .is_none()
+        );
+        let mut stream = open_response_stream(response)
+            .await
+            .expect("a successful SSE body does not require Content-Type");
+        let (_cancellation_sender, mut cancellation) = watch::channel(false);
+        let event = stream
+            .next_event(&mut cancellation)
+            .await
+            .expect("SSE event should parse");
+
+        assert!(matches!(
+            event,
+            Some(ResponseEvent::OutputTextDelta { delta, .. }) if delta == "OK."
+        ));
+        server.await.expect("loopback server should finish");
+    }
 
     #[test]
     fn model_catalog_url_uses_the_explicit_compatibility_version() {
@@ -346,6 +518,27 @@ mod tests {
                 .cookies(&url)
                 .and_then(|value| value.to_str().ok().map(str::to_string)),
             Some("__cf_bm=value".into())
+        );
+    }
+
+    #[test]
+    fn provider_errors_are_bounded_and_human_readable() {
+        let usage = format_provider_error_body(
+            br#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":511936}}"#
+                .to_vec(),
+        );
+        assert_eq!(
+            usage,
+            "The usage limit has been reached; reset in approximately 5d 22h (provider type: usage_limit_reached)"
+        );
+
+        let invalid = format_provider_error_body(
+            br#"{"error":{"message":"No tool output found","type":"invalid_request_error"}}"#
+                .to_vec(),
+        );
+        assert_eq!(
+            invalid,
+            "No tool output found (provider type: invalid_request_error)"
         );
     }
 }

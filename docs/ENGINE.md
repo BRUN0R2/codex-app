@@ -19,8 +19,9 @@ externo. A CLI aberta é uma referência de estudo, não uma integração.
 | --- | --- |
 | lifecycle | `engine_start` |
 | conta | `engine_account_read`, `engine_account_rate_limits_read`, `engine_login_chatgpt`, `engine_login_cancel`, `engine_logout` |
-| tarefas | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive` |
-| turnos | `engine_turn_start`, `engine_turn_interrupt` |
+| tarefas | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive`, `engine_thread_unarchive`, `engine_thread_delete`, `engine_thread_fork`, `engine_thread_compact_start` |
+| turnos | `engine_turn_start`, `engine_turn_steer`, `engine_turn_interrupt` |
+| projeto | `workspace_repository_read` |
 | configuração | `engine_config_read`, `engine_config_update`, `engine_model_list` |
 | aprovação | `engine_server_request_respond` |
 | anexos | `attachment_inspect`, `attachment_save_pasted_image` |
@@ -40,10 +41,13 @@ Quatro canais Tauri possuem payloads fechados:
 Notificações suportadas:
 
 - `auth.loginCompleted`, `auth.sessionChanged`;
-- `thread.created`, `thread.updated`, `thread.archived`;
+- `thread.created`, `thread.updated`, `thread.archived`, `thread.unarchived`,
+  `thread.deleted`;
 - `turn.started`, `turn.completed`;
 - `item.started`, `item.completed`, `item.agentTextDelta`;
-- `item.reasoningSummaryDelta`, `item.reasoningTextDelta`.
+- `item.reasoningSummaryDelta`, `item.reasoningTextDelta`;
+- `model.rerouted`, `model.verification`, `model.safetyBufferingUpdated` e
+  `turn.moderationMetadata`.
 
 Qualquer método diferente falha na fronteira TypeScript e gera diagnóstico
 visível.
@@ -60,6 +64,12 @@ Headers de conta e sessão são montados somente no Rust. Tokens, cookies e
 respostas brutas não são expostos ao frontend. O parser aceita apenas a forma de
 catálogo e os eventos SSE implementados; novidades de protocolo exigem mudança
 explícita do contrato.
+
+Antes de cada requisição, o histórico garante a mesma invariável do Desktop
+oficial: toda chamada de ferramenta possui exatamente uma saída compatível e
+toda saída possui uma chamada. Uma interrupção que deixou uma chamada pendente
+recebe a saída explícita `aborted`; saídas órfãs são removidas. Qualquer correção
+é regravada em uma única transação e publicada nos diagnósticos de runtime.
 
 ## Ferramentas e permissão
 
