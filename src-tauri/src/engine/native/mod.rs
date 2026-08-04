@@ -1,6 +1,7 @@
 mod agent;
 mod approval;
 pub(crate) mod auth;
+mod context_window;
 mod provider;
 mod storage;
 mod tools;
