@@ -1,3 +1,5 @@
+use std::io::{self, Write};
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -34,16 +36,22 @@ pub(super) fn evaluate_context_window(
     context_window: Option<&ModelContextWindow>,
 ) -> ContextWindowStatus {
     let estimated_request = estimate_request_tokens(instructions, history, tools);
-    let measured_with_local_delta = snapshot
-        .filter(|snapshot| snapshot.model == model_id)
-        .and_then(|snapshot| {
-            let last_model_item = history.iter().rposition(is_model_generated_item)?;
-            let local_tokens = history[last_model_item.saturating_add(1)..]
-                .iter()
-                .map(estimate_item_tokens)
-                .fold(0, u64::saturating_add);
-            Some(snapshot.usage.total_tokens.saturating_add(local_tokens))
-        });
+    let measured_with_local_delta =
+        snapshot
+            .filter(|snapshot| snapshot.model == model_id)
+            .map(|snapshot| {
+                let local_tokens = history
+                    .iter()
+                    .rposition(is_model_generated_item)
+                    .map(|last_model_item| {
+                        history[last_model_item.saturating_add(1)..]
+                            .iter()
+                            .map(estimate_item_tokens)
+                            .fold(0, u64::saturating_add)
+                    })
+                    .unwrap_or_default();
+                snapshot.usage.total_tokens.saturating_add(local_tokens)
+            });
     let active_tokens = measured_with_local_delta.map_or(estimated_request, |measured| {
         measured.max(estimated_request)
     });
@@ -53,6 +61,16 @@ pub(super) fn evaluate_context_window(
     ContextWindowStatus {
         active_tokens,
         should_compact,
+    }
+}
+
+pub(super) fn full_context_usage(window: &ModelContextWindow) -> TokenUsage {
+    TokenUsage {
+        input_tokens: window.tokens,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: window.tokens,
     }
 }
 
@@ -144,9 +162,7 @@ fn estimate_item_tokens(item: &ResponseItem) -> u64 {
             ..
         } => bytes_to_tokens(estimate_encrypted_payload_bytes(content.len())),
         _ => {
-            let serialized_bytes = serde_json::to_vec(item)
-                .map(|serialized| usize_to_u64(serialized.len()))
-                .unwrap_or(u64::MAX);
+            let serialized_bytes = serialized_json_len(item);
             let (image_payload_bytes, image_estimate_bytes) = image_estimate_adjustment(item);
             bytes_to_tokens(
                 serialized_bytes
@@ -161,9 +177,33 @@ fn estimate_json_tokens<T>(value: &T) -> u64
 where
     T: Serialize + ?Sized,
 {
-    serde_json::to_vec(value)
-        .map(|serialized| bytes_to_tokens(usize_to_u64(serialized.len())))
+    bytes_to_tokens(serialized_json_len(value))
+}
+
+fn serialized_json_len<T>(value: &T) -> u64
+where
+    T: Serialize + ?Sized,
+{
+    let mut counter = SerializedByteCounter::default();
+    serde_json::to_writer(&mut counter, value)
+        .map(|()| counter.bytes)
         .unwrap_or(u64::MAX)
+}
+
+#[derive(Default)]
+struct SerializedByteCounter {
+    bytes: u64,
+}
+
+impl Write for SerializedByteCounter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(usize_to_u64(buffer.len()));
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn estimate_text_tokens(value: &str) -> u64 {
@@ -595,5 +635,42 @@ mod tests {
                 .iter()
                 .any(|part| matches!(part, ResponseContent::InputImage { .. }))
         );
+    }
+
+    #[test]
+    fn streaming_json_length_matches_the_encoded_request_shape() {
+        let item = text("user", "quoted: \\\"value\\\" and newline:\\nnext");
+        let encoded = serde_json::to_vec(&item).expect("test item should encode");
+
+        assert_eq!(serialized_json_len(&item), usize_to_u64(encoded.len()));
+    }
+
+    #[test]
+    fn full_context_usage_forces_the_next_preflight_to_compact() {
+        let window = ModelContextWindow {
+            tokens: 272_000,
+            usable_tokens: 258_400,
+            usable_percent: 95,
+            maximum_tokens: Some(400_000),
+        };
+        let usage = full_context_usage(&window);
+        assert_eq!(usage.input_tokens, 272_000);
+        assert_eq!(usage.total_tokens, 272_000);
+
+        let snapshot = ContextUsageSnapshot {
+            model: "gpt-test".into(),
+            usage,
+        };
+        let status = evaluate_context_window(
+            "gpt-test",
+            "",
+            &[text("user", "request that overflowed before model output")],
+            &[],
+            Some(&snapshot),
+            Some(244_800),
+            Some(&window),
+        );
+
+        assert!(status.should_compact);
     }
 }

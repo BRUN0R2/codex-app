@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::NativeEngineInner;
 use super::compaction::compact_context;
+use super::context_window::{evaluate_context_window, full_context_usage};
 use super::provider::{
     ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseRequest,
     ResponseRequestSettings, SelectedModel, normalize_provider_history,
@@ -19,7 +20,7 @@ use crate::engine::{
     ActivityStatus, AppConfig, DiagnosticStream, ImageDetail, IndexedTextDeltaNotification,
     ItemNotification, MessagePhase, ModelRerouteReason, ModelReroutedNotification,
     ModelSafetyBufferingUpdatedNotification, ModelVerificationNotification, Personality,
-    TextDeltaNotification, ThreadItem, TokenUsage, TurnInput, TurnModerationMetadataNotification,
+    TextDeltaNotification, ThreadItem, TurnInput, TurnModerationMetadataNotification,
     WebSearchMode,
 };
 use crate::error::AppError;
@@ -53,6 +54,11 @@ pub(super) struct TurnRun {
 pub(super) enum RunCompletion {
     Completed,
     Interrupted,
+}
+
+struct SamplingInput {
+    history: Vec<ResponseItem>,
+    tools: Vec<serde_json::Value>,
 }
 
 pub(super) async fn prepare_user_input(
@@ -172,24 +178,17 @@ pub(super) async fn run_turn(
 ) -> Result<RunCompletion, AppError> {
     let instructions = compose_instructions(&run.model, &run.workspace, &run.config)?;
     let mut provider_state = TurnProviderState::default();
-    let previous_usage = inner
-        .storage
-        .latest_context_usage(run.thread_id.clone())
-        .await?;
-    if context_limit_reached(
-        previous_usage.as_ref().map(|snapshot| &snapshot.usage),
-        run.model.auto_compact_token_limit(),
-    ) && !compact_context(&inner, &app, &mut run, &instructions, &mut provider_state).await?
-    {
-        return Ok(RunCompletion::Interrupted);
-    }
 
     loop {
         if *run.cancellation.borrow() {
             return Ok(RunCompletion::Interrupted);
         }
-        let history = load_prompt_history(&inner, &app, &run.thread_id).await?;
-        let tools = provider_tools(&inner, &run.config);
+        let Some(SamplingInput { history, tools }) =
+            prepare_sampling_input(&inner, &app, &mut run, &instructions, &mut provider_state)
+                .await?
+        else {
+            return Ok(RunCompletion::Interrupted);
+        };
         let request = ResponseRequest::new(
             run.model.id().into(),
             instructions.clone(),
@@ -210,20 +209,34 @@ pub(super) async fn run_turn(
                 &inner.auth,
                 request,
                 &run.thread_id,
-                provider_state.turn_state.as_deref(),
+                provider_state.turn_state(),
                 &mut run.cancellation,
             )
             .await
         {
             Ok(stream) => stream,
             Err(AppError::Cancelled(_)) => return Ok(RunCompletion::Interrupted),
-            Err(error) => return Err(error),
+            Err(error) => {
+                if matches!(&error, AppError::ContextWindowExceeded(_)) {
+                    persist_full_context_usage(&inner, &app, &run).await?;
+                }
+                return Err(error);
+            }
         };
         let mut pending_tools = Vec::new();
-        let mut completed_usage = None;
         let mut saw_completed = false;
 
-        while let Some(event) = stream.next_event(&mut run.cancellation).await? {
+        loop {
+            let event = match stream.next_event(&mut run.cancellation).await {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(error) => {
+                    if matches!(&error, AppError::ContextWindowExceeded(_)) {
+                        persist_full_context_usage(&inner, &app, &run).await?;
+                    }
+                    return Err(error);
+                }
+            };
             let Some(event) =
                 handle_provider_control_event(&inner, &app, &run, &mut provider_state, event)?
             else {
@@ -326,13 +339,12 @@ pub(super) async fn run_turn(
                             ThreadItem::ContextUsage {
                                 id: Uuid::now_v7().to_string(),
                                 model: run.model.id().into(),
-                                usage: usage.clone(),
+                                usage,
                                 context_window: run.model.context_window(),
                             },
                             false,
                         )
                         .await?;
-                        completed_usage = Some(usage);
                     }
                     saw_completed = true;
                     break;
@@ -419,13 +431,6 @@ pub(super) async fn run_turn(
                 )
                 .await?;
         }
-        if context_limit_reached(
-            completed_usage.as_ref(),
-            run.model.auto_compact_token_limit(),
-        ) && !compact_context(&inner, &app, &mut run, &instructions, &mut provider_state).await?
-        {
-            return Ok(RunCompletion::Interrupted);
-        }
     }
 }
 
@@ -436,7 +441,22 @@ pub(super) async fn run_compaction(
 ) -> Result<RunCompletion, AppError> {
     let instructions = compose_instructions(&run.model, &run.workspace, &run.config)?;
     let mut provider_state = TurnProviderState::default();
-    if compact_context(&inner, &app, &mut run, &instructions, &mut provider_state).await? {
+    if *run.cancellation.borrow() {
+        return Ok(RunCompletion::Interrupted);
+    }
+    let history = load_prompt_history(&inner, &app, &run.thread_id).await?;
+    let tools = provider_tools(&inner, &run.config);
+    if compact_context(
+        &inner,
+        &app,
+        &mut run,
+        &instructions,
+        &mut provider_state,
+        history,
+        &tools,
+    )
+    .await?
+    {
         Ok(RunCompletion::Completed)
     } else {
         Ok(RunCompletion::Interrupted)
@@ -483,13 +503,83 @@ pub(super) async fn load_prompt_history(
     Ok(normalized.items)
 }
 
-fn context_limit_reached(
-    usage: Option<&TokenUsage>,
-    auto_compact_token_limit: Option<u64>,
-) -> bool {
-    usage
-        .zip(auto_compact_token_limit)
-        .is_some_and(|(usage, limit)| usage.total_tokens >= limit)
+async fn prepare_sampling_input(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    run: &mut TurnRun,
+    instructions: &str,
+    provider_state: &mut TurnProviderState,
+) -> Result<Option<SamplingInput>, AppError> {
+    let history = load_prompt_history(inner, app, &run.thread_id).await?;
+    let tools = provider_tools(inner, &run.config);
+    let snapshot = inner
+        .storage
+        .latest_context_usage(run.thread_id.clone())
+        .await?;
+    let context_window = run.model.context_window();
+    let status = evaluate_context_window(
+        run.model.id(),
+        instructions,
+        &history,
+        &tools,
+        snapshot.as_ref(),
+        run.model.auto_compact_token_limit(),
+        context_window.as_ref(),
+    );
+    if !status.should_compact {
+        return Ok(Some(SamplingInput { history, tools }));
+    }
+
+    inner.emit_diagnostic(
+        app,
+        DiagnosticStream::Runtime,
+        format!(
+            "Automatically compacting {active_tokens} active context tokens before sampling.",
+            active_tokens = status.active_tokens
+        ),
+    );
+    if !compact_context(
+        inner,
+        app,
+        run,
+        instructions,
+        provider_state,
+        history,
+        &tools,
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(SamplingInput {
+        history: load_prompt_history(inner, app, &run.thread_id).await?,
+        tools,
+    }))
+}
+
+async fn persist_full_context_usage(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    run: &TurnRun,
+) -> Result<(), AppError> {
+    let Some(context_window) = run.model.context_window() else {
+        return Ok(());
+    };
+    persist_and_emit_item(
+        inner,
+        app,
+        &run.thread_id,
+        &run.turn_id,
+        ThreadItem::ContextUsage {
+            id: Uuid::now_v7().to_string(),
+            model: run.model.id().into(),
+            usage: full_context_usage(&context_window),
+            context_window: Some(context_window),
+        },
+        false,
+    )
+    .await
 }
 
 #[derive(Default)]
@@ -820,28 +910,12 @@ fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_input_bytes, context_limit_reached, record_turn_state};
-    use crate::engine::TokenUsage;
+    use super::{add_input_bytes, record_turn_state};
 
     #[test]
     fn combined_input_is_bounded() {
         let mut total = super::MAX_RAW_INPUT_BYTES;
         assert!(add_input_bytes(&mut total, 1).is_err());
-    }
-
-    #[test]
-    fn compaction_is_driven_by_the_models_auto_compact_limit() {
-        let usage = |tokens_in_context_window| TokenUsage {
-            input_tokens: tokens_in_context_window,
-            cached_input_tokens: 0,
-            output_tokens: 0,
-            reasoning_output_tokens: 0,
-            total_tokens: tokens_in_context_window,
-        };
-
-        assert!(!context_limit_reached(Some(&usage(244_799)), Some(244_800)));
-        assert!(context_limit_reached(Some(&usage(244_800)), Some(244_800)));
-        assert!(!context_limit_reached(Some(&usage(400_000)), None));
     }
 
     #[test]

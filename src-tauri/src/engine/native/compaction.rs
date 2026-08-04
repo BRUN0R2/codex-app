@@ -4,7 +4,7 @@ use uuid::Uuid;
 use super::NativeEngineInner;
 use super::agent::{
     TurnProviderState, TurnRun, emit_item_notification, handle_provider_control_event,
-    load_prompt_history, provider_tools, validate_response_item,
+    validate_response_item,
 };
 use super::context_window::{build_compacted_history, prepare_compaction_history};
 use super::provider::{ResponseEvent, ResponseItem, ResponseRequest, ResponseRequestSettings};
@@ -17,17 +17,17 @@ pub(super) async fn compact_context(
     run: &mut TurnRun,
     instructions: &str,
     provider_state: &mut TurnProviderState,
+    history: Vec<ResponseItem>,
+    tools: &[serde_json::Value],
 ) -> Result<bool, AppError> {
     if *run.cancellation.borrow() {
         return Ok(false);
     }
-    let history = load_prompt_history(inner, app, &run.thread_id).await?;
-    let tools = provider_tools(inner, &run.config);
     let context_window = run.model.context_window();
     let mut compaction_input = prepare_compaction_history(
         instructions,
         &history,
-        &tools,
+        tools,
         context_window.as_ref().map(|window| window.tokens),
     );
     compaction_input.push(ResponseItem::compaction_trigger());
@@ -49,7 +49,7 @@ pub(super) async fn compact_context(
         run.model.id().into(),
         instructions.into(),
         compaction_input,
-        tools,
+        tools.to_vec(),
         ResponseRequestSettings {
             parallel_tool_calls: run.model.supports_parallel_tool_calls(),
             reasoning_effort: run.reasoning_effort,
