@@ -84,6 +84,7 @@ import {
   type ThreadRuntimeState,
   type VisibleThreadTurn,
 } from "./threadRuntime";
+import { applyTurnCompletion } from "./turnCompletion";
 
 const MAX_DIAGNOSTICS = 50;
 const MAX_PENDING_APPROVALS = 64;
@@ -443,22 +444,36 @@ export function createAppController(): AppController {
         }));
         return;
       case "turn.completed":
-        updateThreadRuntime(notification.params.threadId, (runtime) => ({
-          ...runtime,
-          activeTurnId:
-            runtime.activeTurnId === notification.params.turn.id ? null : runtime.activeTurnId,
-          safetyBuffering:
-            runtime.activeTurnId === notification.params.turn.id ? null : runtime.safetyBuffering,
-        }));
-        if (
-          currentThread()?.id === notification.params.threadId &&
-          notification.params.error !== null
-        ) {
-          setError(notification.params.error.message);
-        }
-        setPendingApprovals((current) =>
-          current.filter((request) => request.params.turnId !== notification.params.turn.id),
-        );
+        batch(() => {
+          setThreads((current) =>
+            current.map((thread) =>
+              thread.id === notification.params.threadId
+                ? applyTurnCompletion(thread, notification.params.turn)
+                : thread,
+            ),
+          );
+          setCurrentThread((current) =>
+            current?.id === notification.params.threadId
+              ? applyTurnCompletion(current, notification.params.turn)
+              : current,
+          );
+          updateThreadRuntime(notification.params.threadId, (runtime) => ({
+            ...runtime,
+            activeTurnId:
+              runtime.activeTurnId === notification.params.turn.id ? null : runtime.activeTurnId,
+            safetyBuffering:
+              runtime.activeTurnId === notification.params.turn.id ? null : runtime.safetyBuffering,
+          }));
+          setPendingApprovals((current) =>
+            current.filter((request) => request.params.turnId !== notification.params.turn.id),
+          );
+          if (
+            currentThread()?.id === notification.params.threadId &&
+            notification.params.error !== null
+          ) {
+            setError(notification.params.error.message);
+          }
+        });
         return;
       case "model.rerouted":
         updateThreadRuntime(notification.params.threadId, (runtime) => ({

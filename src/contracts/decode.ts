@@ -92,6 +92,7 @@ const REASONING_EFFORTS = [
   "xhigh",
 ] as const;
 const TURN_STATUSES = ["completed", "failed", "inProgress", "interrupted"] as const;
+const TERMINAL_TURN_STATUSES = ["completed", "failed", "interrupted"] as const;
 const ACTIVITY_STATUSES = ["completed", "declined", "failed", "inProgress"] as const;
 const MESSAGE_PHASES = ["commentary", "finalAnswer"] as const;
 const IMAGE_DETAILS = ["auto", "high", "low"] as const;
@@ -438,7 +439,7 @@ export function decodeEngineNotification(value: unknown): EngineNotification {
         method,
         params: {
           threadId: identifier(params.threadId, "$.params.threadId"),
-          turn: decodeTurnSummary(params.turn, "$.params.turn"),
+          turn: decodeCompletedTurn(params.turn, "$.params.turn"),
           error:
             params.error === null ? null : decodeOperationFailure(params.error, "$.params.error"),
         },
@@ -1076,6 +1077,16 @@ function decodeTurnSummary(value: unknown, path: string) {
   return {
     id: identifier(object.id, `${path}.id`),
     status: literal(object.status, `${path}.status`, TURN_STATUSES),
+  };
+}
+
+function decodeCompletedTurn(value: unknown, path: string) {
+  const object = exactRecord(value, path, ["error", "id", "status", "updatedAt"]);
+  return {
+    id: identifier(object.id, `${path}.id`),
+    status: literal(object.status, `${path}.status`, TERMINAL_TURN_STATUSES),
+    error: nullableText(object.error, `${path}.error`),
+    updatedAt: integer(object.updatedAt, `${path}.updatedAt`, 0, Number.MAX_SAFE_INTEGER),
   };
 }
 

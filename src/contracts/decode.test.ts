@@ -208,6 +208,39 @@ describe("decodificação dos contratos nativos", () => {
     }
   });
 
+  it("decodifica somente projeções terminais completas", () => {
+    const notification = (turn: Record<string, unknown>) => ({
+      method: "turn.completed",
+      params: { threadId: "thread-1", turn, error: null },
+    });
+    const decoded = decodeEngineNotification(
+      notification({
+        id: "turn-1",
+        status: "interrupted",
+        error: null,
+        updatedAt: 1_785_552_060,
+      }),
+    );
+
+    if (decoded.method !== "turn.completed") {
+      throw new Error("A notificação terminal mudou de método.");
+    }
+    expect(decoded.params.turn).toEqual({
+      id: "turn-1",
+      status: "interrupted",
+      error: null,
+      updatedAt: 1_785_552_060,
+    });
+    expect(() =>
+      decodeEngineNotification(
+        notification({ id: "turn-1", status: "inProgress", error: null, updatedAt: 2 }),
+      ),
+    ).toThrow(ContractError);
+    expect(() =>
+      decodeEngineNotification(notification({ id: "turn-1", status: "completed", error: null })),
+    ).toThrow(ContractError);
+  });
+
   it("decodifica o fluxo transitório de segurança e roteamento do modelo", () => {
     const buffering = decodeEngineNotification({
       method: "model.safetyBufferingUpdated",

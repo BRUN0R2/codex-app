@@ -290,6 +290,13 @@ export interface TurnSummary {
   readonly status: TurnStatus;
 }
 
+export interface CompletedTurn {
+  readonly id: string;
+  readonly status: Exclude<TurnStatus, "inProgress">;
+  readonly error: string | null;
+  readonly updatedAt: number;
+}
+
 export interface TurnStartResponse {
   readonly turn: TurnSummary;
 }
@@ -461,7 +468,7 @@ export interface TurnCompletedNotification {
   readonly method: "turn.completed";
   readonly params: {
     readonly threadId: string;
-    readonly turn: TurnSummary;
+    readonly turn: CompletedTurn;
     readonly error: { readonly code: string; readonly message: string } | null;
   };
 }
