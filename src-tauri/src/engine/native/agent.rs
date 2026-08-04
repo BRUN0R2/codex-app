@@ -177,7 +177,7 @@ pub(super) async fn run_turn(
         .latest_context_usage(run.thread_id.clone())
         .await?;
     if context_limit_reached(
-        previous_usage.as_ref(),
+        previous_usage.as_ref().map(|snapshot| &snapshot.usage),
         run.model.auto_compact_token_limit(),
     ) && !compact_context(&inner, &app, &mut run, &instructions, &mut provider_state).await?
     {

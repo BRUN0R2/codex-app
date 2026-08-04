@@ -8,11 +8,12 @@ use tauri::{AppHandle, Manager as _};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use super::context_window::ContextUsageSnapshot;
 use super::provider::ResponseItem;
 use crate::engine::{
     AppConfig, CodexThread, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
     DesktopPreferences, OperationAck, ThreadActiveFlag, ThreadItem, ThreadListResponse,
-    ThreadStatus, ThreadTurn, TokenUsage, TurnStatus, TurnSummary,
+    ThreadStatus, ThreadTurn, TurnStatus, TurnSummary,
 };
 use crate::error::AppError;
 
@@ -660,25 +661,7 @@ impl NativeStorage {
         thread_id: String,
         items: Vec<ResponseItem>,
     ) -> Result<(), AppError> {
-        if items.is_empty() || items.len() > MAX_HISTORY_ITEMS {
-            return Err(AppError::Provider(format!(
-                "provider history must contain between 1 and {MAX_HISTORY_ITEMS} items"
-            )));
-        }
-        let mut total_bytes = 0usize;
-        let mut payloads = Vec::with_capacity(items.len());
-        for item in items {
-            let payload = encode_bounded(&item, MAX_ITEM_BYTES, "provider history item")?;
-            total_bytes = total_bytes
-                .checked_add(payload.len())
-                .ok_or_else(|| AppError::Provider("provider history size overflowed".into()))?;
-            if total_bytes > MAX_HISTORY_BYTES {
-                return Err(AppError::Provider(format!(
-                    "provider history exceeds {MAX_HISTORY_BYTES} bytes"
-                )));
-            }
-            payloads.push(payload);
-        }
+        let payloads = encode_provider_history(items)?;
         let path = self.path().await?;
         run_blocking(move || {
             let mut connection = open_connection(&path)?;
@@ -695,20 +678,63 @@ impl NativeStorage {
                     "thread does not exist or is archived".into(),
                 ));
             }
-            transaction
-                .execute(
-                    "DELETE FROM provider_items WHERE thread_id = ?1",
-                    [&thread_id],
+            replace_provider_history_rows(&transaction, &thread_id, &payloads)?;
+            transaction.commit().map_err(storage_error)
+        })
+        .await
+    }
+
+    pub async fn install_compacted_history(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        items: Vec<ResponseItem>,
+        compaction_id: String,
+    ) -> Result<(), AppError> {
+        let payloads = encode_provider_history(items)?;
+        let compaction_item = ThreadItem::ContextCompaction {
+            id: compaction_id.clone(),
+        };
+        let compaction_payload =
+            encode_bounded(&compaction_item, MAX_ITEM_BYTES, "context compaction item")?;
+        let path = self.path().await?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM turns
+                         JOIN threads ON threads.id = turns.thread_id
+                         WHERE turns.id = ?1
+                           AND turns.thread_id = ?2
+                           AND turns.status = 'inProgress'
+                           AND threads.archived = 0
+                     )",
+                    params![turn_id, thread_id],
+                    |row| row.get(0),
                 )
                 .map_err(storage_error)?;
-            for payload in payloads {
-                transaction
-                    .execute(
-                        "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
-                        params![&thread_id, payload],
-                    )
-                    .map_err(storage_error)?;
+            if !active {
+                return Err(AppError::State(
+                    "turn is no longer active or does not belong to the thread".into(),
+                ));
             }
+
+            replace_provider_history_rows(&transaction, &thread_id, &payloads)?;
+            transaction
+                .execute(
+                    "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
+                    params![turn_id, compaction_id, compaction_payload],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "UPDATE threads SET updated_at = ?1 WHERE id = ?2",
+                    params![unix_timestamp()?, thread_id],
+                )
+                .map_err(storage_error)?;
             transaction.commit().map_err(storage_error)
         })
         .await
@@ -717,7 +743,7 @@ impl NativeStorage {
     pub async fn latest_context_usage(
         &self,
         thread_id: String,
-    ) -> Result<Option<TokenUsage>, AppError> {
+    ) -> Result<Option<ContextUsageSnapshot>, AppError> {
         let path = self.path().await?;
         run_blocking(move || {
             let connection = open_connection(&path)?;
@@ -754,7 +780,9 @@ impl NativeStorage {
                 return Ok(None);
             };
             match decode_bounded::<ThreadItem>(&payload, MAX_ITEM_BYTES, "context usage")? {
-                ThreadItem::ContextUsage { usage, .. } => Ok(Some(usage)),
+                ThreadItem::ContextUsage { model, usage, .. } => {
+                    Ok(Some(ContextUsageSnapshot { model, usage }))
+                }
                 ThreadItem::ContextCompaction { .. } => Ok(None),
                 _ => Err(AppError::Storage(
                     "context-state query returned a different item type".into(),
@@ -875,6 +903,51 @@ impl NativeStorage {
             .clone()
             .ok_or_else(|| AppError::Storage("native storage is not initialized".into()))
     }
+}
+
+fn encode_provider_history(items: Vec<ResponseItem>) -> Result<Vec<String>, AppError> {
+    if items.is_empty() || items.len() > MAX_HISTORY_ITEMS {
+        return Err(AppError::Provider(format!(
+            "provider history must contain between 1 and {MAX_HISTORY_ITEMS} items"
+        )));
+    }
+    let mut total_bytes = 0usize;
+    let mut payloads = Vec::with_capacity(items.len());
+    for item in items {
+        let payload = encode_bounded(&item, MAX_ITEM_BYTES, "provider history item")?;
+        total_bytes = total_bytes
+            .checked_add(payload.len())
+            .ok_or_else(|| AppError::Provider("provider history size overflowed".into()))?;
+        if total_bytes > MAX_HISTORY_BYTES {
+            return Err(AppError::Provider(format!(
+                "provider history exceeds {MAX_HISTORY_BYTES} bytes"
+            )));
+        }
+        payloads.push(payload);
+    }
+    Ok(payloads)
+}
+
+fn replace_provider_history_rows(
+    transaction: &Transaction<'_>,
+    thread_id: &str,
+    payloads: &[String],
+) -> Result<(), AppError> {
+    transaction
+        .execute(
+            "DELETE FROM provider_items WHERE thread_id = ?1",
+            [thread_id],
+        )
+        .map_err(storage_error)?;
+    for payload in payloads {
+        transaction
+            .execute(
+                "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
+                params![thread_id, payload],
+            )
+            .map_err(storage_error)?;
+    }
+    Ok(())
 }
 
 impl ThreadItem {
@@ -1558,7 +1631,8 @@ mod tests {
                 .expect("history should encode")
                 .contains("replacement")
         );
-        assert_eq!(usage.total_tokens, 100);
+        assert_eq!(usage.model, "gpt-test");
+        assert_eq!(usage.usage.total_tokens, 100);
 
         storage
             .append_thread_item(
@@ -1576,6 +1650,135 @@ mod tests {
                 .expect("context state should load")
                 .is_none()
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn installs_compacted_history_and_marker_together() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("atomic-compaction.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(directory.path().display().to_string())
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "user-atomic".into(),
+                    content: vec![UserContent::Text { text: "old".into() }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText { text: "old".into() }]),
+                "old".into(),
+            )
+            .await
+            .expect("turn should begin");
+
+        storage
+            .install_compacted_history(
+                thread.id.clone(),
+                turn.id,
+                vec![ResponseItem::Compaction {
+                    id: Some("checkpoint-atomic".into()),
+                    encrypted_content: "encrypted".into(),
+                    internal_chat_message_metadata_passthrough: None,
+                }],
+                "compaction-atomic".into(),
+            )
+            .await
+            .expect("compacted history and marker should install");
+
+        let history = storage
+            .provider_history(thread.id.clone())
+            .await
+            .expect("compacted history should load");
+        let loaded = storage
+            .read_thread(thread.id.clone())
+            .await
+            .expect("thread should load");
+        assert!(matches!(
+            history.as_slice(),
+            [ResponseItem::Compaction { .. }]
+        ));
+        assert!(matches!(
+            loaded.turns[0].items.last(),
+            Some(ThreadItem::ContextCompaction { id }) if id == "compaction-atomic"
+        ));
+        assert!(
+            storage
+                .latest_context_usage(thread.id)
+                .await
+                .expect("context state should load")
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rolls_back_compacted_history_when_marker_insert_fails() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("rollback-compaction.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(directory.path().display().to_string())
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "user-rollback".into(),
+                    content: vec![UserContent::Text {
+                        text: "original".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "original".into(),
+                }]),
+                "original".into(),
+            )
+            .await
+            .expect("turn should begin");
+        storage
+            .append_thread_item(
+                turn.id.clone(),
+                ThreadItem::ContextCompaction {
+                    id: "duplicate-compaction".into(),
+                },
+            )
+            .await
+            .expect("duplicate fixture should persist");
+
+        let result = storage
+            .install_compacted_history(
+                thread.id.clone(),
+                turn.id,
+                vec![ResponseItem::Compaction {
+                    id: Some("replacement-checkpoint".into()),
+                    encrypted_content: "replacement".into(),
+                    internal_chat_message_metadata_passthrough: None,
+                }],
+                "duplicate-compaction".into(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let history = storage
+            .provider_history(thread.id)
+            .await
+            .expect("original history should remain readable");
+        let encoded = serde_json::to_string(&history).expect("history should encode");
+        assert!(encoded.contains("original"));
+        assert!(!encoded.contains("replacement-checkpoint"));
     }
 
     #[tokio::test(flavor = "current_thread")]
