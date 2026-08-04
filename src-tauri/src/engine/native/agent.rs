@@ -8,6 +8,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use super::NativeEngineInner;
+use super::compaction::compact_context;
 use super::provider::{
     ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseRequest,
     ResponseRequestSettings, SelectedModel, normalize_provider_history,
@@ -30,7 +31,6 @@ const MAX_RAW_INPUT_BYTES: usize = 16 * 1_048_576;
 const MAX_INSTRUCTIONS_BYTES: usize = 524_288;
 const MAX_PROVIDER_ITEM_ID_BYTES: usize = 256;
 const MAX_PROVIDER_TEXT_BYTES: usize = 2 * 1_048_576;
-const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 
 pub(super) struct PreparedTurn {
     pub user_item: ThreadItem,
@@ -443,7 +443,10 @@ pub(super) async fn run_compaction(
     }
 }
 
-fn provider_tools(inner: &NativeEngineInner, config: &AppConfig) -> Vec<serde_json::Value> {
+pub(super) fn provider_tools(
+    inner: &NativeEngineInner,
+    config: &AppConfig,
+) -> Vec<serde_json::Value> {
     let mut tools = inner.tools.definitions();
     if config.web_search == WebSearchMode::Live {
         tools.push(json!({
@@ -454,7 +457,7 @@ fn provider_tools(inner: &NativeEngineInner, config: &AppConfig) -> Vec<serde_js
     tools
 }
 
-async fn load_prompt_history(
+pub(super) async fn load_prompt_history(
     inner: &NativeEngineInner,
     app: &AppHandle,
     thread_id: &str,
@@ -489,135 +492,20 @@ fn context_limit_reached(
         .is_some_and(|(usage, limit)| usage.total_tokens >= limit)
 }
 
-async fn compact_context(
-    inner: &NativeEngineInner,
-    app: &AppHandle,
-    run: &mut TurnRun,
-    instructions: &str,
-    provider_state: &mut TurnProviderState,
-) -> Result<bool, AppError> {
-    if *run.cancellation.borrow() {
-        return Ok(false);
-    }
-    let history = load_prompt_history(inner, app, &run.thread_id).await?;
-    let compaction_item = ThreadItem::ContextCompaction {
-        id: Uuid::now_v7().to_string(),
-    };
-    persist_and_emit_item(
-        inner,
-        app,
-        &run.thread_id,
-        &run.turn_id,
-        compaction_item.clone(),
-        true,
-    )
-    .await?;
-
-    let mut compaction_input = history.clone();
-    compaction_input.push(ResponseItem::compaction_trigger());
-    let request = ResponseRequest::new(
-        run.model.id().into(),
-        instructions.into(),
-        compaction_input,
-        provider_tools(inner, &run.config),
-        ResponseRequestSettings {
-            parallel_tool_calls: run.model.supports_parallel_tool_calls(),
-            reasoning_effort: run.reasoning_effort,
-            service_tier: run.service_tier.clone(),
-            prompt_cache_key: Some(run.thread_id.clone()),
-            verbosity: run.config.model_verbosity,
-        },
-    );
-    let mut stream = match inner
-        .provider
-        .start_response(
-            app,
-            &inner.auth,
-            request,
-            &run.thread_id,
-            provider_state.turn_state.as_deref(),
-            &mut run.cancellation,
-        )
-        .await
-    {
-        Ok(stream) => stream,
-        Err(AppError::Cancelled(_)) => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    let mut output_item_count = 0usize;
-    let mut checkpoint = None;
-    let mut saw_completed = false;
-    while let Some(event) = stream.next_event(&mut run.cancellation).await? {
-        let Some(event) = handle_provider_control_event(inner, app, run, provider_state, event)?
-        else {
-            continue;
-        };
-        match event {
-            ResponseEvent::OutputItemDone(item) => {
-                output_item_count = output_item_count
-                    .checked_add(1)
-                    .ok_or_else(|| AppError::State("compaction output counter overflow".into()))?;
-                validate_response_item(&item)?;
-                if item.is_compaction_checkpoint() && checkpoint.replace(item).is_some() {
-                    return Err(AppError::Provider(
-                        "context compaction returned more than one checkpoint".into(),
-                    ));
-                }
-            }
-            ResponseEvent::Completed(_) => {
-                saw_completed = true;
-                break;
-            }
-            ResponseEvent::Interrupted => return Ok(false),
-            ResponseEvent::OutputTextDelta { .. }
-            | ResponseEvent::ReasoningSummaryDelta { .. }
-            | ResponseEvent::ReasoningContentDelta { .. } => {}
-            ResponseEvent::ServerModel(_)
-            | ResponseEvent::TurnState(_)
-            | ResponseEvent::ModelVerifications(_)
-            | ResponseEvent::TurnModerationMetadata(_)
-            | ResponseEvent::SafetyBuffering(_) => {
-                return Err(AppError::State(
-                    "provider control event escaped its handler".into(),
-                ));
-            }
-        }
-    }
-    if !saw_completed {
-        return Err(AppError::Provider(
-            "context compaction stream ended before response.completed".into(),
-        ));
-    }
-    let Some(checkpoint) = checkpoint else {
-        return Err(AppError::Provider(format!(
-            "context compaction returned no checkpoint in {output_item_count} output items"
-        )));
-    };
-    let compacted = build_compacted_history(history, checkpoint);
-    inner
-        .storage
-        .replace_provider_history(run.thread_id.clone(), compacted)
-        .await?;
-    persist_and_emit_item(
-        inner,
-        app,
-        &run.thread_id,
-        &run.turn_id,
-        compaction_item,
-        false,
-    )
-    .await?;
-    Ok(true)
-}
-
 #[derive(Default)]
-struct TurnProviderState {
+pub(super) struct TurnProviderState {
     turn_state: Option<String>,
     rerouted_models: Vec<String>,
     verification_emitted: bool,
 }
 
-fn handle_provider_control_event(
+impl TurnProviderState {
+    pub(super) fn turn_state(&self) -> Option<&str> {
+        self.turn_state.as_deref()
+    }
+}
+
+pub(super) fn handle_provider_control_event(
     inner: &NativeEngineInner,
     app: &AppHandle,
     run: &TurnRun,
@@ -713,44 +601,6 @@ fn record_turn_state(current: &mut Option<String>, incoming: String) -> Result<(
     Ok(())
 }
 
-fn build_compacted_history(
-    history: Vec<ResponseItem>,
-    checkpoint: ResponseItem,
-) -> Vec<ResponseItem> {
-    let mut remaining_tokens = RETAINED_MESSAGE_TOKEN_BUDGET;
-    let mut retained = Vec::new();
-    for item in history.into_iter().rev() {
-        if !matches!(&item, ResponseItem::Message { role, .. } if role == "user") {
-            continue;
-        }
-        let estimated_tokens = estimate_message_tokens(&item).max(1);
-        if estimated_tokens > remaining_tokens {
-            continue;
-        }
-        remaining_tokens -= estimated_tokens;
-        retained.push(item);
-    }
-    retained.reverse();
-    retained.push(checkpoint);
-    retained
-}
-
-fn estimate_message_tokens(item: &ResponseItem) -> usize {
-    let ResponseItem::Message { content, .. } = item else {
-        return 0;
-    };
-    content
-        .iter()
-        .map(|part| match part {
-            ResponseContent::InputText { text } | ResponseContent::OutputText { text } => {
-                text.len().div_ceil(4)
-            }
-            ResponseContent::Refusal { refusal } => refusal.len().div_ceil(4),
-            ResponseContent::InputImage { .. } => 1_024,
-        })
-        .sum()
-}
-
 struct PendingTool {
     call_id: String,
     prepared: PreparedTool,
@@ -770,6 +620,17 @@ async fn persist_and_emit_item(
             .append_thread_item(turn_id.into(), item.clone())
             .await?;
     }
+    emit_item_notification(inner, app, thread_id, turn_id, item, started)
+}
+
+pub(super) fn emit_item_notification(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    thread_id: &str,
+    turn_id: &str,
+    item: ThreadItem,
+    started: bool,
+) -> Result<(), AppError> {
     let notification = ItemNotification {
         thread_id: thread_id.into(),
         turn_id: turn_id.into(),
@@ -869,7 +730,7 @@ fn compose_instructions(
     Ok(instructions)
 }
 
-fn validate_response_item(item: &ResponseItem) -> Result<(), AppError> {
+pub(super) fn validate_response_item(item: &ResponseItem) -> Result<(), AppError> {
     if let Some(id) = item.id() {
         validate_provider_id(id)?;
     }
