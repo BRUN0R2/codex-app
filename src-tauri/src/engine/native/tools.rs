@@ -17,6 +17,7 @@ use crate::engine::{
 };
 use crate::error::AppError;
 
+pub(super) const MAX_PROVIDER_ITEM_BYTES: usize = 2 * 1_048_576;
 const MAX_TOOL_ARGUMENT_BYTES: usize = 262_144;
 const MAX_FILE_BYTES: usize = 2 * 1_048_576;
 const MAX_READ_LINES: usize = 2_000;
@@ -45,6 +46,7 @@ pub struct PreparedTool {
 
 #[derive(Debug)]
 enum ToolOperation {
+    ApplyPatch,
     ReadFile(ReadFileArgs),
     ListFiles(ListFilesArgs),
     SearchText(SearchTextArgs),
@@ -203,6 +205,16 @@ impl ToolRegistry {
                     "additionalProperties": false
                 }),
             ),
+            json!({
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": include_str!("apply_patch/apply_patch.lark")
+                }
+            }),
         ]
     }
 
@@ -261,6 +273,32 @@ impl ToolRegistry {
             description,
             operation,
         })
+    }
+
+    pub fn prepare_custom(
+        &self,
+        item_id: String,
+        name: &str,
+        input: &str,
+    ) -> Result<PreparedTool, AppError> {
+        validate_identifier("tool item id", &item_id)?;
+        if input.len() > MAX_PROVIDER_ITEM_BYTES {
+            return Err(AppError::Tool(format!(
+                "custom tool input exceeds {MAX_PROVIDER_ITEM_BYTES} bytes"
+            )));
+        }
+        match name {
+            "apply_patch" if input.is_empty() => {
+                Err(AppError::Tool("apply_patch input is empty".into()))
+            }
+            "apply_patch" => Ok(PreparedTool {
+                item_id,
+                name: "apply_patch",
+                description: "Apply patch".into(),
+                operation: ToolOperation::ApplyPatch,
+            }),
+            _ => Err(AppError::Tool(format!("unknown custom tool `{name}`"))),
+        }
     }
 }
 
@@ -328,6 +366,9 @@ impl PreparedTool {
         let workspace = canonical_workspace(context.workspace).await?;
         let started_at = Instant::now();
         let execution = match &self.operation {
+            ToolOperation::ApplyPatch => Err(AppError::Tool(
+                "native apply_patch execution is not available yet".into(),
+            )),
             ToolOperation::ReadFile(args) => {
                 read_file(&workspace, args).await.map(ToolResult::Text)
             }
@@ -1252,6 +1293,24 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{ToolRegistry, atomic_write, resolve_write_target};
+
+    #[test]
+    fn apply_patch_tool_definition_is_freeform_and_grammar_constrained() {
+        let tool = ToolRegistry
+            .definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "apply_patch")
+            .expect("apply_patch should be advertised");
+
+        assert_eq!(tool["type"], "custom");
+        assert_eq!(tool["name"], "apply_patch");
+        assert_eq!(tool["format"]["type"], "grammar");
+        assert_eq!(tool["format"]["syntax"], "lark");
+        assert_eq!(
+            tool["format"]["definition"],
+            include_str!("apply_patch/apply_patch.lark")
+        );
+    }
 
     #[test]
     fn tool_arguments_are_closed_and_unknown_tools_fail() {

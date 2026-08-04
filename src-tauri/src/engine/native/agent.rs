@@ -14,7 +14,7 @@ use super::provider::{
     ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseRequest,
     ResponseRequestSettings, SelectedModel, normalize_provider_history,
 };
-use super::tools::{PreparedTool, ToolExecutionContext};
+use super::tools::{MAX_PROVIDER_ITEM_BYTES, PreparedTool, ToolExecutionContext};
 use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
 use crate::engine::{
     ActivityStatus, AppConfig, DiagnosticStream, ImageDetail, IndexedTextDeltaNotification,
@@ -31,7 +31,6 @@ const MAX_IMAGE_BYTES: usize = 10 * 1_048_576;
 const MAX_RAW_INPUT_BYTES: usize = 16 * 1_048_576;
 const MAX_INSTRUCTIONS_BYTES: usize = 524_288;
 const MAX_PROVIDER_ITEM_ID_BYTES: usize = 256;
-const MAX_PROVIDER_TEXT_BYTES: usize = 2 * 1_048_576;
 
 pub(super) struct PreparedTurn {
     pub user_item: ThreadItem,
@@ -319,12 +318,25 @@ pub(super) async fn run_turn(
                         } => {
                             let item_id = id.unwrap_or_else(|| call_id.clone());
                             let prepared = inner.tools.prepare(item_id, &name, &arguments)?;
-                            pending_tools.push(PendingTool { call_id, prepared });
+                            pending_tools.push(PendingTool {
+                                call_id,
+                                output_kind: ToolOutputKind::Function,
+                                prepared,
+                            });
                         }
-                        ResponseItem::CustomToolCall { name, .. } => {
-                            return Err(AppError::Provider(format!(
-                                "provider emitted unsupported custom tool call `{name}`"
-                            )));
+                        ResponseItem::CustomToolCall {
+                            id,
+                            call_id,
+                            name,
+                            input,
+                        } => {
+                            let item_id = id.unwrap_or_else(|| call_id.clone());
+                            let prepared = inner.tools.prepare_custom(item_id, &name, &input)?;
+                            pending_tools.push(PendingTool {
+                                call_id,
+                                output_kind: ToolOutputKind::Custom,
+                                prepared,
+                            });
                         }
                         _ => {}
                     }
@@ -423,12 +435,17 @@ pub(super) async fn run_turn(
                 false,
             )
             .await?;
+            let output = match pending.output_kind {
+                ToolOutputKind::Function => {
+                    ResponseItem::function_output(pending.call_id, provider_output)
+                }
+                ToolOutputKind::Custom => {
+                    ResponseItem::custom_output(pending.call_id, provider_output)
+                }
+            };
             inner
                 .storage
-                .append_provider_item(
-                    run.thread_id.clone(),
-                    ResponseItem::function_output(pending.call_id, provider_output),
-                )
+                .append_provider_item(run.thread_id.clone(), output)
                 .await?;
         }
     }
@@ -693,7 +710,14 @@ fn record_turn_state(current: &mut Option<String>, incoming: String) -> Result<(
 
 struct PendingTool {
     call_id: String,
+    output_kind: ToolOutputKind,
     prepared: PreparedTool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ToolOutputKind {
+    Function,
+    Custom,
 }
 
 async fn persist_and_emit_item(
@@ -827,9 +851,9 @@ pub(super) fn validate_response_item(item: &ResponseItem) -> Result<(), AppError
     let encoded = serde_json::to_vec(item).map_err(|error| {
         AppError::Provider(format!("response item could not be encoded: {error}"))
     })?;
-    if encoded.len() > MAX_PROVIDER_TEXT_BYTES {
+    if encoded.len() > MAX_PROVIDER_ITEM_BYTES {
         return Err(AppError::Provider(format!(
-            "response item exceeds {MAX_PROVIDER_TEXT_BYTES} bytes"
+            "response item exceeds {MAX_PROVIDER_ITEM_BYTES} bytes"
         )));
     }
     match item {
@@ -868,7 +892,7 @@ pub(super) fn validate_response_item(item: &ResponseItem) -> Result<(), AppError
 
 fn validate_delta(item_id: &str, delta: &str) -> Result<(), AppError> {
     validate_provider_id(item_id)?;
-    if delta.len() > MAX_PROVIDER_TEXT_BYTES {
+    if delta.len() > MAX_PROVIDER_ITEM_BYTES {
         return Err(AppError::Provider("stream delta is too large".into()));
     }
     Ok(())

@@ -175,6 +175,10 @@ impl ResponseItem {
         Self::FunctionCallOutput { call_id, output }
     }
 
+    pub fn custom_output(call_id: String, output: String) -> Self {
+        Self::CustomToolCallOutput { call_id, output }
+    }
+
     pub fn compaction_trigger() -> Self {
         Self::CompactionTrigger {}
     }
@@ -954,6 +958,19 @@ mod tests {
     use super::ResponseRequest;
     use super::ResponseRequestSettings;
     use super::SseParser;
+
+    #[test]
+    fn custom_tool_output_uses_the_responses_api_shape() {
+        let value = serde_json::to_value(ResponseItem::custom_output(
+            "call-1".into(),
+            "patch applied".into(),
+        ))
+        .expect("custom output should serialize");
+
+        assert_eq!(value["type"], "custom_tool_call_output");
+        assert_eq!(value["call_id"], "call-1");
+        assert_eq!(value["output"], "patch applied");
+    }
 
     #[test]
     fn parses_fragmented_sse_without_unbounded_lines() {
