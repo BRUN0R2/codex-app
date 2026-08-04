@@ -596,6 +596,8 @@ struct OutputTokenDetailsWire {
 struct ResponseErrorWire {
     #[serde(default)]
     code: Option<String>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
     #[serde(default)]
     message: Option<String>,
 }
@@ -926,17 +928,19 @@ fn stream_failure(event: StreamEventWire) -> AppError {
     let (code, message) = error.map_or_else(
         || (None, "response stream failed without a message".into()),
         |error| {
+            let code = error.code.or(error.kind);
             let message = error
                 .message
                 .filter(|message| !message.trim().is_empty())
                 .unwrap_or_else(|| "response stream failed without a message".into());
-            (error.code, message)
+            (code, message)
         },
     );
-    AppError::Provider(match code {
+    let message = match code.as_deref() {
         Some(code) => format!("{code}: {message}"),
         None => message,
-    })
+    };
+    AppError::from_provider_rejection(None, code.as_deref(), message)
 }
 
 #[cfg(test)]
@@ -968,6 +972,26 @@ mod tests {
             events.pop_front(),
             Some(ResponseEvent::OutputTextDelta { delta, .. }) if delta == "hello"
         ));
+    }
+
+    #[test]
+    fn preserves_context_window_exceeded_from_sse() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+        let error = parser
+            .push(
+                br#"data: {"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"too large"}}}
+
+"#,
+                &mut events,
+            )
+            .expect_err("context overflow should fail the stream");
+
+        assert!(matches!(
+            error,
+            crate::error::AppError::ContextWindowExceeded(_)
+        ));
+        assert!(events.is_empty());
     }
 
     #[test]

@@ -9,6 +9,8 @@ pub enum AppError {
     Provider(String),
     #[error("provider returned HTTP {status}: {message}")]
     ProviderHttp { status: u16, message: String },
+    #[error("model context window exceeded: {0}")]
+    ContextWindowExceeded(String),
     #[error("{operation} exceeded its time limit")]
     Timeout { operation: &'static str },
     #[error("native storage failed: {0}")]
@@ -35,6 +37,7 @@ impl AppError {
             Self::Auth(_) => "authFailed",
             Self::Provider(_) => "providerFailed",
             Self::ProviderHttp { .. } => "providerHttpError",
+            Self::ContextWindowExceeded(_) => "contextWindowExceeded",
             Self::Timeout { .. } => "operationTimeout",
             Self::Storage(_) => "storageFailed",
             Self::Protocol(_) => "invalidContract",
@@ -62,6 +65,20 @@ impl AppError {
     pub(crate) const fn public_code(&self) -> &'static str {
         self.code()
     }
+
+    pub(crate) fn from_provider_rejection(
+        status: Option<u16>,
+        code: Option<&str>,
+        message: String,
+    ) -> Self {
+        if code == Some("context_length_exceeded") {
+            Self::ContextWindowExceeded(message)
+        } else if let Some(status) = status {
+            Self::ProviderHttp { status, message }
+        } else {
+            Self::Provider(message)
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -83,3 +100,21 @@ impl From<AppError> for CommandError {
 }
 
 pub type CommandResult<T> = Result<T, CommandError>;
+
+#[cfg(test)]
+mod tests {
+    use super::{AppError, CommandError};
+
+    #[test]
+    fn context_window_exceeded_is_explicit_and_not_retryable() {
+        let error = AppError::from_provider_rejection(
+            None,
+            Some("context_length_exceeded"),
+            "request is too large".into(),
+        );
+        let public = CommandError::from(error);
+
+        assert_eq!(public.code, "contextWindowExceeded");
+        assert!(!public.retryable);
+    }
+}
