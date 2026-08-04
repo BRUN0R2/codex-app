@@ -507,7 +507,12 @@ pub struct TokenUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum FileChangeKind {
     Add,
     Delete,
@@ -872,6 +877,7 @@ pub struct AccountRateLimitsResponse {
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
+    use super::FileChangeKind;
     use super::PermissionProfile;
 
     #[test]
@@ -882,5 +888,21 @@ mod tests {
             PermissionProfile::workspace_write()
         );
         assert!(config.model.is_none());
+    }
+
+    #[test]
+    fn file_change_update_uses_camel_case_variant_fields() {
+        let value = serde_json::to_value(FileChangeKind::Update {
+            move_path: Some("src/new.rs".into()),
+        })
+        .expect("file change kind should serialize");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "update",
+                "movePath": "src/new.rs"
+            })
+        );
     }
 }

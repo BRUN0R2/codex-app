@@ -120,6 +120,36 @@ describe("decodificação dos contratos nativos", () => {
     ).toThrow(ContractError);
   });
 
+  it("aceita somente movePath em alterações de arquivo", () => {
+    const notification = (kind: Record<string, unknown>) => ({
+      method: "item.completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "fileChange",
+          id: "change-1",
+          changes: [{ path: "src/old.ts", kind, diff: "" }],
+          status: "completed",
+        },
+      },
+    });
+
+    const decoded = decodeEngineNotification(
+      notification({ type: "update", movePath: "src/new.ts" }),
+    );
+    if (decoded.method !== "item.completed" || decoded.params.item.type !== "fileChange") {
+      throw new Error("A alteração de arquivo decodificada mudou de tipo.");
+    }
+    expect(decoded.params.item.changes[0]?.kind).toEqual({
+      type: "update",
+      movePath: "src/new.ts",
+    });
+    expect(() =>
+      decodeEngineNotification(notification({ type: "update", move_path: "src/new.ts" })),
+    ).toThrow(ContractError);
+  });
+
   it("valida o uso persistido da janela de contexto", () => {
     const decoded = decodeEngineNotification({
       method: "item.completed",
