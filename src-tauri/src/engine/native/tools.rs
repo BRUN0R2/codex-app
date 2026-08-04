@@ -29,7 +29,7 @@ const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 const MAX_COMMAND_BYTES: usize = 16_384;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1_048_576;
 const MAX_TOOL_OUTPUT_BYTES: usize = 1_048_576;
-const MAX_DIFF_BYTES: usize = 131_072;
+pub(super) const MAX_DIFF_BYTES: usize = 131_072;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
