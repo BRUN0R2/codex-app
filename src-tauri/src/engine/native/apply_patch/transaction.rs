@@ -12,12 +12,12 @@ use crate::error::AppError;
 use super::plan::{FileSnapshot, PreparedChange, PreparedPatch};
 
 #[derive(Debug)]
-pub(super) struct PatchOutcome {
+pub(in crate::engine::native) struct PatchOutcome {
     pub changes: Vec<FileChange>,
     pub output: String,
 }
 
-pub(super) async fn commit_patch(
+pub(in crate::engine::native) async fn commit_patch(
     prepared: PreparedPatch,
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<PatchOutcome, AppError> {
@@ -322,6 +322,9 @@ fn make_replaceable(path: &Path) -> Result<(), AppError> {
     }
     let mut permissions = metadata.permissions();
     if permissions.readonly() {
+        // This function is Windows-only, where false clears the read-only file
+        // attribute. The Unix behavior described by the lint cannot apply.
+        #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
         std::fs::set_permissions(path, permissions)
             .map_err(|error| AppError::FileSystem(error.to_string()))?;

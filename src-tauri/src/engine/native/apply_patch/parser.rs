@@ -3,12 +3,12 @@ use std::path::PathBuf;
 use crate::error::AppError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ParsedPatch {
+pub(in crate::engine::native) struct ParsedPatch {
     pub hunks: Vec<PatchHunk>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PatchHunk {
+pub(in crate::engine::native) enum PatchHunk {
     Add {
         path: PathBuf,
         contents: String,
@@ -24,7 +24,7 @@ pub(super) enum PatchHunk {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct UpdateChunk {
+pub(in crate::engine::native) struct UpdateChunk {
     pub context: Option<String>,
     pub old_lines: Vec<String>,
     pub new_lines: Vec<String>,
@@ -39,7 +39,7 @@ const UPDATE_FILE: &str = "*** Update File: ";
 const MOVE_TO: &str = "*** Move to: ";
 const END_OF_FILE: &str = "*** End of File";
 
-pub(super) fn parse_patch(input: &str) -> Result<ParsedPatch, AppError> {
+pub(in crate::engine::native) fn parse_patch(input: &str) -> Result<ParsedPatch, AppError> {
     let normalized = input.replace("\r\n", "\n");
     let mut lines = normalized.split('\n').collect::<Vec<_>>();
     if normalized.ends_with('\n') {
@@ -143,13 +143,13 @@ fn parse_update(cursor: &mut Cursor<'_>, path: &str) -> Result<PatchHunk, AppErr
     cursor.advance();
 
     let mut move_path = None;
-    if cursor.index < cursor.end_index {
-        if let Some(path) = cursor.line().strip_prefix(MOVE_TO) {
-            move_path = Some(parse_path(path, cursor.line_number())?);
-            cursor.advance();
-            if cursor.index < cursor.end_index && cursor.line().starts_with(MOVE_TO) {
-                return Err(invalid(cursor.line_number(), "duplicate move marker"));
-            }
+    if cursor.index < cursor.end_index
+        && let Some(path) = cursor.line().strip_prefix(MOVE_TO)
+    {
+        move_path = Some(parse_path(path, cursor.line_number())?);
+        cursor.advance();
+        if cursor.index < cursor.end_index && cursor.line().starts_with(MOVE_TO) {
+            return Err(invalid(cursor.line_number(), "duplicate move marker"));
         }
     }
 

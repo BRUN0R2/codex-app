@@ -10,6 +10,9 @@ use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::process::Command;
 use tokio::sync::watch;
 
+use super::apply_patch::parser::{ParsedPatch, parse_patch};
+use super::apply_patch::plan::{prepare_patch, preview_changes};
+use super::apply_patch::transaction::{PatchOutcome, commit_patch};
 use super::approval::ApprovalBroker;
 use crate::engine::{
     ActivityStatus, ApprovalDecision, CommandApprovalRequest, CommandSource, FileChange,
@@ -46,7 +49,7 @@ pub struct PreparedTool {
 
 #[derive(Debug)]
 enum ToolOperation {
-    ApplyPatch,
+    ApplyPatch(ParsedPatch),
     ReadFile(ReadFileArgs),
     ListFiles(ListFilesArgs),
     SearchText(SearchTextArgs),
@@ -288,15 +291,17 @@ impl ToolRegistry {
             )));
         }
         match name {
-            "apply_patch" if input.is_empty() => {
-                Err(AppError::Tool("apply_patch input is empty".into()))
+            "apply_patch" => {
+                let patch = parse_patch(input)?;
+                let file_count = patch.hunks.len();
+                let noun = if file_count == 1 { "file" } else { "files" };
+                Ok(PreparedTool {
+                    item_id,
+                    name: "apply_patch",
+                    description: format!("Apply patch to {file_count} {noun}"),
+                    operation: ToolOperation::ApplyPatch(patch),
+                })
             }
-            "apply_patch" => Ok(PreparedTool {
-                item_id,
-                name: "apply_patch",
-                description: "Apply patch".into(),
-                operation: ToolOperation::ApplyPatch,
-            }),
             _ => Err(AppError::Tool(format!("unknown custom tool `{name}`"))),
         }
     }
@@ -305,6 +310,11 @@ impl ToolRegistry {
 impl PreparedTool {
     pub fn started_item(&self, workspace: &Path) -> ThreadItem {
         match &self.operation {
+            ToolOperation::ApplyPatch(patch) => ThreadItem::FileChange {
+                id: self.item_id.clone(),
+                changes: preview_changes(patch),
+                status: ActivityStatus::InProgress,
+            },
             ToolOperation::ExecCommand(args) => ThreadItem::CommandExecution {
                 id: self.item_id.clone(),
                 command: args.command.clone(),
@@ -366,9 +376,14 @@ impl PreparedTool {
         let workspace = canonical_workspace(context.workspace).await?;
         let started_at = Instant::now();
         let execution = match &self.operation {
-            ToolOperation::ApplyPatch => Err(AppError::Tool(
-                "native apply_patch execution is not available yet".into(),
-            )),
+            ToolOperation::ApplyPatch(patch) => execute_patch_operation(
+                &workspace,
+                patch.clone(),
+                context.permissions,
+                cancellation,
+            )
+            .await
+            .map(ToolResult::Patch),
             ToolOperation::ReadFile(args) => {
                 read_file(&workspace, args).await.map(ToolResult::Text)
             }
@@ -438,6 +453,21 @@ impl PreparedTool {
         };
 
         match execution {
+            Ok(ToolResult::Patch(outcome)) => {
+                if outcome.output.len() > MAX_TOOL_OUTPUT_BYTES {
+                    return Err(AppError::Tool(format!(
+                        "tool output exceeds {MAX_TOOL_OUTPUT_BYTES} bytes"
+                    )));
+                }
+                Ok(ToolExecutionResult {
+                    provider_output: outcome.output,
+                    completed_item: ThreadItem::FileChange {
+                        id: self.item_id.clone(),
+                        changes: outcome.changes,
+                        status: ActivityStatus::Completed,
+                    },
+                })
+            }
             Ok(result) => {
                 let (provider_output, exit_code) = result.into_output()?;
                 let duration = elapsed_millis(started_at)?;
@@ -466,6 +496,11 @@ impl PreparedTool {
         duration_ms: Option<u64>,
     ) -> ThreadItem {
         match &self.operation {
+            ToolOperation::ApplyPatch(patch) => ThreadItem::FileChange {
+                id: self.item_id.clone(),
+                changes: preview_changes(patch),
+                status,
+            },
             ToolOperation::ExecCommand(args) => ThreadItem::CommandExecution {
                 id: self.item_id.clone(),
                 command: args.command.clone(),
@@ -513,6 +548,7 @@ impl PreparedTool {
 enum ToolResult {
     Text(String),
     Command(CommandOutput),
+    Patch(PatchOutcome),
 }
 
 impl ToolResult {
@@ -526,6 +562,11 @@ impl ToolResult {
                 );
                 (text, Some(output.exit_code))
             }
+            Self::Patch(_) => {
+                return Err(AppError::State(
+                    "patch result escaped its dedicated completion path".into(),
+                ));
+            }
         };
         if output.len() > MAX_TOOL_OUTPUT_BYTES {
             return Err(AppError::Tool(format!(
@@ -534,6 +575,17 @@ impl ToolResult {
         }
         Ok((output, exit_code))
     }
+}
+
+async fn execute_patch_operation(
+    workspace: &Path,
+    patch: ParsedPatch,
+    permissions: PermissionProfile,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<PatchOutcome, AppError> {
+    require_workspace_write(permissions)?;
+    let prepared = prepare_patch(workspace, patch).await?;
+    commit_patch(prepared, cancellation).await
 }
 
 struct CommandOutput {
@@ -1291,8 +1343,13 @@ fn elapsed_millis(started_at: Instant) -> Result<u64, AppError> {
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
+    use tokio::sync::watch;
 
-    use super::{ToolRegistry, atomic_write, resolve_write_target};
+    use crate::engine::{ActivityStatus, PermissionProfile, ThreadItem};
+
+    use super::{
+        ToolOperation, ToolRegistry, atomic_write, execute_patch_operation, resolve_write_target,
+    };
 
     #[test]
     fn apply_patch_tool_definition_is_freeform_and_grammar_constrained() {
@@ -1327,6 +1384,115 @@ mod tests {
         assert!(
             registry
                 .prepare("call-2".into(), "future_tool", "{}")
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_apply_patch_prepares_previews_and_executes_natively() {
+        let workspace = TempDir::new().expect("workspace should exist");
+        tokio::fs::write(workspace.path().join("source.txt"), "old\n")
+            .await
+            .expect("source should exist");
+        tokio::fs::write(workspace.path().join("move.txt"), "move\n")
+            .await
+            .expect("move source should exist");
+        let prepared = ToolRegistry
+            .prepare_custom(
+                "patch-1".into(),
+                "apply_patch",
+                "*** Begin Patch\n\
+*** Add File: added.txt\n\
++added\n\
+*** Update File: source.txt\n\
+@@\n\
+-old\n\
++new\n\
+*** Update File: move.txt\n\
+*** Move to: moved.txt\n\
+*** End Patch",
+            )
+            .expect("custom patch should prepare");
+
+        assert!(matches!(
+            prepared.started_item(workspace.path()),
+            ThreadItem::FileChange { changes, status: ActivityStatus::InProgress, .. }
+                if changes.len() == 3
+        ));
+        let ToolOperation::ApplyPatch(patch) = &prepared.operation else {
+            panic!("expected apply patch operation");
+        };
+        let (_sender, mut cancellation) = watch::channel(false);
+        let outcome = execute_patch_operation(
+            workspace.path(),
+            patch.clone(),
+            PermissionProfile::workspace_write(),
+            &mut cancellation,
+        )
+        .await
+        .expect("native patch should execute");
+
+        assert_eq!(outcome.output, "Applied patch to 3 files.");
+        assert_eq!(outcome.changes.len(), 3);
+        assert_eq!(
+            tokio::fs::read_to_string(workspace.path().join("source.txt"))
+                .await
+                .expect("source should be updated"),
+            "new\n"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(workspace.path().join("added.txt"))
+                .await
+                .expect("add should exist"),
+            "added\n"
+        );
+        assert!(!workspace.path().join("move.txt").exists());
+        assert!(workspace.path().join("moved.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn custom_apply_patch_fails_closed_in_read_only_mode() {
+        let workspace = TempDir::new().expect("workspace should exist");
+        let prepared = ToolRegistry
+            .prepare_custom(
+                "patch-2".into(),
+                "apply_patch",
+                "*** Begin Patch\n*** Add File: denied.txt\n+denied\n*** End Patch",
+            )
+            .expect("structural patch should prepare");
+        let ToolOperation::ApplyPatch(patch) = &prepared.operation else {
+            panic!("expected apply patch operation");
+        };
+        let (_sender, mut cancellation) = watch::channel(false);
+
+        let error = execute_patch_operation(
+            workspace.path(),
+            patch.clone(),
+            PermissionProfile::read_only(),
+            &mut cancellation,
+        )
+        .await
+        .expect_err("read-only patch should fail");
+
+        assert!(matches!(error, crate::error::AppError::Permission(_)));
+        assert!(!workspace.path().join("denied.txt").exists());
+    }
+
+    #[test]
+    fn custom_apply_patch_rejects_invalid_input_and_unknown_names() {
+        let registry = ToolRegistry;
+        assert!(
+            registry
+                .prepare_custom(
+                    "patch-3".into(),
+                    "apply_patch",
+                    "*** Begin Patch\n*** Add File: invalid.txt\n+missing end",
+                )
+                .is_err()
+        );
+        assert!(
+            registry
+                .prepare_custom("patch-4".into(), "future_custom_tool", "input")
                 .is_err()
         );
     }

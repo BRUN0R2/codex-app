@@ -11,14 +11,58 @@ use crate::error::AppError;
 use super::super::tools::MAX_DIFF_BYTES;
 use super::parser::{ParsedPatch, PatchHunk, UpdateChunk};
 
+pub(in crate::engine::native) fn preview_changes(parsed: &ParsedPatch) -> Vec<FileChange> {
+    parsed
+        .hunks
+        .iter()
+        .map(|hunk| match hunk {
+            PatchHunk::Add { path, contents } => {
+                let relative = display_unchecked(path);
+                FileChange {
+                    path: relative.clone(),
+                    kind: FileChangeKind::Add,
+                    diff: truncate_diff(&render_add_diff(&relative, contents)),
+                }
+            }
+            PatchHunk::Delete { path } => {
+                let relative = display_unchecked(path);
+                FileChange {
+                    path: relative.clone(),
+                    kind: FileChangeKind::Delete,
+                    diff: truncate_diff(&format!("*** Delete File: {relative}\n")),
+                }
+            }
+            PatchHunk::Update {
+                path,
+                move_path,
+                chunks,
+            } => {
+                let relative = display_unchecked(path);
+                let move_path = move_path.as_deref().map(display_unchecked);
+                FileChange {
+                    path: relative.clone(),
+                    kind: FileChangeKind::Update {
+                        move_path: move_path.clone(),
+                    },
+                    diff: truncate_diff(&render_update_diff(
+                        &relative,
+                        move_path.as_deref(),
+                        chunks,
+                    )),
+                }
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug)]
-pub(super) struct PreparedPatch {
+pub(in crate::engine::native) struct PreparedPatch {
     pub changes: Vec<PreparedChange>,
     pub thread_changes: Vec<FileChange>,
 }
 
 #[derive(Debug)]
-pub(super) enum PreparedChange {
+pub(in crate::engine::native) enum PreparedChange {
     Write {
         original: FileSnapshot,
         final_bytes: Vec<u8>,
@@ -34,7 +78,7 @@ pub(super) enum PreparedChange {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct FileSnapshot {
+pub(in crate::engine::native) struct FileSnapshot {
     pub path: PathBuf,
     pub exists: bool,
     pub bytes: Vec<u8>,
@@ -42,7 +86,7 @@ pub(super) struct FileSnapshot {
     pub digest: [u8; 32],
 }
 
-pub(super) async fn prepare_patch(
+pub(in crate::engine::native) async fn prepare_patch(
     workspace: &Path,
     parsed: ParsedPatch,
 ) -> Result<PreparedPatch, AppError> {
@@ -256,13 +300,13 @@ fn validate_claims(hunks: &[ResolvedHunk]) -> Result<(), AppError> {
         }
     }
     for (destination, destination_index) in destinations {
-        if let Some(source_index) = sources.get(&destination) {
-            if source_index != &destination_index || !hunks[destination_index].is_in_place_update()
-            {
-                return Err(AppError::Tool(
-                    "patch source and destination paths overlap".into(),
-                ));
-            }
+        if let Some(source_index) = sources.get(&destination)
+            && (source_index != &destination_index
+                || !hunks[destination_index].is_in_place_update())
+        {
+            return Err(AppError::Tool(
+                "patch source and destination paths overlap".into(),
+            ));
         }
     }
     Ok(())
@@ -615,7 +659,11 @@ fn truncate_diff(value: &str) -> String {
 
 fn display_relative(path: &Path) -> Result<String, AppError> {
     validate_relative_path(path)?;
-    Ok(path.to_string_lossy().replace('\\', "/"))
+    Ok(display_unchecked(path))
+}
+
+fn display_unchecked(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn path_identity(path: &Path) -> String {
