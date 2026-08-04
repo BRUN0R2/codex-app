@@ -164,12 +164,21 @@ O snapshot mais recente é compatível quando:
 - o último item de estado é `ContextUsage`, não `ContextCompaction`; e
 - seu `model` é exatamente o modelo selecionado para a nova requisição.
 
-Com snapshot compatível, o contexto ativo é:
+Com snapshot compatível, o contexto ativo é o maior dos dois valores:
 
 ```text
 uso total informado pelo servidor
 + estimativa de cada item após o último item gerado pelo modelo
+
+estimativa completa da requisição atual
+(instruções + histórico normalizado + ferramentas)
 ```
+
+No Codex de referência, instruções e estado canônico participam do gerenciador
+de contexto versionado. Neste projeto eles são recompostos em campos de cada
+requisição. Usar o máximo preserva a medição mais precisa do servidor e também
+captura instruções ou ferramentas que cresceram desde a resposta anterior, sem
+criar um ledger duplicado.
 
 Itens gerados pelo modelo delimitam o snapshot: mensagem `assistant`,
 `Reasoning`, `FunctionCall`, `CustomToolCall`, `WebSearchCall` e `Compaction`.
@@ -333,6 +342,8 @@ falha genérica do provider sem adicionar lógica de recuperação ao frontend.
 ### Política pura
 
 - snapshot compatível mais mensagem local cruza o limite;
+- crescimento das instruções ou ferramentas cruza o limite mesmo com snapshot
+  compatível;
 - saída de ferramenta local cruza o limite;
 - itens anteriores à última saída do modelo não são contados novamente;
 - ausência de snapshot estima instruções, histórico e ferramentas completos;
