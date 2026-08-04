@@ -12,6 +12,7 @@ import {
 import type { CodexThread, ProjectRecord } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
 import { pathsEqual } from "../state/projects";
+import { threadsWithoutConfiguredProject } from "../state/sidebarThreads";
 import { CodexGlyph } from "./CodexGlyph";
 import { Icon } from "./Icon";
 
@@ -64,8 +65,7 @@ export function Sidebar(props: SidebarProps) {
     return grouped().slice(0, 5);
   });
   const ungrouped = createMemo(() =>
-    props.controller
-      .threads()
+    threadsWithoutConfiguredProject(props.controller.threads(), props.controller.projects())
       .filter(
         (thread) =>
           normalizedSearchQuery().length === 0 || matchesThread(thread, normalizedSearchQuery()),
