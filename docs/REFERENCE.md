@@ -51,6 +51,31 @@ saída `aborted` para chamadas sem resultado e remove resultados órfãos. O eng
 local segue essa invariável e ainda persiste a correção atomicamente, porque seu
 SQLite próprio é a fonte autoritativa entre reinícios.
 
+## Contexto ativo e compactação
+
+A implementação de compactação foi comparada diretamente com estes arquivos do
+snapshot fixado:
+
+- `codex-rs/core/src/context_manager/history.rs`;
+- `codex-rs/core/src/session/context_window.rs`;
+- `codex-rs/core/src/session/turn.rs`;
+- `codex-rs/core/src/compact_remote.rs`;
+- `codex-rs/core/src/compact_remote_v2.rs`.
+
+O core oficial combina o último uso medido pelo servidor com itens locais ainda
+não medidos, consulta a política antes das amostragens e, no Remote Compaction
+V2, conserva mensagens recentes junto de um único checkpoint criptografado. Um
+estouro inesperado marca a janela como cheia, encerra o turno com erro visível e
+faz a submissão seguinte compactar antes da rede; ele não repete silenciosamente
+a mesma amostragem.
+
+Neste aplicativo, instruções e ferramentas são campos recompostos em cada
+request, e não world-state persistido no histórico. Por isso o cálculo local usa
+o máximo entre a medição compatível acrescida do sufixo local e a estimativa da
+requisição completa. Também não são inventados `comp_hash`, metadados de mundo,
+um ledger duplicado ou um endpoint alternativo. A instalação do histórico e do
+marcador visível é atômica no SQLite próprio.
+
 ## Decisões próprias
 
 Este projeto implementa do zero:

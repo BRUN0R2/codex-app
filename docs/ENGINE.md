@@ -71,6 +71,36 @@ toda saída possui uma chamada. Uma interrupção que deixou uma chamada pendent
 recebe a saída explícita `aborted`; saídas órfãs são removidas. Qualquer correção
 é regravada em uma única transação e publicada nos diagnósticos de runtime.
 
+## Compactação dinâmica de contexto
+
+Antes da primeira amostragem e de toda continuação no mesmo turno, o
+`NativeEngine` avalia a requisição que realmente será enviada. O contexto ativo
+é o maior entre:
+
+- a estimativa atual de instruções, histórico normalizado e ferramentas; e
+- o último uso informado pelo servidor para o mesmo modelo, somado aos itens
+  locais posteriores à última saída gerada pelo modelo.
+
+A contagem é saturante e mede JSON com um writer de contagem, sem criar buffers
+serializados temporários para cada item. A compactação começa quando o orçamento
+automático do catálogo ou a janela útil do modelo é atingido. Não há um limite
+de rodadas adicional nem uma cota local arbitrária de tamanho de projeto.
+
+O protocolo é Responses Remote Compaction V2. O motor envia
+`compaction_trigger`, exige exatamente um checkpoint `compaction` criptografado
+e só então instala, em uma transação SQLite, as mensagens recentes retidas, o
+checkpoint e o item concluído da timeline. A cópia enviada ao provider pode
+reduzir apenas o sufixo contíguo de saídas de ferramenta quando ele sozinho
+impede a requisição de caber; o histórico durável não é alterado antes do
+checkpoint válido.
+
+Um `context_length_exceeded` inesperado em uma amostragem comum é preservado
+como `ContextWindowExceeded`. O turno atual falha de forma visível e uma medição
+de janela cheia é persistida. Na próxima submissão, o preflight compacta antes
+de chamar o modelo. A ação recusada nunca é repetida silenciosamente no mesmo
+turno. O frontend somente apresenta os eventos e o estado persistido; política,
+recuperação e atomicidade pertencem integralmente ao Rust.
+
 ## Ferramentas e permissão
 
 | Ferramenta | Somente leitura | Projeto | Acesso total |

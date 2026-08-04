@@ -97,7 +97,7 @@ e recebem estruturas já carregadas.
 Novo módulo interno responsável pelo ciclo Remote Compaction V2:
 
 1. verificar cancelamento;
-2. carregar e normalizar o histórico;
+2. receber o histórico normalizado e as ferramentas já avaliadas pelo caller;
 3. preparar uma cópia limitada para a requisição de compactação;
 4. emitir `ContextCompaction` como item iniciado;
 5. enviar o histórico, ferramentas e `compaction_trigger`;
@@ -186,8 +186,11 @@ Itens locais após esse delimitador incluem mensagem `user`,
 `FunctionCallOutput` e `CustomToolCallOutput`. A varredura usa a ordem real do
 histórico, portanto também cobre steers e múltiplas saídas de ferramentas.
 
-Se não houver delimitador coerente para um snapshot existente, a política não
-assume um delta vazio: estima a requisição completa.
+Se não houver delimitador coerente para um snapshot compatível, não existe um
+sufixo local confiável a acrescentar. A política ainda toma o máximo entre o
+snapshot e a estimativa completa. Isso permite que a medição sintética de janela
+cheia, gravada após uma recusa antes de qualquer saída do modelo, force a
+compactação seguinte sem subestimar a requisição atual.
 
 ### Sem snapshot ou com modelo diferente
 
@@ -203,8 +206,8 @@ um catálogo anterior. O cálculo usa adição saturante e nunca pode dar overfl
 
 ### Estimador
 
-- Estruturas ordinárias são serializadas como JSON e aproximadas por
-  `ceil(bytes / 4)`.
+- Estruturas ordinárias têm o tamanho JSON contado por streaming e são
+  aproximadas por `ceil(bytes / 4)`, sem alocar uma cópia serializada por item.
 - Payloads `data:image/...;base64,...` não são cobrados pelo tamanho bruto da
   base64; cada imagem usa uma estimativa fixa de 1.024 tokens, consistente com o
   custo já adotado pelo projeto.
