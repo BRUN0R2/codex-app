@@ -1,4 +1,5 @@
 mod agent;
+mod apply_patch;
 mod approval;
 pub(crate) mod auth;
 mod compaction;
