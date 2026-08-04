@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::context_window::ContextUsageSnapshot;
 use super::provider::ResponseItem;
 use crate::engine::{
-    AppConfig, CodexThread, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
+    AppConfig, CodexThread, CompletedTurn, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
     DesktopPreferences, OperationAck, ThreadActiveFlag, ThreadItem, ThreadListResponse,
     ThreadStatus, ThreadTurn, TurnStatus, TurnSummary,
 };
@@ -798,7 +798,7 @@ impl NativeStorage {
         turn_id: String,
         status: TurnStatus,
         error: Option<String>,
-    ) -> Result<TurnSummary, AppError> {
+    ) -> Result<CompletedTurn, AppError> {
         if status == TurnStatus::InProgress {
             return Err(AppError::State(
                 "complete_turn cannot preserve an in-progress status".into(),
@@ -813,7 +813,13 @@ impl NativeStorage {
                 .execute(
                     "UPDATE turns SET status = ?1, error = ?2, updated_at = ?3
                      WHERE id = ?4 AND thread_id = ?5 AND status = 'inProgress'",
-                    params![status_name(status), error, now, turn_id, thread_id],
+                    params![
+                        status_name(status),
+                        error.as_deref(),
+                        now,
+                        turn_id,
+                        thread_id
+                    ],
                 )
                 .map_err(storage_error)?;
             require_changed(changed, "active turn")?;
@@ -824,9 +830,11 @@ impl NativeStorage {
                 )
                 .map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
-            Ok(TurnSummary {
+            Ok(CompletedTurn {
                 id: turn_id,
                 status,
+                error,
+                updated_at: now,
             })
         })
         .await
@@ -1509,6 +1517,44 @@ mod tests {
         let failed_turn = loaded.turns.first().expect("failed turn should be present");
         assert_eq!(failed_turn.status, TurnStatus::Failed);
         assert_eq!(failed_turn.error.as_deref(), Some("provider stream failed"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_turn_returns_terminal_projection() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("completed-turn.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(directory.path().display().to_string())
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_compaction_turn(thread.id.clone(), "gpt-test".into(), None)
+            .await
+            .expect("turn should begin");
+        let created_at = storage
+            .read_thread(thread.id.clone())
+            .await
+            .expect("thread should load")
+            .turns[0]
+            .created_at;
+
+        let completed = storage
+            .complete_turn(
+                thread.id,
+                turn.id,
+                TurnStatus::Interrupted,
+                Some("interrupted by user".into()),
+            )
+            .await
+            .expect("turn should complete");
+
+        assert_eq!(completed.status, TurnStatus::Interrupted);
+        assert_eq!(completed.error.as_deref(), Some("interrupted by user"));
+        assert!(completed.updated_at >= created_at);
     }
 
     #[tokio::test(flavor = "current_thread")]

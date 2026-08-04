@@ -136,7 +136,7 @@ pub struct TurnNotification {
 #[serde(rename_all = "camelCase")]
 pub struct TurnCompletedNotification {
     pub thread_id: String,
-    pub turn: TurnSummary,
+    pub turn: CompletedTurn,
     pub error: Option<OperationFailure>,
 }
 
@@ -677,6 +677,15 @@ pub struct TurnStartResponse {
 pub struct TurnSummary {
     pub id: String,
     pub status: TurnStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedTurn {
+    pub id: String,
+    pub status: TurnStatus,
+    pub error: Option<String>,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
