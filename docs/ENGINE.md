@@ -52,6 +52,14 @@ Notificações suportadas:
 Qualquer método diferente falha na fronteira TypeScript e gera diagnóstico
 visível.
 
+`turn.completed` carrega a projeção terminal persistida do turno: `id`,
+`status`, `error` e `updatedAt`. O storage produz esses valores na mesma
+transação que encerra o turno e atualiza a thread. O frontend aplica a projeção
+ao cache visível e limpa o runtime em um único batch, portanto interrupção,
+falha e duração não dependem da chegada posterior de `thread.updated`. Essa
+notificação posterior apenas reconcilia o snapshot completo de forma
+idempotente; uma segunda conclusão conflitante é erro de contrato.
+
 ## Provider
 
 O backend usa a sessão OAuth diretamente para:
