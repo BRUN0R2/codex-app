@@ -1,4 +1,5 @@
 import type { ProjectRecord } from "../contracts/types";
+import type { IconName } from "../ui/Icon";
 
 const STORAGE_KEY = "codex-desktop.projects.v1";
 const MAX_PROJECTS = 32;
@@ -57,6 +58,25 @@ export function pathsEqual(left: string | null, right: string | null): boolean {
   return normalizeForComparison(left) === normalizeForComparison(right);
 }
 
+export function updateProject(
+  projects: readonly ProjectRecord[],
+  path: string,
+  updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
+): readonly ProjectRecord[] {
+  const normalized = validatePath(path);
+  return projects.map((project) => {
+    if (pathsEqual(project.path, normalized)) {
+      return {
+        ...project,
+        ...(updates.name !== undefined ? { name: updates.name } : {}),
+        ...(updates.icon !== undefined ? { icon: updates.icon } : {}),
+        ...(updates.color !== undefined ? { color: updates.color } : {}),
+      };
+    }
+    return project;
+  });
+}
+
 function decodeStoredProjects(value: unknown): StoredProjects {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("A lista local de projetos não é um objeto.");
@@ -77,22 +97,20 @@ function decodeStoredProjects(value: unknown): StoredProjects {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
       throw new Error(`O projeto ${index + 1} é inválido.`);
     }
-    const project = entry as Record<"name" | "path", unknown>;
-    const projectKeys = Object.keys(project).sort();
-    if (projectKeys.length !== 2 || projectKeys[0] !== "name" || projectKeys[1] !== "path") {
-      throw new Error(`O projeto ${index + 1} possui campos incompatíveis.`);
-    }
+    const project = entry as Record<"color" | "icon" | "name" | "path", unknown>;
     const path = validatePath(project.path);
     const name = project.name;
     if (typeof name !== "string" || name.length === 0 || name.length > 256) {
       throw new Error(`O nome do projeto ${index + 1} é inválido.`);
     }
+    const icon = typeof project.icon === "string" ? (project.icon as IconName) : undefined;
+    const color = typeof project.color === "string" ? project.color : undefined;
     const comparison = normalizeForComparison(path);
     if (seen.has(comparison)) {
       throw new Error(`O projeto ${index + 1} está duplicado.`);
     }
     seen.add(comparison);
-    return { name, path };
+    return { name, path, ...(icon ? { icon } : {}), ...(color ? { color } : {}) };
   });
   return { version: 1, projects };
 }

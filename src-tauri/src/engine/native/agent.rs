@@ -12,7 +12,7 @@ use super::compaction::compact_context;
 use super::context_window::{evaluate_context_window, full_context_usage};
 use super::provider::{
     ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseRequest,
-    ResponseRequestSettings, SelectedModel, normalize_provider_history,
+    ResponseRequestSettings, SelectedModel, WebSearchAction, normalize_provider_history,
 };
 use super::tools::{MAX_PROVIDER_ITEM_BYTES, PreparedTool, ToolExecutionContext};
 use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
@@ -790,10 +790,7 @@ fn visible_item(item: &ResponseItem) -> Result<Option<ThreadItem>, AppError> {
         ResponseItem::WebSearchCall { action, .. } => Ok(Some(ThreadItem::ToolExecution {
             id: required_visible_item_id(item)?,
             name: "web_search".into(),
-            description: action
-                .as_ref()
-                .map(|action| format!("{action:?}"))
-                .unwrap_or_else(|| "Web search".into()),
+            description: web_search_activity_detail(action.as_ref()),
             status: ActivityStatus::Completed,
             output: None,
         })),
@@ -804,6 +801,35 @@ fn visible_item(item: &ResponseItem) -> Result<Option<ThreadItem>, AppError> {
         | ResponseItem::Compaction { .. }
         | ResponseItem::CompactionTrigger { .. } => Ok(None),
     }
+}
+
+fn web_search_activity_detail(action: Option<&WebSearchAction>) -> String {
+    let detail = match action {
+        Some(WebSearchAction::Search { query, queries }) => query
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::trim)
+            .map(str::to_string)
+            .or_else(|| {
+                let queries = queries
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(String::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>();
+                (!queries.is_empty()).then(|| queries.join(" · "))
+            }),
+        Some(WebSearchAction::OpenPage { url }) | Some(WebSearchAction::FindInPage { url, .. }) => {
+            url.as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        }
+        None => None,
+    };
+    detail.unwrap_or_else(|| "Pesquisa na web".into())
 }
 
 fn required_visible_item_id(item: &ResponseItem) -> Result<String, AppError> {
@@ -831,6 +857,8 @@ fn compose_instructions(
         "{}\n\n# Native Codex Desktop runtime\n\
          You are operating through an independent desktop runtime in workspace {}. \
          Use only the tools advertised in this request. Tool paths are workspace-relative. \
+         For multi-step work, publish a concise plan with update_plan and keep its statuses current. \
+         Skip a plan for trivial requests. \
          Never claim an operation succeeded until its tool result confirms it. \
          Surface blockers and failures plainly. {personality}{developer}",
         model.instructions(),
@@ -934,7 +962,8 @@ fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_input_bytes, record_turn_state};
+    use super::{add_input_bytes, record_turn_state, web_search_activity_detail};
+    use crate::engine::native::provider::WebSearchAction;
 
     #[test]
     fn combined_input_is_bounded() {
@@ -949,5 +978,26 @@ mod tests {
         record_turn_state(&mut state, "route-1".into()).expect("same route should be idempotent");
         assert!(record_turn_state(&mut state, "route-2".into()).is_err());
         assert_eq!(state.as_deref(), Some("route-1"));
+    }
+
+    #[test]
+    fn web_search_activity_uses_the_query_or_url_without_debug_syntax() {
+        let search = WebSearchAction::Search {
+            query: Some("  Codex app activity messages  ".into()),
+            queries: None,
+        };
+        let page = WebSearchAction::OpenPage {
+            url: Some("https://developers.openai.com/codex/app/".into()),
+        };
+
+        assert_eq!(
+            web_search_activity_detail(Some(&search)),
+            "Codex app activity messages"
+        );
+        assert_eq!(
+            web_search_activity_detail(Some(&page)),
+            "https://developers.openai.com/codex/app/"
+        );
+        assert_eq!(web_search_activity_detail(None), "Pesquisa na web");
     }
 }

@@ -1,11 +1,7 @@
 use std::path::Path;
-use std::process::{Output, Stdio};
-use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tauri::{AppHandle, State};
-use tokio::process::Command;
-use tokio::time::timeout;
 
 use crate::attachments::{AttachmentKind, inspect_path};
 use crate::engine::{
@@ -22,43 +18,11 @@ const MAX_PROTOCOL_ID_BYTES: usize = 256;
 const MAX_MODEL_NAME_BYTES: usize = 256;
 const MAX_TURN_TEXT_BYTES: usize = 1_048_576;
 const MAX_TURN_ATTACHMENTS: usize = 12;
-const MAX_GIT_REFERENCE_BYTES: usize = 256;
-const MAX_GIT_PATH_BYTES: usize = 4_096;
-const MAX_GIT_STATUS_BYTES: usize = 524_288;
-const MAX_WORKSPACE_CHANGES: usize = 512;
-const GIT_INSPECTION_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadStartRequest {
-    cwd: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WorkspaceRequest {
-    cwd: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum WorkspaceRepository {
-    None,
-    GitBranch {
-        branch: String,
-        changes: Vec<WorkspaceChange>,
-    },
-    GitDetached {
-        revision: String,
-        changes: Vec<WorkspaceChange>,
-    },
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceChange {
-    status: String,
-    path: String,
+    project_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,16 +174,12 @@ pub async fn engine_thread_start(
     engine: State<'_, EngineManager>,
     request: ThreadStartRequest,
 ) -> CommandResult<ThreadStartResponse> {
-    let cwd = validate_workspace(&request.cwd).await?;
-    engine.thread_start(&app, cwd).await.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn workspace_repository_read(
-    request: WorkspaceRequest,
-) -> CommandResult<WorkspaceRepository> {
-    let cwd = validate_workspace(&request.cwd).await?;
-    inspect_workspace_repository(Path::new(&cwd))
+    let project_path = match request.project_path {
+        Some(path) => Some(validate_workspace(&path).await?),
+        None => None,
+    };
+    engine
+        .thread_start(&app, project_path)
         .await
         .map_err(Into::into)
 }
@@ -502,123 +462,6 @@ async fn validate_workspace(value: &str) -> CommandResult<String> {
     ))
 }
 
-async fn inspect_workspace_repository(cwd: &Path) -> Result<WorkspaceRepository, AppError> {
-    let branch = run_git(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
-    if branch.status.success() {
-        return Ok(WorkspaceRepository::GitBranch {
-            branch: decode_git_reference(branch, "Git branch")?,
-            changes: inspect_workspace_changes(cwd).await?,
-        });
-    }
-
-    let revision = run_git(cwd, &["rev-parse", "--verify", "--short=12", "HEAD"]).await?;
-    if revision.status.success() {
-        return Ok(WorkspaceRepository::GitDetached {
-            revision: decode_git_reference(revision, "Git revision")?,
-            changes: inspect_workspace_changes(cwd).await?,
-        });
-    }
-
-    Ok(WorkspaceRepository::None)
-}
-
-async fn inspect_workspace_changes(cwd: &Path) -> Result<Vec<WorkspaceChange>, AppError> {
-    let output = run_git(
-        cwd,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
-    )
-    .await?;
-    if !output.status.success() {
-        return Err(AppError::FileSystem(
-            "could not inspect Git workspace changes".into(),
-        ));
-    }
-    decode_git_changes(output.stdout)
-}
-
-fn decode_git_changes(output: Vec<u8>) -> Result<Vec<WorkspaceChange>, AppError> {
-    if output.len() > MAX_GIT_STATUS_BYTES {
-        return Err(AppError::Protocol(format!(
-            "Git status exceeds {MAX_GIT_STATUS_BYTES} bytes"
-        )));
-    }
-    let mut fields = output
-        .split(|byte| *byte == 0)
-        .filter(|field| !field.is_empty());
-    let mut changes = Vec::new();
-    while let Some(entry) = fields.next() {
-        if changes.len() >= MAX_WORKSPACE_CHANGES {
-            return Err(AppError::Protocol(format!(
-                "Git status exceeds {MAX_WORKSPACE_CHANGES} changes"
-            )));
-        }
-        if entry.len() < 4 || entry[2] != b' ' {
-            return Err(AppError::Protocol(
-                "Git status returned an invalid entry".into(),
-            ));
-        }
-        let status = std::str::from_utf8(&entry[..2])
-            .map_err(|_| AppError::Protocol("Git status code is not valid UTF-8".into()))?;
-        if status.chars().any(char::is_control) {
-            return Err(AppError::Protocol(
-                "Git status code contains control characters".into(),
-            ));
-        }
-        let path = std::str::from_utf8(&entry[3..])
-            .map_err(|_| AppError::Protocol("Git path is not valid UTF-8".into()))?;
-        if path.is_empty() || path.len() > MAX_GIT_PATH_BYTES || path.chars().any(char::is_control)
-        {
-            return Err(AppError::Protocol(
-                "Git status returned an invalid path".into(),
-            ));
-        }
-        changes.push(WorkspaceChange {
-            status: status.to_owned(),
-            path: path.to_owned(),
-        });
-        if matches!(entry[0], b'R' | b'C') || matches!(entry[1], b'R' | b'C') {
-            fields.next().ok_or_else(|| {
-                AppError::Protocol("Git rename status omitted its source path".into())
-            })?;
-        }
-    }
-    Ok(changes)
-}
-
-async fn run_git(cwd: &Path, arguments: &[&str]) -> Result<Output, AppError> {
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(cwd)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-
-    timeout(GIT_INSPECTION_TIMEOUT, command.output())
-        .await
-        .map_err(|_| AppError::Timeout {
-            operation: "Git workspace inspection",
-        })?
-        .map_err(|error| AppError::FileSystem(format!("could not inspect Git metadata: {error}")))
-}
-
-fn decode_git_reference(output: Output, label: &str) -> Result<String, AppError> {
-    let value = String::from_utf8(output.stdout)
-        .map_err(|_| AppError::Protocol(format!("{label} is not valid UTF-8")))?;
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > MAX_GIT_REFERENCE_BYTES
-        || value.chars().any(char::is_control)
-    {
-        return Err(AppError::Protocol(format!(
-            "{label} must contain between 1 and {MAX_GIT_REFERENCE_BYTES} bytes without control characters"
-        )));
-    }
-    Ok(value.to_owned())
-}
-
 fn normalize_windows_canonical_path(value: &str) -> String {
     if let Some(path) = value.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{path}")
@@ -656,7 +499,7 @@ fn validate_model_name(model: String) -> CommandResult<String> {
 mod tests {
     use serde_json::json;
 
-    use super::{TurnServiceTierSelection, decode_git_changes};
+    use super::{ThreadStartRequest, TurnServiceTierSelection};
 
     #[test]
     fn canonical_windows_prefix_is_not_exposed_to_the_ui() {
@@ -685,21 +528,12 @@ mod tests {
     }
 
     #[test]
-    fn git_status_parser_handles_regular_untracked_and_renamed_paths() {
-        let changes = decode_git_changes(
-            b" M src/ui/Timeline.tsx\0?? notes.txt\0R  new-name.ts\0old-name.ts\0".to_vec(),
-        )
-        .expect("Git status should decode");
+    fn thread_start_request_accepts_an_explicit_projectless_target() {
+        let request: ThreadStartRequest = serde_json::from_value(json!({
+            "projectPath": null
+        }))
+        .expect("projectless request should decode");
 
-        assert_eq!(changes.len(), 3);
-        assert_eq!(changes[0].status, " M");
-        assert_eq!(changes[0].path, "src/ui/Timeline.tsx");
-        assert_eq!(changes[1].status, "??");
-        assert_eq!(changes[2].path, "new-name.ts");
-    }
-
-    #[test]
-    fn git_status_parser_rejects_truncated_rename_metadata() {
-        assert!(decode_git_changes(b"R  new-name.ts\0".to_vec()).is_err());
+        assert_eq!(request.project_path, None);
     }
 }

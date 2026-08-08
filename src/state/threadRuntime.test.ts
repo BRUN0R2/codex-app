@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { CodexThread } from "../contracts/types";
 import {
   deleteThreadRuntime,
+  isThreadActive,
+  readActiveTurnPlan,
   readVisibleThreadTurns,
   synchronizeThreadRuntime,
   updateThreadRuntime,
@@ -58,6 +60,18 @@ describe("thread runtime reducer", () => {
     expect(deleteThreadRuntime(completed, "thread-a").has("thread-a")).toBe(false);
   });
 
+  it("treats runtime ownership as active even when the persisted snapshot is stale", () => {
+    const thread = threadFixture("completed");
+    const runtime = updateThreadRuntime(new Map(), thread.id, (current) => ({
+      ...current,
+      activeTurnId: "turn-runtime",
+    })).get(thread.id);
+
+    expect(isThreadActive(thread, runtime)).toBe(true);
+    expect(isThreadActive(thread, undefined)).toBe(false);
+    expect(isThreadActive(threadFixture("inProgress"), undefined)).toBe(true);
+  });
+
   it("groups streamed items into their canonical turn without exposing context snapshots", () => {
     const thread = threadFixture("inProgress");
     const runtimeItems = [
@@ -71,6 +85,34 @@ describe("thread runtime reducer", () => {
     expect(turns[0]?.items).toEqual(runtimeItems);
     expect(turns[0]?.createdAt).toBe(1);
   });
+
+  it("selects only the latest plan from the active turn", () => {
+    const thread = threadFixture("inProgress");
+    const turns = readVisibleThreadTurns(
+      thread,
+      [
+        {
+          type: "plan",
+          id: "plan-1",
+          explanation: null,
+          steps: [{ step: "Mapear", status: "completed" }],
+        },
+        {
+          type: "plan",
+          id: "plan-2",
+          explanation: "Plano atualizado",
+          steps: [
+            { step: "Mapear", status: "completed" },
+            { step: "Validar", status: "inProgress" },
+          ],
+        },
+      ],
+      "turn-a",
+    );
+
+    expect(readActiveTurnPlan(turns, "turn-a")?.id).toBe("plan-2");
+    expect(readActiveTurnPlan(turns, null)).toBeNull();
+  });
 });
 
 function threadFixture(status: "completed" | "inProgress"): CodexThread {
@@ -79,6 +121,7 @@ function threadFixture(status: "completed" | "inProgress"): CodexThread {
     preview: "Teste",
     name: null,
     cwd: "C:\\workspace",
+    projectPath: "C:\\workspace",
     createdAt: 1,
     updatedAt: 2,
     recencyAt: 2,

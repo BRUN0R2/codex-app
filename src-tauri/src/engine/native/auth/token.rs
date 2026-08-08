@@ -9,6 +9,7 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
 use serde::de::DeserializeOwned;
+use url::Url;
 use zeroize::Zeroize;
 
 use super::error::AuthError;
@@ -108,6 +109,8 @@ impl fmt::Debug for AuthRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AccountClaims {
     pub email: Option<String>,
+    pub name: Option<String>,
+    pub picture: Option<String>,
     pub plan_type: Option<String>,
     pub account_id: Option<String>,
 }
@@ -203,16 +206,24 @@ pub(super) fn validate_account_token(token: &SecretString) -> Result<(), AuthErr
 struct JwtClaims {
     #[serde(default)]
     email: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    picture: Option<String>,
     #[serde(rename = "https://api.openai.com/profile", default)]
     profile: Option<ProfileClaims>,
     #[serde(rename = "https://api.openai.com/auth", default)]
     auth: Option<ChatGptClaims>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct ProfileClaims {
     #[serde(default)]
     email: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    picture: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -231,18 +242,34 @@ struct ExpirationClaims {
 
 fn parse_account_claims(token: &SecretString) -> Result<AccountClaims, AuthError> {
     let claims: JwtClaims = decode_jwt_payload(token)?;
-    let email = claims
-        .email
-        .or_else(|| claims.profile.and_then(|profile| profile.email));
+    let profile = claims.profile.unwrap_or_default();
+    let email = claims.email.or(profile.email);
+    let name = clean_profile_text(claims.name.or(profile.name), 256);
+    let picture = clean_profile_picture(claims.picture.or(profile.picture));
     let (plan_type, account_id) = claims
         .auth
         .map(|auth| (auth.chatgpt_plan_type, auth.chatgpt_account_id))
         .unwrap_or_default();
     Ok(AccountClaims {
         email,
+        name,
+        picture,
         plan_type,
         account_id,
     })
+}
+
+pub(super) fn clean_profile_text(value: Option<String>, maximum_length: usize) -> Option<String> {
+    let value = value?.trim().to_owned();
+    (!value.is_empty() && value.len() <= maximum_length && !value.chars().any(char::is_control))
+        .then_some(value)
+}
+
+pub(super) fn clean_profile_picture(value: Option<String>) -> Option<String> {
+    let value = clean_profile_text(value, 8_192)?;
+    let url = Url::parse(&value).ok()?;
+    (url.scheme() == "https" && url.username().is_empty() && url.password().is_none())
+        .then_some(value)
 }
 
 fn parse_expiration(token: &SecretString) -> Result<Option<DateTime<Utc>>, AuthError> {
@@ -303,6 +330,8 @@ mod tests {
             "tokens": {
                 "idToken": jwt(json!({
                     "email": "person@example.com",
+                    "name": "Person Example",
+                    "picture": "https://images.example.com/person.png",
                     "https://api.openai.com/auth": {
                         "chatgpt_plan_type": "plus",
                         "chatgpt_account_id": "account-1"
@@ -320,6 +349,11 @@ mod tests {
             .account_claims()
             .unwrap_or_else(|error| panic!("claims should parse: {error}"));
         assert_eq!(claims.email.as_deref(), Some("person@example.com"));
+        assert_eq!(claims.name.as_deref(), Some("Person Example"));
+        assert_eq!(
+            claims.picture.as_deref(),
+            Some("https://images.example.com/person.png")
+        );
         assert_eq!(claims.plan_type.as_deref(), Some("plus"));
         assert_eq!(claims.account_id.as_deref(), Some("account-1"));
         assert!(record.validate().is_ok());

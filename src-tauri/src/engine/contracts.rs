@@ -461,6 +461,21 @@ pub enum ActivityStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum PlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanStep {
+    pub step: String,
+    pub status: PlanStepStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum MessagePhase {
     Commentary,
     FinalAnswer,
@@ -549,6 +564,12 @@ pub enum ThreadItem {
         summary: Vec<String>,
         content: Vec<String>,
     },
+    #[serde(rename = "plan")]
+    Plan {
+        id: String,
+        explanation: Option<String>,
+        steps: Vec<PlanStep>,
+    },
     #[serde(rename = "commandExecution")]
     CommandExecution {
         id: String,
@@ -625,6 +646,7 @@ pub struct CodexThread {
     pub preview: String,
     pub name: Option<String>,
     pub cwd: String,
+    pub project_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub recency_at: Option<i64>,

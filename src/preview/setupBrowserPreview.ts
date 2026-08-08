@@ -13,7 +13,6 @@ import type {
   ProjectRecord,
   ThreadListResponse,
   VisibleThreadItem,
-  WorkspaceRepository,
 } from "../contracts/types";
 import { saveProjects } from "../state/projects";
 
@@ -21,6 +20,9 @@ const PREVIEW_PERMISSION_PROFILE = {
   sandbox: "danger-full-access",
   approvals: "never",
 } as const satisfies PermissionProfile;
+
+const PREVIEW_MODEL_ID = "gpt-5.6-luna";
+const PREVIEW_REASONING_EFFORT = "low";
 
 const PREVIEW_PROJECTS = [
   {
@@ -49,7 +51,7 @@ const PREVIEW_ENGINE = {
       "nativeTools",
     ],
   },
-  schemaVersion: 1,
+  schemaVersion: 2,
   permissionProfile: PREVIEW_PERMISSION_PROFILE,
   permissionProfiles: [
     { sandbox: "read-only", approvals: "untrusted" },
@@ -59,15 +61,22 @@ const PREVIEW_ENGINE = {
 } as const satisfies EngineStartResponse;
 
 const PREVIEW_ACCOUNT = {
-  account: { type: "chatgpt", email: null, planType: "plus" },
+  account: {
+    type: "chatgpt",
+    email: null,
+    name: "Bruno",
+    picture:
+      "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23546673'/%3E%3Ccircle cx='32' cy='25' r='14' fill='%23f0c6a7'/%3E%3Cpath d='M8 64c3-17 13-25 24-25s21 8 24 25' fill='%23c03f77'/%3E%3Cpath d='M18 24c1-14 26-18 30 1-10-4-18-9-30-1' fill='%23302028'/%3E%3C/svg%3E",
+    planType: "plus",
+  },
   requiresOpenaiAuth: true,
   refresh: { status: "notRequired", error: null },
 } as const satisfies AccountReadResponse;
 
 const PREVIEW_CONFIG = {
   config: {
-    model: "gpt-5.6-sol",
-    modelReasoningEffort: "ultra",
+    model: PREVIEW_MODEL_ID,
+    modelReasoningEffort: PREVIEW_REASONING_EFFORT,
     serviceTier: null,
     permissionProfile: PREVIEW_PERMISSION_PROFILE,
     webSearch: "live",
@@ -94,13 +103,36 @@ const PREVIEW_MODEL_DEFINITIONS = [
   ["gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"],
 ] as const;
 
-const PREVIEW_MODELS = PREVIEW_MODEL_DEFINITIONS.map(([id, displayName], index) =>
-  createPreviewModel(id, displayName, index === 0),
+const PREVIEW_MODELS = PREVIEW_MODEL_DEFINITIONS.map(([id, displayName]) =>
+  createPreviewModel(id, displayName, id === PREVIEW_MODEL_ID),
 );
 
 const PREVIEW_MODEL_CATALOG = {
   data: PREVIEW_MODELS,
 } satisfies ModelListResponse;
+
+const PREVIEW_NOW_SECONDS = Math.floor(Date.now() / 1_000);
+const PREVIEW_WORKSPACE = "D:\\ARQUIVOS IMPORTANTES\\REPOSITORIOS\\apps\\streamplay-app";
+const PREVIEW_IMAGE_ONE = previewSvg(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 220">
+    <rect width="320" height="220" fill="#17191d"/>
+    <rect x="16" y="16" width="288" height="188" rx="18" fill="#252930"/>
+    <circle cx="82" cy="91" r="42" fill="#597a71"/>
+    <path d="M34 177 105 99l42 43 34-35 105 70" fill="#84a79a"/>
+    <circle cx="243" cy="63" r="22" fill="#e2c873"/>
+  </svg>
+`);
+const PREVIEW_IMAGE_TWO = previewSvg(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 220">
+    <rect width="320" height="220" fill="#151515"/>
+    <rect x="20" y="22" width="280" height="176" rx="12" fill="#202020" stroke="#454545"/>
+    <circle cx="39" cy="41" r="4" fill="#e06c75"/>
+    <circle cx="53" cy="41" r="4" fill="#e5c07b"/>
+    <circle cx="67" cy="41" r="4" fill="#98c379"/>
+    <path d="M43 76h92M43 100h190M43 124h150M43 148h214M43 172h120" stroke="#7f8fa6" stroke-width="9" stroke-linecap="round"/>
+    <path d="M154 76h86M213 124h48M184 172h72" stroke="#65a780" stroke-width="9" stroke-linecap="round"/>
+  </svg>
+`);
 
 const PREVIEW_SCROLL_ITEMS: readonly VisibleThreadItem[] = [
   {
@@ -144,11 +176,12 @@ const PREVIEW_CONTEXT_THREAD = {
   id: "preview-context-thread",
   preview: "Inspecionar janela de contexto",
   name: "Inspecionar janela de contexto",
-  cwd: "D:\\ARQUIVOS IMPORTANTES\\REPOSITORIOS\\apps\\streamplay-app",
+  cwd: PREVIEW_WORKSPACE,
+  projectPath: PREVIEW_WORKSPACE,
   createdAt: 1_785_552_000,
-  updatedAt: 1_785_552_060,
-  recencyAt: 1_785_552_060,
-  status: { type: "idle" },
+  updatedAt: PREVIEW_NOW_SECONDS,
+  recencyAt: PREVIEW_NOW_SECONDS,
+  status: { type: "active", activeFlags: [] },
   turns: [
     {
       id: "preview-turn",
@@ -161,7 +194,7 @@ const PREVIEW_CONTEXT_THREAD = {
         {
           type: "contextUsage",
           id: "context-preview-turn-0",
-          model: "gpt-5.6-sol",
+          model: PREVIEW_MODEL_ID,
           usage: {
             inputTokens: 164_000,
             cachedInputTokens: 120_000,
@@ -175,6 +208,198 @@ const PREVIEW_CONTEXT_THREAD = {
             usablePercent: 95,
             maximumTokens: 400_000,
           },
+        },
+      ],
+    },
+    {
+      id: "preview-active-turn",
+      status: "inProgress",
+      error: null,
+      createdAt: PREVIEW_NOW_SECONDS - 240,
+      updatedAt: PREVIEW_NOW_SECONDS,
+      items: [
+        {
+          type: "userMessage",
+          id: "preview-active-user-message",
+          content: [
+            {
+              type: "text",
+              text: "**O turno falhou** provider request failed: provider returned unsupported SSE event `response.web_search_call.in_progress`",
+            },
+          ],
+        },
+        {
+          type: "plan",
+          id: "preview-active-plan",
+          explanation: null,
+          steps: [
+            {
+              step: "Mapear o ciclo de renderização da conversa e o estado transitório da UI",
+              status: "inProgress",
+            },
+            {
+              step: "Isolar a causa do remonte e dos saltos de scroll",
+              status: "pending",
+            },
+            {
+              step: "Implementar uma correção preservando as alterações locais existentes",
+              status: "pending",
+            },
+            {
+              step: "Adicionar/regredir testes e validar o comportamento",
+              status: "pending",
+            },
+            {
+              step: "Revisar o resultado final e preparar a entrega",
+              status: "pending",
+            },
+          ],
+        },
+        {
+          type: "contextCompaction",
+          id: "preview-context-compaction",
+        },
+        {
+          type: "reasoning",
+          id: "preview-active-reasoning",
+          summary: ["Implementing keyed Show with stable Index"],
+          content: [],
+        },
+        {
+          type: "commandExecution",
+          id: "preview-command-1",
+          command:
+            "$candidates = @('C:\\Users\\bruno\\.codex\\bin\\rtk.exe', 'C:\\Users\\bruno\\bin\\rtk.exe')",
+          cwd: PREVIEW_WORKSPACE,
+          processId: null,
+          source: "agent",
+          status: "completed",
+          aggregatedOutput: null,
+          exitCode: 0,
+          durationMs: 18,
+        },
+        {
+          type: "commandExecution",
+          id: "preview-command-2",
+          command: "rg --files src",
+          cwd: PREVIEW_WORKSPACE,
+          processId: null,
+          source: "agent",
+          status: "completed",
+          aggregatedOutput:
+            "exit_code: 0\nstdout:\nsrc/ui/WindowChrome.tsx\nsrc/ui/WeatherWidget.tsx\nsrc/ui/turnFailure.ts\nsrc/ui/timelineScroll.ts\nsrc/ui/Timeline.tsx\nsrc/ui/SettingsDialog.tsx\nsrc/ui/Composer.tsx\nsrc/ui/AppShell.tsx\nsrc/state/threadRuntime.ts\nsrc/contracts/types.ts\n\nstderr:\n",
+          exitCode: 0,
+          durationMs: 24,
+        },
+        {
+          type: "commandExecution",
+          id: "preview-command-3",
+          command: 'rg -n -S "scroll|scrollTop|scrollIntoView|autoScroll|sticky|anchor" src',
+          cwd: PREVIEW_WORKSPACE,
+          processId: null,
+          source: "agent",
+          status: "completed",
+          aggregatedOutput: null,
+          exitCode: 0,
+          durationMs: 31,
+        },
+        {
+          type: "commandExecution",
+          id: "preview-command-4",
+          command: "Get-Content -LiteralPath package.json -Raw",
+          cwd: PREVIEW_WORKSPACE,
+          processId: null,
+          source: "agent",
+          status: "completed",
+          aggregatedOutput: null,
+          exitCode: 0,
+          durationMs: 19,
+        },
+        {
+          type: "fileChange",
+          id: "preview-file-change",
+          status: "completed",
+          changes: [
+            {
+              path: "src/preview/setupBrowserPreview.ts",
+              kind: { type: "update", movePath: null },
+              diff: [
+                "@@ -22,6 +22,6 @@ const PREVIEW_PERMISSION_PROFILE = {",
+                '   approvals: "never",',
+                " } as const satisfies PermissionProfile;",
+                " ",
+                '-const PREVIEW_MODEL_ID = "gpt-5.6-sol";',
+                '-const PREVIEW_REASONING_EFFORT = "ultra";',
+                '+const PREVIEW_MODEL_ID = "gpt-5.6-luna";',
+                '+const PREVIEW_REASONING_EFFORT = "low";',
+              ].join("\n"),
+            },
+          ],
+        },
+        {
+          type: "toolExecution",
+          id: "preview-web-search-1",
+          name: "web_search",
+          description: "Codex app activity files commands",
+          status: "completed",
+          output: null,
+        },
+        {
+          type: "toolExecution",
+          id: "preview-web-search-2",
+          name: "web_search",
+          description: "Codex app work activity messages",
+          status: "completed",
+          output: null,
+        },
+        {
+          type: "toolExecution",
+          id: "preview-web-search-3",
+          name: "web_search",
+          description: "https://developers.openai.com/codex/app/",
+          status: "completed",
+          output: null,
+        },
+        {
+          type: "userMessage",
+          id: "preview-image-user-message",
+          content: [
+            { type: "text", text: "Compare estas duas referências visuais." },
+            { type: "localImage", path: PREVIEW_IMAGE_ONE, detail: "auto" },
+            { type: "localImage", path: PREVIEW_IMAGE_TWO, detail: "high" },
+          ],
+        },
+        {
+          type: "toolExecution",
+          id: "preview-image-tool",
+          name: "view_image",
+          description: "Visualizou uma imagem",
+          status: "completed",
+          output: JSON.stringify({ image_url: PREVIEW_IMAGE_ONE }),
+        },
+        {
+          type: "agentMessage",
+          id: "preview-latest-commentary",
+          text: "Vou investigar em três frentes: entender a implementação do menu e do perfil neste projeto, localizar a instalação oficial do Codex Desktop e comparar como ela resolve e carrega a imagem do usuário antes de alterar qualquer código.",
+          phase: "commentary",
+        },
+        {
+          type: "commandExecution",
+          id: "preview-command-5",
+          command: "Get-Content -LiteralPath src/ui/Timeline.tsx -Raw",
+          cwd: PREVIEW_WORKSPACE,
+          processId: null,
+          source: "agent",
+          status: "inProgress",
+          aggregatedOutput: null,
+          exitCode: null,
+          durationMs: null,
+        },
+        {
+          type: "agentMessage",
+          id: "preview-image-answer",
+          text: `A imagem gerada também aparece como uma prévia clicável.\n\n![Interface gerada](${PREVIEW_IMAGE_TWO})`,
+          phase: "finalAnswer",
         },
       ],
     },
@@ -201,27 +426,22 @@ const PREVIEW_RATE_LIMITS = {
   rateLimitsByLimitId: {},
 } as const satisfies AccountRateLimitsResponse;
 
-const PREVIEW_REPOSITORY = {
-  type: "gitBranch",
-  branch: "main",
-  changes: [
-    { status: " M", path: "src/ui/Timeline.tsx" },
-    { status: "??", path: "src/ui/MessageNavigator.tsx" },
-  ],
-} as const satisfies WorkspaceRepository;
-
 export function setupBrowserPreview(): void {
   document.title = "Codex App · Visualização";
   document.documentElement.setAttribute("data-runtime", "browser-preview");
   saveProjects(PREVIEW_PROJECTS);
 
   mockIPC(
-    (command) => {
+    (command, args) => {
       switch (command) {
-        case "engine_start":
-          return emit("engine://runtime-status", { state: "ready", message: null }).then(
-            () => PREVIEW_ENGINE,
-          );
+        case "engine_start": {
+          // O boot não pode depender da entrega do evento: numa sessão WebView
+          // reutilizada (reload/HMR) o emit pode nunca resolver e prender a
+          // visualização no boot para sempre. Dispara sem aguardar e responde.
+          const status = emit("engine://runtime-status", { state: "ready", message: null });
+          status.catch(() => {});
+          return PREVIEW_ENGINE;
+        }
         case "engine_account_read":
           return PREVIEW_ACCOUNT;
         case "engine_config_read":
@@ -234,8 +454,47 @@ export function setupBrowserPreview(): void {
           return { thread: PREVIEW_CONTEXT_THREAD, cwd: PREVIEW_CONTEXT_THREAD.cwd };
         case "engine_account_rate_limits_read":
           return PREVIEW_RATE_LIMITS;
-        case "workspace_repository_read":
-          return PREVIEW_REPOSITORY;
+        case "engine_turn_interrupt":
+          return { applied: true };
+        case "engine_turn_steer":
+          return { applied: true };
+        case "engine_turn_start":
+          return {
+            turn: {
+              id: `preview-turn-${Date.now()}`,
+              status: "inProgress",
+            },
+          };
+        case "plugin:dialog|open": {
+          const options = (args as { options?: { directory?: boolean } }).options;
+          return options?.directory === true
+            ? PREVIEW_WORKSPACE
+            : [PREVIEW_IMAGE_ONE, PREVIEW_IMAGE_TWO];
+        }
+        case "attachment_inspect": {
+          const paths = (args as { paths?: readonly string[] }).paths ?? [];
+          return paths.map((path, index) => ({
+            id: `preview-attachment-${index}`,
+            name: index === 0 ? "paisagem.png" : "interface.png",
+            path,
+            kind: "image",
+            size: 128_000 + index * 16_000,
+            mediaType: "image/png",
+          }));
+        }
+        case "attachment_read_image": {
+          const request = (args as { request?: { path?: string } }).request;
+          return { dataUrl: request?.path ?? PREVIEW_IMAGE_ONE };
+        }
+        case "attachment_save_pasted_image":
+          return {
+            id: "preview-pasted-image",
+            name: "imagem-colada.png",
+            path: PREVIEW_IMAGE_ONE,
+            kind: "image",
+            size: 128_000,
+            mediaType: "image/png",
+          };
         default:
           throw new Error(
             `O modo de visualização não executa o comando nativo ${JSON.stringify(command)}.`,
@@ -244,6 +503,10 @@ export function setupBrowserPreview(): void {
     },
     { shouldMockEvents: true },
   );
+}
+
+function previewSvg(svg: string): string {
+  return `data:image/svg+xml,${encodeURIComponent(svg.trim())}`;
 }
 
 function createPreviewModel(id: string, displayName: string, isDefault: boolean): CodexModel {

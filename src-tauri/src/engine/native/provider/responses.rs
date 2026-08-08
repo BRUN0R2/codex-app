@@ -662,26 +662,9 @@ fn decode_event(
                 "provider returned an incomplete response: {reason}"
             )));
         }
-        "response.created"
-        | "response.in_progress"
-        | "response.metadata"
-        | "response.output_item.added"
-        | "response.content_part.added"
-        | "response.content_part.done"
-        | "response.output_text.done"
-        | "response.reasoning_summary_part.done"
-        | "response.reasoning_summary_part.added"
-        | "response.reasoning_summary_text.done"
-        | "response.reasoning_text.done"
-        | "response.function_call_arguments.delta"
-        | "response.function_call_arguments.done"
-        | "response.custom_tool_call_input.delta"
-        | "response.custom_tool_call_input.done" => None,
-        unknown => {
-            return Err(AppError::Provider(format!(
-                "provider returned unsupported SSE event `{unknown}`"
-            )));
-        }
+        // The stream is extensible: transport heartbeats and response lifecycle
+        // events without application output must not terminate an active turn.
+        _ => None,
     };
     if let Some(event) = decoded {
         output.push_back(event);
@@ -1171,11 +1154,52 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_event_discriminators() {
+    fn ignores_unhandled_event_discriminators() {
         let mut parser = SseParser::default();
         let mut events = VecDeque::new();
-        let result = parser.push(b"data: {\"type\":\"response.future\"}\n\n", &mut events);
-        assert!(result.is_err());
+
+        parser
+            .push(b"data: {\"type\":\"response.future\"}\n\n", &mut events)
+            .expect("unhandled response events should not terminate the stream");
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn keeps_streaming_across_keepalive_events() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+
+        for chunk in [
+            br#"data: {"type":"response.output_text.delta","item_id":"message-1","delta":"antes"}
+
+"#
+            .as_slice(),
+            br#"data: {"type":"keepalive"}
+
+"#
+            .as_slice(),
+            br#"data: {"type":"response.output_text.delta","item_id":"message-1","delta":" depois"}
+
+"#
+            .as_slice(),
+        ] {
+            parser
+                .push(chunk, &mut events)
+                .expect("keepalive should not terminate a valid response stream");
+        }
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::OutputTextDelta { item_id, delta })
+                if item_id == "message-1" && delta == "antes"
+        ));
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::OutputTextDelta { item_id, delta })
+                if item_id == "message-1" && delta == " depois"
+        ));
     }
 
     #[test]
@@ -1190,6 +1214,25 @@ mod tests {
                 &mut events,
             )
             .expect("reasoning summary lifecycle marker should be accepted");
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn accepts_web_search_lifecycle_markers() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+
+        for kind in [
+            "response.web_search_call.in_progress",
+            "response.web_search_call.searching",
+            "response.web_search_call.completed",
+        ] {
+            let event = format!("data: {{\"type\":\"{kind}\",\"item_id\":\"search-1\"}}\n\n");
+            parser
+                .push(event.as_bytes(), &mut events)
+                .expect("web search lifecycle marker should be accepted");
+        }
 
         assert!(events.is_empty());
     }

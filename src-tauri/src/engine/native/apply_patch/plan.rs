@@ -862,7 +862,9 @@ mod tests {
         std::os::unix::fs::symlink(&outside_file, &link).expect("symlink should be created");
         #[cfg(windows)]
         if let Err(error) = std::os::windows::fs::symlink_file(&outside_file, &link) {
-            if error.kind() == std::io::ErrorKind::PermissionDenied {
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(1314)
+            {
                 return;
             }
             panic!("symlink should be created: {error}");

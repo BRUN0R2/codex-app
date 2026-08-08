@@ -25,12 +25,12 @@ import type {
   ModelReroutedNotification,
   ModelSafetyBufferingUpdatedNotification,
   ModelVerification,
+  PlanItem,
   ProjectRecord,
   ReasoningEffort,
   RuntimeDiagnostic,
   RuntimeStatus,
   VisibleThreadItem,
-  WorkspaceRepository,
 } from "../contracts/types";
 import {
   archiveThread as archiveThreadCommand,
@@ -46,11 +46,9 @@ import {
   loginWithChatGpt,
   logout as logoutCommand,
   openExternalUrl,
-  openWorkspacePath,
   readAccount,
   readConfig,
   readRateLimits,
-  readWorkspaceRepository,
   respondToServerRequest,
   resumeThread,
   savePastedImage,
@@ -70,13 +68,31 @@ import {
   upsertItem,
 } from "./conversation";
 import {
+  appendQueuedMessage,
+  deleteMessageQueue,
+  type MessageQueueMap,
+  type QueuedMessage,
+  readQueuedMessages,
+  takeQueuedMessage as reduceTakeQueuedMessage,
+} from "./messageQueue";
+import { resolveNewThreadWorkspace } from "./newThreadTarget";
+import {
   loadPinnedThreadIds,
   removePinnedThreadId,
   savePinnedThreadIds,
   togglePinnedThreadId,
 } from "./pins";
-import { addProject, loadProjects, pathsEqual, removeProject, saveProjects } from "./projects";
 import {
+  addProject,
+  loadProjects,
+  pathsEqual,
+  removeProject,
+  saveProjects,
+  updateProject as updateProjectsList,
+} from "./projects";
+import {
+  readActiveTurnPlan,
+  isThreadActive as readThreadActive,
   readVisibleThreadTurns,
   deleteThreadRuntime as reduceDeleteThreadRuntime,
   synchronizeThreadRuntime as reduceSynchronizeThreadRuntime,
@@ -88,6 +104,7 @@ import { applyTurnCompletion } from "./turnCompletion";
 
 const MAX_DIAGNOSTICS = 50;
 const MAX_PENDING_APPROVALS = 64;
+const BOOT_TIMEOUT_MS = 15_000;
 
 export interface DiagnosticEntry extends RuntimeDiagnostic {
   readonly id: number;
@@ -105,6 +122,7 @@ export interface SendMessageInput {
 export interface AppController {
   readonly account: Accessor<AccountReadResponse | undefined>;
   readonly activeTurnId: Accessor<string | null>;
+  readonly activePlan: Accessor<PlanItem | null>;
   readonly approvals: Accessor<readonly EngineServerRequest[]>;
   readonly archivedThreads: Accessor<readonly CodexThread[]>;
   readonly archivedThreadsNextCursor: Accessor<string | null>;
@@ -126,6 +144,7 @@ export interface AppController {
   readonly pendingOperations: Accessor<number>;
   readonly pinnedThreadIds: Accessor<readonly string[]>;
   readonly projects: Accessor<readonly ProjectRecord[]>;
+  readonly queuedMessages: Accessor<readonly QueuedMessage[]>;
   readonly rateLimits: Accessor<AccountRateLimitsResponse | null>;
   readonly runtimeStatus: Accessor<RuntimeStatus>;
   readonly signedIn: Accessor<boolean>;
@@ -135,32 +154,39 @@ export interface AppController {
   readonly turnBusy: Accessor<boolean>;
   readonly turns: Accessor<readonly VisibleThreadTurn[]>;
   readonly workspace: Accessor<string | null>;
-  readonly workspaceRepository: Accessor<WorkspaceRepository | null>;
   readonly archiveThread: (threadId: string) => Promise<boolean>;
   readonly cancelLogin: () => Promise<void>;
   readonly chooseWorkspace: () => Promise<string | null>;
   readonly clearError: () => void;
   readonly compactThread: (threadId: string) => Promise<boolean>;
   readonly deleteThread: (threadId: string) => Promise<boolean>;
+  readonly deleteQueuedMessage: (messageId: string) => boolean;
+  readonly enqueueMessage: (input: SendMessageInput) => boolean;
   readonly forkThread: (threadId: string) => Promise<boolean>;
   readonly inspectFiles: (paths: readonly string[]) => Promise<readonly Attachment[]>;
   readonly interrupt: () => Promise<boolean>;
+  readonly isThreadActive: (threadId: string) => boolean;
   readonly loadMoreThreads: () => Promise<boolean>;
   readonly loadMoreArchivedThreads: () => Promise<boolean>;
   readonly login: () => Promise<boolean>;
   readonly logout: () => Promise<boolean>;
   readonly newThread: (workspace?: string) => boolean;
   readonly openThread: (threadId: string) => Promise<boolean>;
-  readonly openWorkspace: () => Promise<boolean>;
   readonly refreshRateLimits: () => Promise<boolean>;
-  readonly refreshWorkspaceRepository: () => Promise<boolean>;
   readonly removeProject: (path: string) => void;
   readonly renameThread: (threadId: string, name: string) => Promise<boolean>;
+  readonly retryInitialization: () => void;
   readonly respondToApproval: (requestId: string, decision: ApprovalDecision) => Promise<boolean>;
   readonly saveClipboardImage: (dataBase64: string) => Promise<Attachment | null>;
   readonly selectProject: (path: string) => boolean;
   readonly sendMessage: (input: SendMessageInput) => Promise<boolean>;
+  readonly sendQueuedMessageNow: (messageId?: string) => Promise<boolean>;
+  readonly takeQueuedMessage: (messageId: string) => QueuedMessage | null;
   readonly togglePinnedThread: (threadId: string) => void;
+  readonly updateProject: (
+    path: string,
+    updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
+  ) => void;
   readonly updateSetting: (update: ConfigUpdate) => Promise<boolean>;
   readonly unarchiveThread: (threadId: string) => Promise<boolean>;
 }
@@ -193,6 +219,7 @@ export function createAppController(): AppController {
   const [threadRuntime, setThreadRuntime] = createSignal<ReadonlyMap<string, ThreadRuntimeState>>(
     new Map(),
   );
+  const [messageQueues, setMessageQueues] = createSignal<MessageQueueMap>(new Map());
   const [pendingApprovals, setPendingApprovals] = createSignal<readonly EngineServerRequest[]>([]);
   const [diagnostics, setDiagnostics] = createSignal<readonly DiagnosticEntry[]>([]);
   const [error, setError] = createSignal<string | null>(null);
@@ -200,20 +227,16 @@ export function createAppController(): AppController {
   const [openingThreadId, setOpeningThreadId] = createSignal<string | null>(null);
   const [loginPending, setLoginPending] = createSignal(false);
   const [workspace, setWorkspace] = createSignal<string | null>(null);
-  const [workspaceRepository, setWorkspaceRepository] = createSignal<WorkspaceRepository | null>(
-    null,
-  );
   let loginId: string | null = null;
   let diagnosticSequence = 0;
   let disposed = false;
   let unsubscribe: (() => void) | null = null;
   let configQueue: Promise<void> = Promise.resolve();
+  const queuedDispatchTails = new Map<string, Promise<void>>();
   let authenticationSync: {
     readonly expectedSignedIn: boolean;
     readonly promise: Promise<void>;
   } | null = null;
-  let repositoryRequestSequence = 0;
-
   let initialProjects: readonly ProjectRecord[] = [];
   let projectLoadError: Error | null = null;
   try {
@@ -239,6 +262,7 @@ export function createAppController(): AppController {
       ? []
       : readVisibleThreadTurns(thread, runtime?.items ?? [], runtime?.activeTurnId ?? null);
   });
+  const activePlan = createMemo(() => readActiveTurnPlan(turns(), activeTurnId()));
   const modelReroute = createMemo(() => selectedRuntime()?.modelReroute ?? null);
   const modelVerifications = createMemo(() => selectedRuntime()?.modelVerifications ?? []);
   const safetyBuffering = createMemo(() => selectedRuntime()?.safetyBuffering ?? null);
@@ -249,6 +273,10 @@ export function createAppController(): AppController {
       : pendingApprovals().filter((request) => request.params.threadId === threadId);
   });
   const turnBusy = createMemo(() => activeTurnId() !== null);
+  const queuedMessages = createMemo<readonly QueuedMessage[]>(() => {
+    const threadId = currentThread()?.id;
+    return threadId === undefined ? [] : readQueuedMessages(messageQueues(), threadId);
+  });
   const busy = createMemo(() => turnBusy() || pendingOperations() > 0);
   const currentThreadTitle = createMemo(() => {
     const thread = currentThread();
@@ -273,11 +301,6 @@ export function createAppController(): AppController {
     document.documentElement.setAttribute("data-diff", preferences.diffDisplay);
   });
 
-  createEffect(() => {
-    const cwd = workspace();
-    void synchronizeWorkspaceRepository(cwd, true);
-  });
-
   onMount(() => {
     if (projectLoadError !== null) {
       reportError(projectLoadError);
@@ -295,25 +318,29 @@ export function createAppController(): AppController {
   });
 
   async function initialize(): Promise<void> {
+    unsubscribe?.();
+    unsubscribe = null;
+    const subscription = subscribeToEvents({
+      onContractError: reportError,
+      onDiagnostic: addDiagnostic,
+      onNotification: handleNotification,
+      onServerRequest: handleServerRequest,
+      onStatus: handleRuntimeStatus,
+    });
+    let releaseEvents: (() => void) | null = null;
     try {
-      const release = await subscribeToEvents({
-        onContractError: reportError,
-        onDiagnostic: addDiagnostic,
-        onNotification: handleNotification,
-        onServerRequest: handleServerRequest,
-        onStatus: setRuntimeStatus,
-      });
+      const release = await withBootTimeout("registrar os eventos do engine", () => subscription);
       if (disposed) {
-        release();
         return;
       }
+      releaseEvents = release;
       unsubscribe = release;
-      const started = await startEngine();
+      const started = await withBootTimeout("iniciar o engine", () => startEngine());
       if (disposed) {
         return;
       }
       setEngine(started);
-      const currentAccount = await readAccount();
+      const currentAccount = await withBootTimeout("ler a conta conectada", () => readAccount());
       if (disposed) {
         return;
       }
@@ -325,10 +352,33 @@ export function createAppController(): AppController {
     } catch (reason) {
       const message = describeError(reason);
       batch(() => {
+        setEngine(null);
+        setAccount(undefined);
         setError(message);
         setRuntimeStatus({ state: "failed", message });
       });
+    } finally {
+      if (releaseEvents === null) {
+        void subscription.then((release) => release()).catch(() => {});
+      }
     }
+  }
+
+  function handleRuntimeStatus(status: RuntimeStatus): void {
+    if (runtimeStatus().state === "failed") {
+      return;
+    }
+    setRuntimeStatus(status);
+  }
+
+  function retryInitialization(): void {
+    batch(() => {
+      setEngine(null);
+      setAccount(undefined);
+      setError(null);
+      setRuntimeStatus({ state: "starting", message: null });
+    });
+    void initialize();
   }
 
   async function loadAuthenticatedState(): Promise<void> {
@@ -408,6 +458,7 @@ export function createAppController(): AppController {
           clearCurrentThread();
         }
         deleteThreadRuntime(notification.params.threadId);
+        deleteQueuedMessages(notification.params.threadId);
         setPendingApprovals((current) =>
           current.filter((request) => request.params.threadId !== notification.params.threadId),
         );
@@ -418,20 +469,7 @@ export function createAppController(): AppController {
         );
         return;
       case "thread.deleted":
-        setThreads((current) =>
-          current.filter((thread) => thread.id !== notification.params.threadId),
-        );
-        setArchivedThreads((current) =>
-          current.filter((thread) => thread.id !== notification.params.threadId),
-        );
-        if (currentThread()?.id === notification.params.threadId) {
-          clearCurrentThread();
-        }
-        deleteThreadRuntime(notification.params.threadId);
-        setPendingApprovals((current) =>
-          current.filter((request) => request.params.threadId !== notification.params.threadId),
-        );
-        removePinnedThread(notification.params.threadId);
+        removeDeletedThread(notification.params.threadId);
         return;
       case "turn.started":
         updateThreadRuntime(notification.params.threadId, (runtime) => ({
@@ -444,36 +482,45 @@ export function createAppController(): AppController {
         }));
         return;
       case "turn.completed":
-        batch(() => {
-          setThreads((current) =>
-            current.map((thread) =>
-              thread.id === notification.params.threadId
-                ? applyTurnCompletion(thread, notification.params.turn)
-                : thread,
-            ),
-          );
-          setCurrentThread((current) =>
-            current?.id === notification.params.threadId
-              ? applyTurnCompletion(current, notification.params.turn)
-              : current,
-          );
-          updateThreadRuntime(notification.params.threadId, (runtime) => ({
-            ...runtime,
-            activeTurnId:
-              runtime.activeTurnId === notification.params.turn.id ? null : runtime.activeTurnId,
-            safetyBuffering:
-              runtime.activeTurnId === notification.params.turn.id ? null : runtime.safetyBuffering,
-          }));
-          setPendingApprovals((current) =>
-            current.filter((request) => request.params.turnId !== notification.params.turn.id),
-          );
-          if (
-            currentThread()?.id === notification.params.threadId &&
-            notification.params.error !== null
-          ) {
-            setError(notification.params.error.message);
+        {
+          let completedActiveTurn = false;
+          batch(() => {
+            setThreads((current) =>
+              current.map((thread) =>
+                thread.id === notification.params.threadId
+                  ? applyTurnCompletion(thread, notification.params.turn)
+                  : thread,
+              ),
+            );
+            setCurrentThread((current) =>
+              current?.id === notification.params.threadId
+                ? applyTurnCompletion(current, notification.params.turn)
+                : current,
+            );
+            updateThreadRuntime(notification.params.threadId, (runtime) => {
+              completedActiveTurn = runtime.activeTurnId === notification.params.turn.id;
+              return {
+                ...runtime,
+                activeTurnId: completedActiveTurn ? null : runtime.activeTurnId,
+                safetyBuffering: completedActiveTurn ? null : runtime.safetyBuffering,
+              };
+            });
+            setPendingApprovals((current) =>
+              current.filter((request) => request.params.turnId !== notification.params.turn.id),
+            );
+            if (
+              currentThread()?.id === notification.params.threadId &&
+              notification.params.error !== null
+            ) {
+              setError(notification.params.error.message);
+            }
+          });
+          if (completedActiveTurn && notification.params.turn.status === "completed") {
+            queueMicrotask(() => {
+              void scheduleQueuedMessage(notification.params.threadId);
+            });
           }
-        });
+        }
         return;
       case "model.rerouted":
         updateThreadRuntime(notification.params.threadId, (runtime) => ({
@@ -659,6 +706,7 @@ export function createAppController(): AppController {
         setArchivedThreads([]);
         setArchivedThreadsNextCursor(null);
         setThreadRuntime(new Map());
+        setMessageQueues(new Map());
         setPendingApprovals([]);
         clearCurrentThread();
       });
@@ -696,7 +744,7 @@ export function createAppController(): AppController {
     try {
       const next = addProject(projects(), path);
       saveProjects(next);
-      const changesConversation = thread !== null && !pathsEqual(thread.cwd, path);
+      const changesConversation = thread !== null && !pathsEqual(thread.projectPath, path);
       batch(() => {
         setProjects(next);
         setWorkspace(path);
@@ -749,20 +797,42 @@ export function createAppController(): AppController {
   }
 
   function newThread(targetWorkspace?: string): boolean {
-    if (targetWorkspace !== undefined && !selectProject(targetWorkspace)) {
+    const requestedWorkspace = resolveNewThreadWorkspace(targetWorkspace);
+    if (requestedWorkspace === null) {
+      batch(() => {
+        setWorkspace(null);
+        clearCurrentThread();
+      });
+      return true;
+    }
+    if (!selectProject(requestedWorkspace)) {
       return false;
     }
     clearCurrentThread();
     return true;
   }
 
-  async function materializeThread(cwd: string): Promise<CodexThread | null> {
+  function selectThreadProject(thread: CodexThread): boolean {
+    if (thread.projectPath === null) {
+      setWorkspace(null);
+      return true;
+    }
+    return selectProject(thread.projectPath);
+  }
+
+  async function materializeThread(projectPath: string | null): Promise<CodexThread | null> {
     try {
-      const response = await withPending(() => startThread(cwd));
-      if (!pathsEqual(response.thread.cwd, cwd)) {
-        throw new Error("O engine criou a tarefa em um projeto diferente do solicitado.");
+      const response = await withPending(() => startThread(projectPath));
+      if (!pathsEqual(response.thread.projectPath, projectPath)) {
+        throw new Error("O engine criou a tarefa com uma associação de projeto diferente.");
       }
-      if (!selectProject(response.thread.cwd)) {
+      if (
+        response.thread.projectPath !== null &&
+        !pathsEqual(response.thread.cwd, response.thread.projectPath)
+      ) {
+        throw new Error("O diretório de execução da tarefa diverge do projeto associado.");
+      }
+      if (!selectThreadProject(response.thread)) {
         return null;
       }
       batch(() => {
@@ -781,7 +851,10 @@ export function createAppController(): AppController {
     setOpeningThreadId(threadId);
     try {
       const response = await resumeThread(threadId);
-      if (!selectProject(response.cwd)) {
+      if (!pathsEqual(response.cwd, response.thread.cwd)) {
+        throw new Error("O engine retomou a tarefa em um diretório inconsistente.");
+      }
+      if (!selectThreadProject(response.thread)) {
         return false;
       }
       batch(() => {
@@ -795,21 +868,6 @@ export function createAppController(): AppController {
       return false;
     } finally {
       setOpeningThreadId(null);
-    }
-  }
-
-  async function openWorkspace(): Promise<boolean> {
-    const path = workspace();
-    if (path === null) {
-      setError("Selecione um projeto antes de abri-lo no sistema.");
-      return false;
-    }
-    try {
-      await openWorkspacePath(path);
-      return true;
-    } catch (reason) {
-      reportError(reason);
-      return false;
     }
   }
 
@@ -848,6 +906,11 @@ export function createAppController(): AppController {
     }
   }
 
+  function isThreadActive(threadId: string): boolean {
+    const thread = [...threads(), ...archivedThreads()].find((entry) => entry.id === threadId);
+    return thread !== undefined && readThreadActive(thread, threadRuntime().get(threadId));
+  }
+
   async function deleteThread(threadId: string): Promise<boolean> {
     const thread = [...threads(), ...archivedThreads()].find((entry) => entry.id === threadId);
     if (thread === undefined) {
@@ -856,19 +919,20 @@ export function createAppController(): AppController {
     }
     try {
       const title = thread.name ?? thread.preview ?? "Nova tarefa";
-      const confirmed = await confirm(
-        `A tarefa “${title}” e todo o histórico serão excluídos permanentemente.`,
-        {
-          cancelLabel: "Cancelar",
-          kind: "warning",
-          okLabel: "Excluir",
-          title: "Excluir tarefa?",
-        },
-      );
+      const description = isThreadActive(threadId)
+        ? `A tarefa “${title}” está ativa. O turno em andamento será interrompido e todo o histórico será excluído permanentemente.`
+        : `A tarefa “${title}” e todo o histórico serão excluídos permanentemente.`;
+      const confirmed = await confirm(description, {
+        cancelLabel: "Cancelar",
+        kind: "warning",
+        okLabel: "Excluir",
+        title: "Excluir tarefa?",
+      });
       if (!confirmed) {
         return false;
       }
       await withPending(() => deleteThreadCommand(threadId));
+      removeDeletedThread(threadId);
       return true;
     } catch (reason) {
       reportError(reason);
@@ -889,7 +953,7 @@ export function createAppController(): AppController {
   async function forkThread(threadId: string): Promise<boolean> {
     try {
       const response = await withPending(() => forkThreadCommand(threadId));
-      if (!selectProject(response.thread.cwd)) {
+      if (!selectThreadProject(response.thread)) {
         return false;
       }
       batch(() => {
@@ -967,14 +1031,7 @@ export function createAppController(): AppController {
     }
     let thread = currentThread();
     if (thread === null) {
-      let cwd = workspace();
-      if (cwd === null) {
-        cwd = await chooseWorkspace();
-      }
-      if (cwd === null) {
-        return false;
-      }
-      thread = await materializeThread(cwd);
+      thread = await materializeThread(workspace());
     }
     if (thread === null) {
       return false;
@@ -993,6 +1050,113 @@ export function createAppController(): AppController {
         ...runtime,
         activeTurnId: response.turn.id,
       }));
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  function enqueueMessage(input: SendMessageInput): boolean {
+    if (input.text.trim().length === 0 && input.attachments.length === 0) {
+      return false;
+    }
+    const thread = currentThread();
+    if (thread === null) {
+      setError("Abra uma tarefa antes de adicionar mensagens à fila.");
+      return false;
+    }
+    const message: QueuedMessage = {
+      id: crypto.randomUUID(),
+      text: input.text,
+      attachments: [...input.attachments],
+      model: input.model,
+      effort: input.effort,
+      serviceTier: input.serviceTier,
+    };
+    try {
+      setMessageQueues((current) => appendQueuedMessage(current, thread.id, message));
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  function takeQueuedMessage(messageId: string): QueuedMessage | null {
+    const threadId = currentThread()?.id;
+    if (threadId === undefined) {
+      return null;
+    }
+    let taken: QueuedMessage | null = null;
+    setMessageQueues((current) => {
+      const result = reduceTakeQueuedMessage(current, threadId, messageId);
+      taken = result.message;
+      return result.queues;
+    });
+    return taken;
+  }
+
+  function deleteQueuedMessage(messageId: string): boolean {
+    return takeQueuedMessage(messageId) !== null;
+  }
+
+  function sendQueuedMessageNow(messageId?: string): Promise<boolean> {
+    const threadId = currentThread()?.id;
+    return threadId === undefined
+      ? Promise.resolve(false)
+      : scheduleQueuedMessage(threadId, messageId);
+  }
+
+  function scheduleQueuedMessage(threadId: string, messageId?: string): Promise<boolean> {
+    const previous = queuedDispatchTails.get(threadId) ?? Promise.resolve();
+    const operation = previous.then(() => dispatchQueuedMessage(threadId, messageId));
+    const tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    queuedDispatchTails.set(threadId, tail);
+    void tail.then(() => {
+      if (queuedDispatchTails.get(threadId) === tail) {
+        queuedDispatchTails.delete(threadId);
+      }
+    });
+    return operation;
+  }
+
+  async function dispatchQueuedMessage(threadId: string, messageId?: string): Promise<boolean> {
+    const queue = readQueuedMessages(messageQueues(), threadId);
+    const message =
+      messageId === undefined ? queue.at(0) : queue.find((entry) => entry.id === messageId);
+    if (message === undefined) {
+      return false;
+    }
+    try {
+      const runningTurnId = threadRuntime().get(threadId)?.activeTurnId ?? null;
+      if (runningTurnId === null) {
+        const response = await startTurn({
+          threadId,
+          clientUserMessageId: message.id,
+          text: message.text,
+          attachments: message.attachments.map((attachment) => ({ path: attachment.path })),
+          model: message.model,
+          effort: message.effort,
+          serviceTier: message.serviceTier,
+        });
+        updateThreadRuntime(threadId, (runtime) => ({
+          ...runtime,
+          activeTurnId: response.turn.id,
+        }));
+      } else {
+        await steerTurn({
+          threadId,
+          expectedTurnId: runningTurnId,
+          clientUserMessageId: message.id,
+          text: message.text,
+          attachments: message.attachments.map((attachment) => ({ path: attachment.path })),
+        });
+      }
+      setMessageQueues((current) => reduceTakeQueuedMessage(current, threadId, message.id).queues);
       return true;
     } catch (reason) {
       reportError(reason);
@@ -1097,6 +1261,26 @@ export function createAppController(): AppController {
     setThreadRuntime((current) => reduceDeleteThreadRuntime(current, threadId));
   }
 
+  function removeDeletedThread(threadId: string): void {
+    batch(() => {
+      setThreads((current) => current.filter((thread) => thread.id !== threadId));
+      setArchivedThreads((current) => current.filter((thread) => thread.id !== threadId));
+      if (currentThread()?.id === threadId) {
+        clearCurrentThread();
+      }
+      deleteThreadRuntime(threadId);
+      deleteQueuedMessages(threadId);
+      setPendingApprovals((current) =>
+        current.filter((request) => request.params.threadId !== threadId),
+      );
+      removePinnedThread(threadId);
+    });
+  }
+
+  function deleteQueuedMessages(threadId: string): void {
+    setMessageQueues((current) => deleteMessageQueue(current, threadId));
+  }
+
   function mergeThread(thread: CodexThread): void {
     setThreads((current) => {
       const index = current.findIndex((entry) => entry.id === thread.id);
@@ -1142,39 +1326,20 @@ export function createAppController(): AppController {
     }
   }
 
-  async function synchronizeWorkspaceRepository(
-    cwd: string | null,
-    clearCurrent: boolean,
-  ): Promise<boolean> {
-    repositoryRequestSequence += 1;
-    const requestSequence = repositoryRequestSequence;
-    if (clearCurrent) {
-      setWorkspaceRepository(null);
-    }
-    if (cwd === null) {
-      return false;
-    }
-    try {
-      const repository = await readWorkspaceRepository(cwd);
-      if (disposed || requestSequence !== repositoryRequestSequence) {
-        return false;
-      }
-      setWorkspaceRepository(repository);
-      return true;
-    } catch (reason) {
-      if (!disposed && requestSequence === repositoryRequestSequence) {
-        reportError(reason);
-      }
-      return false;
-    }
-  }
-
-  async function refreshWorkspaceRepository(): Promise<boolean> {
-    return synchronizeWorkspaceRepository(workspace(), false);
+  function updateProject(
+    path: string,
+    updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
+  ): void {
+    setProjects((current) => {
+      const next = updateProjectsList(current, path, updates);
+      saveProjects(next);
+      return next;
+    });
   }
 
   return {
     account,
+    activePlan,
     activeTurnId,
     approvals,
     archivedThreads,
@@ -1197,6 +1362,7 @@ export function createAppController(): AppController {
     pendingOperations,
     pinnedThreadIds,
     projects,
+    queuedMessages,
     rateLimits,
     runtimeStatus,
     signedIn,
@@ -1206,35 +1372,53 @@ export function createAppController(): AppController {
     turnBusy,
     turns,
     workspace,
-    workspaceRepository,
     archiveThread,
     cancelLogin,
     chooseWorkspace,
     clearError: () => setError(null),
     compactThread,
     deleteThread,
+    deleteQueuedMessage,
+    enqueueMessage,
     forkThread,
     inspectFiles,
     interrupt,
+    isThreadActive,
     loadMoreThreads,
     loadMoreArchivedThreads,
     login,
     logout,
     newThread,
     openThread,
-    openWorkspace,
     refreshRateLimits,
-    refreshWorkspaceRepository,
     removeProject: removeProjectFromSidebar,
     renameThread,
+    retryInitialization,
     respondToApproval,
     saveClipboardImage: saveClipboard,
     selectProject,
     sendMessage,
+    sendQueuedMessageNow,
+    takeQueuedMessage,
     togglePinnedThread,
+    updateProject,
     updateSetting,
     unarchiveThread,
   };
+}
+
+function withBootTimeout<T>(label: string, operation: () => Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `O engine não respondeu em ${BOOT_TIMEOUT_MS / 1000} segundos ao ${label}. Tente novamente.`,
+        ),
+      );
+    }, BOOT_TIMEOUT_MS);
+  });
+  return Promise.race([operation(), timeout]).finally(() => clearTimeout(timer));
 }
 
 function mergeThreadPages(

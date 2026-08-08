@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   ContractError,
+  decodeAccountReadResponse,
+  decodeAttachmentImageResponse,
   decodeEngineNotification,
   decodeEngineStartResponse,
   decodeModelListResponse,
@@ -31,6 +33,32 @@ function modelFixture() {
 }
 
 describe("decodificação dos contratos nativos", () => {
+  it("valida a resposta usada para visualizar anexos de imagem", () => {
+    expect(decodeAttachmentImageResponse({ dataUrl: "data:image/png;base64,aGVsbG8=" })).toEqual({
+      dataUrl: "data:image/png;base64,aGVsbG8=",
+    });
+    expect(() =>
+      decodeAttachmentImageResponse({ dataUrl: "data:image/png;base64,aGVsbG8=", extra: true }),
+    ).toThrow(ContractError);
+  });
+
+  it("preserva nome e foto do perfil ChatGPT", () => {
+    const decoded = decodeAccountReadResponse({
+      account: {
+        type: "chatgpt",
+        email: "bruno@example.com",
+        name: "Bruno",
+        picture: "https://images.example.com/bruno.png",
+        planType: "plus",
+      },
+      requiresOpenaiAuth: true,
+      refresh: { status: "notRequired", error: null },
+    });
+
+    expect(decoded.account?.name).toBe("Bruno");
+    expect(decoded.account?.picture).toBe("https://images.example.com/bruno.png");
+  });
+
   it("aceita somente a composição de engine publicada", () => {
     const decoded = decodeEngineStartResponse({
       engine: {
@@ -48,7 +76,7 @@ describe("decodificação dos contratos nativos", () => {
           "explicitApprovals",
         ],
       },
-      schemaVersion: 1,
+      schemaVersion: 2,
       permissionProfile: { sandbox: "workspace-write", approvals: "on-request" },
       permissionProfiles: [
         { sandbox: "read-only", approvals: "untrusted" },
@@ -73,7 +101,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 1,
+        schemaVersion: 2,
         permissionProfile: { sandbox: "danger-full-access", approvals: "on-request" },
         permissionProfiles: [],
       }),
@@ -120,6 +148,49 @@ describe("decodificação dos contratos nativos", () => {
     ).toThrow(ContractError);
   });
 
+  it("mantém saídas de ferramenta dentro do limite publicado pelo motor", () => {
+    const response = (output: string) => ({
+      thread: {
+        id: "thread-output-limit",
+        preview: "Teste de limite",
+        name: null,
+        cwd: "C:\\workspace",
+        projectPath: "C:\\workspace",
+        createdAt: 1,
+        updatedAt: 2,
+        recencyAt: 2,
+        status: { type: "idle" },
+        turns: [
+          {
+            id: "turn-output-limit",
+            items: [
+              {
+                type: "toolExecution",
+                id: "tool-output-limit",
+                name: "read_file",
+                description: "Lê um arquivo",
+                status: "completed",
+                output,
+              },
+            ],
+            status: "completed",
+            error: null,
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        ],
+      },
+    });
+    const maximumOutput = "x".repeat(1_048_576);
+
+    expect(
+      decodeThreadReadResponse(response(maximumOutput)).thread.turns[0]?.items[0],
+    ).toMatchObject({ output: maximumOutput });
+    expect(() => decodeThreadReadResponse(response(`${maximumOutput}x`))).toThrow(
+      "$.thread.turns[0].items[0].output: string must contain at most 1048576 UTF-8 bytes",
+    );
+  });
+
   it("aceita somente movePath em alterações de arquivo", () => {
     const notification = (kind: Record<string, unknown>) => ({
       method: "item.completed",
@@ -147,6 +218,51 @@ describe("decodificação dos contratos nativos", () => {
     });
     expect(() =>
       decodeEngineNotification(notification({ type: "update", move_path: "src/new.ts" })),
+    ).toThrow(ContractError);
+  });
+
+  it("decodifica planos estruturados e rejeita progresso ambíguo", () => {
+    const notification = (steps: readonly Record<string, unknown>[]) => ({
+      method: "item.completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "plan",
+          id: "plan-1",
+          explanation: "Plano inicial",
+          steps,
+        },
+      },
+    });
+
+    const decoded = decodeEngineNotification(
+      notification([
+        { step: "Mapear o fluxo", status: "completed" },
+        { step: "Corrigir o estado", status: "inProgress" },
+        { step: "Validar", status: "pending" },
+      ]),
+    );
+    if (decoded.method !== "item.completed" || decoded.params.item.type !== "plan") {
+      throw new Error("O plano decodificado mudou de tipo.");
+    }
+    expect(decoded.params.item.steps[1]?.status).toBe("inProgress");
+    expect(() => decodeEngineNotification(notification([]))).toThrow(ContractError);
+    expect(() =>
+      decodeEngineNotification(
+        notification([
+          { step: "Um", status: "inProgress" },
+          { step: "Dois", status: "inProgress" },
+        ]),
+      ),
+    ).toThrow(ContractError);
+    expect(() =>
+      decodeEngineNotification(
+        notification([
+          { step: "Validar", status: "completed" },
+          { step: "validar", status: "pending" },
+        ]),
+      ),
     ).toThrow(ContractError);
   });
 
@@ -294,6 +410,7 @@ describe("decodificação dos contratos nativos", () => {
         preview: "Teste",
         name: null,
         cwd: "C:\\workspace",
+        projectPath: "C:\\workspace",
         createdAt: 1,
         updatedAt: 2,
         recencyAt: 2,
@@ -314,6 +431,15 @@ describe("decodificação dos contratos nativos", () => {
     expect(decodeThreadReadResponse(response).thread.turns[0]?.error).toBe(
       "O provider rejeitou o evento.",
     );
+    expect(
+      decodeThreadReadResponse({
+        thread: {
+          ...response.thread,
+          cwd: "C:\\app-data\\projectless-workspace",
+          projectPath: null,
+        },
+      }).thread.projectPath,
+    ).toBeNull();
     expect(() =>
       decodeThreadReadResponse({
         thread: {

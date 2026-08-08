@@ -34,4 +34,11 @@ describe("turn failure presentation", () => {
     expect(failure.detail).toContain("5 dias e 22 horas");
     expect(failure.technical).toBe("HTTP 429 · usage_limit_reached");
   });
+
+  it("sanitizes absolute system paths from error messages", () => {
+    const failure = presentTurnFailure(
+      "Failed to open file at C:\\Users\\test\\secret\\project.txt",
+    );
+    expect(failure.detail).toBe("Failed to open file at <caminho-local>");
+  });
 });

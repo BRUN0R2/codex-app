@@ -25,14 +25,26 @@ describe("sidebar thread projection", () => {
 
     expect(threadsWithoutConfiguredProject(threads, [])).toBe(threads);
   });
+
+  it("keeps a projectless task in recents independently of its execution directory", () => {
+    const projects = [{ name: "one", path: "D:\\code\\one" }] as const;
+    const thread = threadFixture("standalone", null, "D:\\code\\one");
+
+    expect(threadsWithoutConfiguredProject([thread], projects)).toEqual([thread]);
+  });
 });
 
-function threadFixture(id: string, cwd: string): CodexThread {
+function threadFixture(
+  id: string,
+  projectPath: string | null,
+  cwd = projectPath ?? "D:\\local",
+): CodexThread {
   return {
     id,
     preview: id,
     name: null,
     cwd,
+    projectPath,
     createdAt: 1,
     updatedAt: 2,
     recencyAt: 2,

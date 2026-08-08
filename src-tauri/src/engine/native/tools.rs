@@ -16,9 +16,10 @@ use super::apply_patch::transaction::{PatchOutcome, commit_patch};
 use super::approval::ApprovalBroker;
 use crate::engine::{
     ActivityStatus, ApprovalDecision, CommandApprovalRequest, CommandSource, FileChange,
-    FileChangeKind, PermissionProfile, SandboxMode, ThreadItem,
+    FileChangeKind, PermissionProfile, PlanStep, PlanStepStatus, SandboxMode, ThreadItem,
 };
 use crate::error::AppError;
+use crate::process::background_command;
 
 pub(super) const MAX_PROVIDER_ITEM_BYTES: usize = 2 * 1_048_576;
 const MAX_TOOL_ARGUMENT_BYTES: usize = 262_144;
@@ -32,6 +33,9 @@ const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 const MAX_COMMAND_BYTES: usize = 16_384;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1_048_576;
 const MAX_TOOL_OUTPUT_BYTES: usize = 1_048_576;
+const MAX_PLAN_STEPS: usize = 20;
+const MAX_PLAN_STEP_BYTES: usize = 1_024;
+const MAX_PLAN_EXPLANATION_BYTES: usize = 4_096;
 pub(super) const MAX_DIFF_BYTES: usize = 131_072;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -56,6 +60,10 @@ enum ToolOperation {
     EditFile(EditFileArgs),
     WriteFile(WriteFileArgs),
     ExecCommand(ExecCommandArgs),
+    UpdatePlan {
+        explanation: Option<String>,
+        steps: Vec<PlanStep>,
+    },
 }
 
 #[derive(Debug)]
@@ -119,6 +127,28 @@ struct ExecCommandArgs {
     command: String,
     cwd: String,
     reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdatePlanArgs {
+    explanation: Option<String>,
+    plan: Vec<UpdatePlanStep>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdatePlanStep {
+    step: String,
+    status: UpdatePlanStatus,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum UpdatePlanStatus {
+    Pending,
+    InProgress,
+    Completed,
 }
 
 impl ToolRegistry {
@@ -208,6 +238,36 @@ impl ToolRegistry {
                     "additionalProperties": false
                 }),
             ),
+            function_tool(
+                "update_plan",
+                "Publish the current multi-step work plan shown in the desktop UI. Keep at most one step in progress and update statuses as work advances.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "explanation": {
+                            "type": ["string", "null"],
+                            "maxLength": MAX_PLAN_EXPLANATION_BYTES,
+                            "description": "Optional concise reason for changing the plan."
+                        },
+                        "plan": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": MAX_PLAN_STEPS,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "step": { "type": "string", "minLength": 1, "maxLength": MAX_PLAN_STEP_BYTES },
+                                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+                                },
+                                "required": ["step", "status"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["explanation", "plan"],
+                    "additionalProperties": false
+                }),
+            ),
             json!({
                 "type": "custom",
                 "name": "apply_patch",
@@ -266,6 +326,15 @@ impl ToolRegistry {
                     "exec_command",
                     description,
                     ToolOperation::ExecCommand(args),
+                )
+            }
+            "update_plan" => {
+                let args: UpdatePlanArgs = decode_arguments(name, arguments)?;
+                let (explanation, steps) = normalize_plan(args)?;
+                (
+                    "update_plan",
+                    "Update work plan".into(),
+                    ToolOperation::UpdatePlan { explanation, steps },
                 )
             }
             _ => return Err(AppError::Tool(format!("unknown tool `{name}`"))),
@@ -348,6 +417,11 @@ impl PreparedTool {
                 }],
                 status: ActivityStatus::InProgress,
             },
+            ToolOperation::UpdatePlan { explanation, steps } => ThreadItem::Plan {
+                id: self.item_id.clone(),
+                explanation: explanation.clone(),
+                steps: steps.clone(),
+            },
             _ => ThreadItem::ToolExecution {
                 id: self.item_id.clone(),
                 name: self.name.into(),
@@ -373,6 +447,16 @@ impl PreparedTool {
         context: ToolExecutionContext<'_>,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<ToolExecutionResult, AppError> {
+        if let ToolOperation::UpdatePlan { explanation, steps } = &self.operation {
+            return Ok(ToolExecutionResult {
+                provider_output: "Plan updated.".into(),
+                completed_item: ThreadItem::Plan {
+                    id: self.item_id.clone(),
+                    explanation: explanation.clone(),
+                    steps: steps.clone(),
+                },
+            });
+        }
         let workspace = canonical_workspace(context.workspace).await?;
         let started_at = Instant::now();
         let execution = match &self.operation {
@@ -449,6 +533,9 @@ impl PreparedTool {
                 execute_command(&workspace, args, cancellation)
                     .await
                     .map(ToolResult::Command)
+            }
+            ToolOperation::UpdatePlan { .. } => {
+                unreachable!("update_plan must complete before filesystem tool execution")
             }
         };
 
@@ -533,6 +620,11 @@ impl PreparedTool {
                     diff: diff_preview("", &args.content),
                 }],
                 status,
+            },
+            ToolOperation::UpdatePlan { explanation, steps } => ThreadItem::Plan {
+                id: self.item_id.clone(),
+                explanation: explanation.clone(),
+                steps: steps.clone(),
             },
             _ => ThreadItem::ToolExecution {
                 id: self.item_id.clone(),
@@ -929,7 +1021,7 @@ async fn terminate_child(child: &mut tokio::process::Child) -> Result<(), AppErr
             AppError::Tool(format!("could not inspect command process: {error}"))
         });
     };
-    let mut taskkill = Command::new("taskkill.exe");
+    let mut taskkill = background_command("taskkill.exe");
     taskkill
         .args(["/PID", &process_id.to_string(), "/T", "/F"])
         .kill_on_drop(true);
@@ -1007,7 +1099,7 @@ async fn terminate_child(child: &mut tokio::process::Child) -> Result<(), AppErr
 
 #[cfg(windows)]
 fn shell_command(command: &str) -> Command {
-    let mut process = Command::new("powershell.exe");
+    let mut process = background_command("powershell.exe");
     process.args([
         "-NoLogo",
         "-NoProfile",
@@ -1020,7 +1112,7 @@ fn shell_command(command: &str) -> Command {
 
 #[cfg(not(windows))]
 fn shell_command(command: &str) -> Command {
-    let mut process = Command::new("sh");
+    let mut process = background_command("sh");
     process.args(["-lc", command]);
     process
 }
@@ -1288,6 +1380,64 @@ fn decode_arguments<T: for<'de> Deserialize<'de>>(
         .map_err(|error| AppError::Tool(format!("invalid `{name}` arguments: {error}")))
 }
 
+fn normalize_plan(args: UpdatePlanArgs) -> Result<(Option<String>, Vec<PlanStep>), AppError> {
+    if args.plan.is_empty() || args.plan.len() > MAX_PLAN_STEPS {
+        return Err(AppError::Tool(format!(
+            "plan must contain between 1 and {MAX_PLAN_STEPS} steps"
+        )));
+    }
+
+    let explanation = match args.explanation {
+        Some(value) => {
+            let value = value.trim().to_string();
+            if value.len() > MAX_PLAN_EXPLANATION_BYTES {
+                return Err(AppError::Tool(format!(
+                    "plan explanation exceeds {MAX_PLAN_EXPLANATION_BYTES} bytes"
+                )));
+            }
+            (!value.is_empty()).then_some(value)
+        }
+        None => None,
+    };
+
+    let mut in_progress = 0usize;
+    let mut steps = Vec::with_capacity(args.plan.len());
+    for (index, candidate) in args.plan.into_iter().enumerate() {
+        let step = candidate.step.trim().to_string();
+        if step.is_empty() || step.len() > MAX_PLAN_STEP_BYTES {
+            return Err(AppError::Tool(format!(
+                "plan step {} must contain between 1 and {MAX_PLAN_STEP_BYTES} bytes",
+                index + 1
+            )));
+        }
+        let normalized_step = step.to_lowercase();
+        if steps
+            .iter()
+            .any(|existing: &PlanStep| existing.step.to_lowercase() == normalized_step)
+        {
+            return Err(AppError::Tool(format!(
+                "plan step {} duplicates an earlier step",
+                index + 1
+            )));
+        }
+        let status = match candidate.status {
+            UpdatePlanStatus::Pending => PlanStepStatus::Pending,
+            UpdatePlanStatus::InProgress => {
+                in_progress += 1;
+                PlanStepStatus::InProgress
+            }
+            UpdatePlanStatus::Completed => PlanStepStatus::Completed,
+        };
+        steps.push(PlanStep { step, status });
+    }
+    if in_progress > 1 {
+        return Err(AppError::Tool(
+            "plan must not contain more than one in-progress step".into(),
+        ));
+    }
+    Ok((explanation, steps))
+}
+
 fn validate_identifier(label: &str, value: &str) -> Result<(), AppError> {
     if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
         return Err(AppError::Tool(format!("{label} is invalid")));
@@ -1345,11 +1495,23 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::watch;
 
-    use crate::engine::{ActivityStatus, PermissionProfile, ThreadItem};
+    use crate::engine::{ActivityStatus, PermissionProfile, PlanStepStatus, ThreadItem};
 
     use super::{
-        ToolOperation, ToolRegistry, atomic_write, execute_patch_operation, resolve_write_target,
+        MAX_TOOL_OUTPUT_BYTES, ToolOperation, ToolRegistry, ToolResult, atomic_write,
+        execute_patch_operation, resolve_write_target,
     };
+
+    #[test]
+    fn rejects_tool_output_before_it_can_cross_the_native_contract() {
+        let output = "x".repeat(MAX_TOOL_OUTPUT_BYTES + 1);
+
+        let error = ToolResult::Text(output)
+            .into_output()
+            .expect_err("oversized tool output must fail before persistence or notification");
+
+        assert!(matches!(error, crate::error::AppError::Tool(_)));
+    }
 
     #[test]
     fn apply_patch_tool_definition_is_freeform_and_grammar_constrained() {
@@ -1386,6 +1548,57 @@ mod tests {
                 .prepare("call-2".into(), "future_tool", "{}")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn update_plan_is_validated_and_exposed_as_structured_state() {
+        let registry = ToolRegistry;
+        let definition = registry
+            .definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "update_plan")
+            .expect("update_plan should be advertised");
+        assert_eq!(definition["strict"], true);
+        assert_eq!(definition["parameters"]["additionalProperties"], false);
+
+        let prepared = registry
+            .prepare(
+                "plan-1".into(),
+                "update_plan",
+                r#"{"explanation":"Implementação iniciada","plan":[{"step":"Mapear o fluxo","status":"completed"},{"step":"Corrigir o estado","status":"in_progress"},{"step":"Validar","status":"pending"}]}"#,
+            )
+            .expect("valid plan should prepare");
+
+        assert!(matches!(
+            prepared.started_item(std::path::Path::new("C:\\workspace")),
+            ThreadItem::Plan { explanation: Some(explanation), steps, .. }
+                if explanation == "Implementação iniciada"
+                    && steps.len() == 3
+                    && steps[1].status == PlanStepStatus::InProgress
+        ));
+    }
+
+    #[test]
+    fn update_plan_rejects_ambiguous_or_empty_progress() {
+        let registry = ToolRegistry;
+        for (item_id, arguments) in [
+            ("plan-empty", r#"{"explanation":null,"plan":[]}"#),
+            (
+                "plan-multiple",
+                r#"{"explanation":null,"plan":[{"step":"Um","status":"in_progress"},{"step":"Dois","status":"in_progress"}]}"#,
+            ),
+            (
+                "plan-duplicate",
+                r#"{"explanation":null,"plan":[{"step":"Validar","status":"completed"},{"step":"validar","status":"pending"}]}"#,
+            ),
+        ] {
+            assert!(
+                registry
+                    .prepare(item_id.into(), "update_plan", arguments)
+                    .is_err(),
+                "invalid plan {item_id} should fail"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1505,6 +1718,16 @@ mod tests {
             .expect("workspace should canonicalize");
         assert!(
             resolve_write_target(&workspace, "../outside.txt")
+                .await
+                .is_err()
+        );
+        assert!(
+            resolve_write_target(&workspace, "../../etc/passwd")
+                .await
+                .is_err()
+        );
+        assert!(
+            resolve_write_target(&workspace, "sub/../../outside.txt")
                 .await
                 .is_err()
         );

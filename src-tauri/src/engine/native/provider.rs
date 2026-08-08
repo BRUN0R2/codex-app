@@ -31,6 +31,7 @@ pub(crate) use self::responses::ResponseMessagePhase;
 pub(crate) use self::responses::ResponseRequest;
 pub(crate) use self::responses::ResponseRequestSettings;
 pub(crate) use self::responses::ResponseStream;
+pub(crate) use self::responses::WebSearchAction;
 
 const MAX_MODELS: usize = 100;
 

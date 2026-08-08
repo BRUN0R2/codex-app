@@ -1,69 +1,72 @@
-import { createMemo, Show } from "solid-js";
+import { createMemo, type JSX, Show } from "solid-js";
 
-import type { ContextUsageItem } from "../contracts/types";
+import type { ContextUsageItem, ModelContextWindow } from "../contracts/types";
 import { calculateContextWindowMetrics, formatContextTokens } from "./contextWindowMetrics";
 
-export interface ContextWindowIndicatorProps {
+interface ContextWindowIndicatorProps {
+  readonly modelWindow: ModelContextWindow | null;
   readonly usage: ContextUsageItem | null;
 }
 
-export function ContextWindowIndicator(props: ContextWindowIndicatorProps) {
-  const metrics = createMemo(() => calculateContextWindowMetrics(props.usage));
+export function ContextWindowIndicator(props: ContextWindowIndicatorProps): JSX.Element {
+  const metrics = createMemo(() => calculateContextWindowMetrics(props.usage, props.modelWindow));
+  const percent = () => metrics()?.percent ?? 0;
+  const remainingPercent = () => metrics()?.remainingPercent ?? 0;
+  const radius = 5;
+  const circumference = 2 * Math.PI * radius;
+  const strokeDashoffset = () => (circumference * remainingPercent()) / 100;
+  const roundedPercent = () => Math.round(percent());
+  const statusLabel = () =>
+    roundedPercent() >= 50
+      ? `${roundedPercent()}% cheia`
+      : `${roundedPercent()}% usado (${Math.round(remainingPercent())}% restante)`;
 
   return (
-    <Show when={metrics()}>
-      {(value) => {
-        const roundedPercent = () => Math.round(value().percent);
-        return (
-          <span class="context-window-control">
-            <span
-              aria-describedby="context-window-tooltip"
-              aria-label={`Uso do contexto: ${roundedPercent()}%`}
-              class="context-window-indicator"
-              role="img"
-            >
-              <svg aria-hidden="true" class="context-window-ring" viewBox="0 0 12 12">
-                <circle
-                  class="context-window-track"
-                  cx="6"
-                  cy="6"
-                  fill="none"
-                  r="5"
-                  stroke="currentColor"
-                  stroke-width="2"
-                />
-                <circle
-                  class="context-window-progress"
-                  cx="6"
-                  cy="6"
-                  fill="none"
-                  opacity={value().percent === 0 ? 0 : 1}
-                  pathLength={100}
-                  r="5"
-                  stroke="currentColor"
-                  stroke-dasharray="100"
-                  stroke-dashoffset={100 - value().percent}
-                  stroke-linecap="round"
-                  stroke-width="2"
-                  transform="rotate(-90 6 6)"
-                />
-              </svg>
-            </span>
-            <span class="context-window-tooltip" id="context-window-tooltip" role="tooltip">
-              <span>Janela de contexto:</span>
-              <span classList={{ warning: roundedPercent() >= 50 }}>
-                {roundedPercent() >= 50
-                  ? `${roundedPercent()}% cheia`
-                  : `${roundedPercent()}% usada (${value().remainingPercent}% restante)`}
-              </span>
-              <span>
-                {formatContextTokens(value().usedTokens)}k /{" "}
-                {formatContextTokens(value().contextWindow)}k tokens usados
-              </span>
-            </span>
+    <Show when={metrics()} fallback={null}>
+      {(current) => (
+        <div
+          aria-label={`Uso de contexto: ${roundedPercent()}%`}
+          class="composer-context-ring-anchor"
+          classList={{ full: roundedPercent() >= 100 }}
+          role="img"
+        >
+          <span aria-hidden="true" class="composer-context-ring-icon">
+            <svg class="composer-context-ring-svg" height={12} viewBox="0 0 12 12" width={12}>
+              <title>Uso de contexto</title>
+              <circle
+                class="composer-context-ring-track"
+                cx={6}
+                cy={6}
+                fill="none"
+                r={radius}
+                stroke="currentColor"
+                stroke-width={2}
+              />
+              <circle
+                class="composer-context-ring-progress"
+                cx={6}
+                cy={6}
+                fill="none"
+                r={radius}
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-width={2}
+                stroke-dasharray={`${circumference} ${circumference}`}
+                stroke-dashoffset={strokeDashoffset()}
+                transform="rotate(-90 6 6)"
+              />
+            </svg>
           </span>
-        );
-      }}
+          <div class="context-window-popover" role="tooltip">
+            <div class="context-window-popover-title">Janela de contexto:</div>
+            <div class="context-window-popover-percent">{statusLabel()}</div>
+            <div class="context-window-popover-tokens">
+              {formatContextTokens(current().usedTokens)} /{" "}
+              {formatContextTokens(current().contextWindow)} tokens usados
+            </div>
+          </div>
+        </div>
+      )}
     </Show>
   );
 }

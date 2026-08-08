@@ -9,6 +9,6 @@ export function threadsWithoutConfiguredProject(
     return threads;
   }
   return threads.filter(
-    (thread) => !projects.some((project) => pathsEqual(thread.cwd, project.path)),
+    (thread) => !projects.some((project) => pathsEqual(thread.projectPath, project.path)),
   );
 }

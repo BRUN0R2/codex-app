@@ -19,24 +19,6 @@ export interface RuntimeDiagnostic {
   readonly message: string;
 }
 
-export interface WorkspaceChange {
-  readonly status: string;
-  readonly path: string;
-}
-
-export type WorkspaceRepository =
-  | {
-      readonly type: "gitBranch";
-      readonly branch: string;
-      readonly changes: readonly WorkspaceChange[];
-    }
-  | {
-      readonly type: "gitDetached";
-      readonly revision: string;
-      readonly changes: readonly WorkspaceChange[];
-    }
-  | { readonly type: "none" };
-
 export interface EngineDescriptor {
   readonly id: string;
   readonly name: string;
@@ -57,7 +39,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly permissionProfile: PermissionProfile;
   readonly permissionProfiles: readonly PermissionProfile[];
 }
@@ -72,6 +54,8 @@ export interface AuthRefreshResult {
 export interface ChatGptAccount {
   readonly type: "chatgpt";
   readonly email: string | null;
+  readonly name: string | null;
+  readonly picture: string | null;
   readonly planType: string | null;
 }
 
@@ -180,8 +164,23 @@ export interface ContextUsageItem {
   readonly contextWindow: ModelContextWindow | null;
 }
 
+export type PlanStepStatus = "completed" | "inProgress" | "pending";
+
+export interface PlanStep {
+  readonly step: string;
+  readonly status: PlanStepStatus;
+}
+
+export interface PlanItem {
+  readonly type: "plan";
+  readonly id: string;
+  readonly explanation: string | null;
+  readonly steps: readonly PlanStep[];
+}
+
 export type ThreadItem =
   | ContextUsageItem
+  | PlanItem
   | {
       readonly type: "contextCompaction";
       readonly id: string;
@@ -250,6 +249,7 @@ export interface CodexThread {
   readonly preview: string;
   readonly name: string | null;
   readonly cwd: string;
+  readonly projectPath: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly recencyAt: number | null;
@@ -425,6 +425,10 @@ export interface Attachment {
   readonly mediaType: string | null;
 }
 
+export interface AttachmentImageResponse {
+  readonly dataUrl: string;
+}
+
 export interface AuthLoginCompletedNotification {
   readonly method: "auth.loginCompleted";
   readonly params: {
@@ -590,4 +594,6 @@ export interface CommandError {
 export interface ProjectRecord {
   readonly name: string;
   readonly path: string;
+  readonly icon?: string | undefined;
+  readonly color?: string | undefined;
 }

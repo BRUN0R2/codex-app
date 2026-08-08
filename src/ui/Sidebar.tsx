@@ -8,19 +8,22 @@ import {
   onMount,
   Show,
 } from "solid-js";
+import { Portal } from "solid-js/web";
 
 import type { CodexThread, ProjectRecord } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
 import { pathsEqual } from "../state/projects";
 import { threadsWithoutConfiguredProject } from "../state/sidebarThreads";
+import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { CodexGlyph } from "./CodexGlyph";
-import { Icon } from "./Icon";
+import { Icon, type IconName } from "./Icon";
+import type { SettingsPage } from "./SettingsDialog";
 
 export interface SidebarProps {
   readonly collapsed: boolean;
   readonly controller: AppController;
   readonly inert: boolean;
-  readonly onOpenSettings: () => void;
+  readonly onOpenSettings: (page?: SettingsPage) => void;
 }
 
 export function Sidebar(props: SidebarProps) {
@@ -36,7 +39,6 @@ export function Sidebar(props: SidebarProps) {
     ReadonlySet<string>
   >(new Set());
   const [recentsExpanded, setRecentsExpanded] = createSignal(true);
-  const [archivedExpanded, setArchivedExpanded] = createSignal(false);
   const [accountMenuOpen, setAccountMenuOpen] = createSignal(false);
   const [brandMenuOpen, setBrandMenuOpen] = createSignal(false);
   const [searchOpen, setSearchOpen] = createSignal(false);
@@ -49,7 +51,7 @@ export function Sidebar(props: SidebarProps) {
     return props.controller.projects().flatMap((project) => {
       const threads = props.controller
         .threads()
-        .filter((thread) => pathsEqual(thread.cwd, project.path))
+        .filter((thread) => pathsEqual(thread.projectPath, project.path))
         .sort((left, right) => right.updatedAt - left.updatedAt);
       if (query.length === 0 || matchesProject(project, query)) {
         return [{ project, threads }];
@@ -73,15 +75,6 @@ export function Sidebar(props: SidebarProps) {
       .sort((left, right) => right.updatedAt - left.updatedAt)
       .slice(0, 8),
   );
-  const archivedMatches = createMemo(() =>
-    props.controller
-      .archivedThreads()
-      .filter(
-        (thread) =>
-          normalizedSearchQuery().length === 0 || matchesThread(thread, normalizedSearchQuery()),
-      )
-      .sort((left, right) => right.updatedAt - left.updatedAt),
-  );
   const pinnedThreads = createMemo(() => {
     const pinned = new Set(props.controller.pinnedThreadIds());
     return props.controller
@@ -92,6 +85,16 @@ export function Sidebar(props: SidebarProps) {
           normalizedSearchQuery().length === 0 || matchesThread(thread, normalizedSearchQuery()),
       )
       .sort((left, right) => right.updatedAt - left.updatedAt);
+  });
+  const pinnedProjects = createMemo(() => {
+    const pinned = new Set(props.controller.pinnedThreadIds());
+    return props.controller
+      .projects()
+      .filter((project) => pinned.has(project.path))
+      .filter(
+        (project) =>
+          normalizedSearchQuery().length === 0 || matchesProject(project, normalizedSearchQuery()),
+      );
   });
 
   createEffect(() => {
@@ -179,7 +182,7 @@ export function Sidebar(props: SidebarProps) {
     }
     return (
       pathsEqual(props.controller.workspace(), project.path) ||
-      pathsEqual(props.controller.currentThread()?.cwd ?? null, project.path)
+      pathsEqual(props.controller.currentThread()?.projectPath ?? null, project.path)
     );
   }
 
@@ -213,66 +216,55 @@ export function Sidebar(props: SidebarProps) {
     >
       <header class="sidebar-titlebar">
         <Show when={!props.collapsed}>
-          <button
-            aria-expanded={brandMenuOpen()}
-            aria-haspopup="menu"
-            class="sidebar-brand"
-            onClick={() => {
-              setAccountMenuOpen(false);
-              setBrandMenuOpen((value) => !value);
-            }}
-            type="button"
-          >
-            <CodexGlyph size={18} />
-            <strong>Codex</strong>
-            <Icon name="chevronDown" size={12} />
-          </button>
-          <Show when={brandMenuOpen()}>
-            <div aria-label="Codex" class="account-menu brand-menu" role="menu">
-              <button
-                onClick={() => {
-                  setBrandMenuOpen(false);
-                  void props.controller.refreshRateLimits();
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <Icon name="reset" size={15} />
-                <span>Atualizar uso</span>
-              </button>
-              <button
-                onClick={() => {
-                  setBrandMenuOpen(false);
-                  props.onOpenSettings();
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <Icon name="settings" size={15} />
-                <span>Configurações</span>
-                <kbd>Ctrl+,</kbd>
-              </button>
-              <button
-                onClick={() => {
-                  setBrandMenuOpen(false);
-                  void props.controller.logout();
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <Icon name="logout" size={15} />
-                <span>Sair</span>
-              </button>
-            </div>
-          </Show>
+          <div class="brand-menu-anchor">
+            <button
+              aria-expanded={brandMenuOpen()}
+              aria-haspopup="menu"
+              class="sidebar-brand"
+              onClick={() => {
+                setAccountMenuOpen(false);
+                setBrandMenuOpen((value) => !value);
+              }}
+              type="button"
+            >
+              <CodexGlyph size={18} />
+              <strong>Codex</strong>
+              <Icon name="chevronDown" size={12} />
+            </button>
+            <Show when={brandMenuOpen()}>
+              <div aria-label="Codex" class="brand-menu" role="menu">
+                <button
+                  class="brand-menu-item"
+                  onClick={() => setBrandMenuOpen(false)}
+                  role="menuitem"
+                  type="button"
+                >
+                  <div class="brand-menu-item-text">
+                    <strong>ChatGPT</strong>
+                    <small>Criar, aprender e explorar</small>
+                  </div>
+                </button>
+                <button
+                  class="brand-menu-item selected"
+                  onClick={() => setBrandMenuOpen(false)}
+                  role="menuitem"
+                  type="button"
+                >
+                  <div class="brand-menu-item-text">
+                    <strong>Codex</strong>
+                    <small>Criar, depurar e publicar</small>
+                  </div>
+                  <Icon name="check" size={14} />
+                </button>
+              </div>
+            </Show>
+          </div>
         </Show>
       </header>
 
       <nav aria-label="Ações principais" class="sidebar-primary-nav">
         <button
-          aria-current={props.controller.currentThread() === null ? "page" : undefined}
           class="new-thread-button"
-          classList={{ active: props.controller.currentThread() === null }}
           onClick={() => {
             props.controller.newThread();
           }}
@@ -280,33 +272,24 @@ export function Sidebar(props: SidebarProps) {
           type="button"
         >
           <span class="sidebar-item-icon">
-            <Icon name="edit" size={16} />
+            <Icon name="newChat" size={16} />
           </span>
           <Show when={!props.collapsed}>
             <span class="sidebar-row-label">Novo chat</span>
           </Show>
         </button>
-        <button
-          aria-expanded={searchOpen()}
-          aria-label="Pesquisar projetos e tarefas"
-          class="search-nav-button"
-          classList={{ active: searchOpen() }}
-          onClick={() => {
-            setAccountMenuOpen(false);
-            setSearchOpen((value) => !value);
-            queueMicrotask(() => searchInput?.focus());
-          }}
-          title="Pesquisar (Ctrl+K)"
-          type="button"
-        >
-          <span class="sidebar-item-icon">
-            <Icon name="search" size={16} />
-          </span>
-          <Show when={!props.collapsed}>
-            <span class="sidebar-row-label">Pesquisar</span>
-            <kbd class="sidebar-shortcut">Ctrl K</kbd>
-          </Show>
-        </button>
+        <For each={NEW_CHAT_MODES}>
+          {(mode) => (
+            <button class="new-chat-mode-row" disabled title={mode.label} type="button">
+              <span class="sidebar-item-icon">
+                <Icon name={mode.icon} size={16} />
+              </span>
+              <Show when={!props.collapsed}>
+                <span class="sidebar-row-label">{mode.label}</span>
+              </Show>
+            </button>
+          )}
+        </For>
       </nav>
 
       <Show when={!props.collapsed && searchOpen()}>
@@ -334,7 +317,9 @@ export function Sidebar(props: SidebarProps) {
       </Show>
 
       <div class="sidebar-scroll">
-        <Show when={!props.collapsed && pinnedThreads().length > 0}>
+        <Show
+          when={!props.collapsed && (pinnedThreads().length > 0 || pinnedProjects().length > 0)}
+        >
           <SidebarSectionHeading
             expanded={pinnedExpanded() || normalizedSearchQuery().length > 0}
             label="Fixados"
@@ -342,6 +327,31 @@ export function Sidebar(props: SidebarProps) {
           />
           <Show when={pinnedExpanded() || normalizedSearchQuery().length > 0}>
             <div class="pinned-threads">
+              <For each={pinnedProjects()}>
+                {(project) => {
+                  const threads = () =>
+                    props.controller
+                      .threads()
+                      .filter((thread) => pathsEqual(thread.projectPath, project.path));
+                  return (
+                    <ProjectGroup
+                      collapsed={props.collapsed}
+                      controller={props.controller}
+                      expanded={isProjectExpanded(project)}
+                      onBeginRename={beginRename}
+                      onSubmitRename={submitRename}
+                      onToggleExpanded={() => toggleProject(project)}
+                      onToggleThreadList={() => toggleProjectThreadList(project)}
+                      project={project}
+                      renameValue={renameValue()}
+                      renamingId={renamingId()}
+                      setRenameValue={setRenameValue}
+                      threadListExpanded={expandedProjectThreadLists().has(project.path)}
+                      threads={threads()}
+                    />
+                  );
+                }}
+              </For>
               <For each={pinnedThreads()}>
                 {(thread) => (
                   <ThreadButton
@@ -424,7 +434,16 @@ export function Sidebar(props: SidebarProps) {
             expanded={recentsExpanded() || normalizedSearchQuery().length > 0}
             label="Recentes"
             onToggle={() => setRecentsExpanded((value) => !value)}
-          />
+          >
+            <button
+              aria-label="Novo chat sem projeto"
+              onClick={() => props.controller.newThread()}
+              title="Novo chat"
+              type="button"
+            >
+              <Icon name="newChat" size={16} />
+            </button>
+          </SidebarSectionHeading>
           <Show when={recentsExpanded() || normalizedSearchQuery().length > 0}>
             <Show
               when={ungrouped().length > 0}
@@ -469,42 +488,7 @@ export function Sidebar(props: SidebarProps) {
         </Show>
         <Show
           when={
-            !props.collapsed &&
-            (archivedMatches().length > 0 || props.controller.archivedThreadsNextCursor() !== null)
-          }
-        >
-          <SidebarSectionHeading
-            expanded={archivedExpanded() || normalizedSearchQuery().length > 0}
-            label="Arquivadas"
-            onToggle={() => setArchivedExpanded((value) => !value)}
-          />
-          <Show when={archivedExpanded() || normalizedSearchQuery().length > 0}>
-            <For each={archivedMatches()}>
-              {(thread) => <ArchivedThreadButton controller={props.controller} thread={thread} />}
-            </For>
-            <Show
-              when={
-                normalizedSearchQuery().length === 0 &&
-                props.controller.archivedThreadsNextCursor() !== null
-              }
-            >
-              <button
-                class="load-more-button"
-                disabled={props.controller.pendingOperations() > 0}
-                onClick={() => void props.controller.loadMoreArchivedThreads()}
-                type="button"
-              >
-                Carregar mais
-              </button>
-            </Show>
-          </Show>
-        </Show>
-        <Show
-          when={
-            normalizedSearchQuery().length > 0 &&
-            grouped().length === 0 &&
-            ungrouped().length === 0 &&
-            archivedMatches().length === 0
+            normalizedSearchQuery().length > 0 && grouped().length === 0 && ungrouped().length === 0
           }
         >
           <p class="sidebar-search-empty">Nenhum projeto ou tarefa encontrado.</p>
@@ -515,18 +499,44 @@ export function Sidebar(props: SidebarProps) {
         <Show when={!props.collapsed && accountMenuOpen()}>
           <div aria-label="Conta" class="account-menu" id="account-menu" role="menu">
             <div class="account-menu-identity" role="presentation">
-              <span class="account-avatar">{accountInitial(props.controller)}</span>
+              <AccountAvatar account={props.controller.account()?.account} />
               <strong>{accountLabel(props.controller)}</strong>
             </div>
             <hr class="account-menu-separator" />
             <button
-              onClick={() => void props.controller.refreshRateLimits()}
+              onClick={() => {
+                setAccountMenuOpen(false);
+                props.onOpenSettings("usage");
+              }}
               role="menuitem"
               type="button"
             >
-              <Icon name="reset" size={15} />
+              <Icon name="creditCard" size={15} />
               <span>Uso restante</span>
-              <small>{remainingUsageLabel(props.controller)}</small>
+              <small class="usage-badge">{remainingUsageLabel(props.controller)}</small>
+              <Icon name="chevronRight" size={13} />
+            </button>
+            <button
+              onClick={() => {
+                setAccountMenuOpen(false);
+                props.onOpenSettings("pets");
+              }}
+              role="menuitem"
+              type="button"
+            >
+              <Icon name="egg" size={15} />
+              <span>Mostrar mascote</span>
+            </button>
+            <button
+              onClick={() => {
+                setAccountMenuOpen(false);
+                props.onOpenSettings("general");
+              }}
+              role="menuitem"
+              type="button"
+            >
+              <Icon name="send" size={15} />
+              <span>Convide um amigo</span>
             </button>
             <button
               onClick={() => {
@@ -553,35 +563,55 @@ export function Sidebar(props: SidebarProps) {
             </button>
           </div>
         </Show>
-        <button
-          aria-controls="account-menu"
-          aria-expanded={accountMenuOpen()}
-          aria-haspopup="menu"
-          class="sidebar-account-trigger"
-          onClick={() => {
-            setBrandMenuOpen(false);
-            if (props.collapsed) {
-              props.onOpenSettings();
-              return;
-            }
-            setBrandMenuOpen(false);
-            setAccountMenuOpen((value) => !value);
-          }}
-          title="Conta"
-          type="button"
-        >
-          <span class="account-avatar">{accountInitial(props.controller)}</span>
+        <div class="sidebar-footer-row">
+          <button
+            aria-controls="account-menu"
+            aria-expanded={accountMenuOpen()}
+            aria-haspopup="menu"
+            class="sidebar-account-trigger"
+            onClick={() => {
+              setBrandMenuOpen(false);
+              if (props.collapsed) {
+                props.onOpenSettings();
+                return;
+              }
+              setAccountMenuOpen((value) => !value);
+            }}
+            title="Conta"
+            type="button"
+          >
+            <AccountAvatar account={props.controller.account()?.account} />
+            <Show when={!props.collapsed}>
+              <span class="account-label">
+                <strong>{accountLabel(props.controller)}</strong>
+              </span>
+            </Show>
+          </button>
           <Show when={!props.collapsed}>
-            <span class="account-label">
-              <strong>{accountLabel(props.controller)}</strong>
-            </span>
-            <Icon name="more" size={16} />
+            <div class="sidebar-footer-extras">
+              <button
+                aria-label="Ajuda"
+                class="sidebar-help-button"
+                onClick={() => props.onOpenSettings("general")}
+                title="Ajuda"
+                type="button"
+              >
+                <Icon name="helpCircle" size={16} />
+              </button>
+            </div>
           </Show>
-        </button>
+        </div>
       </footer>
     </aside>
   );
 }
+
+const NEW_CHAT_MODES: readonly { readonly icon: IconName; readonly label: string }[] = [
+  { icon: "gitPullRequest", label: "Pull requests" },
+  { icon: "monitor", label: "Sites" },
+  { icon: "calendar", label: "Agendado" },
+  { icon: "puzzle", label: "Plugins" },
+];
 
 function SidebarSectionHeading(props: {
   readonly children?: JSX.Element;
@@ -590,7 +620,7 @@ function SidebarSectionHeading(props: {
   readonly onToggle: () => void;
 }) {
   return (
-    <div class="sidebar-section-heading">
+    <div class="sidebar-section-heading" classList={{ "has-action": props.children !== undefined }}>
       <button
         aria-expanded={props.expanded}
         class="sidebar-section-toggle"
@@ -625,6 +655,8 @@ interface ProjectGroupProps {
 
 function ProjectGroup(props: ProjectGroupProps) {
   let menu: HTMLDetailsElement | undefined;
+  const [editingProject, setEditingProject] = createSignal(false);
+  const isPinned = () => props.controller.pinnedThreadIds().includes(props.project.path);
   const isProjectPageActive = () =>
     props.controller.currentThread() === null &&
     pathsEqual(props.controller.workspace(), props.project.path);
@@ -637,18 +669,28 @@ function ProjectGroup(props: ProjectGroupProps) {
     <section class="project-group" classList={{ expanded: props.expanded }}>
       <div class="project-row" classList={{ selected: isProjectPageActive() }}>
         <button
-          aria-current={isProjectPageActive() ? "page" : undefined}
           aria-expanded={props.expanded}
           class="project-main"
           onClick={() => {
             props.onToggleExpanded();
-            props.controller.selectProject(props.project.path);
+          }}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            if (menu !== undefined) {
+              menu.open = !menu.open;
+            }
           }}
           title={props.project.path}
           type="button"
         >
-          <span class="project-icon-slot">
-            <Icon name={props.expanded ? "folderOpen" : "folder"} size={16} />
+          <span
+            class="project-icon-slot"
+            style={props.project.color ? { color: props.project.color } : undefined}
+          >
+            <Icon
+              name={(props.project.icon as IconName) ?? (props.expanded ? "folderOpen" : "folder")}
+              size={16}
+            />
           </span>
           <Show when={!props.collapsed}>
             <span class="sidebar-row-label">{props.project.name}</span>
@@ -657,14 +699,15 @@ function ProjectGroup(props: ProjectGroupProps) {
         <Show when={!props.collapsed}>
           <div class="row-actions">
             <button
-              aria-label={`Nova tarefa em ${props.project.name}`}
+              aria-label={`Novo chat em ${props.project.name}`}
+              class="project-new-chat-button"
               onClick={() => {
                 props.controller.newThread(props.project.path);
               }}
-              title="Nova tarefa"
+              title="Novo chat"
               type="button"
             >
-              <Icon name="edit" size={14} />
+              <Icon name="newChat" size={16} />
             </button>
             <details class="thread-menu-control" ref={menu}>
               <summary aria-label={`Ações de ${props.project.name}`} title="Mais ações">
@@ -676,18 +719,82 @@ function ProjectGroup(props: ProjectGroupProps) {
                     if (menu !== undefined) {
                       menu.open = false;
                     }
+                    props.controller.togglePinnedThread(props.project.path);
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="pin" size={14} />
+                  <span>{isPinned() ? "Desfixar projeto" : "Fixar projeto"}</span>
+                </button>
+                <button
+                  onClick={() => {
+                    if (menu !== undefined) {
+                      menu.open = false;
+                    }
+                    void props.controller.chooseWorkspace();
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="folder" size={14} />
+                  <span>Abrir no Explorador de Arquivos</span>
+                </button>
+                <button
+                  onClick={() => {
+                    if (menu !== undefined) {
+                      menu.open = false;
+                    }
+                    setEditingProject(true);
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="settings" size={14} />
+                  <span>Editar projeto</span>
+                </button>
+                <button
+                  onClick={() => {
+                    if (menu !== undefined) {
+                      menu.open = false;
+                    }
+                    for (const thread of props.threads) {
+                      void props.controller.archiveThread(thread.id);
+                    }
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="archive" size={14} />
+                  <span>Arquivar chats</span>
+                </button>
+                <button
+                  onClick={() => {
+                    if (menu !== undefined) {
+                      menu.open = false;
+                    }
                     props.controller.removeProject(props.project.path);
                   }}
                   role="menuitem"
                   type="button"
                 >
-                  <Icon name="close" size={14} /> Remover da barra lateral
+                  <Icon name="close" size={14} />
+                  <span>Remover</span>
                 </button>
               </div>
             </details>
           </div>
         </Show>
       </div>
+      <Show when={editingProject()}>
+        <ProjectEditModal
+          onClose={() => setEditingProject(false)}
+          onSave={(name, icon, color) => {
+            props.controller.updateProject(props.project.path, { color, icon, name });
+          }}
+          project={props.project}
+        />
+      </Show>
       <Show when={!props.collapsed && props.expanded}>
         <div class="project-threads">
           <For each={visibleThreads()}>
@@ -777,11 +884,17 @@ function ThreadButton(props: ThreadButtonProps) {
           class="thread-main"
           disabled={props.controller.openingThreadId() === props.thread.id}
           onClick={() => void props.controller.openThread(props.thread.id)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            if (menu !== undefined) {
+              menu.open = !menu.open;
+            }
+          }}
           title={threadTitle(props.thread)}
           type="button"
         >
           <span>{threadTitle(props.thread)}</span>
-          <Show when={props.thread.status.type === "active"}>
+          <Show when={props.controller.isThreadActive(props.thread.id)}>
             <i class="active-dot" />
           </Show>
         </button>
@@ -812,7 +925,7 @@ function ThreadButton(props: ThreadButtonProps) {
                 <Icon name="edit" size={14} /> Renomear
               </button>
               <button
-                disabled={props.thread.status.type === "active"}
+                disabled={props.controller.isThreadActive(props.thread.id)}
                 onClick={() => {
                   closeMenu();
                   void props.controller.forkThread(props.thread.id);
@@ -823,7 +936,10 @@ function ThreadButton(props: ThreadButtonProps) {
                 <Icon name="layers" size={14} /> Criar fork
               </button>
               <button
-                disabled={props.thread.status.type === "active" || props.thread.turns.length === 0}
+                disabled={
+                  props.controller.isThreadActive(props.thread.id) ||
+                  props.thread.turns.length === 0
+                }
                 onClick={() => {
                   closeMenu();
                   void props.controller.compactThread(props.thread.id);
@@ -834,7 +950,7 @@ function ThreadButton(props: ThreadButtonProps) {
                 <Icon name="reset" size={14} /> Compactar contexto
               </button>
               <button
-                disabled={props.thread.status.type === "active"}
+                disabled={props.controller.isThreadActive(props.thread.id)}
                 onClick={() => {
                   closeMenu();
                   void props.controller.archiveThread(props.thread.id);
@@ -846,7 +962,6 @@ function ThreadButton(props: ThreadButtonProps) {
               </button>
               <button
                 class="danger"
-                disabled={props.thread.status.type === "active"}
                 onClick={() => void deleteThread()}
                 role="menuitem"
                 type="button"
@@ -861,41 +976,6 @@ function ThreadButton(props: ThreadButtonProps) {
   );
 }
 
-function ArchivedThreadButton(props: {
-  readonly controller: AppController;
-  readonly thread: CodexThread;
-}) {
-  async function deleteThread(): Promise<void> {
-    await props.controller.deleteThread(props.thread.id);
-  }
-
-  return (
-    <div class="thread-row archived-thread-row">
-      <span class="thread-main" title={threadTitle(props.thread)}>
-        <span>{threadTitle(props.thread)}</span>
-      </span>
-      <div class="thread-actions">
-        <button
-          aria-label="Restaurar tarefa"
-          onClick={() => void props.controller.unarchiveThread(props.thread.id)}
-          title="Restaurar"
-          type="button"
-        >
-          <Icon name="reset" size={13} />
-        </button>
-        <button
-          aria-label="Excluir tarefa permanentemente"
-          onClick={() => void deleteThread()}
-          title="Excluir permanentemente"
-          type="button"
-        >
-          <Icon name="close" size={13} />
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export function threadTitle(thread: CodexThread): string {
   return (thread.name ?? thread.preview) || "Nova tarefa";
 }
@@ -905,15 +985,13 @@ function matchesProject(project: ProjectRecord, query: string): boolean {
 }
 
 function matchesThread(thread: CodexThread, query: string): boolean {
-  return `${threadTitle(thread)}\n${thread.cwd}`.toLocaleLowerCase("pt-BR").includes(query);
+  return `${threadTitle(thread)}\n${thread.projectPath ?? ""}`
+    .toLocaleLowerCase("pt-BR")
+    .includes(query);
 }
 
 function accountLabel(controller: AppController): string {
-  return controller.account()?.account?.email ?? "Conta ChatGPT";
-}
-
-function accountInitial(controller: AppController): string {
-  return accountLabel(controller).slice(0, 1).toLocaleUpperCase("pt-BR");
+  return accountDisplayName(controller.account()?.account);
 }
 
 function remainingUsageLabel(controller: AppController): string {
@@ -923,3 +1001,344 @@ function remainingUsageLabel(controller: AppController): string {
   }
   return `${Math.max(0, Math.round(100 - usedPercent))}%`;
 }
+
+function ProjectEditModal(props: {
+  readonly onClose: () => void;
+  readonly onSave: (name: string, icon?: IconName, color?: string) => void;
+  readonly project: ProjectRecord;
+}) {
+  const [name, setName] = createSignal(props.project.name);
+  const [icon, setIcon] = createSignal<IconName | undefined>(
+    (props.project.icon as IconName | undefined) ?? "folder",
+  );
+  const [color, setColor] = createSignal<string>(props.project.color ?? "#4ade80");
+
+  const selectedIcon = () => icon() ?? "folder";
+
+  return (
+    <Portal>
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: backdrop */}
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: backdrop */}
+      <div class="modal-backdrop" onClick={props.onClose}>
+        <div
+          class="project-edit-container"
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+          role="dialog"
+        >
+          {/* Modal Principal de Edição */}
+          <div class="project-edit-modal">
+            <header class="project-edit-header">
+              <h3>Editar projeto</h3>
+              <button class="icon-button" onClick={props.onClose} title="Fechar" type="button">
+                <Icon name="close" size={14} />
+              </button>
+            </header>
+
+            <div class="project-edit-body">
+              <div class="project-edit-input-row">
+                <div class="project-icon-preview" style={{ color: color() }}>
+                  <Icon name={selectedIcon()} size={20} />
+                </div>
+                <input
+                  class="project-name-input"
+                  onInput={(event) => setName(event.currentTarget.value)}
+                  placeholder="Nome do projeto"
+                  type="text"
+                  value={name()}
+                />
+              </div>
+
+              <div class="icon-picker-section">
+                <span class="picker-label">Ícone</span>
+                <div class="icons-grid">
+                  <For each={SELECTABLE_ICONS_LIST}>
+                    {(item) => (
+                      <button
+                        class="icon-grid-button"
+                        classList={{ active: selectedIcon() === item }}
+                        onClick={() => setIcon(item)}
+                        style={selectedIcon() === item ? { color: color() } : undefined}
+                        title={item}
+                        type="button"
+                      >
+                        <Icon name={item} size={24} strokeWidth={1.5} />
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </div>
+            </div>
+
+            <footer class="project-edit-footer">
+              <button class="project-edit-cancel" onClick={props.onClose} type="button">
+                Cancelar
+              </button>
+              <button
+                class="project-edit-save"
+                onClick={() => {
+                  props.onSave(name().trim() || props.project.name, icon(), color());
+                  props.onClose();
+                }}
+                type="button"
+              >
+                Salvar
+              </button>
+            </footer>
+          </div>
+
+          {/* Modal Lateral de Escolha da Cor (Já aberto ao lado) */}
+          <div class="project-color-side-panel">
+            <header class="side-panel-header">
+              <span class="picker-label">Cor do projeto</span>
+              <div class="color-hex-badge" style={{ background: color() }}>
+                <span>{color().toUpperCase()}</span>
+              </div>
+            </header>
+
+            <InlineColorPicker color={color()} onChange={setColor} />
+          </div>
+        </div>
+      </div>
+    </Portal>
+  );
+}
+
+function InlineColorPicker(props: {
+  readonly color: string;
+  readonly onChange: (color: string) => void;
+}) {
+  let boxRef: HTMLDivElement | undefined;
+  let hueRef: HTMLDivElement | undefined;
+
+  const hsv = createMemo(() => hexToHsv(props.color));
+  const hue = () => hsv().h;
+  const sat = () => hsv().s;
+  const val = () => hsv().v;
+
+  const cursorX = () => `calc(7px + (${sat()} / 100) * (100% - 14px))`;
+  const cursorY = () => `calc(7px + (${100 - val()} / 100) * (100% - 14px))`;
+  const hueX = () => `calc(7px + (${hue()} / 360) * (100% - 14px))`;
+
+  function updateFromBox(event: PointerEvent) {
+    if (boxRef === undefined) {
+      return;
+    }
+    const rect = boxRef.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+    const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+    const newSat = Math.round((x / rect.width) * 100);
+    const newVal = Math.round((1 - y / rect.height) * 100);
+    props.onChange(hsvToHex(hue(), newSat, newVal));
+  }
+
+  function handleBoxPointerDown(event: PointerEvent) {
+    event.preventDefault();
+    boxRef?.setPointerCapture(event.pointerId);
+    updateFromBox(event);
+  }
+
+  function handleBoxPointerMove(event: PointerEvent) {
+    if (boxRef?.hasPointerCapture(event.pointerId) === true) {
+      updateFromBox(event);
+    }
+  }
+
+  function updateFromHue(event: PointerEvent) {
+    if (hueRef === undefined) {
+      return;
+    }
+    const rect = hueRef.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+    const newHue = Math.round((x / rect.width) * 360);
+    props.onChange(hsvToHex(newHue, sat(), val()));
+  }
+
+  function handleHuePointerDown(event: PointerEvent) {
+    event.preventDefault();
+    hueRef?.setPointerCapture(event.pointerId);
+    updateFromHue(event);
+  }
+
+  function handleHuePointerMove(event: PointerEvent) {
+    if (hueRef?.hasPointerCapture(event.pointerId) === true) {
+      updateFromHue(event);
+    }
+  }
+
+  return (
+    <div class="inline-color-picker">
+      <div
+        class="hsv-box"
+        onPointerDown={handleBoxPointerDown}
+        onPointerMove={handleBoxPointerMove}
+        ref={boxRef}
+        style={{ "background-color": `hsl(${hue()}, 100%, 50%)` }}
+      >
+        <div class="hsv-sat-overlay" />
+        <div class="hsv-val-overlay" />
+        <div
+          class="hsv-cursor"
+          style={{
+            left: cursorX(),
+            top: cursorY(),
+          }}
+        />
+      </div>
+
+      <div
+        class="hue-bar"
+        onPointerDown={handleHuePointerDown}
+        onPointerMove={handleHuePointerMove}
+        ref={hueRef}
+      >
+        <div class="hue-cursor" style={{ left: hueX() }} />
+      </div>
+
+      <div class="hex-input-wrapper">
+        <span class="hex-hash">#</span>
+        <input
+          class="hex-text-input"
+          maxLength={6}
+          onInput={(event) => {
+            const raw = event.currentTarget.value.trim().replace(/^#/, "");
+            if (/^[0-9A-Fa-f]{6}$/.test(raw)) {
+              props.onChange(`#${raw}`);
+            }
+          }}
+          type="text"
+          value={props.color.replace(/^#/, "").toUpperCase()}
+        />
+      </div>
+    </div>
+  );
+}
+
+function hsvToHex(h: number, s: number, v: number): string {
+  const satRatio = s / 100;
+  const valRatio = v / 100;
+  const i = Math.floor((h / 60) % 6);
+  const f = h / 60 - i;
+  const p = valRatio * (1 - satRatio);
+  const q = valRatio * (1 - f * satRatio);
+  const t = valRatio * (1 - (1 - f) * satRatio);
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  switch (i) {
+    case 0:
+      r = valRatio;
+      g = t;
+      b = p;
+      break;
+    case 1:
+      r = q;
+      g = valRatio;
+      b = p;
+      break;
+    case 2:
+      r = p;
+      g = valRatio;
+      b = t;
+      break;
+    case 3:
+      r = p;
+      g = q;
+      b = valRatio;
+      break;
+    case 4:
+      r = t;
+      g = p;
+      b = valRatio;
+      break;
+    case 5:
+      r = valRatio;
+      g = p;
+      b = q;
+      break;
+  }
+  const toHex = (n: number) =>
+    Math.round(n * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function hexToHsv(hex: string): { h: number; s: number; v: number } {
+  let c = hex.replace(/^#/, "");
+  if (c.length === 3) {
+    c = c
+      .split("")
+      .map((char) => char + char)
+      .join("");
+  }
+  if (c.length !== 6) {
+    return { h: 140, s: 66, v: 87 };
+  }
+  const r = Number.parseInt(c.substring(0, 2), 16) / 255;
+  const g = Number.parseInt(c.substring(2, 4), 16) / 255;
+  const b = Number.parseInt(c.substring(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  let h = 0;
+  const s = max === 0 ? 0 : d / max;
+  const v = max;
+  if (max !== min) {
+    switch (max) {
+      case r:
+        h = (g - b) / d + (g < b ? 6 : 0);
+        break;
+      case g:
+        h = (b - r) / d + 2;
+        break;
+      case b:
+        h = (r - g) / d + 4;
+        break;
+    }
+    h /= 6;
+  }
+  return { h: Math.round(h * 360), s: Math.round(s * 100), v: Math.round(v * 100) };
+}
+
+const SELECTABLE_ICONS_LIST: readonly IconName[] = [
+  // Linha 1
+  "folder",
+  "dollar",
+  "book",
+  "graduationCap",
+  "edit",
+  "fountainPen",
+
+  // Linha 2
+  "codeBraces",
+  "terminal",
+  "music",
+  "cupcake",
+  "wand",
+  "palette",
+
+  // Linha 3
+  "stethoscope",
+  "flower",
+  "lotus",
+  "briefcase",
+  "barChart",
+  "kettlebell",
+
+  // Linha 4
+  "dumbbell",
+  "notebook",
+  "scale",
+  "globeStand",
+  "plane",
+  "globe",
+
+  // Linha 5
+  "wrench",
+  "paw",
+  "flask",
+  "brain",
+  "heart",
+  "plant",
+];

@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use self::callback::CallbackServer;
 use self::error::AuthError;
+use self::oauth::AccountProfile;
 use self::oauth::OAuthClient;
 use self::pkce::PkceCodes;
 use self::pkce::generate_pkce;
@@ -165,7 +166,7 @@ impl AuthInner {
     async fn read_account(&self, app: &AppHandle) -> Result<AccountReadResponse, AuthError> {
         let context = self.context(app).await?;
         let _operation_guard = context.operation_gate.lock().await;
-        let Some(record) = context.storage.load().await? else {
+        let Some(record) = load_cached_record(app, context).await? else {
             return Ok(AccountReadResponse::signed_out());
         };
 
@@ -177,11 +178,10 @@ impl AuthInner {
                 refresh: RefreshResult::not_required(),
             }
         };
-        let account = outcome
-            .record
-            .as_ref()
-            .map(account_from_record)
-            .transpose()?;
+        let account = match outcome.record.as_ref() {
+            Some(record) => Some(account_from_record(app, context, record).await?),
+            None => None,
+        };
         Ok(AccountReadResponse {
             account,
             requires_openai_auth: true,
@@ -192,9 +192,7 @@ impl AuthInner {
     async fn session(&self, app: &AppHandle) -> Result<AuthSession, AuthError> {
         let context = self.context(app).await?;
         let _operation_guard = context.operation_gate.lock().await;
-        let mut record = context
-            .storage
-            .load()
+        let mut record = load_cached_record(app, context)
             .await?
             .ok_or_else(|| AuthError::InvalidToken("no ChatGPT account is connected".into()))?;
         if record.should_refresh(Utc::now()) {
@@ -235,7 +233,7 @@ impl AuthInner {
             }
         };
 
-        let current = match context.storage.load().await {
+        let current = match load_cached_record(app, context).await {
             Ok(current) => current,
             Err(error) => {
                 report_cleanup_error(app, context.oauth.revoke_patch(&patch).await);
@@ -284,7 +282,7 @@ impl AuthInner {
             return Err(AuthError::LoginInProgress);
         }
         let _operation_guard = context.operation_gate.lock().await;
-        if context.storage.load().await?.is_some() {
+        if load_cached_record(app, context).await?.is_some() {
             return Err(AuthError::AlreadyAuthenticated);
         }
 
@@ -412,7 +410,7 @@ impl AuthInner {
         self.cancel_pending_login().await;
         let context = self.context(app).await?;
         let _operation_guard = context.operation_gate.lock().await;
-        let record = context.storage.load().await?;
+        let record = load_cached_record(app, context).await?;
 
         let (remote_revocation, remote_revocation_error) = match record.as_ref() {
             Some(record) => match context.oauth.revoke_tokens(record.tokens()).await {
@@ -502,15 +500,34 @@ pub enum Account {
     #[serde(rename = "chatgpt")]
     ChatGpt {
         email: Option<String>,
+        name: Option<String>,
+        picture: Option<String>,
         #[serde(rename = "planType")]
         plan_type: Option<String>,
     },
 }
 
-fn account_from_record(record: &AuthRecord) -> Result<Account, AuthError> {
+async fn account_from_record(
+    app: &AppHandle,
+    context: &AuthContext,
+    record: &AuthRecord,
+) -> Result<Account, AuthError> {
     let claims = record.account_claims()?;
+    let profile = if claims.email.is_none() || claims.name.is_none() || claims.picture.is_none() {
+        match context.oauth.userinfo(&record.tokens().access_token).await {
+            Ok(profile) => profile,
+            Err(error) => {
+                emit_diagnostic(app, format!("could not read the ChatGPT profile: {error}"));
+                AccountProfile::default()
+            }
+        }
+    } else {
+        AccountProfile::default()
+    };
     Ok(Account::ChatGpt {
-        email: claims.email,
+        email: profile.email.or(claims.email),
+        name: profile.name.or(claims.name),
+        picture: profile.picture.or(claims.picture),
         plan_type: claims.plan_type,
     })
 }
@@ -620,4 +637,29 @@ fn report_browser_response_error(app: &AppHandle, result: Result<(), AuthError>)
     if let Err(error) = result {
         emit_diagnostic(app, format!("OAuth browser response failed: {error}"));
     }
+}
+
+async fn load_cached_record(
+    app: &AppHandle,
+    context: &AuthContext,
+) -> Result<Option<AuthRecord>, AuthError> {
+    match context.storage.load().await {
+        Ok(record) => Ok(record),
+        Err(AuthError::CredentialStorage(message)) if is_credential_retrieval_corrupt(&message) => {
+            emit_diagnostic(
+                app,
+                format!("credential cache is corrupt and will be cleared: {message}"),
+            );
+            if let Err(error) = context.storage.delete().await {
+                emit_diagnostic(app, format!("could not clear corrupt credentials: {error}"));
+            }
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_credential_retrieval_corrupt(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("could not decrypt credentials") || lower.contains("excessive work parameter")
 }

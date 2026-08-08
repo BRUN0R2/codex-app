@@ -54,6 +54,7 @@ function threadFixture(status: "completed" | "inProgress"): CodexThread {
     preview: "Teste",
     name: null,
     cwd: "C:\\workspace",
+    projectPath: "C:\\workspace",
     createdAt: 1,
     updatedAt: 2,
     recencyAt: 2,

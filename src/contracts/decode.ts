@@ -6,6 +6,7 @@ import type {
   AppConfig,
   ApprovalPolicy,
   Attachment,
+  AttachmentImageResponse,
   AuthRefreshResult,
   CancelLoginResponse,
   ChatGptAccount,
@@ -36,6 +37,7 @@ import type {
   OperationAck,
   PermissionProfile,
   Personality,
+  PlanStepStatus,
   RateLimitReachedType,
   RateLimitSnapshot,
   RateLimitWindow,
@@ -61,12 +63,12 @@ import type {
   TurnStatus,
   UserContent,
   WebSearchMode,
-  WorkspaceRepository,
 } from "./types";
 
 type UnknownRecord = Record<string, unknown>;
 
 const MAX_STRING_BYTES = 4 * 1_048_576;
+const MAX_TOOL_OUTPUT_BYTES = 1_048_576;
 const MAX_COLLECTION_LENGTH = 10_000;
 
 const RUNTIME_STATES = ["failed", "ready", "starting", "stopped"] as const;
@@ -94,6 +96,7 @@ const REASONING_EFFORTS = [
 const TURN_STATUSES = ["completed", "failed", "inProgress", "interrupted"] as const;
 const TERMINAL_TURN_STATUSES = ["completed", "failed", "interrupted"] as const;
 const ACTIVITY_STATUSES = ["completed", "declined", "failed", "inProgress"] as const;
+const PLAN_STEP_STATUSES = ["completed", "inProgress", "pending"] as const;
 const MESSAGE_PHASES = ["commentary", "finalAnswer"] as const;
 const IMAGE_DETAILS = ["auto", "high", "low"] as const;
 const WEB_SEARCH_MODES = ["disabled", "live"] as const;
@@ -152,7 +155,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [1] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [2] as const);
   return {
     engine: {
       id: text(engine.id, "$.engine.id"),
@@ -189,49 +192,6 @@ export function decodeRuntimeDiagnostic(value: unknown): RuntimeDiagnostic {
     stream: literal(object.stream, "$.stream", ["runtime"] as const),
     message: text(object.message, "$.message"),
   };
-}
-
-export function decodeWorkspaceRepository(value: unknown): WorkspaceRepository {
-  const object = record(value, "$");
-  const type = text(field(object, "type"), "$.type", 32);
-  switch (type) {
-    case "gitBranch": {
-      const repository = exactRecord(object, "$", ["branch", "changes", "type"]);
-      return {
-        type,
-        branch: identifier(repository.branch, "$.branch"),
-        changes: decodeWorkspaceChanges(repository.changes, "$.changes"),
-      };
-    }
-    case "gitDetached": {
-      const repository = exactRecord(object, "$", ["changes", "revision", "type"]);
-      return {
-        type,
-        revision: identifier(repository.revision, "$.revision"),
-        changes: decodeWorkspaceChanges(repository.changes, "$.changes"),
-      };
-    }
-    case "none":
-      exactRecord(object, "$", ["type"]);
-      return { type };
-    default:
-      throw new ContractError("$.type", `unsupported workspace repository ${JSON.stringify(type)}`);
-  }
-}
-
-function decodeWorkspaceChanges(value: unknown, path: string) {
-  return array(
-    value,
-    path,
-    (entry, entryPath) => {
-      const change = exactRecord(entry, entryPath, ["path", "status"]);
-      return {
-        status: text(change.status, `${entryPath}.status`, 2),
-        path: text(change.path, `${entryPath}.path`, 4_096),
-      };
-    },
-    512,
-  );
 }
 
 export function decodeAccountReadResponse(value: unknown): AccountReadResponse {
@@ -382,6 +342,13 @@ export function decodeAttachments(value: unknown): readonly Attachment[] {
 
 export function decodeAttachment(value: unknown): Attachment {
   return decodeAttachmentAt(value, "$");
+}
+
+export function decodeAttachmentImageResponse(value: unknown): AttachmentImageResponse {
+  const object = exactRecord(value, "$", ["dataUrl"]);
+  return {
+    dataUrl: text(object.dataUrl, "$.dataUrl", 36 * 1_048_576),
+  };
 }
 
 export function decodeEngineNotification(value: unknown): EngineNotification {
@@ -631,10 +598,15 @@ function decodePermissionProfile(value: unknown, path: string): PermissionProfil
 }
 
 function decodeAccount(value: unknown, path: string): ChatGptAccount {
-  const object = exactRecord(value, path, ["email", "planType", "type"]);
+  const object = exactRecord(value, path, ["email", "name", "picture", "planType", "type"]);
   return {
     type: literal(object.type, `${path}.type`, ["chatgpt"] as const),
     email: nullableText(object.email, `${path}.email`),
+    name: object.name === null ? null : text(object.name, `${path}.name`, 256),
+    picture:
+      object.picture === null
+        ? null
+        : urlText(object.picture, `${path}.picture`, ["data:", "https:"]),
     planType: nullableText(object.planType, `${path}.planType`),
   };
 }
@@ -777,6 +749,7 @@ function decodeThread(value: unknown, path: string): CodexThread {
     "id",
     "name",
     "preview",
+    "projectPath",
     "recencyAt",
     "status",
     "turns",
@@ -799,6 +772,7 @@ function decodeThread(value: unknown, path: string): CodexThread {
     preview: text(object.preview, `${path}.preview`, 512, true),
     name: nullableText(object.name, `${path}.name`),
     cwd: text(object.cwd, `${path}.cwd`, 4_096),
+    projectPath: nullableText(object.projectPath, `${path}.projectPath`),
     createdAt,
     updatedAt,
     recencyAt,
@@ -916,6 +890,45 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
         ),
       };
     }
+    case "plan": {
+      const item = exactRecord(object, path, ["explanation", "id", "steps", "type"]);
+      const steps = array(
+        item.steps,
+        `${path}.steps`,
+        (value, stepPath) => {
+          const step = exactRecord(value, stepPath, ["status", "step"]);
+          return {
+            step: text(step.step, `${stepPath}.step`, 1_024),
+            status: literal(
+              step.status,
+              `${stepPath}.status`,
+              PLAN_STEP_STATUSES,
+            ) satisfies PlanStepStatus,
+          };
+        },
+        20,
+      );
+      if (steps.length === 0) {
+        throw new ContractError(`${path}.steps`, "plan must contain at least one step");
+      }
+      if (steps.filter((step) => step.status === "inProgress").length > 1) {
+        throw new ContractError(
+          `${path}.steps`,
+          "plan must not contain more than one in-progress step",
+        );
+      }
+      const uniqueSteps = new Set(steps.map((step) => step.step.toLowerCase()));
+      if (uniqueSteps.size !== steps.length) {
+        throw new ContractError(`${path}.steps`, "plan steps must be unique");
+      }
+      return {
+        type,
+        id: identifier(item.id, `${path}.id`),
+        explanation:
+          item.explanation === null ? null : text(item.explanation, `${path}.explanation`, 4_096),
+        steps,
+      };
+    }
     case "commandExecution": {
       const item = exactRecord(object, path, [
         "aggregatedOutput",
@@ -937,7 +950,11 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
         processId: nullableText(item.processId, `${path}.processId`),
         source: literal(item.source, `${path}.source`, ["agent"] as const),
         status: literal(item.status, `${path}.status`, ACTIVITY_STATUSES),
-        aggregatedOutput: nullableText(item.aggregatedOutput, `${path}.aggregatedOutput`),
+        aggregatedOutput: nullableText(
+          item.aggregatedOutput,
+          `${path}.aggregatedOutput`,
+          MAX_TOOL_OUTPUT_BYTES,
+        ),
         exitCode:
           item.exitCode === null
             ? null
@@ -972,7 +989,7 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
         name: identifier(item.name, `${path}.name`),
         description: text(item.description, `${path}.description`, 4_096),
         status: literal(item.status, `${path}.status`, ACTIVITY_STATUSES),
-        output: nullableText(item.output, `${path}.output`),
+        output: nullableText(item.output, `${path}.output`, MAX_TOOL_OUTPUT_BYTES),
       };
     }
     default:
@@ -1368,8 +1385,12 @@ function identifier(value: unknown, path: string): string {
   return decoded;
 }
 
-function nullableText(value: unknown, path: string): string | null {
-  return value === null ? null : text(value, path);
+function nullableText(
+  value: unknown,
+  path: string,
+  maximumBytes = MAX_STRING_BYTES,
+): string | null {
+  return value === null ? null : text(value, path, maximumBytes);
 }
 
 function urlText(value: unknown, path: string, protocols: readonly string[]): string {

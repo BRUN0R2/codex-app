@@ -121,11 +121,18 @@ function formatDurationParts(days: number, hours: number, minutes: number): stri
   return `${visibleMinutes} ${visibleMinutes === 1 ? "minuto" : "minutos"}`;
 }
 
+export function sanitizeInternalPaths(text: string): string {
+  return text
+    .replace(/[a-zA-Z]:\\[^\s:"]+/gu, "<caminho-local>")
+    .replace(/\/(?:Users|home|root|var|usr|tmp)\/[^\s:"]+/gu, "<caminho-local>");
+}
+
 function boundedText(value: string): string {
   const normalized = value.trim().replace(/\s+/gu, " ");
-  const characters = Array.from(normalized);
+  const sanitized = sanitizeInternalPaths(normalized);
+  const characters = Array.from(sanitized);
   if (characters.length <= MAX_VISIBLE_FAILURE_CHARACTERS) {
-    return normalized || "O turno falhou sem fornecer um detalhe.";
+    return sanitized || "O turno falhou sem fornecer um detalhe.";
   }
   return `${characters.slice(0, MAX_VISIBLE_FAILURE_CHARACTERS - 1).join("")}…`;
 }

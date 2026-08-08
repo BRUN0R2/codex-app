@@ -14,6 +14,8 @@ use super::error::AuthError;
 use super::pkce::PkceCodes;
 use super::token::SecretString;
 use super::token::TokenSet;
+use super::token::clean_profile_picture;
+use super::token::clean_profile_text;
 use super::token::validate_account_token;
 
 #[cfg(test)]
@@ -21,18 +23,28 @@ const AUTH_ISSUER: &str = "https://auth.openai.com";
 const AUTHORIZE_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const REVOKE_ENDPOINT: &str = "https://auth.openai.com/oauth/revoke";
+const USERINFO_ENDPOINT: &str = "https://auth.openai.com/api/accounts/oauth/userinfo";
 const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OAUTH_SCOPE: &str =
     "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const ORIGINATOR: &str = "codex_desktop_next";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const USERINFO_TIMEOUT: Duration = Duration::from_secs(5);
 const REVOKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TOKEN_RESPONSE_BYTES: usize = 65_536;
+const MAX_USERINFO_RESPONSE_BYTES: usize = 32_768;
 const MAX_ERROR_RESPONSE_BYTES: usize = 16_384;
 const MAX_ERROR_MESSAGE_CHARS: usize = 320;
 
 pub(super) struct OAuthClient {
     client: Client,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct AccountProfile {
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub picture: Option<String>,
 }
 
 pub(super) struct ExchangedTokens {
@@ -156,6 +168,27 @@ impl OAuthClient {
         Ok(patch)
     }
 
+    pub async fn userinfo(&self, access_token: &SecretString) -> Result<AccountProfile, AuthError> {
+        let response = self
+            .client
+            .get(USERINFO_ENDPOINT)
+            .timeout(USERINFO_TIMEOUT)
+            .bearer_auth(access_token.expose())
+            .send()
+            .await
+            .map_err(|error| transport_error("profile request", error))?;
+        if !response.status().is_success() {
+            return Err(endpoint_error("profile request", response).await);
+        }
+        let response = decode_response_limited::<UserInfoResponse>(
+            response,
+            "profile request",
+            MAX_USERINFO_RESPONSE_BYTES,
+        )
+        .await?;
+        Ok(AccountProfile::from(response))
+    }
+
     pub async fn revoke_tokens(&self, tokens: &TokenSet) -> Result<(), AuthError> {
         if !tokens.refresh_token.is_empty() {
             return self
@@ -230,6 +263,26 @@ struct RefreshResponse {
     id_token: Option<String>,
     access_token: Option<String>,
     refresh_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UserInfoResponse {
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    picture: Option<String>,
+}
+
+impl From<UserInfoResponse> for AccountProfile {
+    fn from(response: UserInfoResponse) -> Self {
+        Self {
+            email: clean_profile_text(response.email, 320),
+            name: clean_profile_text(response.name, 256),
+            picture: clean_profile_picture(response.picture),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -308,7 +361,15 @@ async fn decode_response<T: DeserializeOwned>(
     response: Response,
     operation: &'static str,
 ) -> Result<T, AuthError> {
-    let bytes = read_response_limited(response, MAX_TOKEN_RESPONSE_BYTES, operation).await?;
+    decode_response_limited(response, operation, MAX_TOKEN_RESPONSE_BYTES).await
+}
+
+async fn decode_response_limited<T: DeserializeOwned>(
+    response: Response,
+    operation: &'static str,
+    maximum_bytes: usize,
+) -> Result<T, AuthError> {
+    let bytes = read_response_limited(response, maximum_bytes, operation).await?;
     serde_json::from_slice(&bytes)
         .map_err(|error| AuthError::OAuth(format!("{operation} response is invalid: {error}")))
 }
@@ -375,10 +436,12 @@ fn sanitized_nonempty(message: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::AUTH_ISSUER;
+    use super::AccountProfile;
     use super::OAUTH_CLIENT_ID;
     use super::OAUTH_SCOPE;
     use super::OAuthClient;
     use super::ORIGINATOR;
+    use super::UserInfoResponse;
     use crate::engine::native::auth::token::SecretString;
 
     fn generate_test_pkce() -> crate::engine::native::auth::pkce::PkceCodes {
@@ -432,5 +495,29 @@ mod tests {
             query.get("codex_cli_simplified_flow").map(String::as_str),
             Some("true")
         );
+    }
+
+    #[test]
+    fn sanitizes_the_oidc_user_profile() {
+        let profile = AccountProfile::from(UserInfoResponse {
+            email: Some(" bruno@example.com ".into()),
+            name: Some(" Bruno ".into()),
+            picture: Some("https://images.example.com/bruno.png".into()),
+        });
+
+        assert_eq!(profile.email.as_deref(), Some("bruno@example.com"));
+        assert_eq!(profile.name.as_deref(), Some("Bruno"));
+        assert_eq!(
+            profile.picture.as_deref(),
+            Some("https://images.example.com/bruno.png")
+        );
+
+        let rejected = AccountProfile::from(UserInfoResponse {
+            email: None,
+            name: Some("Bruno\nSilva".into()),
+            picture: Some("http://images.example.com/bruno.png".into()),
+        });
+        assert_eq!(rejected.name, None);
+        assert_eq!(rejected.picture, None);
     }
 }

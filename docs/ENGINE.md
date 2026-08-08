@@ -60,6 +60,23 @@ falha e duração não dependem da chegada posterior de `thread.updated`. Essa
 notificação posterior apenas reconcilia o snapshot completo de forma
 idempotente; uma segunda conclusão conflitante é erro de contrato.
 
+`engine_thread_delete` também é a operação completa para tarefas ativas. O motor
+registra um único solicitante, cancela o turno, impede nova aquisição do mesmo
+`thread_id` e responde somente depois da exclusão transacional. Se a persistência
+da conclusão falhar, a exclusão exige a identidade exata do turno que ainda está
+ativo; nenhum estado informado pela interface autoriza esse caminho.
+
+## Boot com limite de tempo
+
+O boot nunca fica preso para sempre. No Rust, cada operação do cofre de
+credenciais (Credential Manager do Windows e decrypt scrypt/age) tem limite de
+10 segundos no `spawn_blocking`; estouro vira erro tratável de storage, sem
+apagar credenciais. No frontend, `engine_start`, `engine_account_read` e o
+registro de eventos têm limite de 15 segundos; o estouro marca o runtime como
+`failed` e a tela de erro oferece nova tentativa, que reexecuta a inicialização
+inteira. Eventos de status atrasados são ignorados após uma falha, para que um
+`ready` tardio não troque o erro por um boot fantasma.
+
 ## Provider
 
 O backend usa a sessão OAuth diretamente para:
@@ -115,12 +132,26 @@ recuperação e atomicidade pertencem integralmente ao Rust.
 | --- | ---: | ---: | ---: |
 | `read_file`, `list_files`, `search_text` | sim | sim | sim |
 | `edit_file`, `write_file` | não | sim | sim |
+| `apply_patch` | não | sim | sim |
 | `exec_command` | não | aprovação | sem aprovação |
 
 Todos os paths de ferramenta são relativos ao workspace. Escritas são atômicas,
 arquivos são UTF-8 e comandos são não interativos, limitados a 120 segundos e a
 1 MiB de saída agregada. Recusa de comando retorna um resultado tipado ao modelo;
 cancelamento interrompe o turno.
+
+`apply_patch` é uma ferramenta freeform do Responses, anunciada com gramática
+Lark fechada e respondida por `custom_tool_call_output`; ela não passa por shell,
+PowerShell, `git apply` ou executável auxiliar. O parser aceita somente o envelope
+canônico e hunks add/delete/update/move. Antes do primeiro write, o planejador
+resolve todos os paths, rejeita escapes, symlinks, duplicidades e sobreposições,
+aplica todos os chunks em memória e fotografa conteúdo, permissões e SHA-256.
+
+O commit prepara e sincroniza todos os temporários, revalida cada fotografia e
+só então troca os arquivos. Cancelamento, concorrência ou falha intermediária
+acionam o journal inverso; qualquer falha de restauração vira erro explícito de
+integridade com os paths afetados. A timeline recebe um único `FileChange` com
+as alterações canônicas somente após o commit completo.
 
 ## Configuração
 

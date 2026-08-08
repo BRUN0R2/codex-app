@@ -1,7 +1,8 @@
-import { Match, Switch } from "solid-js";
+import { ErrorBoundary, Match, Switch } from "solid-js";
 
 import { createAppController } from "./state/createAppController";
 import { AppShell } from "./ui/AppShell";
+import { ImageViewerProvider } from "./ui/ImageViewer";
 import { LoginScreen } from "./ui/LoginScreen";
 
 export default function App() {
@@ -18,6 +19,13 @@ export default function App() {
             <p>
               {controller.runtimeStatus().message ?? controller.error() ?? "Falha sem diagnóstico."}
             </p>
+            <button
+              class="primary-button"
+              onClick={() => controller.retryInitialization()}
+              type="button"
+            >
+              Tentar novamente
+            </button>
           </div>
         </main>
       </Match>
@@ -34,7 +42,21 @@ export default function App() {
         <LoginScreen controller={controller} />
       </Match>
       <Match when={controller.signedIn()}>
-        <AppShell controller={controller} />
+        <ErrorBoundary
+          fallback={(error) => (
+            <main class="boot-screen error-state">
+              <div class="boot-card">
+                <p class="eyebrow">Falha de renderização</p>
+                <h1>O shell do aplicativo falhou</h1>
+                <p>{String(error)}</p>
+              </div>
+            </main>
+          )}
+        >
+          <ImageViewerProvider>
+            <AppShell controller={controller} />
+          </ImageViewerProvider>
+        </ErrorBoundary>
       </Match>
     </Switch>
   );

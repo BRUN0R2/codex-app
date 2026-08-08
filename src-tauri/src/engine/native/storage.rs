@@ -18,9 +18,10 @@ use crate::engine::{
 use crate::error::AppError;
 
 const DATABASE_FILE_NAME: &str = "native-state-v1.sqlite3";
-const DATABASE_SCHEMA_VERSION: i64 = 1;
+const DATABASE_SCHEMA_VERSION: i64 = 2;
 const DATABASE_APPLICATION_ID: i64 = 1_128_552_526;
 const DATABASE_TABLES: &str = "app_config,provider_items,thread_items,threads,turns";
+const THREAD_COLUMNS: &str = "id,cwd,name,preview,archived,created_at,updated_at,project_path";
 const THREAD_PAGE_SIZE: usize = 50;
 const MAX_CURSOR_BYTES: usize = 20;
 const MAX_ITEM_BYTES: usize = 2 * 1_048_576;
@@ -69,7 +70,11 @@ impl NativeStorage {
             if version == 0 && application_id == 0 {
                 initialize_database(&mut connection)?;
             } else {
-                validate_database(&connection, version, application_id)?;
+                migrate_database(&mut connection, version, application_id)?;
+                let current_version: i64 = connection
+                    .query_row("PRAGMA user_version", [], |row| row.get(0))
+                    .map_err(storage_error)?;
+                validate_database(&connection, current_version, application_id)?;
             }
 
             connection
@@ -87,7 +92,11 @@ impl NativeStorage {
         Ok(())
     }
 
-    pub async fn create_thread(&self, cwd: String) -> Result<CodexThread, AppError> {
+    pub async fn create_thread(
+        &self,
+        cwd: String,
+        project_path: Option<String>,
+    ) -> Result<CodexThread, AppError> {
         let path = self.path().await?;
         run_blocking(move || {
             let connection = open_connection(&path)?;
@@ -95,9 +104,10 @@ impl NativeStorage {
             let now = unix_timestamp()?;
             connection
                 .execute(
-                    "INSERT INTO threads (id, cwd, name, preview, archived, created_at, updated_at)
-                     VALUES (?1, ?2, NULL, '', 0, ?3, ?3)",
-                    params![id, cwd, now],
+                    "INSERT INTO threads
+                         (id, cwd, project_path, name, preview, archived, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, NULL, '', 0, ?4, ?4)",
+                    params![id, cwd, project_path, now],
                 )
                 .map_err(storage_error)?;
             read_thread(&connection, &id)
@@ -121,7 +131,7 @@ impl NativeStorage {
                 .map_err(|error| AppError::Protocol(format!("thread cursor is too large: {error}")))?;
             let mut statement = connection
                 .prepare(
-                    "SELECT id, cwd, name, preview, created_at, updated_at,
+                    "SELECT id, cwd, project_path, name, preview, created_at, updated_at,
                             EXISTS(SELECT 1 FROM turns WHERE thread_id = threads.id AND status = 'inProgress')
                      FROM threads
                      WHERE archived = ?3
@@ -134,11 +144,12 @@ impl NativeStorage {
                     Ok(ThreadHeader {
                         id: row.get(0)?,
                         cwd: row.get(1)?,
-                        name: row.get(2)?,
-                        preview: row.get(3)?,
-                        created_at: row.get(4)?,
-                        updated_at: row.get(5)?,
-                        active: row.get(6)?,
+                        project_path: row.get(2)?,
+                        name: row.get(3)?,
+                        preview: row.get(4)?,
+                        created_at: row.get(5)?,
+                        updated_at: row.get(6)?,
+                        active: row.get(7)?,
                     })
                 })
                 .map_err(storage_error)?;
@@ -238,24 +249,59 @@ impl NativeStorage {
     }
 
     pub async fn delete_thread(&self, thread_id: String) -> Result<OperationAck, AppError> {
+        self.delete_thread_with_active_owner(thread_id, None).await
+    }
+
+    pub async fn delete_owned_active_thread(
+        &self,
+        thread_id: String,
+        turn_id: String,
+    ) -> Result<OperationAck, AppError> {
+        self.delete_thread_with_active_owner(thread_id, Some(turn_id))
+            .await
+    }
+
+    async fn delete_thread_with_active_owner(
+        &self,
+        thread_id: String,
+        active_turn_id: Option<String>,
+    ) -> Result<OperationAck, AppError> {
         let path = self.path().await?;
         run_blocking(move || {
             let mut connection = open_connection(&path)?;
             let transaction = connection.transaction().map_err(storage_error)?;
-            let active: bool = transaction
-                .query_row(
-                    "SELECT EXISTS(
-                         SELECT 1 FROM turns
-                         WHERE thread_id = ?1 AND status = 'inProgress'
-                     )",
-                    [&thread_id],
-                    |row| row.get(0),
-                )
-                .map_err(storage_error)?;
-            if active {
-                return Err(AppError::State(
-                    "an active thread cannot be deleted; interrupt its turn first".into(),
-                ));
+            if let Some(active_turn_id) = active_turn_id {
+                let owned: bool = transaction
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1 FROM turns
+                             WHERE thread_id = ?1 AND id = ?2 AND status = 'inProgress'
+                         )",
+                        params![thread_id, active_turn_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(storage_error)?;
+                if !owned {
+                    return Err(AppError::State(
+                        "active-turn ownership does not match the thread deletion request".into(),
+                    ));
+                }
+            } else {
+                let active: bool = transaction
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1 FROM turns
+                             WHERE thread_id = ?1 AND status = 'inProgress'
+                         )",
+                        [&thread_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(storage_error)?;
+                if active {
+                    return Err(AppError::State(
+                        "an active thread cannot be deleted by an idle-thread operation".into(),
+                    ));
+                }
             }
             let changed = transaction
                 .execute("DELETE FROM threads WHERE id = ?1", [&thread_id])
@@ -274,7 +320,7 @@ impl NativeStorage {
             let transaction = connection.transaction().map_err(storage_error)?;
             let source = transaction
                 .query_row(
-                    "SELECT cwd, name, preview
+                    "SELECT cwd, project_path, name, preview
                      FROM threads
                      WHERE id = ?1",
                     [&source_thread_id],
@@ -282,7 +328,8 @@ impl NativeStorage {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, Option<String>>(1)?,
-                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, String>(3)?,
                         ))
                     },
                 )
@@ -334,9 +381,10 @@ impl NativeStorage {
             let now = unix_timestamp()?;
             transaction
                 .execute(
-                    "INSERT INTO threads (id, cwd, name, preview, archived, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
-                    params![fork_id, source.0, source.1, source.2, now],
+                    "INSERT INTO threads
+                         (id, cwd, project_path, name, preview, archived, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
+                    params![fork_id, source.0, source.1, source.2, source.3, now],
                 )
                 .map_err(storage_error)?;
 
@@ -966,6 +1014,7 @@ impl ThreadItem {
             | Self::UserMessage { id, .. }
             | Self::AgentMessage { id, .. }
             | Self::Reasoning { id, .. }
+            | Self::Plan { id, .. }
             | Self::CommandExecution { id, .. }
             | Self::FileChange { id, .. }
             | Self::ToolExecution { id, .. } => id,
@@ -977,6 +1026,7 @@ impl ThreadItem {
 struct ThreadHeader {
     id: String,
     cwd: String,
+    project_path: Option<String>,
     name: Option<String>,
     preview: String,
     created_at: i64,
@@ -991,6 +1041,7 @@ impl ThreadHeader {
             preview: self.preview,
             name: self.name,
             cwd: self.cwd,
+            project_path: self.project_path,
             created_at: self.created_at,
             updated_at: self.updated_at,
             recency_at: Some(self.updated_at),
@@ -1009,7 +1060,7 @@ impl ThreadHeader {
 fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, AppError> {
     let header = connection
         .query_row(
-            "SELECT id, cwd, name, preview, created_at, updated_at,
+            "SELECT id, cwd, project_path, name, preview, created_at, updated_at,
                     EXISTS(SELECT 1 FROM turns WHERE thread_id = threads.id AND status = 'inProgress')
              FROM threads WHERE id = ?1 AND archived = 0",
             [thread_id],
@@ -1017,11 +1068,12 @@ fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, 
                 Ok(ThreadHeader {
                     id: row.get(0)?,
                     cwd: row.get(1)?,
-                    name: row.get(2)?,
-                    preview: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
-                    active: row.get(6)?,
+                    project_path: row.get(2)?,
+                    name: row.get(3)?,
+                    preview: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                    active: row.get(7)?,
                 })
             },
         )
@@ -1313,7 +1365,8 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
                  preview TEXT NOT NULL,
                  archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
                  created_at INTEGER NOT NULL,
-                 updated_at INTEGER NOT NULL
+                 updated_at INTEGER NOT NULL,
+                 project_path TEXT CHECK (project_path IS NULL OR project_path = cwd)
              );
              CREATE TABLE turns (
                  id TEXT PRIMARY KEY,
@@ -1363,6 +1416,45 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
     transaction.commit().map_err(storage_error)
 }
 
+fn migrate_database(
+    connection: &mut Connection,
+    version: i64,
+    application_id: i64,
+) -> Result<(), AppError> {
+    if application_id != DATABASE_APPLICATION_ID {
+        return Err(AppError::Storage(format!(
+            "database identity is unsupported; expected application {DATABASE_APPLICATION_ID}, received application {application_id}"
+        )));
+    }
+    if version == DATABASE_SCHEMA_VERSION {
+        return Ok(());
+    }
+    if version != 1 {
+        return Err(AppError::Storage(format!(
+            "database schema {version} cannot be migrated to {DATABASE_SCHEMA_VERSION}"
+        )));
+    }
+    let tables = database_tables(connection)?;
+    if tables != DATABASE_TABLES {
+        return Err(AppError::Storage(format!(
+            "database tables do not match schema {version}: {tables}"
+        )));
+    }
+
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE threads ADD COLUMN project_path TEXT
+                 CHECK (project_path IS NULL OR project_path = cwd);
+             UPDATE threads SET project_path = cwd;",
+        )
+        .map_err(storage_error)?;
+    transaction
+        .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
 fn validate_database(
     connection: &Connection,
     version: i64,
@@ -1377,6 +1469,12 @@ fn validate_database(
     if tables != DATABASE_TABLES {
         return Err(AppError::Storage(format!(
             "database tables do not match schema {DATABASE_SCHEMA_VERSION}: {tables}"
+        )));
+    }
+    let columns = thread_columns(connection)?;
+    if columns != THREAD_COLUMNS {
+        return Err(AppError::Storage(format!(
+            "thread columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
         )));
     }
     let integrity: String = connection
@@ -1418,13 +1516,26 @@ fn database_tables(connection: &Connection) -> Result<String, AppError> {
         .map_err(storage_error)
 }
 
+fn thread_columns(connection: &Connection) -> Result<String, AppError> {
+    connection
+        .query_row(
+            "SELECT COALESCE(group_concat(name, ','), '')
+             FROM (SELECT name FROM pragma_table_info('threads') ORDER BY cid)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
 fn open_connection(path: &Path) -> Result<Connection, AppError> {
     let connection = Connection::open(path).map_err(storage_error)?;
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(storage_error)?;
     connection
-        .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
+        .execute_batch(
+            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA wal_checkpoint(PASSIVE);",
+        )
         .map_err(storage_error)?;
     Ok(connection)
 }
@@ -1468,7 +1579,7 @@ mod tests {
 
     use super::{DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, NativeStorage};
     use crate::engine::native::provider::{ResponseContent, ResponseItem};
-    use crate::engine::{ThreadItem, TokenUsage, TurnStatus, UserContent};
+    use crate::engine::{AppConfig, ThreadItem, TokenUsage, TurnStatus, UserContent};
 
     #[tokio::test(flavor = "current_thread")]
     async fn initializes_the_native_schema_directly() {
@@ -1479,8 +1590,9 @@ mod tests {
             .initialize_at(database_path.clone())
             .await
             .expect("storage should initialize");
+        let project_path = directory.path().display().to_string();
         let thread = storage
-            .create_thread(directory.path().display().to_string())
+            .create_thread(project_path.clone(), Some(project_path.clone()))
             .await
             .expect("thread should persist");
         let loaded = storage
@@ -1488,6 +1600,7 @@ mod tests {
             .await
             .expect("thread should load");
         assert_eq!(loaded.id, thread.id);
+        assert_eq!(loaded.project_path.as_deref(), Some(project_path.as_str()));
         assert!(loaded.turns.is_empty());
 
         let connection = Connection::open(database_path).expect("database should reopen");
@@ -1520,6 +1633,122 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn persists_projectless_threads_without_inventing_a_project() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let workspace = directory.path().join("projectless-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("projectless.sqlite3"))
+            .await
+            .expect("storage should initialize");
+
+        let thread = storage
+            .create_thread(workspace.display().to_string(), None)
+            .await
+            .expect("projectless thread should persist");
+        let fork = storage
+            .fork_thread(thread.id.clone())
+            .await
+            .expect("projectless thread should fork");
+        let listed = storage
+            .list_threads(None, false)
+            .await
+            .expect("projectless threads should list");
+
+        assert_eq!(thread.project_path, None);
+        assert_eq!(fork.project_path, None);
+        assert!(listed.data.iter().all(|entry| entry.project_path.is_none()));
+        assert!(listed.data.iter().all(|entry| entry.cwd == thread.cwd));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn migrates_existing_threads_as_project_threads() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("migration.sqlite3");
+        let cwd = directory.path().display().to_string();
+        let connection = Connection::open(&database_path).expect("database should reopen");
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (
+                     id TEXT PRIMARY KEY,
+                     cwd TEXT NOT NULL,
+                     name TEXT,
+                     preview TEXT NOT NULL,
+                     archived INTEGER NOT NULL,
+                     created_at INTEGER NOT NULL,
+                     updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE turns (
+                     id TEXT PRIMARY KEY,
+                     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                     status TEXT NOT NULL,
+                     model TEXT NOT NULL,
+                     reasoning_effort TEXT,
+                     error TEXT,
+                     created_at INTEGER NOT NULL,
+                     updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE thread_items (
+                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                     turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+                     item_id TEXT NOT NULL,
+                     payload TEXT NOT NULL
+                 );
+                 CREATE TABLE provider_items (
+                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                     payload TEXT NOT NULL
+                 );
+                 CREATE TABLE app_config (
+                     singleton INTEGER PRIMARY KEY,
+                     version INTEGER NOT NULL,
+                     payload TEXT NOT NULL
+                 );",
+            )
+            .expect("schema-one tables should be created");
+        let config = serde_json::to_string(&AppConfig::default())
+            .expect("default configuration should encode");
+        connection
+            .execute(
+                "INSERT INTO app_config (singleton, version, payload) VALUES (1, 1, ?1)",
+                [&config],
+            )
+            .expect("schema-one configuration should persist");
+        connection
+            .execute(
+                "INSERT INTO threads
+                     (id, cwd, name, preview, archived, created_at, updated_at)
+                 VALUES ('legacy-thread', ?1, NULL, '', 0, 1, 1)",
+                [&cwd],
+            )
+            .expect("schema-one thread should persist");
+        connection
+            .pragma_update(None, "application_id", DATABASE_APPLICATION_ID)
+            .expect("application id should persist");
+        connection
+            .pragma_update(None, "user_version", 1)
+            .expect("schema version should persist");
+        drop(connection);
+
+        let migrated = NativeStorage::default();
+        migrated
+            .initialize_at(database_path.clone())
+            .await
+            .expect("schema one should migrate");
+        let loaded = migrated
+            .read_thread("legacy-thread".into())
+            .await
+            .expect("migrated thread should load");
+        assert_eq!(loaded.project_path.as_deref(), Some(cwd.as_str()));
+        let connection = Connection::open(database_path).expect("database should reopen");
+        let schema_version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version should be readable");
+        assert_eq!(schema_version, DATABASE_SCHEMA_VERSION);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn completed_turn_returns_terminal_projection() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let storage = NativeStorage::default();
@@ -1528,7 +1757,10 @@ mod tests {
             .await
             .expect("storage should initialize");
         let thread = storage
-            .create_thread(directory.path().display().to_string())
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+            )
             .await
             .expect("thread should persist");
         let turn = storage
@@ -1580,7 +1812,10 @@ mod tests {
             .await
             .expect("storage should initialize");
         let thread = storage
-            .create_thread(directory.path().display().to_string())
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+            )
             .await
             .expect("thread should persist");
 
@@ -1615,7 +1850,10 @@ mod tests {
             .await
             .expect("storage should initialize");
         let thread = storage
-            .create_thread(directory.path().display().to_string())
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+            )
             .await
             .expect("thread should persist");
         let turn = storage
@@ -1707,7 +1945,10 @@ mod tests {
             .await
             .expect("storage should initialize");
         let thread = storage
-            .create_thread(directory.path().display().to_string())
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+            )
             .await
             .expect("thread should persist");
         let turn = storage
@@ -1773,7 +2014,10 @@ mod tests {
             .await
             .expect("storage should initialize");
         let thread = storage
-            .create_thread(directory.path().display().to_string())
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+            )
             .await
             .expect("thread should persist");
         let turn = storage
@@ -1836,7 +2080,10 @@ mod tests {
             .await
             .expect("storage should initialize");
         let thread = storage
-            .create_thread(directory.path().display().to_string())
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+            )
             .await
             .expect("thread should persist");
         let turn = storage
@@ -1916,6 +2163,65 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn deletes_only_the_matching_owned_active_turn_transactionally() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("active-thread-deletion.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+            )
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "user-active-delete".into(),
+                    content: vec![UserContent::Text {
+                        text: "delete while active".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "delete while active".into(),
+                }]),
+                "delete while active".into(),
+            )
+            .await
+            .expect("turn should begin");
+
+        assert!(storage.delete_thread(thread.id.clone()).await.is_err());
+        assert!(
+            storage
+                .delete_owned_active_thread(thread.id.clone(), "wrong-turn".into())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            storage
+                .read_thread(thread.id.clone())
+                .await
+                .expect("failed deletion must preserve the thread")
+                .turns[0]
+                .status,
+            TurnStatus::InProgress
+        );
+
+        let response = storage
+            .delete_owned_active_thread(thread.id.clone(), turn.id)
+            .await
+            .expect("the owning active turn should authorize deletion");
+        assert!(response.applied);
+        assert!(storage.read_thread(thread.id).await.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn thread_lifecycle_forks_archives_restores_and_deletes_transactionally() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let storage = NativeStorage::default();
@@ -1924,7 +2230,10 @@ mod tests {
             .await
             .expect("storage should initialize");
         let source = storage
-            .create_thread(directory.path().display().to_string())
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+            )
             .await
             .expect("source thread should persist");
         let turn = storage

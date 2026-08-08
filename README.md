@@ -60,10 +60,10 @@ O Codex CLI não é pré-requisito.
 
 ```powershell
 pnpm install --frozen-lockfile
-pnpm tauri dev
+pnpm dev:launch
 ```
 
-Na primeira execução, **Continuar com ChatGPT** abre a autorização no navegador.
+Quando não há uma sessão ativa, **Entrar com ChatGPT** abre a autorização no navegador.
 A sessão é criada no diretório de dados deste aplicativo; credenciais existentes
 da CLI não são lidas ou migradas.
 

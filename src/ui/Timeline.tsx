@@ -1,27 +1,60 @@
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import {
+  createContext,
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  Index,
+  onCleanup,
+  onMount,
+  Show,
+  useContext,
+} from "solid-js";
 
-import type {
-  ActivityStatus,
-  FileChange,
-  ThreadItem,
-  UserContent,
-  VisibleThreadItem,
-} from "../contracts/types";
+import type { FileChange, ThreadItem, UserContent, VisibleThreadItem } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
 import { projectName } from "../state/projects";
 import type { VisibleThreadTurn } from "../state/threadRuntime";
+import { fileName, toolIconName, toolLabel } from "./activityLabels";
+import {
+  type AgentActivityItem,
+  type AgentActivityKind,
+  type AgentActivityRenderUnit,
+  activeAgentActivity,
+  agentActivitySummaryLabel,
+  shouldRenderAgentActivityGroup,
+  splitAgentActivityUnits,
+  summarizeAgentActivity,
+  webSearchActivityTitle,
+} from "./agentActivityPresentation";
 import { CodexGlyph } from "./CodexGlyph";
-import { Icon } from "./Icon";
+import { Icon, type IconName } from "./Icon";
+import { ImagePreview } from "./ImagePreview";
+import { extractToolImageSource } from "./imageSource";
 import { Markdown } from "./Markdown";
+import { SplitDiffView, summarizeDiff, UnifiedDiffView } from "./SplitDiffView";
+import { createTimelineDisclosureStore, type TimelineDisclosureStore } from "./timelineDisclosure";
+import {
+  commandActivityTitle,
+  commandOutputText,
+  fileChangeActivityTitle,
+  reasoningTitle,
+  shouldCollapseTurnWork,
+  toolActivityTitle,
+  turnDurationLabel,
+} from "./timelinePresentation";
 import {
   calculateTimelineScrollbar,
+  hasRecentTimelineUserScrollIntent,
   isTimelineNearEnd,
+  resolveTimelineFollowing,
   type ScrollbarMetrics,
 } from "./timelineScroll";
 import { presentTurnFailure } from "./turnFailure";
+import { type UserMessageEntry, UserMessageNavigator } from "./UserMessageNavigator";
 
 interface StarterSuggestion {
-  readonly icon: "edit" | "file" | "search" | "terminal";
+  readonly icon: IconName;
   readonly label: string;
   readonly prompt: string;
   readonly tone: "blue" | "green" | "orange" | "violet";
@@ -29,29 +62,29 @@ interface StarterSuggestion {
 
 const STARTER_SUGGESTIONS: readonly StarterSuggestion[] = [
   {
-    icon: "search",
-    label: "Explore e entenda o código",
+    icon: "telescope",
+    label: "Explore e entenda código",
     prompt:
       "Explore este projeto e explique sua arquitetura, os fluxos principais e os riscos técnicos mais importantes.",
     tone: "blue",
   },
   {
-    icon: "edit",
+    icon: "hammer",
     label: "Crie um novo recurso, aplicativo ou ferramenta",
     prompt:
       "Implemente um novo recurso neste projeto. Primeiro identifique a melhor integração arquitetural e então faça a alteração completa com validação.",
     tone: "violet",
   },
   {
-    icon: "file",
-    label: "Revise código e sugira mudanças",
+    icon: "syncCheck",
+    label: "Revisar código e sugerir mudanças",
     prompt:
       "Revise as alterações atuais do projeto, priorize bugs, riscos e regressões e proponha correções objetivas.",
     tone: "green",
   },
   {
-    icon: "terminal",
-    label: "Corrija problemas e falhas",
+    icon: "bug",
+    label: "Corrigir problemas e falhas",
     prompt:
       "Investigue os problemas atuais do projeto, encontre a causa raiz e implemente uma correção completa e verificável.",
     tone: "orange",
@@ -60,9 +93,37 @@ const STARTER_SUGGESTIONS: readonly StarterSuggestion[] = [
 
 const USER_MESSAGE_COLLAPSED_LINES = 20;
 
-interface UserMessageEntry {
-  readonly id: string;
-  readonly label: string;
+interface TimelineDisclosureBinding {
+  readonly isOpen: () => boolean;
+  readonly setOpen: (open: boolean) => void;
+  readonly toggle: () => void;
+}
+
+const TimelineDisclosureContext = createContext<TimelineDisclosureStore>();
+
+function useTimelineDisclosure(
+  key: () => string,
+  initialOpen: () => boolean = () => false,
+): TimelineDisclosureBinding {
+  const disclosures = useContext(TimelineDisclosureContext);
+  if (disclosures === undefined) {
+    throw new Error("O estado visual da timeline não foi inicializado.");
+  }
+
+  createEffect(() => {
+    if (initialOpen()) {
+      disclosures.keepOpen(key());
+    }
+  });
+
+  const isOpen = () => disclosures.read(key(), initialOpen());
+  const setOpen = (open: boolean) => disclosures.write(key(), open);
+
+  return {
+    isOpen,
+    setOpen,
+    toggle: () => setOpen(!isOpen()),
+  };
 }
 
 export function Timeline(props: {
@@ -75,6 +136,9 @@ export function Timeline(props: {
   let scrollbarThumbElement: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let animationFrame: number | undefined;
+  let lastUserScrollIntentAt = Number.NEGATIVE_INFINITY;
+  let observedActiveTurnId: string | null | undefined;
+  let observedThreadId: string | null | undefined;
   let dragState:
     | { readonly pointerId: number; readonly startScrollTop: number; readonly startY: number }
     | undefined;
@@ -88,16 +152,26 @@ export function Timeline(props: {
     thumbHeight: 0,
     thumbTop: 0,
   });
+  const disclosures = createTimelineDisclosureStore();
   const userMessages = createMemo<readonly UserMessageEntry[]>(() =>
-    props.controller
-      .turns()
-      .flatMap((turn) =>
-        turn.items.flatMap((item) =>
-          item.type === "userMessage"
-            ? [{ id: item.id, label: userMessagePreview(item.content) }]
-            : [],
-        ),
-      ),
+    props.controller.turns().flatMap((turn) => {
+      const response = [...turn.items].reverse().find((item) => item.type === "agentMessage");
+      const detail = response?.type === "agentMessage" ? blockPreview(response.text, 320) : null;
+      return turn.items.flatMap((item) => {
+        if (item.type !== "userMessage") {
+          return [];
+        }
+        const title = inlinePreview(userMessageCopyText(item.content), 180);
+        return [
+          {
+            id: item.id,
+            title,
+            detail,
+            label: detail === null ? title : `${title}. ${detail.replace(/\s+/gu, " ")}`,
+          },
+        ];
+      });
+    }),
   );
 
   function measureActiveUserMessage(): void {
@@ -136,10 +210,48 @@ export function Timeline(props: {
       scrollTop: scrollElement.scrollTop,
     });
     setShowScrollToEnd(!isNearEnd);
-    if (userInitiated) {
-      setFollowingLatest(isNearEnd);
-    }
+    setFollowingLatest((current) =>
+      resolveTimelineFollowing({
+        followingLatest: current,
+        nearEnd: isNearEnd,
+        userInitiated,
+      }),
+    );
     measureActiveUserMessage();
+  }
+
+  function markUserScrollIntent(): void {
+    lastUserScrollIntentAt = performance.now();
+  }
+
+  function handleTimelineKeyDown(event: KeyboardEvent): void {
+    if (event.target !== scrollElement) {
+      return;
+    }
+    switch (event.key) {
+      case " ":
+      case "ArrowDown":
+      case "ArrowUp":
+      case "End":
+      case "Home":
+      case "PageDown":
+      case "PageUp":
+        markUserScrollIntent();
+        return;
+    }
+  }
+
+  function handleTimelinePointerDown(event: PointerEvent): void {
+    if (event.pointerType === "touch" || event.button === 1) {
+      markUserScrollIntent();
+    }
+  }
+
+  function handleTimelineClick(event: MouseEvent): void {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("[data-timeline-disclosure]")) {
+      setFollowingLatest(false);
+    }
   }
 
   function synchronizeScroll(): void {
@@ -276,7 +388,17 @@ export function Timeline(props: {
       default:
         return;
     }
+    markUserScrollIntent();
     event.preventDefault();
+    measureScroll(true);
+  }
+
+  function scrollTimelineBy(delta: number): void {
+    if (scrollElement === undefined) {
+      return;
+    }
+    markUserScrollIntent();
+    scrollElement.scrollBy({ top: delta });
     measureScroll(true);
   }
 
@@ -284,7 +406,8 @@ export function Timeline(props: {
     if (scrollElement === undefined || contentElement === undefined) {
       return;
     }
-    const handleScroll = () => measureScroll(true);
+    const handleScroll = () =>
+      measureScroll(hasRecentTimelineUserScrollIntent(lastUserScrollIntentAt, performance.now()));
     scrollElement.addEventListener("scroll", handleScroll, { passive: true });
     resizeObserver = new ResizeObserver(synchronizeScroll);
     resizeObserver.observe(scrollElement);
@@ -307,117 +430,298 @@ export function Timeline(props: {
 
   createEffect(() => {
     props.controller.turns();
-    props.controller.turnBusy();
+    const threadId = props.controller.currentThread()?.id ?? null;
+    const activeTurnId = props.controller.activeTurnId();
+    const threadChanged = observedThreadId !== threadId;
+    const turnStarted = activeTurnId !== null && observedActiveTurnId !== activeTurnId;
+    observedThreadId = threadId;
+    observedActiveTurnId = activeTurnId;
+    if (threadChanged || turnStarted) {
+      setFollowingLatest(true);
+    }
     synchronizeScroll();
   });
 
   return (
-    <div class="timeline-frame">
-      <UserMessageNavigator
-        activeIndex={activeUserMessageIndex()}
-        messages={userMessages()}
-        onSelect={scrollToUserMessage}
-      />
-      <section
-        aria-label="Conversa"
-        class="timeline"
-        id="conversation-timeline"
-        ref={scrollElement}
-        // biome-ignore lint/a11y/noNoninteractiveTabindex: the official desktop keeps the scroll viewport keyboard-focusable for Home, End, PageUp, and PageDown.
-        tabIndex={0}
-      >
-        <div class="timeline-inner" ref={contentElement}>
-          <Show
-            when={props.controller.turns().length > 0}
-            fallback={
-              <EmptyConversation
-                onSelectSuggestion={props.onSelectSuggestion}
-                workspace={props.controller.workspace()}
-              />
-            }
-          >
-            <For each={props.controller.turns()}>
-              {(turn) => <ConversationTurn clock={clock()} turn={turn} />}
-            </For>
-          </Show>
-        </div>
-      </section>
-      <div
-        aria-controls="conversation-timeline"
-        aria-hidden={!scrollbar().scrollable}
-        aria-label="Posição na conversa"
-        aria-orientation="vertical"
-        aria-valuemax={Math.round(scrollbar().maximumScroll)}
-        aria-valuemin={0}
-        aria-valuenow={Math.round(scrollElement?.scrollTop ?? 0)}
-        class="timeline-scrollbar"
-        classList={{ "is-hidden": !scrollbar().scrollable }}
-        onKeyDown={handleScrollbarKeyDown}
-        onPointerDown={handleScrollbarTrackPointerDown}
-        ref={scrollbarTrackElement}
-        role="scrollbar"
-        tabIndex={scrollbar().scrollable ? 0 : -1}
-      >
-        <div
-          class="timeline-scrollbar-thumb"
-          onPointerDown={handleScrollbarThumbPointerDown}
-          onPointerMove={handleScrollbarThumbPointerMove}
-          onPointerUp={handleScrollbarThumbPointerUp}
-          ref={scrollbarThumbElement}
-          style={{
-            height: `${scrollbar().thumbHeight}px`,
-            transform: `translateY(${scrollbar().thumbTop}px)`,
-          }}
+    <TimelineDisclosureContext.Provider value={disclosures}>
+      <div class="timeline-frame">
+        <UserMessageNavigator
+          activeIndex={activeUserMessageIndex()}
+          messages={userMessages()}
+          onSelect={scrollToUserMessage}
         />
-      </div>
-      <Show when={showScrollToEnd()}>
-        <button
-          aria-label="Ir para o fim da conversa"
-          class="scroll-to-end-button"
-          onClick={() => scrollToEnd("smooth")}
-          title="Ir para o fim da conversa"
-          type="button"
+        <section
+          aria-label="Conversa"
+          class="timeline"
+          id="conversation-timeline"
+          onClick={handleTimelineClick}
+          onKeyDown={handleTimelineKeyDown}
+          onPointerDown={handleTimelinePointerDown}
+          onWheel={markUserScrollIntent}
+          ref={scrollElement}
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: the official desktop keeps the scroll viewport keyboard-focusable for Home, End, PageUp, and PageDown.
+          tabIndex={0}
         >
-          <Icon name="chevronDown" size={16} />
-        </button>
-      </Show>
-    </div>
-  );
-}
-
-function UserMessageNavigator(props: {
-  readonly activeIndex: number;
-  readonly messages: readonly UserMessageEntry[];
-  readonly onSelect: (message: UserMessageEntry) => void;
-}) {
-  return (
-    <Show when={props.messages.length > 1}>
-      <nav aria-label="Mensagens do usuário" class="user-message-navigator">
-        <For each={props.messages}>
-          {(message, index) => (
-            <button
-              aria-current={index() === props.activeIndex ? "true" : undefined}
-              aria-label={`Ir para a mensagem do usuário ${index() + 1}`}
-              classList={{ active: index() === props.activeIndex }}
-              onClick={() => props.onSelect(message)}
-              title={message.label}
-              type="button"
+          <div class="timeline-inner" ref={contentElement}>
+            <Show
+              keyed
+              when={props.controller.currentThread()?.id}
+              fallback={
+                <EmptyConversation
+                  onSelectSuggestion={props.onSelectSuggestion}
+                  workspace={props.controller.workspace()}
+                />
+              }
             >
-              <span class="user-message-navigator-dot" />
-              <span class="user-message-navigator-preview">{message.label}</span>
-            </button>
-          )}
-        </For>
-      </nav>
-    </Show>
+              {(_threadId) => (
+                <Show
+                  when={props.controller.turns().length > 0}
+                  fallback={
+                    <EmptyConversation
+                      onSelectSuggestion={props.onSelectSuggestion}
+                      workspace={props.controller.workspace()}
+                    />
+                  }
+                >
+                  <Index each={props.controller.turns()}>
+                    {(turn) => (
+                      <ConversationTurn
+                        clock={clock()}
+                        diffDisplay={props.controller.config()?.config.desktop.diffDisplay}
+                        turn={turn()}
+                      />
+                    )}
+                  </Index>
+                </Show>
+              )}
+            </Show>
+          </div>
+        </section>
+        <div
+          aria-hidden={!scrollbar().scrollable}
+          class="timeline-scrollbar"
+          classList={{ "is-hidden": !scrollbar().scrollable }}
+        >
+          <button
+            aria-controls="conversation-timeline"
+            aria-label="Rolar conversa para cima"
+            class="timeline-scrollbar-arrow up"
+            disabled={!scrollbar().scrollable || scrollbar().thumbTop <= 0.5}
+            onClick={() => scrollTimelineBy(-64)}
+            title="Rolar para cima"
+            type="button"
+          >
+            <span aria-hidden="true" class="timeline-scrollbar-arrow-glyph" />
+          </button>
+          <div
+            aria-controls="conversation-timeline"
+            aria-label="Posição na conversa"
+            aria-orientation="vertical"
+            aria-valuemax={Math.round(scrollbar().maximumScroll)}
+            aria-valuemin={0}
+            aria-valuenow={Math.round(scrollElement?.scrollTop ?? 0)}
+            class="timeline-scrollbar-track"
+            onKeyDown={handleScrollbarKeyDown}
+            onPointerDown={handleScrollbarTrackPointerDown}
+            ref={scrollbarTrackElement}
+            role="scrollbar"
+            tabIndex={scrollbar().scrollable ? 0 : -1}
+          >
+            <div
+              class="timeline-scrollbar-thumb"
+              onPointerDown={handleScrollbarThumbPointerDown}
+              onPointerMove={handleScrollbarThumbPointerMove}
+              onPointerUp={handleScrollbarThumbPointerUp}
+              ref={scrollbarThumbElement}
+              style={{
+                height: `${scrollbar().thumbHeight}px`,
+                transform: `translateY(${scrollbar().thumbTop}px)`,
+              }}
+            />
+          </div>
+          <button
+            aria-controls="conversation-timeline"
+            aria-label="Rolar conversa para baixo"
+            class="timeline-scrollbar-arrow down"
+            disabled={
+              !scrollbar().scrollable ||
+              scrollbar().thumbTop + scrollbar().thumbHeight >=
+                (scrollbarTrackElement?.clientHeight ?? 0) - 0.5
+            }
+            onClick={() => scrollTimelineBy(64)}
+            title="Rolar para baixo"
+            type="button"
+          >
+            <span aria-hidden="true" class="timeline-scrollbar-arrow-glyph" />
+          </button>
+        </div>
+        <Show when={showScrollToEnd()}>
+          <button
+            aria-label="Ir para o fim da conversa"
+            class="scroll-to-end-button"
+            onClick={() => scrollToEnd("smooth")}
+            title="Ir para o fim da conversa"
+            type="button"
+          >
+            <Icon name="chevronDown" size={16} />
+          </button>
+        </Show>
+      </div>
+    </TimelineDisclosureContext.Provider>
   );
 }
 
-function ConversationTurn(props: { readonly clock: number; readonly turn: VisibleThreadTurn }) {
+function ConversationTurn(props: {
+  readonly clock: number;
+  readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly turn: VisibleThreadTurn;
+}) {
+  const disclosure = useTimelineDisclosure(
+    () => `turn:${props.turn.id}`,
+    () => props.turn.status === "inProgress",
+  );
+  let previousStatus = props.turn.status;
   const failure = () => (props.turn.error === null ? null : presentTurnFailure(props.turn.error));
+
+  createEffect(() => {
+    const status = props.turn.status;
+    if (shouldCollapseTurnWork(previousStatus, status)) {
+      disclosure.setOpen(false);
+    }
+    previousStatus = status;
+  });
+
+  const userMessages = createMemo(() =>
+    props.turn.items.filter((item) => item.type === "userMessage"),
+  );
+
+  const nonUserItems = createMemo(() =>
+    props.turn.items.filter((item) => item.type !== "userMessage" && item.type !== "plan"),
+  );
+
+  const finalAgentMessageIndex = createMemo(() => {
+    const items = nonUserItems();
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      if (item?.type === "agentMessage" && item.phase !== "commentary") {
+        return i;
+      }
+    }
+    return -1;
+  });
+
+  const workItems = createMemo(() => {
+    const items = nonUserItems();
+    const finalIdx = finalAgentMessageIndex();
+    if (finalIdx === -1) {
+      return items;
+    }
+    return items.slice(0, finalIdx);
+  });
+
+  const finalAgentMessage = createMemo(() => {
+    const items = nonUserItems();
+    const finalIdx = finalAgentMessageIndex();
+    if (finalIdx === -1) {
+      return null;
+    }
+    const item = items[finalIdx];
+    return item ?? null;
+  });
+
+  const workUnits = createMemo(() => splitAgentActivityUnits(workItems()));
+  const latestReasoningHeading = createMemo(() => {
+    const items = workItems();
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (
+        item?.type === "reasoning" &&
+        [...item.summary, ...item.content].some((part) => part.trim().length > 0)
+      ) {
+        return reasoningTitle(item.summary, item.content);
+      }
+    }
+    return null;
+  });
+
+  function turnLabel(): string {
+    const end =
+      props.turn.status === "inProgress"
+        ? Math.floor(props.clock / 1_000)
+        : Math.max(props.turn.createdAt, props.turn.updatedAt);
+    const duration = formatElapsedSeconds(Math.max(0, end - props.turn.createdAt));
+    return turnDurationLabel(props.turn.status, duration);
+  }
+
   return (
     <section class="conversation-turn" data-status={props.turn.status}>
-      <For each={props.turn.items}>{(item) => <TimelineItem item={item} />}</For>
+      <Index each={userMessages()}>
+        {(item) => <TimelineItem diffDisplay={props.diffDisplay} item={item()} />}
+      </Index>
+
+      <Show when={workItems().length > 0 || props.turn.status === "inProgress"}>
+        <div class="turn-header-wrapper">
+          <Show
+            when={props.turn.status === "inProgress"}
+            fallback={
+              <button
+                aria-expanded={disclosure.isOpen()}
+                aria-label={`${disclosure.isOpen() ? "Ocultar" : "Mostrar"} trabalho do agente`}
+                class="turn-header-button"
+                data-timeline-disclosure=""
+                onClick={disclosure.toggle}
+                type="button"
+              >
+                <span class="turn-duration-label">{turnLabel()}</span>
+                <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+              </button>
+            }
+          >
+            <div aria-atomic="true" aria-live="polite" class="turn-active-status" role="status">
+              <span class="turn-duration-label">{turnLabel()}</span>
+            </div>
+          </Show>
+          <div class="turn-header-line" />
+        </div>
+
+        <Show when={props.turn.status === "inProgress" || disclosure.isOpen()}>
+          <Show when={workItems().length > 0}>
+            <div class="turn-body">
+              <Index each={workUnits()}>
+                {(unit, index) => (
+                  <WorkTimelineUnit
+                    diffDisplay={props.diffDisplay}
+                    isLatest={index === workUnits().length - 1}
+                    reasoningHeading={latestReasoningHeading()}
+                    turnStatus={props.turn.status}
+                    unit={unit()}
+                  />
+                )}
+              </Index>
+              <Show
+                when={
+                  props.turn.status === "inProgress" &&
+                  workItems().at(-1)?.type === "reasoning" &&
+                  workUnits().at(-1)?.kind !== "activityGroup"
+                    ? latestReasoningHeading()
+                    : null
+                }
+              >
+                {(heading) => (
+                  <section class="thinking-activity-status" role="status">
+                    <ActivityHeadline active text={heading()} />
+                  </section>
+                )}
+              </Show>
+            </div>
+          </Show>
+        </Show>
+      </Show>
+
+      <Show when={finalAgentMessage()}>
+        {(msg) => <TimelineItem diffDisplay={props.diffDisplay} item={msg()} />}
+      </Show>
+
       <Show when={failure()}>
         {(presentation) => (
           <section class="turn-failure" role="alert">
@@ -429,36 +733,134 @@ function ConversationTurn(props: { readonly clock: number; readonly turn: Visibl
           </section>
         )}
       </Show>
-      <TurnDuration clock={props.clock} turn={props.turn} />
     </section>
   );
 }
 
-function TurnDuration(props: { readonly clock: number; readonly turn: VisibleThreadTurn }) {
-  const label = () => {
-    const end =
-      props.turn.status === "inProgress"
-        ? Math.floor(props.clock / 1_000)
-        : Math.max(props.turn.createdAt, props.turn.updatedAt);
-    const duration = formatElapsedSeconds(Math.max(0, end - props.turn.createdAt));
-    switch (props.turn.status) {
-      case "completed":
-        return `Trabalhou por ${duration}`;
-      case "failed":
-        return `Falhou após ${duration}`;
-      case "inProgress":
-        return `Trabalhando há ${duration}`;
-      case "interrupted":
-        return `Você interrompeu após ${duration}`;
+function WorkTimelineUnit(props: {
+  readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly isLatest: boolean;
+  readonly reasoningHeading: string | null;
+  readonly turnStatus: VisibleThreadTurn["status"];
+  readonly unit: AgentActivityRenderUnit;
+}) {
+  return (
+    <Show
+      when={props.unit.kind === "activityGroup" ? props.unit : null}
+      fallback={
+        <Show when={props.unit.kind === "item" ? props.unit.item : null}>
+          {(item) => (
+            <TimelineItem
+              active={props.turnStatus === "inProgress"}
+              diffDisplay={props.diffDisplay}
+              item={item()}
+            />
+          )}
+        </Show>
+      }
+    >
+      {(group) => {
+        const isCurrent = () => props.turnStatus === "inProgress" && props.isLatest;
+        return (
+          <Show
+            when={shouldRenderAgentActivityGroup(group().items, isCurrent())}
+            fallback={
+              <Show when={group().items[0]}>
+                {(item) => <TimelineItem diffDisplay={props.diffDisplay} item={item()} />}
+              </Show>
+            }
+          >
+            <AgentActivityGroup
+              diffDisplay={props.diffDisplay}
+              isCurrent={isCurrent()}
+              items={group().items}
+              reasoningHeading={props.reasoningHeading}
+              turnStatus={props.turnStatus}
+            />
+          </Show>
+        );
+      }}
+    </Show>
+  );
+}
+
+function AgentActivityGroup(props: {
+  readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly isCurrent: boolean;
+  readonly items: readonly AgentActivityItem[];
+  readonly reasoningHeading: string | null;
+  readonly turnStatus: VisibleThreadTurn["status"];
+}) {
+  const disclosure = useTimelineDisclosure(
+    () => `agent-activity:${props.items[0]?.id ?? "start"}:${props.items.at(-1)?.id ?? "end"}`,
+    () => false,
+  );
+  const summaries = createMemo(() => summarizeAgentActivity(props.items));
+  const activeActivity = createMemo(() => activeAgentActivity(props.items));
+  const title = createMemo(() => {
+    if (!props.isCurrent) {
+      return agentActivitySummaryLabel(props.items);
     }
-  };
+    return activeActivity()?.label ?? props.reasoningHeading ?? "Pensando";
+  });
+  const iconKind = createMemo(() =>
+    props.isCurrent ? activeActivity()?.kind : summaries()[0]?.kind,
+  );
+  let previousStatus = props.turnStatus;
+
+  createEffect(() => {
+    const status = props.turnStatus;
+    if (shouldCollapseTurnWork(previousStatus, status)) {
+      disclosure.setOpen(false);
+    }
+    previousStatus = status;
+  });
 
   return (
-    <div class="turn-duration" role={props.turn.status === "inProgress" ? "status" : undefined}>
-      <span>{label()}</span>
-      <i />
-    </div>
+    <details
+      class="activity-card agent-activity-group"
+      onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+      open={disclosure.isOpen()}
+    >
+      <summary class="activity-summary agent-activity-summary" data-timeline-disclosure="">
+        <Show when={iconKind()}>
+          {(kind) => (
+            <span class="activity-icon">
+              <Icon name={agentActivityIcon(kind())} size={13} />
+            </span>
+          )}
+        </Show>
+        <ActivityHeadline active={props.isCurrent} text={title()} />
+        <span class="activity-chevron">
+          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+        </span>
+      </summary>
+      <div class="agent-activity-viewport">
+        <div class="agent-activity-list">
+          <Index each={props.items}>
+            {(item) => (
+              <TimelineItem diffDisplay={props.diffDisplay} item={item()} variant="grouped" />
+            )}
+          </Index>
+        </div>
+      </div>
+    </details>
   );
+}
+
+function agentActivityIcon(kind: AgentActivityKind | undefined): IconName {
+  switch (kind) {
+    case "fileChanges":
+      return "edit";
+    case "exploration":
+      return "file";
+    case "commands":
+      return "terminal";
+    case "webSearch":
+      return "globe";
+    default:
+      return "sparkles";
+  }
 }
 
 function EmptyConversation(props: {
@@ -471,64 +873,81 @@ function EmptyConversation(props: {
         <CodexGlyph />
       </div>
       <h2 id="empty-conversation-title">
-        O que devemos criar
-        <Show when={props.workspace} fallback="?">
+        <Show when={props.workspace} fallback="Em que vamos trabalhar hoje?">
           {(workspace) => (
             <>
-              {" em "}
-              <span>{projectName(workspace())}</span>?
+              Em que devemos trabalhar em <span>{projectName(workspace())}</span>?
             </>
           )}
         </Show>
       </h2>
-      <fieldset class="starter-suggestions">
-        <legend class="visually-hidden">Sugestões para começar</legend>
-        <For each={STARTER_SUGGESTIONS}>
-          {(suggestion) => (
-            <button
-              data-tone={suggestion.tone}
-              onClick={() => props.onSelectSuggestion(suggestion.prompt)}
-              type="button"
-            >
-              <Icon name={suggestion.icon} size={17} />
-              <span>{suggestion.label}</span>
-            </button>
-          )}
-        </For>
-      </fieldset>
+      <Show when={props.workspace !== null}>
+        <fieldset class="starter-suggestions">
+          <legend class="visually-hidden">Sugestões para começar</legend>
+          <For each={STARTER_SUGGESTIONS}>
+            {(suggestion) => (
+              <button
+                data-tone={suggestion.tone}
+                onClick={() => props.onSelectSuggestion(suggestion.prompt)}
+                type="button"
+              >
+                <Icon name={suggestion.icon} size={22} strokeWidth={2} />
+                <span>{suggestion.label}</span>
+              </button>
+            )}
+          </For>
+        </fieldset>
+      </Show>
     </section>
   );
 }
 
-function TimelineItem(props: { readonly item: VisibleThreadItem }) {
+function TimelineItem(props: {
+  readonly active?: boolean | undefined;
+  readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly item: VisibleThreadItem;
+  readonly variant?: "default" | "grouped" | undefined;
+}) {
   switch (props.item.type) {
     case "userMessage":
       return <UserMessage item={props.item} />;
     case "agentMessage":
-      return <AgentMessage item={props.item} />;
+      return props.item.phase === "commentary" ? (
+        <CommentaryMessage item={props.item} />
+      ) : (
+        <AgentMessage item={props.item} />
+      );
     case "contextCompaction":
-      return <ContextCompaction item={props.item} />;
+      return <ContextCompaction active={props.active} item={props.item} />;
     case "reasoning":
-      return <Reasoning item={props.item} />;
+      return null;
+    case "plan":
+      return null;
     case "commandExecution":
-      return <CommandItem item={props.item} />;
+      return <CommandItem item={props.item} variant={props.variant} />;
     case "fileChange":
-      return <FileChangeItem item={props.item} />;
+      return (
+        <FileChangeItem diffDisplay={props.diffDisplay} item={props.item} variant={props.variant} />
+      );
     case "toolExecution":
-      return <ToolItem item={props.item} />;
+      return <ToolItem item={props.item} variant={props.variant} />;
   }
 }
 
 function ContextCompaction(props: {
+  readonly active?: boolean | undefined;
   readonly item: Extract<ThreadItem, { type: "contextCompaction" }>;
 }) {
   return (
     <section class="context-compaction-row" id={props.item.id}>
       <span class="activity-icon">
-        <Icon name="layers" size={15} />
+        <Icon name="layers" size={13} />
       </span>
-      <span>Contexto compactado</span>
-      <small>A conversa continua em uma nova janela de contexto.</small>
+      <ActivityHeadline
+        active={props.active === true}
+        class="activity-title compaction-text"
+        text="Compactando contexto"
+      />
     </section>
   );
 }
@@ -536,11 +955,20 @@ function ContextCompaction(props: {
 function UserMessage(props: { readonly item: Extract<ThreadItem, { type: "userMessage" }> }) {
   let bubble: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
-  const [expanded, setExpanded] = createSignal(false);
+  const disclosure = useTimelineDisclosure(() => `user-message:${props.item.id}`);
   const [collapsible, setCollapsible] = createSignal(false);
+  const imageContent = createMemo(() =>
+    props.item.content.filter(
+      (content): content is Extract<UserContent, { type: "localImage" }> =>
+        content.type === "localImage",
+    ),
+  );
+  const bubbleContent = createMemo(() =>
+    props.item.content.filter((content) => content.type !== "localImage"),
+  );
 
   function measure(): void {
-    if (bubble === undefined || expanded()) {
+    if (bubble === undefined || disclosure.isOpen()) {
       return;
     }
     setCollapsible(bubble.scrollHeight > bubble.clientHeight + 1);
@@ -559,22 +987,42 @@ function UserMessage(props: { readonly item: Extract<ThreadItem, { type: "userMe
     <article class="message-row user-message-row" id={userMessageAnchor(props.item.id)}>
       <div class="message-content">
         <span class="visually-hidden">Você disse:</span>
-        <div
-          class="user-message-bubble"
-          classList={{ clamped: !expanded(), collapsed: collapsible() && !expanded() }}
-          ref={bubble}
-          style={{ "--collapsed-lines": USER_MESSAGE_COLLAPSED_LINES }}
-        >
-          <For each={props.item.content}>{(content) => <UserContentPart content={content} />}</For>
-        </div>
+        <Show when={imageContent().length > 0}>
+          <div class="message-image-grid user-message-images">
+            <For each={imageContent()}>
+              {(content) => (
+                <ImagePreview
+                  alt={imageContentName(content.path)}
+                  class="message-image-preview"
+                  name={imageContentName(content.path)}
+                  source={content.path}
+                />
+              )}
+            </For>
+          </div>
+        </Show>
+        <Show when={bubbleContent().length > 0}>
+          <div
+            class="user-message-bubble"
+            classList={{
+              clamped: !disclosure.isOpen(),
+              collapsed: collapsible() && !disclosure.isOpen(),
+            }}
+            ref={bubble}
+            style={{ "--collapsed-lines": USER_MESSAGE_COLLAPSED_LINES }}
+          >
+            <For each={bubbleContent()}>{(content) => <UserContentPart content={content} />}</For>
+          </div>
+        </Show>
         <Show when={collapsible()}>
           <button
-            aria-expanded={expanded()}
+            aria-expanded={disclosure.isOpen()}
             class="user-message-expand"
-            onClick={() => setExpanded((value) => !value)}
+            data-timeline-disclosure=""
+            onClick={disclosure.toggle}
             type="button"
           >
-            {expanded() ? "Mostrar menos" : "Mostrar mais"}
+            {disclosure.isOpen() ? "Mostrar menos" : "Mostrar mais"}
           </button>
         </Show>
         <div class="message-actions user-message-actions">
@@ -590,11 +1038,7 @@ function UserContentPart(props: { readonly content: UserContent }) {
     case "text":
       return <p class="message-text">{props.content.text}</p>;
     case "localImage":
-      return (
-        <div class="attachment-line">
-          <Icon name="file" size={15} /> Imagem: {fileName(props.content.path)}
-        </div>
-      );
+      return null;
     case "mention":
       return (
         <div class="attachment-line">
@@ -604,17 +1048,47 @@ function UserContentPart(props: { readonly content: UserContent }) {
   }
 }
 
+function CommentaryMessage(props: {
+  readonly item: Extract<ThreadItem, { type: "agentMessage" }>;
+}) {
+  const disclosure = useTimelineDisclosure(() => `commentary:${props.item.id}`);
+  const content = () => props.item.text.trim();
+  const title = () => reasoningTitle([], [content()]);
+  const hasDetails = () => content().includes("\n") || content() !== title();
+
+  return (
+    <Show
+      when={hasDetails()}
+      fallback={
+        <section class="activity-card commentary-card">
+          <p class="commentary-message-text">{content()}</p>
+        </section>
+      }
+    >
+      <details
+        class="activity-card commentary-card"
+        onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+        open={disclosure.isOpen()}
+      >
+        <summary class="activity-summary" data-timeline-disclosure="">
+          <ActivityHeadline text={title()} />
+          <span class="activity-chevron">
+            <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+          </span>
+        </summary>
+        <div class="commentary-content">
+          <Markdown text={content()} />
+        </div>
+      </details>
+    </Show>
+  );
+}
+
 function AgentMessage(props: { readonly item: Extract<ThreadItem, { type: "agentMessage" }> }) {
   return (
-    <article
-      class="message-row agent-message-row"
-      classList={{ commentary: props.item.phase === "commentary" }}
-    >
+    <article class="message-row agent-message-row">
       <div class="message-content">
         <span class="visually-hidden">Codex disse:</span>
-        <Show when={props.item.phase === "commentary"}>
-          <div class="message-phase">Atualização</div>
-        </Show>
         <Markdown class="agent-message-markdown" text={props.item.text} />
         <div class="message-actions">
           <CopyMessageButton text={props.item.text} />
@@ -671,168 +1145,364 @@ function CopyMessageButton(props: { readonly text: string }) {
   );
 }
 
-function Reasoning(props: { readonly item: Extract<ThreadItem, { type: "reasoning" }> }) {
-  const summary = () => props.item.summary.filter(Boolean).join("\n");
-  const content = () => props.item.content.filter(Boolean).join("\n");
+function ActivityHeadline(props: {
+  readonly active?: boolean | undefined;
+  readonly class?: string;
+  readonly text: string;
+}) {
   return (
-    <details class="activity-card reasoning-card">
-      <summary>
-        <span class="activity-icon">
-          <Icon name="bot" size={15} />
+    <span
+      class={props.class ?? "activity-title"}
+      classList={{ "is-running": props.active === true }}
+    >
+      <span class="activity-title-base">{props.text}</span>
+      <Show when={props.active === true}>
+        <span aria-hidden="true" class="activity-title-sweep">
+          <span class="activity-title-highlight">{props.text}</span>
         </span>
-        <span>Raciocínio</span>
-        <small>{summary().split("\n")[0] || "Analisando contexto"}</small>
-      </summary>
-      <Show when={summary().length > 0}>
-        <pre>{summary()}</pre>
       </Show>
-      <Show when={content().length > 0}>
-        <pre>{content()}</pre>
-      </Show>
-    </details>
+    </span>
   );
 }
 
-function CommandItem(props: { readonly item: Extract<ThreadItem, { type: "commandExecution" }> }) {
+function CommandItem(props: {
+  readonly item: Extract<ThreadItem, { type: "commandExecution" }>;
+  readonly variant?: "default" | "grouped" | undefined;
+}) {
+  const disclosure = useTimelineDisclosure(() => `command:${props.item.id}`);
+  const title = () =>
+    commandActivityTitle(
+      props.item.command,
+      props.item.status,
+      props.variant === "grouped" ? false : disclosure.isOpen(),
+    );
+  const output = () => commandOutputText(props.item.aggregatedOutput);
+
   return (
     <details
-      class={`activity-card status-${props.item.status}`}
-      open={props.item.status === "failed"}
+      class="activity-card command-activity-card"
+      classList={{ "grouped-activity-item": props.variant === "grouped" }}
+      onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+      open={disclosure.isOpen()}
     >
-      <summary>
+      <summary class="activity-summary" data-timeline-disclosure="">
         <span class="activity-icon">
-          <Icon name="terminal" size={15} />
+          <Icon name="terminal" size={13} />
         </span>
-        <span>Comando</span>
-        <code>{props.item.command}</code>
-        <StatusPill status={props.item.status} />
+        <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
+        <span class="activity-chevron">
+          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+        </span>
       </summary>
-      <div class="activity-meta">
-        <span>{props.item.cwd}</span>
-        <Show when={props.item.durationMs !== null}>
-          <span>{formatDuration(props.item.durationMs ?? 0)}</span>
-        </Show>
-        <Show when={props.item.exitCode !== null}>
-          <span>exit {props.item.exitCode}</span>
+      <div class="command-card-inner">
+        <div class="command-card-header">Shell</div>
+        <div class="command-card-scroll">
+          <div class="command-card-prompt">
+            <span class="prompt-symbol">$</span> {props.item.command}
+          </div>
+          <Show when={output()}>
+            {(visibleOutput) => <pre class="command-card-output">{visibleOutput()}</pre>}
+          </Show>
+        </div>
+        <Show when={props.item.status === "failed" || props.item.status === "declined"}>
+          <div class="command-card-footer">
+            <span class="status-failed-text">
+              <Icon name="close" size={12} />
+              {props.item.status === "declined" ? "Recusado" : "Falhou"}
+            </span>
+          </div>
         </Show>
       </div>
-      <Show when={props.item.aggregatedOutput !== null}>
-        <pre class="terminal-output">{props.item.aggregatedOutput}</pre>
-      </Show>
     </details>
   );
 }
 
-function FileChangeItem(props: { readonly item: Extract<ThreadItem, { type: "fileChange" }> }) {
+function ToolItem(props: {
+  readonly item: Extract<ThreadItem, { type: "toolExecution" }>;
+  readonly variant?: "default" | "grouped" | undefined;
+}) {
+  const disclosure = useTimelineDisclosure(() => `tool:${props.item.id}`);
+  const description = () => props.item.description || toolLabel(props.item.name);
+  const imageSource = () => extractToolImageSource(props.item.name, props.item.output);
+  const isWebSearch = () => props.item.name === "web_search" || props.item.name === "web_fetch";
+  const hasDetails = () =>
+    imageSource() !== null ||
+    (props.item.output !== null && props.item.output.length > 0) ||
+    props.item.status === "failed" ||
+    props.item.status === "declined";
+  const title = () =>
+    isWebSearch()
+      ? webSearchActivityTitle(description(), props.item.status)
+      : imageSource() === null
+        ? toolActivityTitle(description(), props.item.status, disclosure.isOpen())
+        : description();
+
+  const headline = () => (
+    <>
+      <span class="activity-icon">
+        <Icon name={toolIconName(props.item.name)} size={13} />
+      </span>
+      <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
+    </>
+  );
+
   return (
-    <section class={`activity-card file-change-card status-${props.item.status}`}>
-      <header>
-        <span class="activity-icon">
-          <Icon name="file" size={15} />
-        </span>
-        <strong>Alterações em arquivos</strong>
-        <StatusPill status={props.item.status} />
-      </header>
-      <For each={props.item.changes}>{(change) => <Change change={change} />}</For>
-    </section>
+    <Show
+      when={hasDetails()}
+      fallback={
+        <div
+          class="activity-card activity-summary tool-activity-card tool-activity-row"
+          classList={{ "grouped-activity-item": props.variant === "grouped" }}
+        >
+          {headline()}
+        </div>
+      }
+    >
+      <details
+        class="activity-card tool-activity-card"
+        classList={{
+          "grouped-activity-item": props.variant === "grouped",
+          "image-tool-activity": imageSource() !== null,
+        }}
+        onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+        open={disclosure.isOpen()}
+      >
+        <summary class="activity-summary" data-timeline-disclosure="">
+          {headline()}
+          <span class="activity-chevron">
+            <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+          </span>
+        </summary>
+        <div class="command-card-inner">
+          <Show when={imageSource() === null}>
+            <div class="command-card-header">{toolLabel(props.item.name)}</div>
+          </Show>
+          <Show
+            when={imageSource()}
+            fallback={
+              <Show when={props.item.output !== null && props.item.output.length > 0}>
+                <div class="command-card-scroll">
+                  <pre class="command-card-output">{props.item.output}</pre>
+                </div>
+              </Show>
+            }
+          >
+            {(source) => (
+              <div class="tool-image-result">
+                <ImagePreview
+                  alt={description()}
+                  class="tool-image-preview"
+                  name={description()}
+                  source={source()}
+                />
+              </div>
+            )}
+          </Show>
+          <Show when={props.item.status === "failed" || props.item.status === "declined"}>
+            <div class="command-card-footer">
+              <span class="status-failed-text">
+                <Icon name="close" size={12} />
+                {props.item.status === "declined" ? "Recusada" : "Falhou"}
+              </span>
+            </div>
+          </Show>
+        </div>
+      </details>
+    </Show>
   );
 }
 
-function Change(props: { readonly change: FileChange }) {
+function FileChangeItem(props: {
+  readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly item: Extract<ThreadItem, { type: "fileChange" }>;
+  readonly variant?: "default" | "grouped" | undefined;
+}) {
+  const disclosure = useTimelineDisclosure(
+    () => `file-change:${props.item.id}`,
+    () => props.item.status === "inProgress",
+  );
+  const title = () => fileChangeActivityTitle(props.item.changes);
+
   return (
-    <details class="diff-block">
-      <summary>
-        <span class={`change-kind kind-${props.change.kind.type}`}>
-          {changeLabel(props.change)}
-        </span>
-        <code>{props.change.path}</code>
-      </summary>
-      <pre>
-        <For each={props.change.diff.split("\n")}>
-          {(line) => (
-            <span classList={{ added: line.startsWith("+"), removed: line.startsWith("-") }}>
-              {line}
-              {"\n"}
+    <Show
+      when={props.variant === "grouped" && props.item.changes.length === 1}
+      fallback={
+        <details
+          class="activity-card file-change-card"
+          classList={{ "grouped-activity-item": props.variant === "grouped" }}
+          onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+          open={disclosure.isOpen()}
+        >
+          <summary class="activity-summary" data-timeline-disclosure="">
+            <span class="activity-icon">
+              <Icon name="edit" size={13} />
             </span>
-          )}
-        </For>
-      </pre>
-    </details>
+            <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
+            <span class="activity-chevron">
+              <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+            </span>
+          </summary>
+          <div class="file-change-list">
+            <Index each={props.item.changes}>
+              {(change, index) => (
+                <Change
+                  change={change()}
+                  defaultOpen={props.item.status === "inProgress"}
+                  diffDisplay={props.diffDisplay}
+                  disclosureKey={`change:${props.item.id}:${index}`}
+                  variant={props.variant}
+                />
+              )}
+            </Index>
+          </div>
+        </details>
+      }
+    >
+      <Change
+        change={props.item.changes[0] as FileChange}
+        defaultOpen={props.item.status === "inProgress"}
+        diffDisplay={props.diffDisplay}
+        disclosureKey={`change:${props.item.id}:0`}
+        variant="grouped"
+      />
+    </Show>
   );
 }
 
-function ToolItem(props: { readonly item: Extract<ThreadItem, { type: "toolExecution" }> }) {
+function Change(props: {
+  readonly change: FileChange;
+  readonly defaultOpen: boolean;
+  readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly disclosureKey: string;
+  readonly variant?: "default" | "grouped" | undefined;
+}) {
+  const disclosure = useTimelineDisclosure(
+    () => props.disclosureKey,
+    () => props.defaultOpen,
+  );
+  const stats = createMemo(() => summarizeDiff(props.change.diff));
+  const [copyState, setCopyState] = createSignal<"copied" | "failed" | "idle">("idle");
+  let resetTimer: number | undefined;
+
+  onCleanup(() => window.clearTimeout(resetTimer));
+
+  async function copyDiff(event: MouseEvent): Promise<void> {
+    event.preventDefault();
+    event.stopPropagation();
+    window.clearTimeout(resetTimer);
+    try {
+      if (navigator.clipboard === undefined) {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(props.change.diff);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    resetTimer = window.setTimeout(() => setCopyState("idle"), 2_000);
+  }
+
+  const copyLabel = () => {
+    switch (copyState()) {
+      case "copied":
+        return "Diff copiado";
+      case "failed":
+        return "Falha ao copiar o diff";
+      case "idle":
+        return "Copiar diff";
+    }
+  };
+
   return (
-    <details class={`activity-card status-${props.item.status}`}>
-      <summary>
-        <span class="activity-icon">
-          <Icon name="shield" size={15} />
+    <details
+      class="diff-block"
+      classList={{ "grouped-diff-block": props.variant === "grouped" }}
+      data-kind={props.change.kind.type}
+      onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+      open={disclosure.isOpen()}
+    >
+      <summary data-timeline-disclosure="">
+        <Show when={props.variant === "grouped"}>
+          <span class="activity-icon">
+            <Icon name="edit" size={13} />
+          </span>
+          <span class="grouped-change-action">{groupedChangeAction(props.change)}</span>
+        </Show>
+        <span class="diff-file-identity">
+          <code title={props.change.path}>{fileName(props.change.path)}</code>
+          <Show when={props.variant !== "grouped" && props.change.kind.type !== "update"}>
+            <span class={`change-kind kind-${props.change.kind.type}`}>
+              {props.change.kind.type === "add" ? "NOVO" : "EXCLUÍDO"}
+            </span>
+          </Show>
         </span>
-        <span>{toolLabel(props.item.name)}</span>
-        <small>{props.item.description}</small>
-        <StatusPill status={props.item.status} />
+        <span class="diff-stat additions" title={`${stats().additions} linhas adicionadas`}>
+          +{stats().additions}
+        </span>
+        <span class="diff-stat deletions" title={`${stats().deletions} linhas removidas`}>
+          −{stats().deletions}
+        </span>
+        <span class="diff-file-actions">
+          <span aria-hidden="true" class="diff-file-chevron">
+            <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+          </span>
+          <button
+            aria-label={copyLabel()}
+            class="diff-copy-button"
+            onClick={(event) => void copyDiff(event)}
+            title={copyLabel()}
+            type="button"
+          >
+            <Icon name={copyState() === "copied" ? "check" : "copy"} size={13} />
+          </button>
+        </span>
       </summary>
-      <Show when={props.item.output !== null}>
-        <pre>{props.item.output}</pre>
+      <Show
+        when={props.change.diff.trim().length > 0}
+        fallback={<div class="diff-empty-state">Nenhuma diferença textual disponível.</div>}
+      >
+        <Show
+          when={props.diffDisplay === "split"}
+          fallback={<UnifiedDiffView diff={props.change.diff} path={props.change.path} />}
+        >
+          <SplitDiffView diff={props.change.diff} path={props.change.path} />
+        </Show>
       </Show>
     </details>
   );
 }
 
-function StatusPill(props: { readonly status: ActivityStatus }) {
-  return <span class={`status-pill status-${props.status}`}>{statusLabel(props.status)}</span>;
-}
-
-function statusLabel(status: ActivityStatus): string {
-  switch (status) {
-    case "completed":
-      return "Concluído";
-    case "declined":
-      return "Recusado";
-    case "failed":
-      return "Falhou";
-    case "inProgress":
-      return "Em andamento";
-  }
-}
-
-function toolLabel(name: string): string {
-  switch (name) {
-    case "read_file":
-      return "Leitura de arquivo";
-    case "list_files":
-      return "Listagem de arquivos";
-    case "search_text":
-      return "Busca no projeto";
-    case "web_search":
-      return "Pesquisa na web";
-    default:
-      return name;
-  }
-}
-
-function changeLabel(change: FileChange): string {
+function groupedChangeAction(change: FileChange): string {
   switch (change.kind.type) {
     case "add":
-      return "NOVO";
+      return "Criado";
     case "delete":
-      return "EXCLUÍDO";
+      return "Excluído";
     case "update":
-      return "ALTERADO";
+      return "Edição";
   }
-}
-
-function fileName(path: string): string {
-  return path.split(/[\\/]/u).at(-1) ?? path;
 }
 
 function userMessageCopyText(content: readonly UserContent[]): string {
   return content.map(userContentPartCopyText).join("\n");
 }
 
-function userMessagePreview(content: readonly UserContent[]): string {
-  const text = userMessageCopyText(content).replace(/\s+/gu, " ").trim();
-  return text.length <= 72 ? text || "Mensagem sem texto" : `${text.slice(0, 69)}…`;
+function inlinePreview(text: string, maximumLength: number): string {
+  const normalized = text.replace(/\s+/gu, " ").trim() || "Mensagem sem texto";
+  return normalized.length <= maximumLength
+    ? normalized
+    : `${normalized.slice(0, maximumLength - 1)}…`;
+}
+
+function blockPreview(text: string, maximumLength: number): string {
+  const normalized = text
+    .replace(/\r\n?/gu, "\n")
+    .replace(/[^\S\r\n]+/gu, " ")
+    .replace(/\n{3,}/gu, "\n\n")
+    .trim();
+  return normalized.length <= maximumLength
+    ? normalized
+    : `${normalized.slice(0, maximumLength - 1)}…`;
 }
 
 function userMessageAnchor(id: string): string {
@@ -844,29 +1514,30 @@ function userContentPartCopyText(part: UserContent): string {
     case "text":
       return part.text;
     case "localImage":
-      return `Imagem: ${fileName(part.path)}`;
+      return `Imagem: ${imageContentName(part.path)}`;
     case "mention":
       return part.name;
   }
 }
 
-function formatDuration(milliseconds: number): string {
-  return milliseconds < 1_000 ? `${milliseconds} ms` : `${(milliseconds / 1_000).toFixed(1)} s`;
+function imageContentName(path: string): string {
+  const name = fileName(path);
+  return name.length <= 160 ? name : "Imagem anexada";
 }
 
 function formatElapsedSeconds(seconds: number): string {
   if (seconds < 1) {
-    return "menos de 1s";
+    return "0 s";
   }
   if (seconds < 60) {
-    return `${seconds}s`;
+    return `${seconds} s`;
   }
   if (seconds < 3_600) {
     const minutes = Math.floor(seconds / 60);
     const remainder = seconds % 60;
-    return remainder === 0 ? `${minutes}min` : `${minutes}min ${remainder}s`;
+    return remainder === 0 ? `${minutes} min` : `${minutes} min ${remainder} s`;
   }
   const hours = Math.floor(seconds / 3_600);
   const minutes = Math.floor((seconds % 3_600) / 60);
-  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}min`;
+  return minutes === 0 ? `${hours} h` : `${hours} h ${minutes} min`;
 }

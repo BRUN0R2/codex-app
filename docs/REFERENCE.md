@@ -76,6 +76,21 @@ requisição completa. Também não são inventados `comp_hash`, metadados de mu
 um ledger duplicado ou um endpoint alternativo. A instalação do histórico e do
 marcador visível é atômica no SQLite próprio.
 
+## Edição freeform nativa
+
+A semântica de `apply_patch` foi estudada somente nestes arquivos do snapshot:
+
+- `codex-rs/apply-patch/src/parser.rs`;
+- `codex-rs/apply-patch/src/seek_sequence.rs`;
+- `codex-rs/core/src/tools/handlers/apply_patch.lark`;
+- `codex-rs/core/src/tools/handlers/apply_patch_spec.rs`.
+
+A gramática e o formato custom do Responses definem o contrato externo. Parser,
+planejamento, confinamento de paths, snapshots, journal, rollback e itens da
+timeline foram implementados sobre as abstrações próprias do `NativeEngine`.
+Nenhum crate do snapshot, sidecar, comando de shell ou fallback de ferramenta
+participa do build ou do runtime local.
+
 ## Decisões próprias
 
 Este projeto implementa do zero:

@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter as _};
-use tokio::sync::{Mutex, watch};
+use tauri::{AppHandle, Emitter as _, Manager as _};
+use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::JoinSet;
 
 use self::agent::{RunCompletion, TurnRun};
@@ -38,7 +38,8 @@ use crate::engine::{
 };
 use crate::error::AppError;
 
-const CONTRACT_SCHEMA_VERSION: u32 = 1;
+const CONTRACT_SCHEMA_VERSION: u32 = 2;
+const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct StartTurn {
@@ -62,6 +63,8 @@ struct ActiveTurn {
     cancellation: watch::Sender<bool>,
     accepting_steers: bool,
     steer_pending: bool,
+    pending_deletion: Option<oneshot::Sender<Result<OperationAck, AppError>>>,
+    deletion_in_progress: bool,
 }
 
 impl ActiveTurn {
@@ -84,6 +87,27 @@ impl ActiveTurn {
         self.accepting_steers = false;
         false
     }
+
+    fn request_deletion(
+        &mut self,
+    ) -> Result<oneshot::Receiver<Result<OperationAck, AppError>>, AppError> {
+        if self.pending_deletion.is_some() || self.deletion_in_progress {
+            return Err(AppError::State(
+                "thread deletion is already in progress".into(),
+            ));
+        }
+        let (sender, receiver) = oneshot::channel();
+        self.pending_deletion = Some(sender);
+        self.accepting_steers = false;
+        self.cancellation.send_replace(true);
+        Ok(receiver)
+    }
+
+    fn begin_deletion(&mut self) -> Option<oneshot::Sender<Result<OperationAck, AppError>>> {
+        let pending = self.pending_deletion.take();
+        self.deletion_in_progress = pending.is_some();
+        pending
+    }
 }
 
 pub(super) struct NativeEngineInner {
@@ -93,6 +117,7 @@ pub(super) struct NativeEngineInner {
     tools: ToolRegistry,
     approvals: ApprovalBroker,
     active_turns: Mutex<HashMap<String, ActiveTurn>>,
+    thread_lifecycle_gate: Mutex<()>,
     tasks: Mutex<JoinSet<()>>,
     start_gate: Mutex<()>,
     started: AtomicBool,
@@ -112,6 +137,7 @@ impl Default for NativeEngine {
                 tools: ToolRegistry,
                 approvals: ApprovalBroker::default(),
                 active_turns: Mutex::new(HashMap::new()),
+                thread_lifecycle_gate: Mutex::new(()),
                 tasks: Mutex::new(JoinSet::new()),
                 start_gate: Mutex::new(()),
                 started: AtomicBool::new(false),
@@ -196,10 +222,24 @@ impl NativeEngine {
     pub async fn thread_start(
         &self,
         app: &AppHandle,
-        cwd: String,
+        project_path: Option<String>,
     ) -> Result<ThreadStartResponse, AppError> {
         self.ensure_started()?;
-        let thread = self.inner.storage.create_thread(cwd).await?;
+        let cwd = match project_path.as_ref() {
+            Some(path) => path.clone(),
+            None => {
+                let directory = app
+                    .path()
+                    .app_data_dir()
+                    .map_err(|error| AppError::Storage(error.to_string()))?
+                    .join(PROJECTLESS_WORKSPACE_DIRECTORY);
+                tokio::fs::create_dir_all(&directory)
+                    .await
+                    .map_err(|error| AppError::FileSystem(error.to_string()))?;
+                directory.to_string_lossy().into_owned()
+            }
+        };
+        let thread = self.inner.storage.create_thread(cwd, project_path).await?;
         self.inner.emit_notification(
             app,
             EngineNotification::ThreadCreated(ThreadNotification {
@@ -304,23 +344,28 @@ impl NativeEngine {
         thread_id: String,
     ) -> Result<OperationAck, AppError> {
         self.ensure_started()?;
-        if self
-            .inner
-            .active_turns
-            .lock()
-            .await
-            .contains_key(&thread_id)
-        {
-            return Err(AppError::State(
-                "interrupt the active turn before deleting its thread".into(),
-            ));
-        }
-        let response = self.inner.storage.delete_thread(thread_id.clone()).await?;
-        self.inner.emit_notification(
-            app,
-            EngineNotification::ThreadDeleted(ThreadDeletedNotification { thread_id }),
-        )?;
-        Ok(response)
+        let active_deletion = {
+            let lifecycle_guard = self.inner.thread_lifecycle_gate.lock().await;
+            let mut active_turns = self.inner.active_turns.lock().await;
+            let pending = active_turns
+                .get_mut(&thread_id)
+                .map(ActiveTurn::request_deletion)
+                .transpose()?;
+            drop(active_turns);
+            let Some(pending) = pending else {
+                let response = self.inner.storage.delete_thread(thread_id.clone()).await?;
+                drop(lifecycle_guard);
+                self.inner.emit_notification(
+                    app,
+                    EngineNotification::ThreadDeleted(ThreadDeletedNotification { thread_id }),
+                )?;
+                return Ok(response);
+            };
+            pending
+        };
+        active_deletion.await.map_err(|_| {
+            AppError::State("active thread deletion lost its completion channel".into())
+        })?
     }
 
     pub async fn thread_fork(
@@ -377,6 +422,7 @@ impl NativeEngine {
             )));
         }
         let service_tier = model.select_service_tier(None)?;
+        let lifecycle_guard = self.inner.thread_lifecycle_gate.lock().await;
         let turn = self
             .inner
             .storage
@@ -396,6 +442,8 @@ impl NativeEngine {
                         cancellation,
                         accepting_steers: false,
                         steer_pending: false,
+                        pending_deletion: None,
+                        deletion_in_progress: false,
                     });
                     false
                 }
@@ -415,6 +463,7 @@ impl NativeEngine {
                 .await?;
             return Err(AppError::State(message));
         }
+        drop(lifecycle_guard);
 
         if let Err(error) = self.inner.emit_notification(
             app,
@@ -509,6 +558,7 @@ impl NativeEngine {
         let prepared =
             agent::prepare_user_input(request.client_user_message_id, request.input).await?;
         let user_item = prepared.user_item.clone();
+        let lifecycle_guard = self.inner.thread_lifecycle_gate.lock().await;
         let turn = self
             .inner
             .storage
@@ -531,6 +581,8 @@ impl NativeEngine {
                         cancellation,
                         accepting_steers: true,
                         steer_pending: false,
+                        pending_deletion: None,
+                        deletion_in_progress: false,
                     });
                     false
                 }
@@ -550,6 +602,7 @@ impl NativeEngine {
                 .await?;
             return Err(AppError::State(message));
         }
+        drop(lifecycle_guard);
 
         if let Err(error) = self.inner.emit_notification(
             app,
@@ -885,6 +938,27 @@ impl NativeEngineInner {
                 (TurnStatus::Failed, Some(failure))
             }
         };
+        if let Err(error) = self
+            .settle_turn(app, thread_id, turn_id, status, failure)
+            .await
+        {
+            self.emit_diagnostic(
+                app,
+                DiagnosticStream::Runtime,
+                format!("could not finalize turn `{turn_id}`: {error}"),
+            );
+        }
+    }
+
+    async fn settle_turn(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+        turn_id: &str,
+        status: TurnStatus,
+        failure: Option<OperationFailure>,
+    ) -> Result<(), AppError> {
+        let lifecycle_guard = self.thread_lifecycle_gate.lock().await;
         let completion = self
             .storage
             .complete_turn(
@@ -894,18 +968,58 @@ impl NativeEngineInner {
                 failure.as_ref().map(|failure| failure.message.clone()),
             )
             .await;
-        self.active_turns.lock().await.remove(&thread_id);
-        let turn = match completion {
-            Ok(turn) => turn,
-            Err(error) => {
-                self.emit_diagnostic(
-                    app,
-                    DiagnosticStream::Runtime,
-                    format!("could not finalize turn `{turn_id}`: {error}"),
-                );
-                return;
+        let pending_deletion = {
+            let mut active_turns = self.active_turns.lock().await;
+            let active = active_turns
+                .get_mut(&thread_id)
+                .ok_or_else(|| AppError::State("active-turn ownership was lost".into()))?;
+            if active.turn_id != turn_id {
+                return Err(AppError::State(
+                    "active-turn ownership changed during finalization".into(),
+                ));
             }
+            let pending = active.begin_deletion();
+            if pending.is_none() {
+                active_turns.remove(&thread_id);
+            }
+            pending
         };
+
+        if let Some(sender) = pending_deletion {
+            let deletion = if completion.is_ok() {
+                self.storage.delete_thread(thread_id.clone()).await
+            } else {
+                self.storage
+                    .delete_owned_active_thread(thread_id.clone(), turn_id.into())
+                    .await
+            };
+            self.active_turns.lock().await.remove(&thread_id);
+            drop(lifecycle_guard);
+            match deletion {
+                Ok(response) => {
+                    let result = self
+                        .emit_notification(
+                            app,
+                            EngineNotification::ThreadDeleted(ThreadDeletedNotification {
+                                thread_id,
+                            }),
+                        )
+                        .map(|()| response);
+                    if let Err(error) = &result {
+                        self.emit_diagnostic(app, DiagnosticStream::Runtime, error.to_string());
+                    }
+                    let _receiver_was_closed = sender.send(result);
+                    return Ok(());
+                }
+                Err(error) => {
+                    let _receiver_was_closed = sender.send(Err(error));
+                }
+            }
+        } else {
+            drop(lifecycle_guard);
+        }
+
+        let turn = completion?;
         if let Err(error) = self.emit_notification(
             app,
             EngineNotification::TurnCompleted(TurnCompletedNotification {
@@ -931,6 +1045,7 @@ impl NativeEngineInner {
                 format!("could not refresh completed thread: {error}"),
             ),
         }
+        Ok(())
     }
 
     async fn rollback_unspawned_turn(
@@ -940,58 +1055,23 @@ impl NativeEngineInner {
         turn_id: &str,
         cause: AppError,
     ) -> AppError {
-        let removed = {
-            let mut active_turns = self.active_turns.lock().await;
-            if active_turns
-                .get(thread_id)
-                .is_some_and(|active| active.turn_id == turn_id)
-            {
-                active_turns.remove(thread_id);
-                true
-            } else {
-                false
-            }
-        };
-        if !removed {
-            self.emit_diagnostic(
-                app,
-                DiagnosticStream::Runtime,
-                format!("rollback lost ownership of unspawned turn `{turn_id}`"),
-            );
-        }
-
         let cause_message = cause.to_string();
-        let completion = self
-            .storage
-            .complete_turn(
+        let rollback = self
+            .settle_turn(
+                app,
                 thread_id.into(),
-                turn_id.into(),
+                turn_id,
                 TurnStatus::Failed,
-                Some(cause_message.clone()),
+                Some(OperationFailure {
+                    code: cause.public_code(),
+                    message: cause_message.clone(),
+                }),
             )
             .await;
-        let turn = match completion {
-            Ok(turn) => turn,
-            Err(rollback_error) => {
-                return AppError::State(format!(
-                    "{cause_message}; failed to roll back unspawned turn `{turn_id}`: {rollback_error}"
-                ));
-            }
-        };
-        let notification = EngineNotification::TurnCompleted(TurnCompletedNotification {
-            thread_id: thread_id.into(),
-            turn,
-            error: Some(OperationFailure {
-                code: cause.public_code(),
-                message: cause_message,
-            }),
-        });
-        if let Err(notification_error) = self.emit_notification(app, notification) {
-            self.emit_diagnostic(
-                app,
-                DiagnosticStream::Runtime,
-                notification_error.to_string(),
-            );
+        if let Err(rollback_error) = rollback {
+            return AppError::State(format!(
+                "{cause_message}; failed to roll back unspawned turn `{turn_id}`: {rollback_error}"
+            ));
         }
         cause
     }
@@ -1020,6 +1100,7 @@ mod tests {
     use tokio::sync::watch;
 
     use super::ActiveTurn;
+    use crate::engine::OperationAck;
 
     fn active_turn() -> ActiveTurn {
         let (cancellation, _receiver) = watch::channel(false);
@@ -1028,6 +1109,8 @@ mod tests {
             cancellation,
             accepting_steers: true,
             steer_pending: false,
+            pending_deletion: None,
+            deletion_in_progress: false,
         }
     }
 
@@ -1056,5 +1139,33 @@ mod tests {
         active.cancellation.send_replace(true);
 
         assert!(!active.can_accept_steer());
+    }
+
+    #[tokio::test]
+    async fn deletion_cancels_the_turn_and_has_one_completion_owner() {
+        let mut active = active_turn();
+        let completion = active
+            .request_deletion()
+            .expect("the first deletion request should register");
+
+        assert!(*active.cancellation.borrow());
+        assert!(!active.can_accept_steer());
+        assert!(active.request_deletion().is_err());
+
+        let sender = active
+            .begin_deletion()
+            .expect("finalization should own the pending request");
+        assert!(active.request_deletion().is_err());
+        sender
+            .send(Ok(OperationAck { applied: true }))
+            .expect("the command should still be waiting");
+
+        assert!(
+            completion
+                .await
+                .expect("the completion channel should remain open")
+                .expect("deletion should succeed")
+                .applied
+        );
     }
 }
