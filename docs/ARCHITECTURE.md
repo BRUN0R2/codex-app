@@ -40,6 +40,10 @@ O engine nativo divide ownership assim:
 Um turno só se torna ativo após persistência e aquisição exclusiva do
 `thread_id`. Falha ao publicar seus eventos iniciais executa rollback antes de a
 operação retornar. Conclusão e interrupção removem o mesmo registro de ownership.
+Excluir uma tarefa ativa registra a intenção nesse mesmo ownership, cancela o
+turno e mantém a tarefa reservada até o storage finalizar e excluir os dados. A
+interface nunca encadeia `interrupt` e `delete`, portanto não existe janela entre
+as duas operações nem dependência do snapshot visual da tarefa.
 No encerramento, novas operações são rejeitadas, aprovações são canceladas,
 processos recebem cancelamento e as tasks possuem prazo de drenagem de dez
 segundos.

@@ -4,6 +4,7 @@ import type {
   ModelReroutedNotification,
   ModelSafetyBufferingUpdatedNotification,
   ModelVerification,
+  PlanItem,
   ThreadTurn,
   VisibleThreadItem,
 } from "../contracts/types";
@@ -94,6 +95,33 @@ export function deleteThreadRuntime(current: ThreadRuntimeMap, threadId: string)
 export function activeTurnFromThread(thread: CodexThread): string | null {
   const active = [...thread.turns].reverse().find((turn) => turn.status === "inProgress");
   return active?.id ?? null;
+}
+
+export function isThreadActive(
+  thread: CodexThread,
+  runtime: ThreadRuntimeState | undefined,
+): boolean {
+  return thread.status.type === "active" || (runtime?.activeTurnId ?? null) !== null;
+}
+
+export function readActiveTurnPlan(
+  turns: readonly VisibleThreadTurn[],
+  activeTurnId: string | null,
+): PlanItem | null {
+  if (activeTurnId === null) {
+    return null;
+  }
+  const activeTurn = turns.find((turn) => turn.id === activeTurnId);
+  if (activeTurn === undefined) {
+    return null;
+  }
+  for (let index = activeTurn.items.length - 1; index >= 0; index -= 1) {
+    const item = activeTurn.items[index];
+    if (item?.type === "plan") {
+      return item;
+    }
+  }
+  return null;
 }
 
 export function readVisibleThreadTurns(

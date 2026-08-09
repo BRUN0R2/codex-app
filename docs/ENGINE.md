@@ -52,6 +52,31 @@ Notificações suportadas:
 Qualquer método diferente falha na fronteira TypeScript e gera diagnóstico
 visível.
 
+`turn.completed` carrega a projeção terminal persistida do turno: `id`,
+`status`, `error` e `updatedAt`. O storage produz esses valores na mesma
+transação que encerra o turno e atualiza a thread. O frontend aplica a projeção
+ao cache visível e limpa o runtime em um único batch, portanto interrupção,
+falha e duração não dependem da chegada posterior de `thread.updated`. Essa
+notificação posterior apenas reconcilia o snapshot completo de forma
+idempotente; uma segunda conclusão conflitante é erro de contrato.
+
+`engine_thread_delete` também é a operação completa para tarefas ativas. O motor
+registra um único solicitante, cancela o turno, impede nova aquisição do mesmo
+`thread_id` e responde somente depois da exclusão transacional. Se a persistência
+da conclusão falhar, a exclusão exige a identidade exata do turno que ainda está
+ativo; nenhum estado informado pela interface autoriza esse caminho.
+
+## Boot com limite de tempo
+
+O boot nunca fica preso para sempre. No Rust, cada operação do cofre de
+credenciais (Credential Manager do Windows e decrypt scrypt/age) tem limite de
+10 segundos no `spawn_blocking`; estouro vira erro tratável de storage, sem
+apagar credenciais. No frontend, `engine_start`, `engine_account_read` e o
+registro de eventos têm limite de 15 segundos; o estouro marca o runtime como
+`failed` e a tela de erro oferece nova tentativa, que reexecuta a inicialização
+inteira. Eventos de status atrasados são ignorados após uma falha, para que um
+`ready` tardio não troque o erro por um boot fantasma.
+
 ## Provider
 
 O backend usa a sessão OAuth diretamente para:
@@ -71,18 +96,62 @@ toda saída possui uma chamada. Uma interrupção que deixou uma chamada pendent
 recebe a saída explícita `aborted`; saídas órfãs são removidas. Qualquer correção
 é regravada em uma única transação e publicada nos diagnósticos de runtime.
 
+## Compactação dinâmica de contexto
+
+Antes da primeira amostragem e de toda continuação no mesmo turno, o
+`NativeEngine` avalia a requisição que realmente será enviada. O contexto ativo
+é o maior entre:
+
+- a estimativa atual de instruções, histórico normalizado e ferramentas; e
+- o último uso informado pelo servidor para o mesmo modelo, somado aos itens
+  locais posteriores à última saída gerada pelo modelo.
+
+A contagem é saturante e mede JSON com um writer de contagem, sem criar buffers
+serializados temporários para cada item. A compactação começa quando o orçamento
+automático do catálogo ou a janela útil do modelo é atingido. Não há um limite
+de rodadas adicional nem uma cota local arbitrária de tamanho de projeto.
+
+O protocolo é Responses Remote Compaction V2. O motor envia
+`compaction_trigger`, exige exatamente um checkpoint `compaction` criptografado
+e só então instala, em uma transação SQLite, as mensagens recentes retidas, o
+checkpoint e o item concluído da timeline. A cópia enviada ao provider pode
+reduzir apenas o sufixo contíguo de saídas de ferramenta quando ele sozinho
+impede a requisição de caber; o histórico durável não é alterado antes do
+checkpoint válido.
+
+Um `context_length_exceeded` inesperado em uma amostragem comum é preservado
+como `ContextWindowExceeded`. O turno atual falha de forma visível e uma medição
+de janela cheia é persistida. Na próxima submissão, o preflight compacta antes
+de chamar o modelo. A ação recusada nunca é repetida silenciosamente no mesmo
+turno. O frontend somente apresenta os eventos e o estado persistido; política,
+recuperação e atomicidade pertencem integralmente ao Rust.
+
 ## Ferramentas e permissão
 
 | Ferramenta | Somente leitura | Projeto | Acesso total |
 | --- | ---: | ---: | ---: |
 | `read_file`, `list_files`, `search_text` | sim | sim | sim |
 | `edit_file`, `write_file` | não | sim | sim |
+| `apply_patch` | não | sim | sim |
 | `exec_command` | não | aprovação | sem aprovação |
 
 Todos os paths de ferramenta são relativos ao workspace. Escritas são atômicas,
 arquivos são UTF-8 e comandos são não interativos, limitados a 120 segundos e a
 1 MiB de saída agregada. Recusa de comando retorna um resultado tipado ao modelo;
 cancelamento interrompe o turno.
+
+`apply_patch` é uma ferramenta freeform do Responses, anunciada com gramática
+Lark fechada e respondida por `custom_tool_call_output`; ela não passa por shell,
+PowerShell, `git apply` ou executável auxiliar. O parser aceita somente o envelope
+canônico e hunks add/delete/update/move. Antes do primeiro write, o planejador
+resolve todos os paths, rejeita escapes, symlinks, duplicidades e sobreposições,
+aplica todos os chunks em memória e fotografa conteúdo, permissões e SHA-256.
+
+O commit prepara e sincroniza todos os temporários, revalida cada fotografia e
+só então troca os arquivos. Cancelamento, concorrência ou falha intermediária
+acionam o journal inverso; qualquer falha de restauração vira erro explícito de
+integridade com os paths afetados. A timeline recebe um único `FileChange` com
+as alterações canônicas somente após o commit completo.
 
 ## Configuração
 

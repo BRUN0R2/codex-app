@@ -51,6 +51,46 @@ saída `aborted` para chamadas sem resultado e remove resultados órfãos. O eng
 local segue essa invariável e ainda persiste a correção atomicamente, porque seu
 SQLite próprio é a fonte autoritativa entre reinícios.
 
+## Contexto ativo e compactação
+
+A implementação de compactação foi comparada diretamente com estes arquivos do
+snapshot fixado:
+
+- `codex-rs/core/src/context_manager/history.rs`;
+- `codex-rs/core/src/session/context_window.rs`;
+- `codex-rs/core/src/session/turn.rs`;
+- `codex-rs/core/src/compact_remote.rs`;
+- `codex-rs/core/src/compact_remote_v2.rs`.
+
+O core oficial combina o último uso medido pelo servidor com itens locais ainda
+não medidos, consulta a política antes das amostragens e, no Remote Compaction
+V2, conserva mensagens recentes junto de um único checkpoint criptografado. Um
+estouro inesperado marca a janela como cheia, encerra o turno com erro visível e
+faz a submissão seguinte compactar antes da rede; ele não repete silenciosamente
+a mesma amostragem.
+
+Neste aplicativo, instruções e ferramentas são campos recompostos em cada
+request, e não world-state persistido no histórico. Por isso o cálculo local usa
+o máximo entre a medição compatível acrescida do sufixo local e a estimativa da
+requisição completa. Também não são inventados `comp_hash`, metadados de mundo,
+um ledger duplicado ou um endpoint alternativo. A instalação do histórico e do
+marcador visível é atômica no SQLite próprio.
+
+## Edição freeform nativa
+
+A semântica de `apply_patch` foi estudada somente nestes arquivos do snapshot:
+
+- `codex-rs/apply-patch/src/parser.rs`;
+- `codex-rs/apply-patch/src/seek_sequence.rs`;
+- `codex-rs/core/src/tools/handlers/apply_patch.lark`;
+- `codex-rs/core/src/tools/handlers/apply_patch_spec.rs`.
+
+A gramática e o formato custom do Responses definem o contrato externo. Parser,
+planejamento, confinamento de paths, snapshots, journal, rollback e itens da
+timeline foram implementados sobre as abstrações próprias do `NativeEngine`.
+Nenhum crate do snapshot, sidecar, comando de shell ou fallback de ferramenta
+participa do build ou do runtime local.
+
 ## Decisões próprias
 
 Este projeto implementa do zero:

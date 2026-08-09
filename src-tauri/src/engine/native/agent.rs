@@ -8,17 +8,19 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use super::NativeEngineInner;
+use super::compaction::compact_context;
+use super::context_window::{evaluate_context_window, full_context_usage};
 use super::provider::{
     ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseRequest,
-    ResponseRequestSettings, SelectedModel, normalize_provider_history,
+    ResponseRequestSettings, SelectedModel, WebSearchAction, normalize_provider_history,
 };
-use super::tools::{PreparedTool, ToolExecutionContext};
+use super::tools::{MAX_PROVIDER_ITEM_BYTES, PreparedTool, ToolExecutionContext};
 use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
 use crate::engine::{
     ActivityStatus, AppConfig, DiagnosticStream, ImageDetail, IndexedTextDeltaNotification,
     ItemNotification, MessagePhase, ModelRerouteReason, ModelReroutedNotification,
     ModelSafetyBufferingUpdatedNotification, ModelVerificationNotification, Personality,
-    TextDeltaNotification, ThreadItem, TokenUsage, TurnInput, TurnModerationMetadataNotification,
+    TextDeltaNotification, ThreadItem, TurnInput, TurnModerationMetadataNotification,
     WebSearchMode,
 };
 use crate::error::AppError;
@@ -29,8 +31,6 @@ const MAX_IMAGE_BYTES: usize = 10 * 1_048_576;
 const MAX_RAW_INPUT_BYTES: usize = 16 * 1_048_576;
 const MAX_INSTRUCTIONS_BYTES: usize = 524_288;
 const MAX_PROVIDER_ITEM_ID_BYTES: usize = 256;
-const MAX_PROVIDER_TEXT_BYTES: usize = 2 * 1_048_576;
-const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 
 pub(super) struct PreparedTurn {
     pub user_item: ThreadItem,
@@ -53,6 +53,11 @@ pub(super) struct TurnRun {
 pub(super) enum RunCompletion {
     Completed,
     Interrupted,
+}
+
+struct SamplingInput {
+    history: Vec<ResponseItem>,
+    tools: Vec<serde_json::Value>,
 }
 
 pub(super) async fn prepare_user_input(
@@ -172,24 +177,17 @@ pub(super) async fn run_turn(
 ) -> Result<RunCompletion, AppError> {
     let instructions = compose_instructions(&run.model, &run.workspace, &run.config)?;
     let mut provider_state = TurnProviderState::default();
-    let previous_usage = inner
-        .storage
-        .latest_context_usage(run.thread_id.clone())
-        .await?;
-    if context_limit_reached(
-        previous_usage.as_ref(),
-        run.model.auto_compact_token_limit(),
-    ) && !compact_context(&inner, &app, &mut run, &instructions, &mut provider_state).await?
-    {
-        return Ok(RunCompletion::Interrupted);
-    }
 
     loop {
         if *run.cancellation.borrow() {
             return Ok(RunCompletion::Interrupted);
         }
-        let history = load_prompt_history(&inner, &app, &run.thread_id).await?;
-        let tools = provider_tools(&inner, &run.config);
+        let Some(SamplingInput { history, tools }) =
+            prepare_sampling_input(&inner, &app, &mut run, &instructions, &mut provider_state)
+                .await?
+        else {
+            return Ok(RunCompletion::Interrupted);
+        };
         let request = ResponseRequest::new(
             run.model.id().into(),
             instructions.clone(),
@@ -210,20 +208,34 @@ pub(super) async fn run_turn(
                 &inner.auth,
                 request,
                 &run.thread_id,
-                provider_state.turn_state.as_deref(),
+                provider_state.turn_state(),
                 &mut run.cancellation,
             )
             .await
         {
             Ok(stream) => stream,
             Err(AppError::Cancelled(_)) => return Ok(RunCompletion::Interrupted),
-            Err(error) => return Err(error),
+            Err(error) => {
+                if matches!(&error, AppError::ContextWindowExceeded(_)) {
+                    persist_full_context_usage(&inner, &app, &run).await?;
+                }
+                return Err(error);
+            }
         };
         let mut pending_tools = Vec::new();
-        let mut completed_usage = None;
         let mut saw_completed = false;
 
-        while let Some(event) = stream.next_event(&mut run.cancellation).await? {
+        loop {
+            let event = match stream.next_event(&mut run.cancellation).await {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(error) => {
+                    if matches!(&error, AppError::ContextWindowExceeded(_)) {
+                        persist_full_context_usage(&inner, &app, &run).await?;
+                    }
+                    return Err(error);
+                }
+            };
             let Some(event) =
                 handle_provider_control_event(&inner, &app, &run, &mut provider_state, event)?
             else {
@@ -306,12 +318,25 @@ pub(super) async fn run_turn(
                         } => {
                             let item_id = id.unwrap_or_else(|| call_id.clone());
                             let prepared = inner.tools.prepare(item_id, &name, &arguments)?;
-                            pending_tools.push(PendingTool { call_id, prepared });
+                            pending_tools.push(PendingTool {
+                                call_id,
+                                output_kind: ToolOutputKind::Function,
+                                prepared,
+                            });
                         }
-                        ResponseItem::CustomToolCall { name, .. } => {
-                            return Err(AppError::Provider(format!(
-                                "provider emitted unsupported custom tool call `{name}`"
-                            )));
+                        ResponseItem::CustomToolCall {
+                            id,
+                            call_id,
+                            name,
+                            input,
+                        } => {
+                            let item_id = id.unwrap_or_else(|| call_id.clone());
+                            let prepared = inner.tools.prepare_custom(item_id, &name, &input)?;
+                            pending_tools.push(PendingTool {
+                                call_id,
+                                output_kind: ToolOutputKind::Custom,
+                                prepared,
+                            });
                         }
                         _ => {}
                     }
@@ -326,13 +351,12 @@ pub(super) async fn run_turn(
                             ThreadItem::ContextUsage {
                                 id: Uuid::now_v7().to_string(),
                                 model: run.model.id().into(),
-                                usage: usage.clone(),
+                                usage,
                                 context_window: run.model.context_window(),
                             },
                             false,
                         )
                         .await?;
-                        completed_usage = Some(usage);
                     }
                     saw_completed = true;
                     break;
@@ -411,20 +435,18 @@ pub(super) async fn run_turn(
                 false,
             )
             .await?;
+            let output = match pending.output_kind {
+                ToolOutputKind::Function => {
+                    ResponseItem::function_output(pending.call_id, provider_output)
+                }
+                ToolOutputKind::Custom => {
+                    ResponseItem::custom_output(pending.call_id, provider_output)
+                }
+            };
             inner
                 .storage
-                .append_provider_item(
-                    run.thread_id.clone(),
-                    ResponseItem::function_output(pending.call_id, provider_output),
-                )
+                .append_provider_item(run.thread_id.clone(), output)
                 .await?;
-        }
-        if context_limit_reached(
-            completed_usage.as_ref(),
-            run.model.auto_compact_token_limit(),
-        ) && !compact_context(&inner, &app, &mut run, &instructions, &mut provider_state).await?
-        {
-            return Ok(RunCompletion::Interrupted);
         }
     }
 }
@@ -436,14 +458,32 @@ pub(super) async fn run_compaction(
 ) -> Result<RunCompletion, AppError> {
     let instructions = compose_instructions(&run.model, &run.workspace, &run.config)?;
     let mut provider_state = TurnProviderState::default();
-    if compact_context(&inner, &app, &mut run, &instructions, &mut provider_state).await? {
+    if *run.cancellation.borrow() {
+        return Ok(RunCompletion::Interrupted);
+    }
+    let history = load_prompt_history(&inner, &app, &run.thread_id).await?;
+    let tools = provider_tools(&inner, &run.config);
+    if compact_context(
+        &inner,
+        &app,
+        &mut run,
+        &instructions,
+        &mut provider_state,
+        history,
+        &tools,
+    )
+    .await?
+    {
         Ok(RunCompletion::Completed)
     } else {
         Ok(RunCompletion::Interrupted)
     }
 }
 
-fn provider_tools(inner: &NativeEngineInner, config: &AppConfig) -> Vec<serde_json::Value> {
+pub(super) fn provider_tools(
+    inner: &NativeEngineInner,
+    config: &AppConfig,
+) -> Vec<serde_json::Value> {
     let mut tools = inner.tools.definitions();
     if config.web_search == WebSearchMode::Live {
         tools.push(json!({
@@ -454,7 +494,7 @@ fn provider_tools(inner: &NativeEngineInner, config: &AppConfig) -> Vec<serde_js
     tools
 }
 
-async fn load_prompt_history(
+pub(super) async fn load_prompt_history(
     inner: &NativeEngineInner,
     app: &AppHandle,
     thread_id: &str,
@@ -480,144 +520,99 @@ async fn load_prompt_history(
     Ok(normalized.items)
 }
 
-fn context_limit_reached(
-    usage: Option<&TokenUsage>,
-    auto_compact_token_limit: Option<u64>,
-) -> bool {
-    usage
-        .zip(auto_compact_token_limit)
-        .is_some_and(|(usage, limit)| usage.total_tokens >= limit)
-}
-
-async fn compact_context(
+async fn prepare_sampling_input(
     inner: &NativeEngineInner,
     app: &AppHandle,
     run: &mut TurnRun,
     instructions: &str,
     provider_state: &mut TurnProviderState,
-) -> Result<bool, AppError> {
-    if *run.cancellation.borrow() {
-        return Ok(false);
-    }
+) -> Result<Option<SamplingInput>, AppError> {
     let history = load_prompt_history(inner, app, &run.thread_id).await?;
-    let compaction_item = ThreadItem::ContextCompaction {
-        id: Uuid::now_v7().to_string(),
-    };
-    persist_and_emit_item(
-        inner,
-        app,
-        &run.thread_id,
-        &run.turn_id,
-        compaction_item.clone(),
-        true,
-    )
-    .await?;
-
-    let mut compaction_input = history.clone();
-    compaction_input.push(ResponseItem::compaction_trigger());
-    let request = ResponseRequest::new(
-        run.model.id().into(),
-        instructions.into(),
-        compaction_input,
-        provider_tools(inner, &run.config),
-        ResponseRequestSettings {
-            parallel_tool_calls: run.model.supports_parallel_tool_calls(),
-            reasoning_effort: run.reasoning_effort,
-            service_tier: run.service_tier.clone(),
-            prompt_cache_key: Some(run.thread_id.clone()),
-            verbosity: run.config.model_verbosity,
-        },
-    );
-    let mut stream = match inner
-        .provider
-        .start_response(
-            app,
-            &inner.auth,
-            request,
-            &run.thread_id,
-            provider_state.turn_state.as_deref(),
-            &mut run.cancellation,
-        )
-        .await
-    {
-        Ok(stream) => stream,
-        Err(AppError::Cancelled(_)) => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    let mut output_item_count = 0usize;
-    let mut checkpoint = None;
-    let mut saw_completed = false;
-    while let Some(event) = stream.next_event(&mut run.cancellation).await? {
-        let Some(event) = handle_provider_control_event(inner, app, run, provider_state, event)?
-        else {
-            continue;
-        };
-        match event {
-            ResponseEvent::OutputItemDone(item) => {
-                output_item_count = output_item_count
-                    .checked_add(1)
-                    .ok_or_else(|| AppError::State("compaction output counter overflow".into()))?;
-                validate_response_item(&item)?;
-                if item.is_compaction_checkpoint() && checkpoint.replace(item).is_some() {
-                    return Err(AppError::Provider(
-                        "context compaction returned more than one checkpoint".into(),
-                    ));
-                }
-            }
-            ResponseEvent::Completed(_) => {
-                saw_completed = true;
-                break;
-            }
-            ResponseEvent::Interrupted => return Ok(false),
-            ResponseEvent::OutputTextDelta { .. }
-            | ResponseEvent::ReasoningSummaryDelta { .. }
-            | ResponseEvent::ReasoningContentDelta { .. } => {}
-            ResponseEvent::ServerModel(_)
-            | ResponseEvent::TurnState(_)
-            | ResponseEvent::ModelVerifications(_)
-            | ResponseEvent::TurnModerationMetadata(_)
-            | ResponseEvent::SafetyBuffering(_) => {
-                return Err(AppError::State(
-                    "provider control event escaped its handler".into(),
-                ));
-            }
-        }
-    }
-    if !saw_completed {
-        return Err(AppError::Provider(
-            "context compaction stream ended before response.completed".into(),
-        ));
-    }
-    let Some(checkpoint) = checkpoint else {
-        return Err(AppError::Provider(format!(
-            "context compaction returned no checkpoint in {output_item_count} output items"
-        )));
-    };
-    let compacted = build_compacted_history(history, checkpoint);
-    inner
+    let tools = provider_tools(inner, &run.config);
+    let snapshot = inner
         .storage
-        .replace_provider_history(run.thread_id.clone(), compacted)
+        .latest_context_usage(run.thread_id.clone())
         .await?;
+    let context_window = run.model.context_window();
+    let status = evaluate_context_window(
+        run.model.id(),
+        instructions,
+        &history,
+        &tools,
+        snapshot.as_ref(),
+        run.model.auto_compact_token_limit(),
+        context_window.as_ref(),
+    );
+    if !status.should_compact {
+        return Ok(Some(SamplingInput { history, tools }));
+    }
+
+    inner.emit_diagnostic(
+        app,
+        DiagnosticStream::Runtime,
+        format!(
+            "Automatically compacting {active_tokens} active context tokens before sampling.",
+            active_tokens = status.active_tokens
+        ),
+    );
+    if !compact_context(
+        inner,
+        app,
+        run,
+        instructions,
+        provider_state,
+        history,
+        &tools,
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(SamplingInput {
+        history: load_prompt_history(inner, app, &run.thread_id).await?,
+        tools,
+    }))
+}
+
+async fn persist_full_context_usage(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    run: &TurnRun,
+) -> Result<(), AppError> {
+    let Some(context_window) = run.model.context_window() else {
+        return Ok(());
+    };
     persist_and_emit_item(
         inner,
         app,
         &run.thread_id,
         &run.turn_id,
-        compaction_item,
+        ThreadItem::ContextUsage {
+            id: Uuid::now_v7().to_string(),
+            model: run.model.id().into(),
+            usage: full_context_usage(&context_window),
+            context_window: Some(context_window),
+        },
         false,
     )
-    .await?;
-    Ok(true)
+    .await
 }
 
 #[derive(Default)]
-struct TurnProviderState {
+pub(super) struct TurnProviderState {
     turn_state: Option<String>,
     rerouted_models: Vec<String>,
     verification_emitted: bool,
 }
 
-fn handle_provider_control_event(
+impl TurnProviderState {
+    pub(super) fn turn_state(&self) -> Option<&str> {
+        self.turn_state.as_deref()
+    }
+}
+
+pub(super) fn handle_provider_control_event(
     inner: &NativeEngineInner,
     app: &AppHandle,
     run: &TurnRun,
@@ -713,47 +708,16 @@ fn record_turn_state(current: &mut Option<String>, incoming: String) -> Result<(
     Ok(())
 }
 
-fn build_compacted_history(
-    history: Vec<ResponseItem>,
-    checkpoint: ResponseItem,
-) -> Vec<ResponseItem> {
-    let mut remaining_tokens = RETAINED_MESSAGE_TOKEN_BUDGET;
-    let mut retained = Vec::new();
-    for item in history.into_iter().rev() {
-        if !matches!(&item, ResponseItem::Message { role, .. } if role == "user") {
-            continue;
-        }
-        let estimated_tokens = estimate_message_tokens(&item).max(1);
-        if estimated_tokens > remaining_tokens {
-            continue;
-        }
-        remaining_tokens -= estimated_tokens;
-        retained.push(item);
-    }
-    retained.reverse();
-    retained.push(checkpoint);
-    retained
-}
-
-fn estimate_message_tokens(item: &ResponseItem) -> usize {
-    let ResponseItem::Message { content, .. } = item else {
-        return 0;
-    };
-    content
-        .iter()
-        .map(|part| match part {
-            ResponseContent::InputText { text } | ResponseContent::OutputText { text } => {
-                text.len().div_ceil(4)
-            }
-            ResponseContent::Refusal { refusal } => refusal.len().div_ceil(4),
-            ResponseContent::InputImage { .. } => 1_024,
-        })
-        .sum()
-}
-
 struct PendingTool {
     call_id: String,
+    output_kind: ToolOutputKind,
     prepared: PreparedTool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ToolOutputKind {
+    Function,
+    Custom,
 }
 
 async fn persist_and_emit_item(
@@ -770,6 +734,17 @@ async fn persist_and_emit_item(
             .append_thread_item(turn_id.into(), item.clone())
             .await?;
     }
+    emit_item_notification(inner, app, thread_id, turn_id, item, started)
+}
+
+pub(super) fn emit_item_notification(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    thread_id: &str,
+    turn_id: &str,
+    item: ThreadItem,
+    started: bool,
+) -> Result<(), AppError> {
     let notification = ItemNotification {
         thread_id: thread_id.into(),
         turn_id: turn_id.into(),
@@ -815,10 +790,7 @@ fn visible_item(item: &ResponseItem) -> Result<Option<ThreadItem>, AppError> {
         ResponseItem::WebSearchCall { action, .. } => Ok(Some(ThreadItem::ToolExecution {
             id: required_visible_item_id(item)?,
             name: "web_search".into(),
-            description: action
-                .as_ref()
-                .map(|action| format!("{action:?}"))
-                .unwrap_or_else(|| "Web search".into()),
+            description: web_search_activity_detail(action.as_ref()),
             status: ActivityStatus::Completed,
             output: None,
         })),
@@ -829,6 +801,35 @@ fn visible_item(item: &ResponseItem) -> Result<Option<ThreadItem>, AppError> {
         | ResponseItem::Compaction { .. }
         | ResponseItem::CompactionTrigger { .. } => Ok(None),
     }
+}
+
+fn web_search_activity_detail(action: Option<&WebSearchAction>) -> String {
+    let detail = match action {
+        Some(WebSearchAction::Search { query, queries }) => query
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::trim)
+            .map(str::to_string)
+            .or_else(|| {
+                let queries = queries
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(String::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>();
+                (!queries.is_empty()).then(|| queries.join(" · "))
+            }),
+        Some(WebSearchAction::OpenPage { url }) | Some(WebSearchAction::FindInPage { url, .. }) => {
+            url.as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        }
+        None => None,
+    };
+    detail.unwrap_or_else(|| "Pesquisa na web".into())
 }
 
 fn required_visible_item_id(item: &ResponseItem) -> Result<String, AppError> {
@@ -856,6 +857,8 @@ fn compose_instructions(
         "{}\n\n# Native Codex Desktop runtime\n\
          You are operating through an independent desktop runtime in workspace {}. \
          Use only the tools advertised in this request. Tool paths are workspace-relative. \
+         For multi-step work, publish a concise plan with update_plan and keep its statuses current. \
+         Skip a plan for trivial requests. \
          Never claim an operation succeeded until its tool result confirms it. \
          Surface blockers and failures plainly. {personality}{developer}",
         model.instructions(),
@@ -869,16 +872,16 @@ fn compose_instructions(
     Ok(instructions)
 }
 
-fn validate_response_item(item: &ResponseItem) -> Result<(), AppError> {
+pub(super) fn validate_response_item(item: &ResponseItem) -> Result<(), AppError> {
     if let Some(id) = item.id() {
         validate_provider_id(id)?;
     }
     let encoded = serde_json::to_vec(item).map_err(|error| {
         AppError::Provider(format!("response item could not be encoded: {error}"))
     })?;
-    if encoded.len() > MAX_PROVIDER_TEXT_BYTES {
+    if encoded.len() > MAX_PROVIDER_ITEM_BYTES {
         return Err(AppError::Provider(format!(
-            "response item exceeds {MAX_PROVIDER_TEXT_BYTES} bytes"
+            "response item exceeds {MAX_PROVIDER_ITEM_BYTES} bytes"
         )));
     }
     match item {
@@ -917,7 +920,7 @@ fn validate_response_item(item: &ResponseItem) -> Result<(), AppError> {
 
 fn validate_delta(item_id: &str, delta: &str) -> Result<(), AppError> {
     validate_provider_id(item_id)?;
-    if delta.len() > MAX_PROVIDER_TEXT_BYTES {
+    if delta.len() > MAX_PROVIDER_ITEM_BYTES {
         return Err(AppError::Provider("stream delta is too large".into()));
     }
     Ok(())
@@ -959,28 +962,13 @@ fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_input_bytes, context_limit_reached, record_turn_state};
-    use crate::engine::TokenUsage;
+    use super::{add_input_bytes, record_turn_state, web_search_activity_detail};
+    use crate::engine::native::provider::WebSearchAction;
 
     #[test]
     fn combined_input_is_bounded() {
         let mut total = super::MAX_RAW_INPUT_BYTES;
         assert!(add_input_bytes(&mut total, 1).is_err());
-    }
-
-    #[test]
-    fn compaction_is_driven_by_the_models_auto_compact_limit() {
-        let usage = |tokens_in_context_window| TokenUsage {
-            input_tokens: tokens_in_context_window,
-            cached_input_tokens: 0,
-            output_tokens: 0,
-            reasoning_output_tokens: 0,
-            total_tokens: tokens_in_context_window,
-        };
-
-        assert!(!context_limit_reached(Some(&usage(244_799)), Some(244_800)));
-        assert!(context_limit_reached(Some(&usage(244_800)), Some(244_800)));
-        assert!(!context_limit_reached(Some(&usage(400_000)), None));
     }
 
     #[test]
@@ -990,5 +978,26 @@ mod tests {
         record_turn_state(&mut state, "route-1".into()).expect("same route should be idempotent");
         assert!(record_turn_state(&mut state, "route-2".into()).is_err());
         assert_eq!(state.as_deref(), Some("route-1"));
+    }
+
+    #[test]
+    fn web_search_activity_uses_the_query_or_url_without_debug_syntax() {
+        let search = WebSearchAction::Search {
+            query: Some("  Codex app activity messages  ".into()),
+            queries: None,
+        };
+        let page = WebSearchAction::OpenPage {
+            url: Some("https://developers.openai.com/codex/app/".into()),
+        };
+
+        assert_eq!(
+            web_search_activity_detail(Some(&search)),
+            "Codex app activity messages"
+        );
+        assert_eq!(
+            web_search_activity_detail(Some(&page)),
+            "https://developers.openai.com/codex/app/"
+        );
+        assert_eq!(web_search_activity_detail(None), "Pesquisa na web");
     }
 }

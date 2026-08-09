@@ -250,22 +250,47 @@ async fn decode_json<T: DeserializeOwned>(
 
 async fn response_error(response: Response) -> AppError {
     let status = response.status().as_u16();
-    let message = match read_limited(response, MAX_ERROR_BYTES).await {
-        Ok(bytes) if bytes.is_empty() => "the provider returned an empty error body".into(),
-        Ok(bytes) => format_provider_error_body(bytes),
-        Err(error) => format!("the provider error body could not be read: {error}"),
+    let decoded = match read_limited(response, MAX_ERROR_BYTES).await {
+        Ok(bytes) if bytes.is_empty() => DecodedProviderError {
+            code: None,
+            message: "the provider returned an empty error body".into(),
+        },
+        Ok(bytes) => decode_provider_error_body(bytes),
+        Err(error) => DecodedProviderError {
+            code: None,
+            message: format!("the provider error body could not be read: {error}"),
+        },
     };
-    AppError::ProviderHttp { status, message }
+    AppError::from_provider_rejection(Some(status), decoded.code.as_deref(), decoded.message)
 }
 
-fn format_provider_error_body(bytes: Vec<u8>) -> String {
+#[derive(Debug, PartialEq, Eq)]
+struct DecodedProviderError {
+    code: Option<String>,
+    message: String,
+}
+
+fn decode_provider_error_body(bytes: Vec<u8>) -> DecodedProviderError {
     let body = match String::from_utf8(bytes) {
         Ok(body) if !body.trim().is_empty() => body,
-        Ok(_) => return "the provider returned a blank error body".into(),
-        Err(error) => return format!("the provider returned a non-UTF-8 error body: {error}"),
+        Ok(_) => {
+            return DecodedProviderError {
+                code: None,
+                message: "the provider returned a blank error body".into(),
+            };
+        }
+        Err(error) => {
+            return DecodedProviderError {
+                code: None,
+                message: format!("the provider returned a non-UTF-8 error body: {error}"),
+            };
+        }
     };
     let Ok(value) = serde_json::from_str::<Value>(&body) else {
-        return bounded_error_text(&body);
+        return DecodedProviderError {
+            code: None,
+            message: bounded_error_text(&body),
+        };
     };
     let error = value.get("error").unwrap_or(&value);
     let message = error
@@ -278,6 +303,12 @@ fn format_provider_error_body(bytes: Vec<u8>) -> String {
         .get("type")
         .and_then(Value::as_str)
         .or_else(|| error.get("code").and_then(Value::as_str));
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("type").and_then(Value::as_str))
+        .map(bounded_error_text)
+        .filter(|code| !code.is_empty());
     let reset = error
         .get("resets_in_seconds")
         .and_then(Value::as_u64)
@@ -294,7 +325,10 @@ fn format_provider_error_body(bytes: Vec<u8>) -> String {
         formatted.push_str(&bounded_error_text(kind));
         formatted.push(')');
     }
-    bounded_error_text(&formatted)
+    DecodedProviderError {
+        code,
+        message: bounded_error_text(&formatted),
+    }
 }
 
 fn bounded_error_text(value: &str) -> String {
@@ -429,10 +463,11 @@ mod tests {
 
     use super::CloudflareCookieStore;
     use super::MODEL_CATALOG_COMPATIBILITY_VERSION;
-    use super::format_provider_error_body;
+    use super::decode_provider_error_body;
     use super::model_catalog_url;
     use super::open_response_stream;
     use crate::engine::native::provider::responses::ResponseEvent;
+    use crate::error::AppError;
 
     #[tokio::test]
     async fn accepts_a_headerless_successful_sse_stream() {
@@ -523,22 +558,42 @@ mod tests {
 
     #[test]
     fn provider_errors_are_bounded_and_human_readable() {
-        let usage = format_provider_error_body(
+        let usage = decode_provider_error_body(
             br#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":511936}}"#
                 .to_vec(),
         );
         assert_eq!(
-            usage,
+            usage.message,
             "The usage limit has been reached; reset in approximately 5d 22h (provider type: usage_limit_reached)"
         );
+        assert_eq!(usage.code.as_deref(), Some("usage_limit_reached"));
 
-        let invalid = format_provider_error_body(
+        let invalid = decode_provider_error_body(
             br#"{"error":{"message":"No tool output found","type":"invalid_request_error"}}"#
                 .to_vec(),
         );
         assert_eq!(
-            invalid,
+            invalid.message,
             "No tool output found (provider type: invalid_request_error)"
         );
+        assert_eq!(invalid.code.as_deref(), Some("invalid_request_error"));
+    }
+
+    #[test]
+    fn provider_error_body_preserves_context_code() {
+        let decoded = decode_provider_error_body(
+            br#"{"error":{"code":"context_length_exceeded","type":"invalid_request_error","message":"too large"}}"#
+                .to_vec(),
+        );
+
+        assert_eq!(decoded.code.as_deref(), Some("context_length_exceeded"));
+        assert_eq!(
+            decoded.message,
+            "too large (provider type: invalid_request_error)"
+        );
+        assert!(matches!(
+            AppError::from_provider_rejection(Some(400), decoded.code.as_deref(), decoded.message),
+            AppError::ContextWindowExceeded(_)
+        ));
     }
 }

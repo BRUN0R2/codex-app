@@ -1,15 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  Match,
-  onCleanup,
-  onMount,
-  Show,
-  Switch,
-} from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 
 import type {
   Attachment,
@@ -18,9 +8,14 @@ import type {
   ReasoningEffort,
 } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
-import { projectName } from "../state/projects";
+import {
+  loadQueueingEnabled,
+  type QueuedMessage,
+  saveQueueingEnabled,
+} from "../state/messageQueue";
 import { ContextWindowIndicator } from "./ContextWindowIndicator";
 import { Icon } from "./Icon";
+import { ImagePreview } from "./ImagePreview";
 
 export interface ComposerProps {
   readonly controller: AppController;
@@ -43,6 +38,7 @@ export function Composer(props: ComposerProps) {
   const [effort, setEffort] = createSignal<ReasoningEffort | null>(null);
   const [serviceTier, setServiceTier] = createSignal<string | null>(null);
   const [sending, setSending] = createSignal(false);
+  const [queueingEnabled, setQueueingEnabled] = createSignal(loadQueueingEnabled());
   const [attachmentError, setAttachmentError] = createSignal<string | null>(null);
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [modelMenuSection, setModelMenuSection] = createSignal<ModelMenuSection | null>(null);
@@ -164,26 +160,72 @@ export function Composer(props: ComposerProps) {
   }
 
   async function send(): Promise<void> {
-    if (!canSend()) {
+    const hasDraft = text().trim().length > 0 || attachments().length > 0;
+    if (!hasDraft) {
+      if (props.controller.queuedMessages().length > 0) {
+        void props.controller.sendQueuedMessageNow();
+      }
+      return;
+    }
+    if (sending()) {
+      return;
+    }
+    const input = {
+      text: text(),
+      attachments: attachments(),
+      model: model(),
+      effort: effort(),
+      serviceTier: serviceTier(),
+    };
+    if (props.controller.turnBusy() && queueingEnabled()) {
+      if (props.controller.enqueueMessage(input)) {
+        clearDraft();
+      }
       return;
     }
     setSending(true);
     try {
-      const succeeded = await props.controller.sendMessage({
-        text: text(),
-        attachments: attachments(),
-        model: model(),
-        effort: effort(),
-        serviceTier: serviceTier(),
-      });
+      const succeeded = await props.controller.sendMessage(input);
       if (succeeded) {
-        setText("");
-        setAttachments([]);
-        setAttachmentError(null);
-        resizeTextArea(textArea);
+        clearDraft();
       }
     } finally {
       setSending(false);
+    }
+  }
+
+  function clearDraft(): void {
+    setText("");
+    setAttachments([]);
+    setAttachmentError(null);
+    resizeTextArea(textArea);
+  }
+
+  function editQueuedMessage(messageId: string): void {
+    const message = props.controller.takeQueuedMessage(messageId);
+    if (message === null) {
+      return;
+    }
+    setText(message.text);
+    setAttachments(message.attachments);
+    setModel(message.model);
+    setEffort(message.effort);
+    setServiceTier(message.serviceTier);
+    setAttachmentError(null);
+    queueMicrotask(() => {
+      resizeTextArea(textArea);
+      textArea?.focus();
+      textArea?.setSelectionRange(message.text.length, message.text.length);
+    });
+  }
+
+  function toggleQueueing(): void {
+    const next = !queueingEnabled();
+    try {
+      saveQueueingEnabled(next);
+      setQueueingEnabled(next);
+    } catch (reason) {
+      setAttachmentError(errorMessage(reason));
     }
   }
 
@@ -207,59 +249,27 @@ export function Composer(props: ComposerProps) {
     }
   }
 
+  function removeAttachment(id: string): void {
+    setAttachments((current) => current.filter((entry) => entry.id !== id));
+  }
+
   return (
     <section class="composer-wrap">
-      <Show when={attachments().length > 0}>
-        <div class="attachment-strip">
-          <For each={attachments()}>
-            {(attachment) => (
-              <span class="attachment-chip">
-                <Icon name="file" size={14} />
-                <span>{attachment.name}</span>
-                <small>{formatBytes(attachment.size)}</small>
-                <button
-                  aria-label={`Remover ${attachment.name}`}
-                  onClick={() =>
-                    setAttachments((current) =>
-                      current.filter((entry) => entry.id !== attachment.id),
-                    )
-                  }
-                  type="button"
-                >
-                  <Icon name="close" size={12} />
-                </button>
-              </span>
+      <Show when={props.controller.queuedMessages().length > 0}>
+        <ul aria-label="Mensagens na fila" class="composer-queue">
+          <For each={props.controller.queuedMessages()}>
+            {(message) => (
+              <QueuedMessageRow
+                message={message}
+                onDelete={() => props.controller.deleteQueuedMessage(message.id)}
+                onEdit={() => editQueuedMessage(message.id)}
+                onSendNow={() => void props.controller.sendQueuedMessageNow(message.id)}
+                onToggleQueueing={toggleQueueing}
+                queueingEnabled={queueingEnabled()}
+              />
             )}
           </For>
-        </div>
-      </Show>
-      <Show
-        when={props.controller.workspace()}
-        fallback={
-          <button
-            class="composer-project-picker"
-            disabled={props.controller.turnBusy()}
-            onClick={() => void props.controller.chooseWorkspace()}
-            type="button"
-          >
-            <Icon name="folder" size={14} />
-            <span>Escolher projeto</span>
-          </button>
-        }
-      >
-        {(workspace) => (
-          <div class="composer-workspace-context" title={workspace()}>
-            <span>
-              <Icon name="folder" size={15} />
-              {projectName(workspace())}
-            </span>
-            <span>
-              <Icon name="computer" size={15} />
-              Local
-            </span>
-            <WorkspaceRepositoryLabel repository={props.controller.workspaceRepository()} />
-          </div>
-        )}
+        </ul>
       </Show>
       <form
         aria-label="Compositor"
@@ -276,6 +286,49 @@ export function Composer(props: ComposerProps) {
         }}
         ref={composerElement}
       >
+        <Show when={attachments().length > 0}>
+          <div class="attachment-strip">
+            <For each={attachments()}>
+              {(attachment) => (
+                <Show
+                  when={attachment.kind === "image"}
+                  fallback={
+                    <span class="attachment-chip">
+                      <Icon name="file" size={14} />
+                      <span>{attachment.name}</span>
+                      <small>{formatBytes(attachment.size)}</small>
+                      <button
+                        aria-label={`Remover ${attachment.name}`}
+                        onClick={() => removeAttachment(attachment.id)}
+                        type="button"
+                      >
+                        <Icon name="close" size={12} />
+                      </button>
+                    </span>
+                  }
+                >
+                  <span class="composer-image-attachment">
+                    <ImagePreview
+                      alt={attachment.name}
+                      class="composer-image-preview"
+                      name={attachment.name}
+                      source={attachment.path}
+                    />
+                    <button
+                      aria-label={`Remover ${attachment.name}`}
+                      class="composer-image-remove"
+                      onClick={() => removeAttachment(attachment.id)}
+                      title={`Remover ${attachment.name}`}
+                      type="button"
+                    >
+                      <Icon name="close" size={12} strokeWidth={2.2} />
+                    </button>
+                  </span>
+                </Show>
+              )}
+            </For>
+          </div>
+        </Show>
         <textarea
           aria-label="Mensagem para o Codex"
           maxlength={1_048_576}
@@ -290,7 +343,7 @@ export function Composer(props: ComposerProps) {
             }
           }}
           onPaste={(event) => void handlePaste(event)}
-          placeholder="Faça o que quiser"
+          placeholder="Peça qualquer coisa"
           ref={textArea}
           rows={1}
           value={text()}
@@ -441,7 +494,10 @@ export function Composer(props: ComposerProps) {
             </div>
           </div>
           <div class="composer-trailing">
-            <ContextWindowIndicator usage={props.controller.contextUsage()} />
+            <ContextWindowIndicator
+              modelWindow={selectedModel()?.contextWindow ?? null}
+              usage={props.controller.contextUsage()}
+            />
             <div class="composer-menu-anchor model-menu-anchor">
               <button
                 aria-expanded={modelMenuOpen()}
@@ -558,11 +614,21 @@ export function Composer(props: ComposerProps) {
               }
             >
               <button
-                aria-label="Enviar mensagem"
+                aria-label={
+                  props.controller.turnBusy() && queueingEnabled()
+                    ? "Adicionar mensagem à fila"
+                    : "Enviar mensagem"
+                }
                 class="send-button"
                 disabled={!canSend()}
                 onClick={() => void send()}
-                title="Enviar"
+                title={
+                  props.controller.turnBusy() && queueingEnabled()
+                    ? "Adicionar à fila"
+                    : props.controller.turnBusy()
+                      ? "Orientar agora"
+                      : "Enviar"
+                }
                 type="button"
               >
                 <Icon name="arrowUp" size={15} />
@@ -579,6 +645,57 @@ export function Composer(props: ComposerProps) {
         )}
       </Show>
     </section>
+  );
+}
+
+interface QueuedMessageRowProps {
+  readonly message: QueuedMessage;
+  readonly onDelete: () => void;
+  readonly onEdit: () => void;
+  readonly onSendNow: () => void;
+  readonly onToggleQueueing: () => void;
+  readonly queueingEnabled: boolean;
+}
+
+function QueuedMessageRow(props: QueuedMessageRowProps) {
+  const summary = () => {
+    const message = props.message.text.trim();
+    if (message.length > 0) {
+      return message;
+    }
+    const count = props.message.attachments.length;
+    return count === 1 ? "1 anexo" : `${count} anexos`;
+  };
+
+  return (
+    <li class="queued-message">
+      <Icon name="cornerDownLeft" size={13} strokeWidth={1.7} />
+      <span class="queued-message-copy">{summary()}</span>
+      <div class="queued-message-actions">
+        <button class="queued-message-steer" onClick={props.onSendNow} type="button">
+          <Icon name="cornerDownLeft" size={13} strokeWidth={1.7} />
+          Orientar
+        </button>
+        <button aria-label="Excluir mensagem da fila" onClick={props.onDelete} type="button">
+          <Icon name="trash" size={14} strokeWidth={1.7} />
+        </button>
+        <details class="queued-message-more">
+          <summary aria-label="Mais ações para a mensagem">
+            <Icon name="more" size={14} />
+          </summary>
+          <div class="queued-message-menu" role="menu">
+            <button onClick={props.onEdit} role="menuitem" type="button">
+              <Icon name="edit" size={14} strokeWidth={1.7} />
+              Editar mensagem
+            </button>
+            <button onClick={props.onToggleQueueing} role="menuitem" type="button">
+              <Icon name="stop" size={13} strokeWidth={1.7} />
+              {props.queueingEnabled ? "Desativar fila" : "Ativar fila"}
+            </button>
+          </div>
+        </details>
+      </div>
+    </li>
   );
 }
 
@@ -607,31 +724,6 @@ function ModelMenuRow(props: {
       <small classList={{ "tone-ultra": props.valueTone === "ultra" }}>{props.value}</small>
       <Icon name="chevronRight" size={16} />
     </button>
-  );
-}
-
-function WorkspaceRepositoryLabel(props: {
-  readonly repository: ReturnType<AppController["workspaceRepository"]>;
-}) {
-  return (
-    <Switch>
-      <Match when={props.repository?.type === "gitBranch" ? props.repository : undefined}>
-        {(repository) => (
-          <span title={`Branch ${repository().branch}`}>
-            <Icon name="gitBranch" size={15} />
-            {repository().branch}
-          </span>
-        )}
-      </Match>
-      <Match when={props.repository?.type === "gitDetached" ? props.repository : undefined}>
-        {(repository) => (
-          <span title={`HEAD destacado em ${repository().revision}`}>
-            <Icon name="gitBranch" size={15} />
-            {repository().revision}
-          </span>
-        )}
-      </Match>
-    </Switch>
   );
 }
 

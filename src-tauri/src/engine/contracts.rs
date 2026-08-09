@@ -136,7 +136,7 @@ pub struct TurnNotification {
 #[serde(rename_all = "camelCase")]
 pub struct TurnCompletedNotification {
     pub thread_id: String,
-    pub turn: TurnSummary,
+    pub turn: CompletedTurn,
     pub error: Option<OperationFailure>,
 }
 
@@ -461,6 +461,21 @@ pub enum ActivityStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum PlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanStep {
+    pub step: String,
+    pub status: PlanStepStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum MessagePhase {
     Commentary,
     FinalAnswer,
@@ -507,7 +522,12 @@ pub struct TokenUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum FileChangeKind {
     Add,
     Delete,
@@ -543,6 +563,12 @@ pub enum ThreadItem {
         id: String,
         summary: Vec<String>,
         content: Vec<String>,
+    },
+    #[serde(rename = "plan")]
+    Plan {
+        id: String,
+        explanation: Option<String>,
+        steps: Vec<PlanStep>,
     },
     #[serde(rename = "commandExecution")]
     CommandExecution {
@@ -620,6 +646,7 @@ pub struct CodexThread {
     pub preview: String,
     pub name: Option<String>,
     pub cwd: String,
+    pub project_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub recency_at: Option<i64>,
@@ -672,6 +699,15 @@ pub struct TurnStartResponse {
 pub struct TurnSummary {
     pub id: String,
     pub status: TurnStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedTurn {
+    pub id: String,
+    pub status: TurnStatus,
+    pub error: Option<String>,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -872,6 +908,7 @@ pub struct AccountRateLimitsResponse {
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
+    use super::FileChangeKind;
     use super::PermissionProfile;
 
     #[test]
@@ -882,5 +919,21 @@ mod tests {
             PermissionProfile::workspace_write()
         );
         assert!(config.model.is_none());
+    }
+
+    #[test]
+    fn file_change_update_uses_camel_case_variant_fields() {
+        let value = serde_json::to_value(FileChangeKind::Update {
+            move_path: Some("src/new.rs".into()),
+        })
+        .expect("file change kind should serialize");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "update",
+                "movePath": "src/new.rs"
+            })
+        );
     }
 }

@@ -50,9 +50,9 @@ impl EngineManager {
     pub async fn thread_start(
         &self,
         app: &AppHandle,
-        cwd: String,
+        project_path: Option<String>,
     ) -> Result<ThreadStartResponse, AppError> {
-        self.engine.thread_start(app, cwd).await
+        self.engine.thread_start(app, project_path).await
     }
 
     pub async fn thread_list(

@@ -1,6 +1,7 @@
 const TIMELINE_END_THRESHOLD_PX = 24;
 const SCROLLBAR_MIN_THUMB_PX = 84;
 const SCROLLBAR_OVERFLOW_EPSILON_PX = 2;
+const TIMELINE_USER_SCROLL_INTENT_WINDOW_MS = 600;
 
 export interface ScrollbarMetrics {
   readonly maximumScroll: number;
@@ -43,4 +44,23 @@ export function isTimelineNearEnd(input: {
 }): boolean {
   const distanceToEnd = Math.max(0, input.scrollHeight - input.clientHeight - input.scrollTop);
   return distanceToEnd <= TIMELINE_END_THRESHOLD_PX;
+}
+
+export function hasRecentTimelineUserScrollIntent(
+  lastUserScrollIntentAt: number,
+  now: number,
+): boolean {
+  return (
+    Number.isFinite(lastUserScrollIntentAt) &&
+    now >= lastUserScrollIntentAt &&
+    now - lastUserScrollIntentAt <= TIMELINE_USER_SCROLL_INTENT_WINDOW_MS
+  );
+}
+
+export function resolveTimelineFollowing(input: {
+  readonly followingLatest: boolean;
+  readonly nearEnd: boolean;
+  readonly userInitiated: boolean;
+}): boolean {
+  return input.userInitiated ? input.nearEnd : input.followingLatest;
 }

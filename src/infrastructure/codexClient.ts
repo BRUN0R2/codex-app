@@ -1,11 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
   decodeAccountRateLimitsResponse,
   decodeAccountReadResponse,
   decodeAttachment,
+  decodeAttachmentImageResponse,
   decodeAttachments,
   decodeCancelLoginResponse,
   decodeCommandError,
@@ -28,13 +29,13 @@ import {
   decodeThreadStartResponse,
   decodeThreadUnarchiveResponse,
   decodeTurnStartResponse,
-  decodeWorkspaceRepository,
 } from "../contracts/decode";
 import type {
   AccountRateLimitsResponse,
   AccountReadResponse,
   ApprovalDecision,
   Attachment,
+  AttachmentImageResponse,
   CancelLoginResponse,
   ConfigReadResponse,
   ConfigUpdate,
@@ -57,7 +58,6 @@ import type {
   ThreadStartResponse,
   ThreadUnarchiveResponse,
   TurnStartResponse,
-  WorkspaceRepository,
 } from "../contracts/types";
 
 const NOTIFICATION_EVENT = "engine://notification";
@@ -137,9 +137,9 @@ export function logout(): Promise<LogoutResponse> {
   return invokeDecoded("engine_logout", decodeLogoutResponse);
 }
 
-export function startThread(cwd: string): Promise<ThreadStartResponse> {
+export function startThread(projectPath: string | null): Promise<ThreadStartResponse> {
   return invokeDecoded("engine_thread_start", decodeThreadStartResponse, {
-    request: { cwd },
+    request: { projectPath },
   });
 }
 
@@ -270,12 +270,6 @@ export function listModels(): Promise<ModelListResponse> {
   return invokeDecoded("engine_model_list", decodeModelListResponse);
 }
 
-export function readWorkspaceRepository(cwd: string): Promise<WorkspaceRepository> {
-  return invokeDecoded("workspace_repository_read", decodeWorkspaceRepository, {
-    request: { cwd },
-  });
-}
-
 export function inspectAttachments(paths: readonly string[]): Promise<readonly Attachment[]> {
   return invokeDecoded("attachment_inspect", decodeAttachments, { paths });
 }
@@ -283,6 +277,12 @@ export function inspectAttachments(paths: readonly string[]): Promise<readonly A
 export function savePastedImage(dataBase64: string): Promise<Attachment> {
   return invokeDecoded("attachment_save_pasted_image", decodeAttachment, {
     request: { dataBase64 },
+  });
+}
+
+export function readAttachmentImage(path: string): Promise<AttachmentImageResponse> {
+  return invokeDecoded("attachment_read_image", decodeAttachmentImageResponse, {
+    request: { path },
   });
 }
 
@@ -297,10 +297,6 @@ export function respondToServerRequest(
 
 export function openExternalUrl(url: string): Promise<void> {
   return openUrl(url);
-}
-
-export function openWorkspacePath(path: string): Promise<void> {
-  return openPath(path);
 }
 
 export function describeError(reason: unknown): string {
@@ -335,6 +331,10 @@ function decodeEvent<T>(
   try {
     handler(decoder(payload));
   } catch (reason) {
+    console.error(
+      "[decode-debug] contract error",
+      JSON.stringify({ error: String(reason), payload: JSON.stringify(payload)?.slice(0, 500) }),
+    );
     handlers.onContractError(asError(reason, "Evento inválido recebido do engine."));
   }
 }

@@ -13,29 +13,52 @@ import {
 
 import type {
   CodexModel,
+  CreditsSnapshot,
   DesktopPreferences,
   ModelVerbosity,
   MotionPreference,
   PermissionProfile,
   Personality,
+  RateLimitWindow,
   ReasoningEffort,
+  SpendControlLimitSnapshot,
   WebSearchMode,
 } from "../contracts/types";
+import { openExternalUrl } from "../infrastructure/codexClient";
 import type { AppController } from "../state/createAppController";
+import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
+import { formatShortDate } from "./dateFormat";
 import { Icon, type IconName } from "./Icon";
+import { threadTitle } from "./Sidebar";
 
-type SettingsPage =
-  | "account"
+export type SettingsPage =
   | "appearance"
+  | "archived"
+  | "computerUse"
+  | "config"
+  | "connections"
   | "diagnostics"
+  | "environments"
   | "general"
+  | "git"
+  | "hooks"
+  | "import"
   | "personalization"
-  | "security";
+  | "pets"
+  | "plugins"
+  | "profile"
+  | "security"
+  | "shortcuts"
+  | "usage"
+  | "voice"
+  | "webBrowser"
+  | "worktrees";
 
 interface SettingsNavigationItem {
   readonly icon: IconName;
   readonly label: string;
   readonly page: SettingsPage;
+  readonly external?: boolean;
 }
 
 interface SettingsNavigationSection {
@@ -48,23 +71,48 @@ const SETTINGS_NAVIGATION: readonly SettingsNavigationSection[] = [
     label: "Pessoais",
     items: [
       { icon: "settings", label: "Geral", page: "general" },
-      { icon: "shield", label: "Permissões", page: "security" },
-      { icon: "user", label: "Personalização", page: "personalization" },
-      { icon: "panel", label: "Aparência", page: "appearance" },
-      { icon: "user", label: "Conta", page: "account" },
+      { icon: "download", label: "Importar", page: "import" },
+      { icon: "user", label: "Perfil", page: "profile" },
+      { icon: "sun", label: "Aparência", page: "appearance" },
+      { icon: "mic", label: "Voz", page: "voice" },
+      { icon: "sliders", label: "Configuração", page: "config" },
+      { icon: "sparkles", label: "Personalização", page: "personalization" },
+      { icon: "egg", label: "Pets", page: "pets" },
+      { icon: "keyboard", label: "Atalhos de teclado", page: "shortcuts" },
+      { icon: "creditCard", label: "Uso e faturamento", page: "usage" },
+      { external: true, icon: "externalLink", label: "Conta", page: "profile" },
     ],
   },
   {
-    label: "Sistema",
-    items: [{ icon: "terminal", label: "Diagnósticos", page: "diagnostics" }],
+    label: "Integrações",
+    items: [
+      { icon: "puzzle", label: "Plug-ins", page: "plugins" },
+      { icon: "globe", label: "Navegador", page: "webBrowser" },
+      { icon: "wand", label: "Uso do computador", page: "computerUse" },
+    ],
+  },
+  {
+    label: "Programação",
+    items: [
+      { icon: "anchor", label: "Hooks", page: "hooks" },
+      { icon: "globe", label: "Conexões", page: "connections" },
+      { icon: "gitBranch", label: "Git", page: "git" },
+      { icon: "monitor", label: "Ambientes", page: "environments" },
+      { icon: "worktree", label: "Árvores de trabalho", page: "worktrees" },
+    ],
+  },
+  {
+    label: "Arquivadas",
+    items: [{ icon: "archive", label: "Chats arquivados", page: "archived" }],
   },
 ];
 
 export function SettingsDialog(props: {
   readonly controller: AppController;
+  readonly initialPage?: SettingsPage | undefined;
   readonly onClose: () => void;
 }) {
-  const [page, setPage] = createSignal<SettingsPage>("general");
+  const [page, setPage] = createSignal<SettingsPage>(props.initialPage ?? "general");
   const [query, setQuery] = createSignal("");
   const [developerInstructions, setDeveloperInstructions] = createSignal("");
   let dialogElement: HTMLElement | undefined;
@@ -154,6 +202,7 @@ export function SettingsDialog(props: {
                   <For each={section.items}>
                     {(item) => (
                       <SettingsNavButton
+                        external={item.external}
                         icon={item.icon}
                         label={item.label}
                         page={item.page}
@@ -188,11 +237,23 @@ export function SettingsDialog(props: {
             <Match when={page() === "appearance"}>
               <AppearanceSettings controller={props.controller} />
             </Match>
-            <Match when={page() === "account"}>
-              <AccountSettings controller={props.controller} />
+            <Match when={page() === "profile"}>
+              <ProfileSettings controller={props.controller} />
+            </Match>
+            <Match when={page() === "shortcuts"}>
+              <ShortcutsSettings />
+            </Match>
+            <Match when={page() === "usage"}>
+              <UsageSettings controller={props.controller} />
             </Match>
             <Match when={page() === "diagnostics"}>
               <DiagnosticsSettings controller={props.controller} />
+            </Match>
+            <Match when={page() === "archived"}>
+              <ArchivedChatsSettings controller={props.controller} />
+            </Match>
+            <Match when={true}>
+              <GeneralSettings controller={props.controller} />
             </Match>
           </Switch>
         </main>
@@ -211,6 +272,7 @@ const FOCUSABLE_SELECTOR = [
 ].join(",");
 
 function SettingsNavButton(props: {
+  readonly external?: boolean | undefined;
   readonly icon: IconName;
   readonly label: string;
   readonly page: SettingsPage;
@@ -223,7 +285,11 @@ function SettingsNavButton(props: {
       onClick={() => props.setPage(props.page)}
       type="button"
     >
-      <Icon name={props.icon} size={16} /> {props.label}
+      <Icon name={props.icon} size={16} />
+      <span>{props.label}</span>
+      <Show when={props.external}>
+        <Icon name="externalLink" size={12} />
+      </Show>
     </button>
   );
 }
@@ -552,46 +618,194 @@ function AppearanceSettings(props: { readonly controller: AppController }) {
   );
 }
 
-function AccountSettings(props: { readonly controller: AppController }) {
-  const account = () => props.controller.account()?.account;
-  const engine = () => props.controller.engine()?.engine;
+function ShortcutsSettings() {
   return (
     <div class="settings-page">
-      <SettingsHeading title="Conta" description="Sessão ChatGPT e composição atual do engine." />
+      <SettingsHeading
+        title="Atalhos de teclado"
+        description="Atalhos disponíveis no aplicativo de desktop."
+      />
+      <SettingsSection title="Geral">
+        <ShortcutRow keys={["Ctrl", "N"]} label="Novo chat" />
+        <ShortcutRow keys={["Ctrl", "K"]} label="Pesquisar na barra lateral" />
+        <ShortcutRow keys={["Ctrl", ","]} label="Abrir configurações" />
+        <ShortcutRow keys={["Ctrl", "B"]} label="Alternar barra lateral" />
+        <ShortcutRow keys={["Ctrl", "R"]} label="Recarregar a janela" />
+      </SettingsSection>
+      <SettingsSection title="Conversa">
+        <ShortcutRow keys={["Enter"]} label="Enviar mensagem" />
+        <ShortcutRow keys={["Shift", "Enter"]} label="Inserir nova linha" />
+        <ShortcutRow keys={["Esc"]} label="Fechar menus e diálogos" />
+      </SettingsSection>
+    </div>
+  );
+}
+
+function ShortcutRow(props: { readonly keys: readonly string[]; readonly label: string }) {
+  return (
+    <div class="settings-row shortcut-row">
+      <span>
+        <strong>{props.label}</strong>
+      </span>
+      <div class="shortcut-keys">
+        <For each={props.keys}>{(key) => <kbd>{key}</kbd>}</For>
+      </div>
+    </div>
+  );
+}
+
+function UsageSettings(props: { readonly controller: AppController }) {
+  const snapshot = () => props.controller.rateLimits()?.rateLimits;
+  const windows = () => {
+    const current = snapshot();
+    if (current === undefined) {
+      return [];
+    }
+    const entries: { readonly label: string; readonly window: RateLimitWindow }[] = [];
+    if (current.primary !== null) {
+      entries.push({ label: "Limite de uso de 5 horas", window: current.primary });
+    }
+    if (current.secondary !== null) {
+      entries.push({ label: "Limite de uso semanal", window: current.secondary });
+    }
+    return entries;
+  };
+  const credits = () => snapshot()?.credits ?? null;
+  const spendControl = () => snapshot()?.individualLimit ?? null;
+  return (
+    <div class="settings-page">
+      <SettingsHeading
+        title="Uso e faturamento"
+        description="Limites de uso e créditos da sua conta ChatGPT."
+      />
+      <SettingsSection title="Uso">
+        <Show
+          when={windows().length > 0 || spendControl() !== null || credits() !== null}
+          fallback={
+            <div class="usage-empty">
+              <Icon name="creditCard" size={18} />
+              <strong>Detalhes de uso indisponíveis</strong>
+              <p>Atualize para consultar os limites da sua conta.</p>
+            </div>
+          }
+        >
+          <For each={windows()}>
+            {(entry) => (
+              <UsageMeter
+                label={entry.label}
+                remainingPercent={Math.max(0, 100 - entry.window.usedPercent)}
+                resetAt={entry.window.resetsAt}
+                usedPercent={entry.window.usedPercent}
+              />
+            )}
+          </For>
+          <Show when={spendControl()}>{(limit) => <SpendControlMeter limit={limit()} />}</Show>
+          <Show when={credits()}>
+            {(snap) => (
+              <div class="usage-credits">
+                <span>
+                  <strong>Créditos</strong>
+                  <small>Saldo disponível para tarefas do Codex.</small>
+                </span>
+                <code>{creditsLabel(snap())}</code>
+              </div>
+            )}
+          </Show>
+        </Show>
+        <div class="usage-actions">
+          <button
+            class="usage-upgrade-button"
+            onClick={() => void openExternalUrl("https://chatgpt.com/membership/plans")}
+            type="button"
+          >
+            Fazer upgrade do plano
+          </button>
+          <button
+            class="usage-credits-button"
+            onClick={() => void openExternalUrl("https://chatgpt.com/settings/billing")}
+            type="button"
+          >
+            Adicionar créditos
+          </button>
+          <button
+            class="usage-refresh-button"
+            onClick={() => void props.controller.refreshRateLimits()}
+            type="button"
+          >
+            <Icon name="reset" size={13} />
+            Atualizar
+          </button>
+        </div>
+      </SettingsSection>
+    </div>
+  );
+}
+
+function UsageMeter(props: {
+  readonly label: string;
+  readonly remainingPercent: number;
+  readonly resetAt: number | null;
+  readonly usedPercent: number;
+}) {
+  return (
+    <div class="usage-meter-row">
+      <span class="usage-meter-copy">
+        <strong>{props.label}</strong>
+        <small>
+          {props.remainingPercent}% restantes
+          <Show when={props.resetAt}>
+            {(resetAt) => <i> · Redefine em {formatShortDate(resetAt())}</i>}
+          </Show>
+        </small>
+      </span>
+      <progress class="usage-meter" max={100} value={props.usedPercent}>
+        {props.usedPercent}%
+      </progress>
+    </div>
+  );
+}
+
+function SpendControlMeter(props: { readonly limit: SpendControlLimitSnapshot }) {
+  const usedPercent = () => Math.max(0, Math.min(100, 100 - props.limit.remainingPercent));
+  return (
+    <div class="usage-meter-row">
+      <span class="usage-meter-copy">
+        <strong>Limite de gastos</strong>
+        <small>
+          {props.limit.used} de {props.limit.limit}
+          <i> · Redefine em {formatShortDate(props.limit.resetsAt)}</i>
+        </small>
+      </span>
+      <progress class="usage-meter" max={100} value={usedPercent()}>
+        {usedPercent()}%
+      </progress>
+    </div>
+  );
+}
+
+function creditsLabel(credits: CreditsSnapshot): string {
+  if (credits.unlimited) {
+    return "Ilimitado";
+  }
+  return credits.balance ?? "—";
+}
+
+function ProfileSettings(props: { readonly controller: AppController }) {
+  const account = () => props.controller.account()?.account;
+  return (
+    <div class="settings-page">
+      <SettingsHeading title="Perfil" description="Conta ChatGPT usada pelo Codex App." />
       <section class="account-settings-card">
-        <span class="account-avatar large">
-          {account()?.email?.slice(0, 1).toUpperCase() ?? "C"}
-        </span>
+        <AccountAvatar account={account()} large />
         <div>
-          <strong>{account()?.email ?? "Conta ChatGPT"}</strong>
+          <strong>{accountDisplayName(account())}</strong>
+          <Show when={account()?.email}>{(email) => <small>{email()}</small>}</Show>
           <small>Plano {account()?.planType ?? "não informado"}</small>
         </div>
         <button class="danger-button" onClick={() => void props.controller.logout()} type="button">
           <Icon name="logout" size={15} /> Sair
         </button>
       </section>
-      <dl class="engine-facts">
-        <div>
-          <dt>Engine</dt>
-          <dd>{engine()?.name ?? "—"}</dd>
-        </div>
-        <div>
-          <dt>Provedor</dt>
-          <dd>{engine()?.provider ?? "—"}</dd>
-        </div>
-        <div>
-          <dt>Autenticação</dt>
-          <dd>{engine()?.auth ?? "—"}</dd>
-        </div>
-        <div>
-          <dt>Transporte</dt>
-          <dd>{engine()?.transport ?? "—"}</dd>
-        </div>
-        <div>
-          <dt>Armazenamento</dt>
-          <dd>{engine()?.storage ?? "—"}</dd>
-        </div>
-      </dl>
     </div>
   );
 }
@@ -619,6 +833,63 @@ function DiagnosticsSettings(props: { readonly controller: AppController }) {
           </For>
         </ol>
       </Show>
+    </div>
+  );
+}
+
+function ArchivedChatsSettings(props: { readonly controller: AppController }) {
+  return (
+    <div class="settings-page">
+      <SettingsHeading
+        title="Chats arquivados"
+        description="Conversas arquivadas da barra lateral. Restaure para voltar à lista ou exclua permanentemente."
+      />
+      <SettingsSection title="Arquivadas">
+        <Show
+          when={props.controller.archivedThreads().length > 0}
+          fallback={<p class="archived-chats-empty">Nenhum chat arquivado.</p>}
+        >
+          <For each={props.controller.archivedThreads()}>
+            {(thread) => (
+              <div class="settings-row archived-chat-row">
+                <span>
+                  <strong>{threadTitle(thread)}</strong>
+                  <small>{thread.projectPath ?? "Sem projeto"}</small>
+                </span>
+                <div class="archived-chat-actions">
+                  <button
+                    aria-label={`Restaurar ${threadTitle(thread)}`}
+                    onClick={() => void props.controller.unarchiveThread(thread.id)}
+                    title="Restaurar para a barra lateral"
+                    type="button"
+                  >
+                    <Icon name="reset" size={14} /> Restaurar
+                  </button>
+                  <button
+                    aria-label={`Excluir ${threadTitle(thread)}`}
+                    class="archived-chat-delete"
+                    onClick={() => void props.controller.deleteThread(thread.id)}
+                    title="Excluir permanentemente"
+                    type="button"
+                  >
+                    <Icon name="close" size={14} /> Excluir
+                  </button>
+                </div>
+              </div>
+            )}
+          </For>
+        </Show>
+        <Show when={props.controller.archivedThreadsNextCursor() !== null}>
+          <button
+            class="load-more-button"
+            disabled={props.controller.pendingOperations() > 0}
+            onClick={() => void props.controller.loadMoreArchivedThreads()}
+            type="button"
+          >
+            Carregar mais
+          </button>
+        </Show>
+      </SettingsSection>
     </div>
   );
 }

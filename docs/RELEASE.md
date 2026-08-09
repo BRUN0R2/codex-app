@@ -27,3 +27,19 @@ publicado pela rota oficial.
 O pipeline compara a tag com os três manifestos, usa SHA-256 e timestamp
 Authenticode e publica apenas se todos os testes, o bundle e a assinatura forem
 concluídos.
+
+## Fluxo de Release seguro (desenvolvimento local)
+
+Antes de abrir o app release manualmente, execute:
+
+- `pnpm release:check` para validar que não há conflito de porta em `127.0.0.1:1420`.
+- `pnpm release` para reconstruir release e executar imediatamente o binário novo.
+- `pnpm release:build` para reconstruir release sem abrir janela.
+
+Esses comandos são intencionalmente separadores:
+
+- `release:check` verifica se há processo antigo do `codex-desktop-next` e se a porta de
+  desenvolvimento está livre.
+- `release` só encerra se houver conflito, evitando abrir a versão errada por engano.
+- `vite.config.ts` aceita sobrescrever a porta de dev via `CODEX_DESKTOP_DEV_PORT` para
+  rodar outros projetos em paralelo sem sobrescrita de 1420.
