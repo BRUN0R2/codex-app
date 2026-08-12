@@ -5,17 +5,18 @@ use tauri::{AppHandle, State};
 
 use crate::attachments::{AttachmentKind, inspect_path};
 use crate::engine::{
-    AccountRateLimitsResponse, AccountReadResponse, CancelLoginResponse, ConfigReadResponse,
-    ConfigUpdate, ConfigUpdateResponse, EngineManager, EngineStartResponse, LoginResponse,
-    LogoutResponse, ModelListResponse, OperationAck, ReasoningEffort, ServerResponse, StartTurn,
-    SteerTurn, ThreadCompactStartResponse, ThreadForkResponse, ThreadListResponse,
-    ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse, ThreadUnarchiveResponse,
-    TurnInput, TurnStartResponse,
+    AccountRateLimitsResponse, AccountReadResponse, CancelLoginResponse, ChatModelListResponse,
+    ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse, ConversationMode, EngineManager,
+    EngineStartResponse, LoginResponse, LogoutResponse, ModelListResponse, OperationAck,
+    ReasoningEffort, ServerResponse, StartTurn, SteerTurn, ThreadCompactStartResponse,
+    ThreadForkResponse, ThreadListResponse, ThreadReadResponse, ThreadResumeResponse,
+    ThreadStartResponse, ThreadUnarchiveResponse, TurnInput, TurnStartResponse,
 };
 use crate::error::{AppError, CommandError, CommandResult};
 
 const MAX_PROTOCOL_ID_BYTES: usize = 256;
 const MAX_MODEL_NAME_BYTES: usize = 256;
+const MAX_TIMEZONE_BYTES: usize = 128;
 const MAX_TURN_TEXT_BYTES: usize = 1_048_576;
 const MAX_TURN_ATTACHMENTS: usize = 12;
 
@@ -23,6 +24,7 @@ const MAX_TURN_ATTACHMENTS: usize = 12;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadStartRequest {
     project_path: Option<String>,
+    mode: ConversationMode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +63,8 @@ pub struct TurnStartRequest {
     model: Option<String>,
     effort: Option<ReasoningEffort>,
     service_tier: TurnServiceTierSelection,
+    timezone: String,
+    timezone_offset_min: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,7 +183,7 @@ pub async fn engine_thread_start(
         None => None,
     };
     engine
-        .thread_start(&app, project_path)
+        .thread_start(&app, project_path, request.mode)
         .await
         .map_err(Into::into)
 }
@@ -310,6 +314,13 @@ pub async fn engine_turn_start(
     validate_protocol_id("thread id", &request.thread_id)?;
     validate_protocol_id("client user message id", &request.client_user_message_id)?;
     let model = request.model.map(validate_model_name).transpose()?;
+    let timezone = validate_timezone(request.timezone)?;
+    if !(-840..=840).contains(&request.timezone_offset_min) {
+        return Err(AppError::Protocol(
+            "timezone offset must be between -840 and 840 minutes".into(),
+        )
+        .into());
+    }
     let input = decode_turn_input(request.text, request.attachments).await?;
     engine
         .turn_start(
@@ -321,6 +332,8 @@ pub async fn engine_turn_start(
                 model,
                 effort: request.effort,
                 service_tier: request.service_tier.into_option(),
+                timezone,
+                timezone_offset_min: request.timezone_offset_min,
             },
         )
         .await
@@ -432,6 +445,14 @@ pub async fn engine_model_list(
 }
 
 #[tauri::command]
+pub async fn engine_chat_model_list(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+) -> CommandResult<ChatModelListResponse> {
+    engine.chat_model_list(&app).await.map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn engine_server_request_respond(
     engine: State<'_, EngineManager>,
     request: ServerResponseRequest,
@@ -495,6 +516,21 @@ fn validate_model_name(model: String) -> CommandResult<String> {
     Ok(model.into())
 }
 
+fn validate_timezone(value: String) -> CommandResult<String> {
+    let value = value.trim().to_string();
+    if value.is_empty()
+        || value.len() > MAX_TIMEZONE_BYTES
+        || value.chars().any(|character| {
+            character.is_control()
+                || !(character.is_ascii_alphanumeric()
+                    || matches!(character, '/' | '_' | '-' | '+'))
+        })
+    {
+        return Err(AppError::Protocol("timezone is invalid".into()).into());
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -530,10 +566,12 @@ mod tests {
     #[test]
     fn thread_start_request_accepts_an_explicit_projectless_target() {
         let request: ThreadStartRequest = serde_json::from_value(json!({
+            "mode": "chat",
             "projectPath": null
         }))
         .expect("projectless request should decode");
 
         assert_eq!(request.project_path, None);
+        assert_eq!(request.mode, crate::engine::ConversationMode::Chat);
     }
 }

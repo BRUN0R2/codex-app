@@ -9,7 +9,8 @@ flowchart LR
     Decode --> Commands["Comandos Tauri fechados"]
     Commands --> Engine["NativeEngine"]
     Engine --> Auth["OAuth e cofre privado"]
-    Engine --> Provider["ChatGPT HTTPS/SSE"]
+    Engine --> Chat["ChatGPT consumer HTTPS/SSE"]
+    Engine --> Provider["Codex Responses HTTPS/SSE"]
     Engine --> Agent["Loop do agente"]
     Agent --> Tools["Ferramentas e aprovações"]
     Engine --> Store["SQLite"]
@@ -30,7 +31,9 @@ semântica e chamam uma operação específica do engine.
 O engine nativo divide ownership assim:
 
 - `auth/`: fluxo OAuth, callback, tokens e envelope criptografado privado;
-- `provider/`: cliente HTTP, cookies restritos, catálogo e stream de respostas;
+- `chat/`: catálogo consumer, Sentinel, prepare/conduit, deltas `v1` e stream de
+  conversa do ChatGPT;
+- `provider/`: catálogo Codex, Responses, cookies restritos e stream do agente;
 - `agent.rs`: composição das instruções, rodadas e ciclo das ferramentas;
 - `tools.rs`: schemas fechados, confinamento de paths, limites e processos;
 - `approval.rs`: solicitações de uso único, timeout e cancelamento;
@@ -67,14 +70,30 @@ fila otimista e modelo, esforço e tier são gravados atomicamente. Login duplic
 é coalescido e qualquer falha de contrato entra nos diagnósticos e no alerta
 visível.
 
+O fluxo de produto possui duas camadas independentes: `ChatGPT | Codex` e,
+dentro do ChatGPT, `Chat | Work`. A troca salva o destino atual antes de
+restaurar a última conversa e o último projeto do destino escolhido. A lista do
+ChatGPT reúne conversas Chat e Work; a lista do Codex contém apenas tarefas
+Codex. Abrir uma conversa Chat ou Work também sincroniza o seletor interno.
+
 ## Dados e segredos
 
-- SQLite: `native-state-v1.sqlite3` no diretório de dados do aplicativo;
+- SQLite: `native-state-unified-v1.sqlite3` no diretório de dados do aplicativo;
 - sessão: `credentials/chatgpt-oauth.age` no mesmo domínio privado;
+- identidade estável do cliente consumer: `chatgpt-consumer-device-id` no diretório
+  de dados do aplicativo; contém somente um UUID aleatório, nunca tokens;
 - chave do envelope: serviço `codex-desktop-next`, conta
   `chatgpt-oauth-v1`, no Windows Credential Manager;
 - projetos conhecidos: schema local `codex-desktop.projects.v1` no WebView;
 - tarefas fixadas: schema local `codex-desktop.pins.v1` no WebView.
+- produto, modo e últimos destinos: schema local
+  `codex-desktop.product-flow.v1` no WebView.
+- preferência explícita de modelo/raciocínio do Chat:
+  `chatgpt-last-selected-model-v1` no WebView; a chave não existe enquanto o
+  usuário usa o padrão dinâmico do catálogo.
+- continuidade consumer do Chat: `conversation_id` e `parent_message_id` na
+  tabela SQLite `chat_conversations`; tokens de integridade e conduit não são
+  persistidos.
 
 Não há leitura de `CODEX_HOME`, `auth.json`, `global/CODEX_AUTH`, banco da CLI ou
 outro formato anterior. O aplicativo não possui caminho de migração.

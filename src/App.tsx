@@ -2,6 +2,7 @@ import { ErrorBoundary, Match, Switch } from "solid-js";
 
 import { createAppController } from "./state/createAppController";
 import { AppShell } from "./ui/AppShell";
+import { CodexGlyph } from "./ui/CodexGlyph";
 import { ImageViewerProvider } from "./ui/ImageViewer";
 import { LoginScreen } from "./ui/LoginScreen";
 
@@ -13,7 +14,9 @@ export default function App() {
       <Match when={controller.runtimeStatus().state === "failed" && controller.engine() === null}>
         <main class="boot-screen error-state">
           <div class="boot-card">
-            <span class="brand-mark large">C</span>
+            <span aria-hidden="true" class="brand-mark large">
+              <CodexGlyph size={30} />
+            </span>
             <p class="eyebrow">Falha de inicialização</p>
             <h1>O engine nativo não iniciou</h1>
             <p>
@@ -32,7 +35,9 @@ export default function App() {
       <Match when={controller.engine() === null || controller.account() === undefined}>
         <main class="boot-screen">
           <div class="boot-loader">
-            <span class="brand-mark large">C</span>
+            <span aria-hidden="true" class="brand-mark large">
+              <CodexGlyph size={30} />
+            </span>
             <i />
             <p>Inicializando o engine nativo…</p>
           </div>

@@ -8,6 +8,7 @@ import type { AppController } from "../state/createAppController";
 import { ApprovalCard } from "./ApprovalCard";
 import { Composer, type ComposerDraftRequest } from "./Composer";
 import { formatShortDate } from "./dateFormat";
+import { HomeComposerModeToggle } from "./HomeComposerModeToggle";
 import { Icon } from "./Icon";
 import { PlanProgress } from "./PlanProgress";
 import { ReviewPanel } from "./ReviewPanel";
@@ -120,8 +121,24 @@ export function AppShell(props: { readonly controller: AppController }) {
         onOpenSettings={openSettings}
       />
       <main class="main-panel" inert={settingsOpen()}>
+        <Show when={props.controller.product() === "chatgpt"}>
+          <HomeComposerModeToggle
+            mode={props.controller.chatGptMode()}
+            onChange={(mode) => void props.controller.selectChatGptMode(mode)}
+          />
+        </Show>
         <div class="main-panel-content">
-          <section class="chat-page" ref={chatPageElement}>
+          <section
+            class="chat-page"
+            classList={{
+              "chatgpt-surface": props.controller.product() === "chatgpt",
+              "chatgpt-empty":
+                props.controller.product() === "chatgpt" &&
+                props.controller.currentThread() === null,
+              "work-surface": props.controller.conversationMode() === "work",
+            }}
+            ref={chatPageElement}
+          >
             <Timeline controller={props.controller} onSelectSuggestion={requestDraft} />
             <div class="chat-dock" ref={chatDockElement}>
               <Show when={props.controller.activePlan()}>
@@ -136,7 +153,9 @@ export function AppShell(props: { readonly controller: AppController }) {
               </Show>
               <ApprovalCard controller={props.controller} />
               <ModelSafetyNotice controller={props.controller} />
-              <UsageLimitBanner controller={props.controller} />
+              <Show when={props.controller.conversationMode() !== "chat"}>
+                <UsageLimitBanner controller={props.controller} />
+              </Show>
               <Composer
                 controller={props.controller}
                 draftRequest={draftRequest()}

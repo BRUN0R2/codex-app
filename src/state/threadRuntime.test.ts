@@ -118,6 +118,7 @@ describe("thread runtime reducer", () => {
 function threadFixture(status: "completed" | "inProgress"): CodexThread {
   return {
     id: "thread-a",
+    mode: "codex",
     preview: "Teste",
     name: null,
     cwd: "C:\\workspace",

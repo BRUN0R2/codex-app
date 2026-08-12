@@ -46,6 +46,7 @@ describe("conversation reducer", () => {
   it("separates the latest context snapshot from visible timeline items", () => {
     const state = readConversationState({
       id: "thread-1",
+      mode: "codex",
       preview: "Teste",
       name: null,
       cwd: "C:\\workspace",
@@ -89,6 +90,7 @@ describe("conversation reducer", () => {
     expect(
       readLatestTurnFailure({
         id: "thread-1",
+        mode: "codex",
         preview: "Teste",
         name: null,
         cwd: "C:\\workspace",

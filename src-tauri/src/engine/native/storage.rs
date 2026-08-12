@@ -12,16 +12,17 @@ use super::context_window::ContextUsageSnapshot;
 use super::provider::ResponseItem;
 use crate::engine::{
     AppConfig, CodexThread, CompletedTurn, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
-    DesktopPreferences, OperationAck, ThreadActiveFlag, ThreadItem, ThreadListResponse,
-    ThreadStatus, ThreadTurn, TurnStatus, TurnSummary,
+    ConversationMode, DesktopPreferences, OperationAck, ThreadActiveFlag, ThreadItem,
+    ThreadListResponse, ThreadStatus, ThreadTurn, TurnStatus, TurnSummary,
 };
 use crate::error::AppError;
 
-const DATABASE_FILE_NAME: &str = "native-state-v1.sqlite3";
+const DATABASE_FILE_NAME: &str = "native-state-unified-v1.sqlite3";
 const DATABASE_SCHEMA_VERSION: i64 = 2;
 const DATABASE_APPLICATION_ID: i64 = 1_128_552_526;
-const DATABASE_TABLES: &str = "app_config,provider_items,thread_items,threads,turns";
-const THREAD_COLUMNS: &str = "id,cwd,name,preview,archived,created_at,updated_at,project_path";
+const DATABASE_TABLES: &str =
+    "app_config,chat_conversations,provider_items,thread_items,threads,turns";
+const THREAD_COLUMNS: &str = "id,cwd,name,preview,archived,created_at,updated_at,project_path,mode";
 const THREAD_PAGE_SIZE: usize = 50;
 const MAX_CURSOR_BYTES: usize = 20;
 const MAX_ITEM_BYTES: usize = 2 * 1_048_576;
@@ -36,6 +37,12 @@ const MAX_IDENTIFIER_BYTES: usize = 256;
 #[derive(Debug, Default)]
 pub struct NativeStorage {
     database_path: RwLock<Option<PathBuf>>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct ChatConversationState {
+    pub conversation_id: Option<String>,
+    pub parent_message_id: Option<String>,
 }
 
 impl NativeStorage {
@@ -96,6 +103,7 @@ impl NativeStorage {
         &self,
         cwd: String,
         project_path: Option<String>,
+        mode: ConversationMode,
     ) -> Result<CodexThread, AppError> {
         let path = self.path().await?;
         run_blocking(move || {
@@ -105,9 +113,9 @@ impl NativeStorage {
             connection
                 .execute(
                     "INSERT INTO threads
-                         (id, cwd, project_path, name, preview, archived, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, NULL, '', 0, ?4, ?4)",
-                    params![id, cwd, project_path, now],
+                         (id, cwd, project_path, mode, name, preview, archived, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, NULL, '', 0, ?5, ?5)",
+                    params![id, cwd, project_path, mode.as_str(), now],
                 )
                 .map_err(storage_error)?;
             read_thread(&connection, &id)
@@ -131,7 +139,7 @@ impl NativeStorage {
                 .map_err(|error| AppError::Protocol(format!("thread cursor is too large: {error}")))?;
             let mut statement = connection
                 .prepare(
-                    "SELECT id, cwd, project_path, name, preview, created_at, updated_at,
+                    "SELECT id, cwd, project_path, mode, name, preview, created_at, updated_at,
                             EXISTS(SELECT 1 FROM turns WHERE thread_id = threads.id AND status = 'inProgress')
                      FROM threads
                      WHERE archived = ?3
@@ -145,11 +153,12 @@ impl NativeStorage {
                         id: row.get(0)?,
                         cwd: row.get(1)?,
                         project_path: row.get(2)?,
-                        name: row.get(3)?,
-                        preview: row.get(4)?,
-                        created_at: row.get(5)?,
-                        updated_at: row.get(6)?,
-                        active: row.get(7)?,
+                        mode: parse_conversation_mode(&row.get::<_, String>(3)?)?,
+                        name: row.get(4)?,
+                        preview: row.get(5)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                        active: row.get(8)?,
                     })
                 })
                 .map_err(storage_error)?;
@@ -320,7 +329,7 @@ impl NativeStorage {
             let transaction = connection.transaction().map_err(storage_error)?;
             let source = transaction
                 .query_row(
-                    "SELECT cwd, project_path, name, preview
+                    "SELECT cwd, project_path, mode, name, preview
                      FROM threads
                      WHERE id = ?1",
                     [&source_thread_id],
@@ -328,8 +337,9 @@ impl NativeStorage {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, String>(4)?,
                         ))
                     },
                 )
@@ -382,9 +392,9 @@ impl NativeStorage {
             transaction
                 .execute(
                     "INSERT INTO threads
-                         (id, cwd, project_path, name, preview, archived, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
-                    params![fork_id, source.0, source.1, source.2, source.3, now],
+                         (id, cwd, project_path, mode, name, preview, archived, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?7)",
+                    params![fork_id, source.0, source.1, source.2, source.3, source.4, now],
                 )
                 .map_err(storage_error)?;
 
@@ -454,8 +464,187 @@ impl NativeStorage {
                     params![fork_id, source_thread_id],
                 )
                 .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO chat_conversations
+                         (thread_id, conversation_id, parent_message_id, updated_at)
+                     SELECT ?1, conversation_id, parent_message_id, ?3
+                     FROM chat_conversations
+                     WHERE thread_id = ?2",
+                    params![fork_id, source_thread_id, now],
+                )
+                .map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
             read_thread(&connection, &fork_id)
+        })
+        .await
+    }
+
+    pub async fn begin_chat_turn(
+        &self,
+        thread_id: String,
+        model: String,
+        thinking_effort: Option<String>,
+        user_item: ThreadItem,
+        preview: String,
+    ) -> Result<TurnSummary, AppError> {
+        let item_id = user_item.id().to_string();
+        let item_payload = encode_bounded(&user_item, MAX_ITEM_BYTES, "ChatGPT thread item")?;
+        let preview = truncate_utf8(preview.trim(), MAX_PREVIEW_BYTES);
+        let path = self.path().await?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            require_available_thread(&transaction, &thread_id)?;
+            let mode: String = transaction
+                .query_row(
+                    "SELECT mode FROM threads WHERE id = ?1",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if mode != ConversationMode::Chat.as_str() {
+                return Err(AppError::State(
+                    "a ChatGPT consumer turn requires a Chat thread".into(),
+                ));
+            }
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM turns WHERE thread_id = ?1 AND status = 'inProgress')",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if active {
+                return Err(AppError::State("the thread already has an active turn".into()));
+            }
+            let turn_id = Uuid::now_v7().to_string();
+            let now = unix_timestamp()?;
+            transaction
+                .execute(
+                    "INSERT INTO turns
+                         (id, thread_id, status, model, reasoning_effort, error, created_at, updated_at)
+                     VALUES (?1, ?2, 'inProgress', ?3, ?4, NULL, ?5, ?5)",
+                    params![turn_id, thread_id, model, thinking_effort, now],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
+                    params![turn_id, item_id, item_payload],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "UPDATE threads
+                     SET preview = CASE WHEN preview = '' THEN ?1 ELSE preview END,
+                         updated_at = ?2
+                     WHERE id = ?3",
+                    params![preview, now, thread_id],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(TurnSummary {
+                id: turn_id,
+                status: TurnStatus::InProgress,
+            })
+        })
+        .await
+    }
+
+    pub async fn chat_conversation_state(
+        &self,
+        thread_id: String,
+    ) -> Result<ChatConversationState, AppError> {
+        let path = self.path().await?;
+        run_blocking(move || {
+            let connection = open_connection(&path)?;
+            let thread_mode = connection
+                .query_row(
+                    "SELECT mode FROM threads WHERE id = ?1 AND archived = 0",
+                    [&thread_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(storage_error)?
+                .ok_or_else(|| AppError::State("thread does not exist or is archived".into()))?;
+            if thread_mode != ConversationMode::Chat.as_str() {
+                return Err(AppError::State(
+                    "ChatGPT conversation state belongs only to Chat threads".into(),
+                ));
+            }
+            connection
+                .query_row(
+                    "SELECT conversation_id, parent_message_id
+                     FROM chat_conversations WHERE thread_id = ?1",
+                    [&thread_id],
+                    |row| {
+                        Ok(ChatConversationState {
+                            conversation_id: row.get(0)?,
+                            parent_message_id: row.get(1)?,
+                        })
+                    },
+                )
+                .optional()
+                .map(|state| state.unwrap_or_default())
+                .map_err(storage_error)
+        })
+        .await
+    }
+
+    pub async fn update_chat_conversation_state(
+        &self,
+        thread_id: String,
+        conversation_id: String,
+        parent_message_id: String,
+    ) -> Result<(), AppError> {
+        validate_text(
+            "ChatGPT conversation id",
+            &conversation_id,
+            MAX_IDENTIFIER_BYTES,
+        )?;
+        validate_text(
+            "ChatGPT parent message id",
+            &parent_message_id,
+            MAX_IDENTIFIER_BYTES,
+        )?;
+        let path = self.path().await?;
+        run_blocking(move || {
+            let mut connection = open_connection(&path)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            let available: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM threads
+                         WHERE id = ?1 AND archived = 0 AND mode = 'chat'
+                     )",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !available {
+                return Err(AppError::State(
+                    "ChatGPT conversation state requires an available Chat thread".into(),
+                ));
+            }
+            transaction
+                .execute(
+                    "INSERT INTO chat_conversations
+                         (thread_id, conversation_id, parent_message_id, updated_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(thread_id) DO UPDATE SET
+                         conversation_id = excluded.conversation_id,
+                         parent_message_id = excluded.parent_message_id,
+                         updated_at = excluded.updated_at",
+                    params![
+                        thread_id,
+                        conversation_id,
+                        parent_message_id,
+                        unix_timestamp()?
+                    ],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)
         })
         .await
     }
@@ -1027,6 +1216,7 @@ struct ThreadHeader {
     id: String,
     cwd: String,
     project_path: Option<String>,
+    mode: ConversationMode,
     name: Option<String>,
     preview: String,
     created_at: i64,
@@ -1038,6 +1228,7 @@ impl ThreadHeader {
     fn without_turns(self) -> CodexThread {
         CodexThread {
             id: self.id,
+            mode: self.mode,
             preview: self.preview,
             name: self.name,
             cwd: self.cwd,
@@ -1060,7 +1251,7 @@ impl ThreadHeader {
 fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, AppError> {
     let header = connection
         .query_row(
-            "SELECT id, cwd, project_path, name, preview, created_at, updated_at,
+            "SELECT id, cwd, project_path, mode, name, preview, created_at, updated_at,
                     EXISTS(SELECT 1 FROM turns WHERE thread_id = threads.id AND status = 'inProgress')
              FROM threads WHERE id = ?1 AND archived = 0",
             [thread_id],
@@ -1069,11 +1260,12 @@ fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, 
                     id: row.get(0)?,
                     cwd: row.get(1)?,
                     project_path: row.get(2)?,
-                    name: row.get(3)?,
-                    preview: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
-                    active: row.get(7)?,
+                    mode: parse_conversation_mode(&row.get::<_, String>(3)?)?,
+                    name: row.get(4)?,
+                    preview: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                    active: row.get(8)?,
                 })
             },
         )
@@ -1288,6 +1480,23 @@ fn parse_status(status: &str) -> Result<TurnStatus, AppError> {
     }
 }
 
+fn parse_conversation_mode(value: &str) -> rusqlite::Result<ConversationMode> {
+    match value {
+        "chat" => Ok(ConversationMode::Chat),
+        "work" => Ok(ConversationMode::Work),
+        "codex" => Ok(ConversationMode::Codex),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("database contains unknown conversation mode `{value}`"),
+            )
+            .into(),
+        )),
+    }
+}
+
 fn encode_bounded<T: Serialize>(
     value: &T,
     maximum_bytes: usize,
@@ -1366,7 +1575,8 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
                  archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
                  created_at INTEGER NOT NULL,
                  updated_at INTEGER NOT NULL,
-                 project_path TEXT CHECK (project_path IS NULL OR project_path = cwd)
+                 project_path TEXT CHECK (project_path IS NULL OR project_path = cwd),
+                 mode TEXT NOT NULL CHECK (mode IN ('chat', 'work', 'codex'))
              );
              CREATE TABLE turns (
                  id TEXT PRIMARY KEY,
@@ -1394,6 +1604,12 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
              );
              CREATE INDEX provider_items_thread_sequence
                  ON provider_items(thread_id, sequence);
+             CREATE TABLE chat_conversations (
+                 thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+                 conversation_id TEXT NOT NULL,
+                 parent_message_id TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
+             );
              CREATE TABLE app_config (
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  version INTEGER NOT NULL CHECK (version >= 1),
@@ -1429,30 +1645,27 @@ fn migrate_database(
     if version == DATABASE_SCHEMA_VERSION {
         return Ok(());
     }
-    if version != 1 {
-        return Err(AppError::Storage(format!(
-            "database schema {version} cannot be migrated to {DATABASE_SCHEMA_VERSION}"
-        )));
+    if version == 1 {
+        let transaction = connection.transaction().map_err(storage_error)?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE chat_conversations (
+                     thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+                     conversation_id TEXT NOT NULL,
+                     parent_message_id TEXT NOT NULL,
+                     updated_at INTEGER NOT NULL
+                 );",
+            )
+            .map_err(storage_error)?;
+        transaction
+            .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+            .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        return Ok(());
     }
-    let tables = database_tables(connection)?;
-    if tables != DATABASE_TABLES {
-        return Err(AppError::Storage(format!(
-            "database tables do not match schema {version}: {tables}"
-        )));
-    }
-
-    let transaction = connection.transaction().map_err(storage_error)?;
-    transaction
-        .execute_batch(
-            "ALTER TABLE threads ADD COLUMN project_path TEXT
-                 CHECK (project_path IS NULL OR project_path = cwd);
-             UPDATE threads SET project_path = cwd;",
-        )
-        .map_err(storage_error)?;
-    transaction
-        .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
-        .map_err(storage_error)?;
-    transaction.commit().map_err(storage_error)
+    Err(AppError::Storage(format!(
+        "database schema {version} cannot be migrated to {DATABASE_SCHEMA_VERSION}"
+    )))
 }
 
 fn validate_database(
@@ -1577,9 +1790,14 @@ mod tests {
     use rusqlite::{Connection, params};
     use tempfile::TempDir;
 
-    use super::{DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, NativeStorage};
+    use super::{
+        DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, NativeStorage, initialize_database,
+    };
     use crate::engine::native::provider::{ResponseContent, ResponseItem};
-    use crate::engine::{AppConfig, ThreadItem, TokenUsage, TurnStatus, UserContent};
+    use crate::engine::{
+        ConfigUpdate, ConversationMode, ModelVerbosity, ThreadItem, TokenUsage, TurnStatus,
+        UserContent,
+    };
 
     #[tokio::test(flavor = "current_thread")]
     async fn initializes_the_native_schema_directly() {
@@ -1592,7 +1810,11 @@ mod tests {
             .expect("storage should initialize");
         let project_path = directory.path().display().to_string();
         let thread = storage
-            .create_thread(project_path.clone(), Some(project_path.clone()))
+            .create_thread(
+                project_path.clone(),
+                Some(project_path.clone()),
+                ConversationMode::Codex,
+            )
             .await
             .expect("thread should persist");
         let loaded = storage
@@ -1600,6 +1822,7 @@ mod tests {
             .await
             .expect("thread should load");
         assert_eq!(loaded.id, thread.id);
+        assert_eq!(loaded.mode, ConversationMode::Codex);
         assert_eq!(loaded.project_path.as_deref(), Some(project_path.as_str()));
         assert!(loaded.turns.is_empty());
 
@@ -1633,6 +1856,59 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn persists_output_detail_overrides_and_restores_the_model_default() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("output-detail.sqlite3"))
+            .await
+            .expect("storage should initialize");
+
+        let initial = storage
+            .read_config()
+            .await
+            .expect("default configuration should load");
+        assert!(initial.config.model_verbosity.is_none());
+        let mut version = initial.version;
+
+        for verbosity in [
+            ModelVerbosity::Low,
+            ModelVerbosity::Medium,
+            ModelVerbosity::High,
+        ] {
+            let updated = storage
+                .update_config(
+                    version,
+                    ConfigUpdate::ModelVerbosity {
+                        value: Some(verbosity),
+                    },
+                )
+                .await
+                .expect("output detail override should persist");
+            assert_eq!(updated.config.model_verbosity, Some(verbosity));
+            version = updated.version;
+
+            let reloaded = storage
+                .read_config()
+                .await
+                .expect("output detail override should reload");
+            assert_eq!(reloaded.config.model_verbosity, Some(verbosity));
+        }
+
+        let restored = storage
+            .update_config(version, ConfigUpdate::ModelVerbosity { value: None })
+            .await
+            .expect("model default should persist");
+        assert!(restored.config.model_verbosity.is_none());
+
+        let reloaded = storage
+            .read_config()
+            .await
+            .expect("model default should reload");
+        assert!(reloaded.config.model_verbosity.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn persists_projectless_threads_without_inventing_a_project() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let workspace = directory.path().join("projectless-workspace");
@@ -1644,7 +1920,11 @@ mod tests {
             .expect("storage should initialize");
 
         let thread = storage
-            .create_thread(workspace.display().to_string(), None)
+            .create_thread(
+                workspace.display().to_string(),
+                None,
+                ConversationMode::Chat,
+            )
             .await
             .expect("projectless thread should persist");
         let fork = storage
@@ -1657,95 +1937,116 @@ mod tests {
             .expect("projectless threads should list");
 
         assert_eq!(thread.project_path, None);
+        assert_eq!(thread.mode, ConversationMode::Chat);
         assert_eq!(fork.project_path, None);
+        assert_eq!(fork.mode, ConversationMode::Chat);
         assert!(listed.data.iter().all(|entry| entry.project_path.is_none()));
         assert!(listed.data.iter().all(|entry| entry.cwd == thread.cwd));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn migrates_existing_threads_as_project_threads() {
+    async fn persists_and_forks_chatgpt_conversation_continuity() {
         let directory = TempDir::new().expect("temporary directory should be created");
-        let database_path = directory.path().join("migration.sqlite3");
-        let cwd = directory.path().display().to_string();
-        let connection = Connection::open(&database_path).expect("database should reopen");
-        connection
-            .execute_batch(
-                "CREATE TABLE threads (
-                     id TEXT PRIMARY KEY,
-                     cwd TEXT NOT NULL,
-                     name TEXT,
-                     preview TEXT NOT NULL,
-                     archived INTEGER NOT NULL,
-                     created_at INTEGER NOT NULL,
-                     updated_at INTEGER NOT NULL
-                 );
-                 CREATE TABLE turns (
-                     id TEXT PRIMARY KEY,
-                     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-                     status TEXT NOT NULL,
-                     model TEXT NOT NULL,
-                     reasoning_effort TEXT,
-                     error TEXT,
-                     created_at INTEGER NOT NULL,
-                     updated_at INTEGER NOT NULL
-                 );
-                 CREATE TABLE thread_items (
-                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                     turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-                     item_id TEXT NOT NULL,
-                     payload TEXT NOT NULL
-                 );
-                 CREATE TABLE provider_items (
-                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-                     payload TEXT NOT NULL
-                 );
-                 CREATE TABLE app_config (
-                     singleton INTEGER PRIMARY KEY,
-                     version INTEGER NOT NULL,
-                     payload TEXT NOT NULL
-                 );",
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("chat-continuity.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                None,
+                ConversationMode::Chat,
             )
-            .expect("schema-one tables should be created");
-        let config = serde_json::to_string(&AppConfig::default())
-            .expect("default configuration should encode");
-        connection
-            .execute(
-                "INSERT INTO app_config (singleton, version, payload) VALUES (1, 1, ?1)",
-                [&config],
+            .await
+            .expect("Chat thread should persist");
+        let turn = storage
+            .begin_chat_turn(
+                thread.id.clone(),
+                "gpt-5.6-pro".into(),
+                Some("max".into()),
+                ThreadItem::UserMessage {
+                    id: "user-chat".into(),
+                    content: vec![UserContent::Text {
+                        text: "Olá".into()
+                    }],
+                },
+                "Olá".into(),
             )
-            .expect("schema-one configuration should persist");
-        connection
-            .execute(
-                "INSERT INTO threads
-                     (id, cwd, name, preview, archived, created_at, updated_at)
-                 VALUES ('legacy-thread', ?1, NULL, '', 0, 1, 1)",
-                [&cwd],
+            .await
+            .expect("Chat turn should begin");
+        storage
+            .update_chat_conversation_state(
+                thread.id.clone(),
+                "conversation-1".into(),
+                "assistant-1".into(),
             )
-            .expect("schema-one thread should persist");
+            .await
+            .expect("continuity should persist");
+        storage
+            .complete_turn(thread.id.clone(), turn.id, TurnStatus::Completed, None)
+            .await
+            .expect("turn should complete");
+
+        let state = storage
+            .chat_conversation_state(thread.id.clone())
+            .await
+            .expect("continuity should load");
+        let history = storage
+            .provider_history(thread.id.clone())
+            .await
+            .expect("Codex history should remain readable");
+        assert_eq!(state.conversation_id.as_deref(), Some("conversation-1"));
+        assert_eq!(state.parent_message_id.as_deref(), Some("assistant-1"));
+        assert!(history.is_empty());
+
+        let fork = storage
+            .fork_thread(thread.id)
+            .await
+            .expect("Chat thread should fork");
+        let fork_state = storage
+            .chat_conversation_state(fork.id)
+            .await
+            .expect("fork continuity should load");
+        assert_eq!(fork_state, state);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn migrates_schema_one_to_chat_conversation_storage() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("schema-one.sqlite3");
+        let mut connection = Connection::open(&database_path).expect("database should open");
+        initialize_database(&mut connection).expect("current fixture should initialize");
         connection
-            .pragma_update(None, "application_id", DATABASE_APPLICATION_ID)
-            .expect("application id should persist");
+            .execute("DROP TABLE chat_conversations", [])
+            .expect("new table should be removed from the legacy fixture");
         connection
             .pragma_update(None, "user_version", 1)
-            .expect("schema version should persist");
+            .expect("legacy schema version should persist");
         drop(connection);
 
-        let migrated = NativeStorage::default();
-        migrated
+        let storage = NativeStorage::default();
+        storage
             .initialize_at(database_path.clone())
             .await
             .expect("schema one should migrate");
-        let loaded = migrated
-            .read_thread("legacy-thread".into())
-            .await
-            .expect("migrated thread should load");
-        assert_eq!(loaded.project_path.as_deref(), Some(cwd.as_str()));
+
         let connection = Connection::open(database_path).expect("database should reopen");
-        let schema_version: i64 = connection
+        let table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_schema
+                     WHERE type = 'table' AND name = 'chat_conversations'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table existence should be readable");
+        let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version should be readable");
-        assert_eq!(schema_version, DATABASE_SCHEMA_VERSION);
+        assert!(table_exists);
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1760,6 +2061,7 @@ mod tests {
             .create_thread(
                 directory.path().display().to_string(),
                 Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
             )
             .await
             .expect("thread should persist");
@@ -1815,6 +2117,7 @@ mod tests {
             .create_thread(
                 directory.path().display().to_string(),
                 Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
             )
             .await
             .expect("thread should persist");
@@ -1853,6 +2156,7 @@ mod tests {
             .create_thread(
                 directory.path().display().to_string(),
                 Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
             )
             .await
             .expect("thread should persist");
@@ -1948,6 +2252,7 @@ mod tests {
             .create_thread(
                 directory.path().display().to_string(),
                 Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
             )
             .await
             .expect("thread should persist");
@@ -2017,6 +2322,7 @@ mod tests {
             .create_thread(
                 directory.path().display().to_string(),
                 Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
             )
             .await
             .expect("thread should persist");
@@ -2083,6 +2389,7 @@ mod tests {
             .create_thread(
                 directory.path().display().to_string(),
                 Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
             )
             .await
             .expect("thread should persist");
@@ -2174,6 +2481,7 @@ mod tests {
             .create_thread(
                 directory.path().display().to_string(),
                 Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
             )
             .await
             .expect("thread should persist");
@@ -2233,6 +2541,7 @@ mod tests {
             .create_thread(
                 directory.path().display().to_string(),
                 Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
             )
             .await
             .expect("source thread should persist");

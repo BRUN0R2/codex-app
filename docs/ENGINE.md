@@ -77,18 +77,31 @@ registro de eventos têm limite de 15 segundos; o estouro marca o runtime como
 inteira. Eventos de status atrasados são ignorados após uma falha, para que um
 `ready` tardio não troque o erro por um boot fantasma.
 
-## Provider
+## Providers
 
-O backend usa a sessão OAuth diretamente para:
+O backend usa a mesma sessão OAuth da conta ChatGPT diretamente, sem solicitar
+uma chave da API Platform. Os dois protocolos são separados antes de qualquer
+seleção de modelo ou amostragem.
+
+Para Chat consumidor:
+
+- catálogo em `https://chatgpt.com/backend-api/models?iim=false&include_icons=false`;
+- requisitos de integridade em `/backend-api/sentinel/chat-requirements/prepare`;
+- preparação opcional e conduit em `/backend-api/f/conversation/prepare`;
+- conversa e deltas `v1` em `/backend-api/f/conversation`;
+- seleção por preset do catálogo, resolvido em `model` e `thinking_effort`.
+
+Para Work local e Codex:
 
 - catálogo em `https://chatgpt.com/backend-api/codex/models`;
 - respostas em `https://chatgpt.com/backend-api/codex/responses`;
 - uso em `https://chatgpt.com/backend-api/wham/usage`.
 
 Headers de conta e sessão são montados somente no Rust. Tokens, cookies e
-respostas brutas não são expostos ao frontend. O parser aceita apenas a forma de
-catálogo e os eventos SSE implementados; novidades de protocolo exigem mudança
-explícita do contrato.
+respostas brutas não são expostos ao frontend. O parser consumer negocia e
+aplica patches `v1`; o parser Codex aceita apenas os eventos Responses
+implementados. Novidades em qualquer protocolo exigem mudança explícita do
+contrato.
 
 Antes de cada requisição, o histórico garante a mesma invariável do Desktop
 oficial: toda chamada de ferramenta possui exatamente uma saída compatível e

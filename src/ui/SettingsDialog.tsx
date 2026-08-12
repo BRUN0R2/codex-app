@@ -29,6 +29,7 @@ import type { AppController } from "../state/createAppController";
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { formatShortDate } from "./dateFormat";
 import { Icon, type IconName } from "./Icon";
+import { OUTPUT_DETAIL_OPTIONS, outputDetailLabel } from "./outputDetail";
 import { threadTitle } from "./Sidebar";
 
 export type SettingsPage =
@@ -311,11 +312,17 @@ function SettingsHeading(props: { readonly title: string; readonly description: 
   );
 }
 
-function SettingsSection(props: { readonly children: JSX.Element; readonly title: string }) {
+function SettingsSection(props: {
+  readonly allowOverflow?: boolean;
+  readonly children: JSX.Element;
+  readonly title: string;
+}) {
   return (
     <section class="settings-section">
       <h3>{props.title}</h3>
-      <div class="settings-card">{props.children}</div>
+      <div class="settings-card" classList={{ "allow-overflow": props.allowOverflow }}>
+        {props.children}
+      </div>
     </section>
   );
 }
@@ -329,7 +336,7 @@ function GeneralSettings(props: { readonly controller: AppController }) {
   return (
     <div class="settings-page">
       <SettingsHeading title="Geral" description="Padrões usados ao iniciar cada novo turno." />
-      <SettingsSection title="Modelo">
+      <SettingsSection allowOverflow title="Modelo">
         <SettingsRow label="Modelo" description="Catálogo autorizado pela conta ChatGPT.">
           <select
             onChange={(event) => {
@@ -412,22 +419,16 @@ function GeneralSettings(props: { readonly controller: AppController }) {
           </SettingsRow>
         </Show>
         <SettingsRow
-          label="Verbosidade"
-          description="Controla o tamanho das respostas quando o modelo suporta."
+          label="Detalhamento da saída"
+          description="Escolha o nível de detalhe que o Codex inclui nas respostas."
         >
-          <select
-            onChange={(event) => {
-              const value = parseVerbosity(event.currentTarget.value);
-              if (value !== undefined)
-                void props.controller.updateSetting({ type: "modelVerbosity", value });
-            }}
-            value={configuration()?.modelVerbosity ?? ""}
-          >
-            <option value="">Automática</option>
-            <option value="low">Baixa</option>
-            <option value="medium">Média</option>
-            <option value="high">Alta</option>
-          </select>
+          <OutputDetailSelect
+            disabled={configuration() === undefined}
+            onChange={(value) =>
+              void props.controller.updateSetting({ type: "modelVerbosity", value })
+            }
+            value={configuration()?.modelVerbosity ?? null}
+          />
         </SettingsRow>
       </SettingsSection>
       <SettingsSection title="Ferramentas">
@@ -894,6 +895,153 @@ function ArchivedChatsSettings(props: { readonly controller: AppController }) {
   );
 }
 
+function OutputDetailSelect(props: {
+  readonly disabled: boolean;
+  readonly onChange: (value: ModelVerbosity | null) => void;
+  readonly value: ModelVerbosity | null;
+}) {
+  const [open, setOpen] = createSignal(false);
+  let rootElement: HTMLDivElement | undefined;
+  let triggerElement: HTMLButtonElement | undefined;
+  const optionElements: Array<HTMLButtonElement | undefined> = [];
+
+  const selectedIndex = () => {
+    const index = OUTPUT_DETAIL_OPTIONS.findIndex((option) => option.value === props.value);
+    return index < 0 ? 0 : index;
+  };
+
+  function focusOption(index: number): void {
+    const optionCount = OUTPUT_DETAIL_OPTIONS.length;
+    const normalizedIndex = (index + optionCount) % optionCount;
+    queueMicrotask(() => optionElements[normalizedIndex]?.focus());
+  }
+
+  function openAndFocusSelected(): void {
+    setOpen(true);
+    focusOption(selectedIndex());
+  }
+
+  function closeAndFocusTrigger(): void {
+    setOpen(false);
+    queueMicrotask(() => triggerElement?.focus());
+  }
+
+  function select(value: ModelVerbosity | null): void {
+    closeAndFocusTrigger();
+    if (value !== props.value) {
+      props.onChange(value);
+    }
+  }
+
+  function handleTriggerKeyDown(event: KeyboardEvent): void {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      event.stopPropagation();
+      openAndFocusSelected();
+      return;
+    }
+    if (event.key === "Escape" && open()) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeAndFocusTrigger();
+    }
+  }
+
+  function handleOptionKeyDown(event: KeyboardEvent, index: number): void {
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        focusOption(index + 1);
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        focusOption(index - 1);
+        break;
+      case "Home":
+        event.preventDefault();
+        focusOption(0);
+        break;
+      case "End":
+        event.preventDefault();
+        focusOption(OUTPUT_DETAIL_OPTIONS.length - 1);
+        break;
+      case "Escape":
+        event.preventDefault();
+        event.stopPropagation();
+        closeAndFocusTrigger();
+        break;
+      case "Tab":
+        setOpen(false);
+        break;
+    }
+  }
+
+  function handleDocumentPointerDown(event: PointerEvent): void {
+    if (open() && (!(event.target instanceof Node) || !rootElement?.contains(event.target))) {
+      setOpen(false);
+    }
+  }
+
+  onMount(() => document.addEventListener("pointerdown", handleDocumentPointerDown));
+  onCleanup(() => document.removeEventListener("pointerdown", handleDocumentPointerDown));
+
+  return (
+    <div class="output-detail-select" ref={rootElement}>
+      <button
+        aria-controls="output-detail-menu"
+        aria-expanded={open()}
+        aria-haspopup="menu"
+        aria-label="Detalhamento da saída"
+        class="output-detail-trigger"
+        classList={{ open: open() }}
+        disabled={props.disabled}
+        onClick={() => setOpen((value) => !value)}
+        onKeyDown={handleTriggerKeyDown}
+        ref={triggerElement}
+        type="button"
+      >
+        <span>{outputDetailLabel(props.value)}</span>
+        <Icon name="chevronDown" size={14} />
+      </button>
+      <Show when={open()}>
+        <div
+          aria-label="Detalhamento da saída"
+          class="output-detail-menu"
+          id="output-detail-menu"
+          role="menu"
+        >
+          <For each={OUTPUT_DETAIL_OPTIONS}>
+            {(option, index) => (
+              <button
+                aria-checked={option.value === props.value}
+                class="output-detail-option"
+                classList={{ selected: option.value === props.value }}
+                onClick={() => select(option.value)}
+                onKeyDown={(event) => handleOptionKeyDown(event, index())}
+                ref={(element) => {
+                  optionElements[index()] = element;
+                }}
+                role="menuitemradio"
+                type="button"
+              >
+                <span>
+                  <strong>{option.label}</strong>
+                  <Show when={option.description}>
+                    {(description) => <small>{description()}</small>}
+                  </Show>
+                </span>
+                <Show when={option.value === props.value}>
+                  <Icon name="check" size={16} />
+                </Show>
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
 function SettingsRow(props: {
   readonly children: JSX.Element;
   readonly description: string;
@@ -932,11 +1080,6 @@ function saveModelDefaults(
 
 function parseWebSearch(value: string): WebSearchMode | undefined {
   return value === "disabled" || value === "live" ? value : undefined;
-}
-
-function parseVerbosity(value: string): ModelVerbosity | null | undefined {
-  if (value === "") return null;
-  return value === "low" || value === "medium" || value === "high" ? value : undefined;
 }
 
 function parsePersonality(value: string): Personality | undefined {

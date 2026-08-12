@@ -10,6 +10,8 @@ import type {
   AuthRefreshResult,
   CancelLoginResponse,
   ChatGptAccount,
+  ChatModelListResponse,
+  ChatModelOption,
   CodexModel,
   CodexThread,
   CommandError,
@@ -72,6 +74,7 @@ const MAX_TOOL_OUTPUT_BYTES = 1_048_576;
 const MAX_COLLECTION_LENGTH = 10_000;
 
 const RUNTIME_STATES = ["failed", "ready", "starting", "stopped"] as const;
+const CONVERSATION_MODES = ["chat", "work", "codex"] as const;
 const ENGINE_TRANSPORTS = ["httpsSse"] as const;
 const ENGINE_STORAGES = ["sqlite"] as const;
 const ENGINE_CAPABILITIES = [
@@ -93,6 +96,16 @@ const REASONING_EFFORTS = [
   "ultra",
   "xhigh",
 ] as const;
+const CHAT_THINKING_EFFORTS = [
+  "extended",
+  "max",
+  "min",
+  "standard",
+  "ultra",
+  "xhigh",
+  "zero",
+] as const;
+const CHAT_MODEL_LANES = ["auto", "instant", "pro", "thinking", "thinking_mini"] as const;
 const TURN_STATUSES = ["completed", "failed", "inProgress", "interrupted"] as const;
 const TERMINAL_TURN_STATUSES = ["completed", "failed", "interrupted"] as const;
 const ACTIVITY_STATUSES = ["completed", "declined", "failed", "inProgress"] as const;
@@ -155,7 +168,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [2] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [4] as const);
   return {
     engine: {
       id: text(engine.id, "$.engine.id"),
@@ -253,6 +266,28 @@ export function decodeModelListResponse(value: unknown): ModelListResponse {
   const defaults = data.filter((model) => model.isDefault);
   if (defaults.length !== 1 || defaults[0]?.hidden === true) {
     throw new ContractError("$.data", "model catalog must contain one visible default model");
+  }
+  return { data };
+}
+
+export function decodeChatModelListResponse(value: unknown): ChatModelListResponse {
+  const object = exactRecord(value, "$", ["data"]);
+  const data = array(object.data, "$.data", decodeChatModelOption, 100);
+  if (data.length === 0) {
+    throw new ContractError("$.data", "ChatGPT model catalog cannot be empty");
+  }
+  const identifiers = new Set<string>();
+  for (const model of data) {
+    if (identifiers.has(model.id)) {
+      throw new ContractError(
+        "$.data",
+        `duplicate ChatGPT model option ${JSON.stringify(model.id)}`,
+      );
+    }
+    identifiers.add(model.id);
+  }
+  if (data.filter((model) => model.isDefault).length !== 1) {
+    throw new ContractError("$.data", "ChatGPT model catalog must have exactly one default option");
   }
   return { data };
 }
@@ -704,6 +739,40 @@ function decodeModel(value: unknown, path: string): CodexModel {
   };
 }
 
+function decodeChatModelOption(value: unknown, path: string): ChatModelOption {
+  const object = exactRecord(value, path, [
+    "description",
+    "id",
+    "isDefault",
+    "lane",
+    "model",
+    "selectedLabel",
+    "thinkingEffort",
+    "title",
+    "versionId",
+  ]);
+  return {
+    id: identifier(object.id, `${path}.id`),
+    model: identifier(object.model, `${path}.model`),
+    title: text(object.title, `${path}.title`, 16_384),
+    description:
+      object.description === null
+        ? null
+        : text(object.description, `${path}.description`, 16_384, true),
+    lane: object.lane === null ? null : literal(object.lane, `${path}.lane`, CHAT_MODEL_LANES),
+    thinkingEffort:
+      object.thinkingEffort === null
+        ? null
+        : literal(object.thinkingEffort, `${path}.thinkingEffort`, CHAT_THINKING_EFFORTS),
+    versionId: object.versionId === null ? null : identifier(object.versionId, `${path}.versionId`),
+    selectedLabel:
+      object.selectedLabel === null
+        ? null
+        : text(object.selectedLabel, `${path}.selectedLabel`, 16_384),
+    isDefault: booleanValue(object.isDefault, `${path}.isDefault`),
+  };
+}
+
 function decodeModelContextWindow(value: unknown, path: string): ModelContextWindow {
   const object = exactRecord(value, path, [
     "maximumTokens",
@@ -747,6 +816,7 @@ function decodeThread(value: unknown, path: string): CodexThread {
     "createdAt",
     "cwd",
     "id",
+    "mode",
     "name",
     "preview",
     "projectPath",
@@ -769,6 +839,7 @@ function decodeThread(value: unknown, path: string): CodexThread {
   }
   return {
     id: identifier(object.id, `${path}.id`),
+    mode: literal(object.mode, `${path}.mode`, CONVERSATION_MODES),
     preview: text(object.preview, `${path}.preview`, 512, true),
     name: nullableText(object.name, `${path}.name`),
     cwd: text(object.cwd, `${path}.cwd`, 4_096),

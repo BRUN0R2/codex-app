@@ -4,6 +4,7 @@ import {
   ContractError,
   decodeAccountReadResponse,
   decodeAttachmentImageResponse,
+  decodeChatModelListResponse,
   decodeEngineNotification,
   decodeEngineStartResponse,
   decodeModelListResponse,
@@ -76,7 +77,7 @@ describe("decodificação dos contratos nativos", () => {
           "explicitApprovals",
         ],
       },
-      schemaVersion: 2,
+      schemaVersion: 4,
       permissionProfile: { sandbox: "workspace-write", approvals: "on-request" },
       permissionProfiles: [
         { sandbox: "read-only", approvals: "untrusted" },
@@ -101,7 +102,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 2,
+        schemaVersion: 4,
         permissionProfile: { sandbox: "danger-full-access", approvals: "on-request" },
         permissionProfiles: [],
       }),
@@ -117,6 +118,35 @@ describe("decodificação dos contratos nativos", () => {
         data: [{ ...modelFixture(), defaultReasoningEffort: "high" }],
       }),
     ).toThrow("must be one of the supported reasoning efforts");
+  });
+
+  it("mantém presets Pro do Chat como model + thinkingEffort", () => {
+    const decoded = decodeChatModelListResponse({
+      data: [
+        {
+          id: "gpt-5.6-pro#pro#max",
+          model: "gpt-5.6-pro",
+          title: "Pro",
+          description: "Maior capacidade",
+          lane: "pro",
+          thinkingEffort: "max",
+          versionId: "gpt-5.6",
+          selectedLabel: "GPT-5.6 Pro",
+          isDefault: true,
+        },
+      ],
+    });
+
+    expect(decoded.data[0]).toMatchObject({
+      model: "gpt-5.6-pro",
+      lane: "pro",
+      thinkingEffort: "max",
+    });
+    expect(() =>
+      decodeChatModelListResponse({
+        data: [{ ...decoded.data[0], thinkingEffort: "high" }],
+      }),
+    ).toThrow(ContractError);
   });
 
   it("rejeita notificações desconhecidas e campos herdados", () => {
@@ -152,6 +182,7 @@ describe("decodificação dos contratos nativos", () => {
     const response = (output: string) => ({
       thread: {
         id: "thread-output-limit",
+        mode: "codex",
         preview: "Teste de limite",
         name: null,
         cwd: "C:\\workspace",
@@ -407,6 +438,7 @@ describe("decodificação dos contratos nativos", () => {
     const response = {
       thread: {
         id: "thread-1",
+        mode: "codex",
         preview: "Teste",
         name: null,
         cwd: "C:\\workspace",

@@ -934,7 +934,9 @@ fn stream_failure(event: StreamEventWire) -> AppError {
 mod tests {
     use std::collections::VecDeque;
 
+    use crate::engine::ModelVerbosity;
     use crate::engine::ModelVerification;
+    use crate::engine::ReasoningEffort;
 
     use super::ResponseEvent;
     use super::ResponseItem;
@@ -1120,6 +1122,56 @@ mod tests {
         let encoded = serde_json::to_value(request).expect("request should serialize");
 
         assert!(encoded.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn serializes_codex_reasoning_as_an_effort_without_a_mode() {
+        let request = ResponseRequest::new(
+            "gpt-5.6-sol".into(),
+            "Be useful.".into(),
+            Vec::new(),
+            Vec::new(),
+            ResponseRequestSettings {
+                reasoning_effort: Some(ReasoningEffort::XHigh),
+                ..ResponseRequestSettings::default()
+            },
+        );
+        let encoded = serde_json::to_value(request).expect("request should serialize");
+
+        assert_eq!(encoded["reasoning"]["effort"], "xhigh");
+        assert!(encoded["reasoning"].get("mode").is_none());
+        assert_eq!(encoded["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn omits_output_detail_when_the_model_default_is_selected() {
+        let request = ResponseRequest::new(
+            "gpt-test".into(),
+            "Be useful.".into(),
+            Vec::new(),
+            Vec::new(),
+            ResponseRequestSettings::default(),
+        );
+        let encoded = serde_json::to_value(request).expect("request should serialize");
+
+        assert!(encoded.get("text").is_none());
+    }
+
+    #[test]
+    fn serializes_an_explicit_output_detail_override() {
+        let request = ResponseRequest::new(
+            "gpt-test".into(),
+            "Be useful.".into(),
+            Vec::new(),
+            Vec::new(),
+            ResponseRequestSettings {
+                verbosity: Some(ModelVerbosity::Low),
+                ..ResponseRequestSettings::default()
+            },
+        );
+        let encoded = serde_json::to_value(request).expect("request should serialize");
+
+        assert_eq!(encoded["text"]["verbosity"], "low");
     }
 
     #[test]

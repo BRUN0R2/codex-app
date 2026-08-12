@@ -1,7 +1,8 @@
 # Codex Desktop Next
 
-Aplicativo desktop nativo e independente para executar um agente de código com
-uma conta ChatGPT. O produto não inicia, empacota, importa nem exige o Codex CLI.
+Aplicativo desktop nativo e independente para alternar entre ChatGPT Chat,
+ChatGPT Work local e um agente Codex usando uma conta ChatGPT. O produto não
+inicia, empacota, importa nem exige o Codex CLI.
 O repositório aberto `openai/codex` é usado somente como referência de protocolo
 e comportamento.
 
@@ -14,10 +15,14 @@ alterar estado.
 
 - OAuth ChatGPT oficial com PKCE, callback local, renovação, revogação e
   cancelamento;
+- seletor persistente `ChatGPT | Codex`, modo `Chat | Work`, restauração do
+  último destino e históricos segregados por produto;
 - credenciais em envelope `age` privado do aplicativo; a chave fica no Windows
   Credential Manager e tokens nunca atravessam o IPC ou o SQLite;
-- catálogo de modelos, tiers e esforços obtido diretamente da sessão ChatGPT;
-- respostas incrementais por HTTPS/SSE, raciocínio e pesquisa web hospedada;
+- catálogos separados para o Chat consumidor e para o Codex, obtidos diretamente
+  da sessão OAuth da conta ChatGPT, sem chave da API Platform;
+- Chat via `/backend-api/f/conversation` com presets `model + thinking_effort` e
+  Codex via Responses, ambos com streaming HTTPS/SSE;
 - tarefas e histórico locais em SQLite com WAL, transações e concorrência
   otimista de configuração, incluindo reparo explícito de pares chamada/saída
   deixados incompletos por interrupção;

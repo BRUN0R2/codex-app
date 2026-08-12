@@ -82,6 +82,24 @@ describe("agent activity presentation", () => {
     ]);
   });
 
+  it("keeps a group's identity stable when new activities are appended", () => {
+    const initial = splitAgentActivityUnits([command("command-1"), command("command-2")]);
+    const withCommand = splitAgentActivityUnits([
+      command("command-1"),
+      command("command-2"),
+      command("command-3"),
+    ]);
+    const withFileChange = splitAgentActivityUnits([
+      command("command-1"),
+      command("command-2"),
+      fileChange("change-1", "src/App.tsx"),
+    ]);
+
+    expect(initial[0]?.key).toBe("activity:command-1");
+    expect(withCommand[0]?.key).toBe(initial[0]?.key);
+    expect(withFileChange[0]?.key).toBe(initial[0]?.key);
+  });
+
   it("only keeps a lone completed row grouped while it owns the current activity heading", () => {
     const single = splitAgentActivityUnits([command("command-1")]);
     const multipleChanges = splitAgentActivityUnits([
@@ -98,6 +116,11 @@ describe("agent activity presentation", () => {
         ? shouldRenderAgentActivityGroup(single[0].items, false)
         : true,
     ).toBe(false);
+    expect(
+      single[0]?.kind === "activityGroup"
+        ? shouldRenderAgentActivityGroup(single[0].items, false, true)
+        : false,
+    ).toBe(true);
     expect(
       single[0]?.kind === "activityGroup"
         ? shouldRenderAgentActivityGroup(single[0].items, true)

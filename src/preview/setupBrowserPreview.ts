@@ -4,6 +4,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
   AccountRateLimitsResponse,
   AccountReadResponse,
+  ChatModelListResponse,
   CodexModel,
   CodexThread,
   ConfigReadResponse,
@@ -51,7 +52,7 @@ const PREVIEW_ENGINE = {
       "nativeTools",
     ],
   },
-  schemaVersion: 2,
+  schemaVersion: 4,
   permissionProfile: PREVIEW_PERMISSION_PROFILE,
   permissionProfiles: [
     { sandbox: "read-only", approvals: "untrusted" },
@@ -80,7 +81,7 @@ const PREVIEW_CONFIG = {
     serviceTier: null,
     permissionProfile: PREVIEW_PERMISSION_PROFILE,
     webSearch: "live",
-    modelVerbosity: "medium",
+    modelVerbosity: null,
     personality: "pragmatic",
     developerInstructions: null,
     desktop: {
@@ -110,6 +111,44 @@ const PREVIEW_MODELS = PREVIEW_MODEL_DEFINITIONS.map(([id, displayName]) =>
 const PREVIEW_MODEL_CATALOG = {
   data: PREVIEW_MODELS,
 } satisfies ModelListResponse;
+
+const PREVIEW_CHAT_MODEL_CATALOG = {
+  data: [
+    {
+      id: "auto#instant#zero",
+      model: "auto",
+      title: "Instantâneo",
+      description: "Respostas rápidas para tarefas cotidianas.",
+      lane: "instant",
+      thinkingEffort: "zero",
+      versionId: "gpt-5.6",
+      selectedLabel: "GPT-5.6 Instantâneo",
+      isDefault: true,
+    },
+    {
+      id: "gpt-5.6-thinking#thinking#extended",
+      model: "gpt-5.6-thinking",
+      title: "Pensamento",
+      description: "Mais tempo para problemas complexos.",
+      lane: "thinking",
+      thinkingEffort: "extended",
+      versionId: "gpt-5.6",
+      selectedLabel: "GPT-5.6 Pensamento",
+      isDefault: false,
+    },
+    {
+      id: "gpt-5.6-pro#pro#max",
+      model: "gpt-5.6-pro",
+      title: "Pro",
+      description: "Maior capacidade para tarefas difíceis.",
+      lane: "pro",
+      thinkingEffort: "max",
+      versionId: "gpt-5.6",
+      selectedLabel: "GPT-5.6 Pro",
+      isDefault: false,
+    },
+  ],
+} satisfies ChatModelListResponse;
 
 const PREVIEW_NOW_SECONDS = Math.floor(Date.now() / 1_000);
 const PREVIEW_WORKSPACE = "D:\\ARQUIVOS IMPORTANTES\\REPOSITORIOS\\apps\\streamplay-app";
@@ -174,6 +213,7 @@ const PREVIEW_SCROLL_ITEMS: readonly VisibleThreadItem[] = [
 
 const PREVIEW_CONTEXT_THREAD = {
   id: "preview-context-thread",
+  mode: "codex",
   preview: "Inspecionar janela de contexto",
   name: "Inspecionar janela de contexto",
   cwd: PREVIEW_WORKSPACE,
@@ -448,6 +488,8 @@ export function setupBrowserPreview(): void {
           return PREVIEW_CONFIG;
         case "engine_model_list":
           return PREVIEW_MODEL_CATALOG;
+        case "engine_chat_model_list":
+          return PREVIEW_CHAT_MODEL_CATALOG;
         case "engine_thread_list":
           return PREVIEW_THREADS;
         case "engine_thread_resume":

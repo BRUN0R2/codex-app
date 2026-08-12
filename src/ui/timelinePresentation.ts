@@ -13,10 +13,6 @@ export function turnDurationLabel(status: TurnStatus, duration: string): string 
   }
 }
 
-export function shouldCollapseTurnWork(previous: TurnStatus, next: TurnStatus): boolean {
-  return previous === "inProgress" && next !== "inProgress";
-}
-
 export function reasoningTitle(summary: readonly string[], content: readonly string[]): string {
   const source = lastNonEmpty(summary) ?? lastNonEmpty(content);
   if (source === null) {

@@ -1,6 +1,7 @@
 import { Show } from "solid-js";
 
 import type { AppController } from "../state/createAppController";
+import { CodexGlyph } from "./CodexGlyph";
 import { Icon } from "./Icon";
 
 export function LoginScreen(props: { readonly controller: AppController }) {
@@ -8,7 +9,7 @@ export function LoginScreen(props: { readonly controller: AppController }) {
     <main class="login-screen">
       <section class="login-card" aria-labelledby="login-title">
         <div class="login-brand" aria-hidden="true">
-          C
+          <CodexGlyph size={30} />
         </div>
         <p class="eyebrow">Codex Desktop</p>
         <h1 id="login-title">Seu agente de código, nativo no PC</h1>

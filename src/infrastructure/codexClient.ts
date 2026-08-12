@@ -9,6 +9,7 @@ import {
   decodeAttachmentImageResponse,
   decodeAttachments,
   decodeCancelLoginResponse,
+  decodeChatModelListResponse,
   decodeCommandError,
   decodeConfigReadResponse,
   decodeConfigUpdateResponse,
@@ -37,9 +38,11 @@ import type {
   Attachment,
   AttachmentImageResponse,
   CancelLoginResponse,
+  ChatModelListResponse,
   ConfigReadResponse,
   ConfigUpdate,
   ConfigUpdateResponse,
+  ConversationMode,
   EngineNotification,
   EngineServerRequest,
   EngineStartResponse,
@@ -137,9 +140,12 @@ export function logout(): Promise<LogoutResponse> {
   return invokeDecoded("engine_logout", decodeLogoutResponse);
 }
 
-export function startThread(projectPath: string | null): Promise<ThreadStartResponse> {
+export function startThread(
+  projectPath: string | null,
+  mode: ConversationMode,
+): Promise<ThreadStartResponse> {
   return invokeDecoded("engine_thread_start", decodeThreadStartResponse, {
-    request: { projectPath },
+    request: { mode, projectPath },
   });
 }
 
@@ -216,11 +222,15 @@ export function startTurn(request: StartTurnRequest): Promise<TurnStartResponse>
     serviceTier: { readonly type: "default" } | { readonly type: "tier"; readonly id: string };
     text: string;
     threadId: string;
+    timezone: string;
+    timezoneOffsetMin: number;
   } = {
     threadId: request.threadId,
     clientUserMessageId: request.clientUserMessageId,
     text: request.text,
     attachments: request.attachments,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    timezoneOffsetMin: new Date().getTimezoneOffset(),
     serviceTier:
       request.serviceTier === null
         ? { type: "default" }
@@ -268,6 +278,10 @@ export function updateConfig(
 
 export function listModels(): Promise<ModelListResponse> {
   return invokeDecoded("engine_model_list", decodeModelListResponse);
+}
+
+export function listChatModels(): Promise<ChatModelListResponse> {
+  return invokeDecoded("engine_chat_model_list", decodeChatModelListResponse);
 }
 
 export function inspectAttachments(paths: readonly string[]): Promise<readonly Attachment[]> {

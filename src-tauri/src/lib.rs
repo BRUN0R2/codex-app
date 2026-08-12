@@ -132,6 +132,7 @@ pub fn run() {
             commands::engine_config_read,
             commands::engine_config_update,
             commands::engine_model_list,
+            commands::engine_chat_model_list,
             commands::engine_server_request_respond,
         ])
         .build(tauri::generate_context!())

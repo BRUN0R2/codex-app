@@ -2,6 +2,7 @@ mod agent;
 mod apply_patch;
 mod approval;
 pub(crate) mod auth;
+mod chat;
 mod compaction;
 mod context_window;
 mod provider;
@@ -21,24 +22,25 @@ use tokio::task::JoinSet;
 use self::agent::{RunCompletion, TurnRun};
 use self::approval::ApprovalBroker;
 use self::auth::ChatGptAuth;
+use self::chat::ChatGptConsumerProvider;
 use self::provider::ChatGptCodexProvider;
 use self::storage::NativeStorage;
 use self::tools::ToolRegistry;
 use crate::engine::{
-    AccountRateLimitsResponse, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
-    DiagnosticStream, EngineCapability, EngineDescriptor, EngineNotification, EngineStartResponse,
-    EngineStorage, EngineTransport, ItemNotification, ModelListResponse, NOTIFICATION_EVENT,
-    OperationAck, OperationFailure, PermissionProfile, RUNTIME_DIAGNOSTIC_EVENT,
-    RUNTIME_STATUS_EVENT, ReasoningEffort, RuntimeDiagnostic, RuntimeState, RuntimeStatus,
-    ServerResponse, ThreadArchivedNotification, ThreadCompactStartResponse,
-    ThreadDeletedNotification, ThreadForkResponse, ThreadListResponse, ThreadNotification,
-    ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse, ThreadUnarchiveResponse,
-    ThreadUnarchivedNotification, TurnCompletedNotification, TurnInput, TurnNotification,
-    TurnStartResponse, TurnStatus,
+    AccountRateLimitsResponse, ChatModelListResponse, CodexThread, ConfigReadResponse,
+    ConfigUpdate, ConfigUpdateResponse, ConversationMode, DiagnosticStream, EngineCapability,
+    EngineDescriptor, EngineNotification, EngineStartResponse, EngineStorage, EngineTransport,
+    ItemNotification, ModelListResponse, NOTIFICATION_EVENT, OperationAck, OperationFailure,
+    PermissionProfile, RUNTIME_DIAGNOSTIC_EVENT, RUNTIME_STATUS_EVENT, ReasoningEffort,
+    RuntimeDiagnostic, RuntimeState, RuntimeStatus, ServerResponse, ThreadArchivedNotification,
+    ThreadCompactStartResponse, ThreadDeletedNotification, ThreadForkResponse, ThreadListResponse,
+    ThreadNotification, ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse,
+    ThreadUnarchiveResponse, ThreadUnarchivedNotification, TurnCompletedNotification, TurnInput,
+    TurnNotification, TurnStartResponse, TurnStatus,
 };
 use crate::error::AppError;
 
-const CONTRACT_SCHEMA_VERSION: u32 = 2;
+const CONTRACT_SCHEMA_VERSION: u32 = 4;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -49,6 +51,8 @@ pub struct StartTurn {
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
     pub service_tier: Option<String>,
+    pub timezone: String,
+    pub timezone_offset_min: i32,
 }
 
 pub struct SteerTurn {
@@ -112,6 +116,7 @@ impl ActiveTurn {
 
 pub(super) struct NativeEngineInner {
     auth: ChatGptAuth,
+    chat: ChatGptConsumerProvider,
     provider: ChatGptCodexProvider,
     storage: NativeStorage,
     tools: ToolRegistry,
@@ -132,6 +137,7 @@ impl Default for NativeEngine {
         Self {
             inner: Arc::new(NativeEngineInner {
                 auth: ChatGptAuth::default(),
+                chat: ChatGptConsumerProvider::default(),
                 provider: ChatGptCodexProvider::default(),
                 storage: NativeStorage::default(),
                 tools: ToolRegistry,
@@ -154,6 +160,7 @@ impl NativeEngine {
             let result = async {
                 self.inner.storage.initialize(app).await?;
                 self.inner.auth.initialize(app).await?;
+                self.inner.chat.initialize(app).await?;
                 self.inner.provider.initialize().await?;
                 Ok::<(), AppError>(())
             }
@@ -215,6 +222,7 @@ impl NativeEngine {
             ));
         }
         let response = self.inner.auth.logout(app).await?;
+        self.inner.chat.clear_session_state().await;
         self.inner.provider.clear_session_state().await;
         Ok(response)
     }
@@ -223,6 +231,7 @@ impl NativeEngine {
         &self,
         app: &AppHandle,
         project_path: Option<String>,
+        mode: ConversationMode,
     ) -> Result<ThreadStartResponse, AppError> {
         self.ensure_started()?;
         let cwd = match project_path.as_ref() {
@@ -239,7 +248,11 @@ impl NativeEngine {
                 directory.to_string_lossy().into_owned()
             }
         };
-        let thread = self.inner.storage.create_thread(cwd, project_path).await?;
+        let thread = self
+            .inner
+            .storage
+            .create_thread(cwd, project_path, mode)
+            .await?;
         self.inner.emit_notification(
             app,
             EngineNotification::ThreadCreated(ThreadNotification {
@@ -403,6 +416,12 @@ impl NativeEngine {
         self.ensure_started()?;
         self.reap_finished_tasks().await;
         let thread = self.inner.storage.read_thread(thread_id.clone()).await?;
+        if thread.mode == ConversationMode::Chat {
+            return Err(AppError::Protocol(
+                "ChatGPT consumer threads are compacted by ChatGPT and cannot be compacted by the Codex engine"
+                    .into(),
+            ));
+        }
         let config = self.inner.storage.read_config().await?.config;
         let model = self
             .inner
@@ -502,6 +521,7 @@ impl NativeEngine {
             thread_id,
             turn_id: turn.id.clone(),
             workspace: thread.cwd.into(),
+            mode: thread.mode,
             model,
             config,
             reasoning_effort,
@@ -534,6 +554,9 @@ impl NativeEngine {
             .storage
             .read_thread(request.thread_id.clone())
             .await?;
+        if thread.mode == ConversationMode::Chat {
+            return self.start_chat_turn(app, request, thread).await;
+        }
         let config = self.inner.storage.read_config().await?.config;
         let requested_model = request.model.as_deref().or(config.model.as_deref());
         let model = self
@@ -659,6 +682,7 @@ impl NativeEngine {
             thread_id: request.thread_id,
             turn_id: turn.id.clone(),
             workspace: thread.cwd.into(),
+            mode: thread.mode,
             model,
             config,
             reasoning_effort,
@@ -679,12 +703,167 @@ impl NativeEngine {
         Ok(TurnStartResponse { turn })
     }
 
+    async fn start_chat_turn(
+        &self,
+        app: &AppHandle,
+        request: StartTurn,
+        thread: CodexThread,
+    ) -> Result<TurnStartResponse, AppError> {
+        if request.effort.is_some() || request.service_tier.is_some() {
+            return Err(AppError::Protocol(
+                "Chat turns use a consumer model option from the ChatGPT catalog and cannot use Codex reasoning effort or service tier settings"
+                    .into(),
+            ));
+        }
+        let model = self
+            .inner
+            .chat
+            .select_model(app, &self.inner.auth, request.model.as_deref())
+            .await?;
+        let prepared =
+            agent::prepare_user_input(request.client_user_message_id.clone(), request.input)
+                .await?;
+        let prompt = chat::prompt_from_prepared_turn(&prepared)?;
+        let user_item = prepared.user_item.clone();
+        let lifecycle_guard = self.inner.thread_lifecycle_gate.lock().await;
+        let turn = self
+            .inner
+            .storage
+            .begin_chat_turn(
+                request.thread_id.clone(),
+                model.model().to_string(),
+                model
+                    .thinking_effort()
+                    .map(|effort| effort.as_str().to_string()),
+                prepared.user_item,
+                prepared.preview,
+            )
+            .await?;
+        let (cancellation, receiver) = watch::channel(false);
+        let ownership_collision = {
+            let mut active_turns = self.inner.active_turns.lock().await;
+            match active_turns.entry(request.thread_id.clone()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(ActiveTurn {
+                        turn_id: turn.id.clone(),
+                        cancellation,
+                        accepting_steers: false,
+                        steer_pending: false,
+                        pending_deletion: None,
+                        deletion_in_progress: false,
+                    });
+                    false
+                }
+                Entry::Occupied(_) => true,
+            }
+        };
+        if ownership_collision {
+            let message = "active-turn ownership collision".to_string();
+            self.inner
+                .storage
+                .complete_turn(
+                    request.thread_id.clone(),
+                    turn.id.clone(),
+                    TurnStatus::Failed,
+                    Some(message.clone()),
+                )
+                .await?;
+            return Err(AppError::State(message));
+        }
+        drop(lifecycle_guard);
+
+        if let Err(error) = self.inner.emit_notification(
+            app,
+            EngineNotification::TurnStarted(TurnNotification {
+                thread_id: request.thread_id.clone(),
+                turn: turn.clone(),
+            }),
+        ) {
+            return Err(self
+                .inner
+                .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
+                .await);
+        }
+        if let Err(error) = self.inner.emit_notification(
+            app,
+            EngineNotification::ItemCompleted(ItemNotification {
+                thread_id: request.thread_id.clone(),
+                turn_id: turn.id.clone(),
+                item: user_item,
+            }),
+        ) {
+            return Err(self
+                .inner
+                .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
+                .await);
+        }
+        let active_thread = match self
+            .inner
+            .storage
+            .read_thread(request.thread_id.clone())
+            .await
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                return Err(self
+                    .inner
+                    .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
+                    .await);
+            }
+        };
+        if let Err(error) = self.inner.emit_notification(
+            app,
+            EngineNotification::ThreadUpdated(ThreadNotification {
+                thread: active_thread,
+            }),
+        ) {
+            return Err(self
+                .inner
+                .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
+                .await);
+        }
+
+        let run = chat::ChatTurnRun {
+            thread_id: request.thread_id,
+            turn_id: turn.id.clone(),
+            user_message_id: request.client_user_message_id,
+            prompt,
+            model,
+            timezone: request.timezone,
+            timezone_offset_min: request.timezone_offset_min,
+            cancellation: receiver,
+        };
+        debug_assert_eq!(thread.mode, ConversationMode::Chat);
+        let inner = Arc::clone(&self.inner);
+        let task_inner = Arc::clone(&self.inner);
+        let app_handle = app.clone();
+        let background_turn_id = turn.id.clone();
+        self.inner.tasks.lock().await.spawn(async move {
+            let result = chat::run_turn(task_inner, app_handle.clone(), run).await;
+            inner
+                .finalize_turn(&app_handle, result, &background_turn_id)
+                .await;
+        });
+        Ok(TurnStartResponse { turn })
+    }
+
     pub async fn turn_steer(
         &self,
         app: &AppHandle,
         request: SteerTurn,
     ) -> Result<OperationAck, AppError> {
         self.ensure_started()?;
+        let thread = self
+            .inner
+            .storage
+            .read_thread(request.thread_id.clone())
+            .await?;
+        if thread.mode == ConversationMode::Chat {
+            return Err(AppError::Protocol(
+                "an active ChatGPT consumer response cannot be steered; queue the follow-up for the next turn"
+                    .into(),
+            ));
+        }
         let prepared =
             agent::prepare_user_input(request.client_user_message_id, request.input).await?;
         let user_item = prepared.user_item.clone();
@@ -788,6 +967,14 @@ impl NativeEngine {
     pub async fn model_list(&self, app: &AppHandle) -> Result<ModelListResponse, AppError> {
         self.ensure_started()?;
         self.inner.provider.list_models(app, &self.inner.auth).await
+    }
+
+    pub async fn chat_model_list(
+        &self,
+        app: &AppHandle,
+    ) -> Result<ChatModelListResponse, AppError> {
+        self.ensure_started()?;
+        self.inner.chat.list_models(app, &self.inner.auth).await
     }
 
     pub async fn server_request_respond(

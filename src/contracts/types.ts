@@ -1,4 +1,7 @@
 export type RuntimeState = "failed" | "ready" | "starting" | "stopped";
+export type AppProduct = "chatgpt" | "codex";
+export type ChatGptMode = "chat" | "work";
+export type ConversationMode = ChatGptMode | "codex";
 export type DiagnosticStream = "runtime";
 export type EngineTransport = "httpsSse";
 export type EngineStorage = "sqlite";
@@ -39,7 +42,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 4;
   readonly permissionProfile: PermissionProfile;
   readonly permissionProfiles: readonly PermissionProfile[];
 }
@@ -125,6 +128,33 @@ export interface CodexModel {
 
 export interface ModelListResponse {
   readonly data: readonly CodexModel[];
+}
+
+export type ChatThinkingEffort =
+  | "extended"
+  | "max"
+  | "min"
+  | "standard"
+  | "ultra"
+  | "xhigh"
+  | "zero";
+
+export type ChatModelLane = "auto" | "instant" | "pro" | "thinking" | "thinking_mini";
+
+export interface ChatModelOption {
+  readonly id: string;
+  readonly model: string;
+  readonly title: string;
+  readonly description: string | null;
+  readonly lane: ChatModelLane | null;
+  readonly thinkingEffort: ChatThinkingEffort | null;
+  readonly versionId: string | null;
+  readonly selectedLabel: string | null;
+  readonly isDefault: boolean;
+}
+
+export interface ChatModelListResponse {
+  readonly data: readonly ChatModelOption[];
 }
 
 export type TurnStatus = "completed" | "failed" | "inProgress" | "interrupted";
@@ -246,6 +276,7 @@ export type ThreadStatus =
 
 export interface CodexThread {
   readonly id: string;
+  readonly mode: ConversationMode;
   readonly preview: string;
   readonly name: string | null;
   readonly cwd: string;

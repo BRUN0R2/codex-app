@@ -185,6 +185,77 @@ depender da CLI. As superfícies ainda ausentes não são representadas por bot�
 inertes; cada uma exige um contrato nativo próprio antes de aparecer na
 interface.
 
+## Fluxo unificado ChatGPT, Work e Codex
+
+Em 12 de agosto de 2026, o fluxo foi revalidado no desktop oficial para Windows,
+build `26.803.10989.0`, e na documentação oficial do ChatGPT. A inspeção cobriu
+o seletor de produto, o seletor `Chat | Work`, a restauração de navegação e os
+controladores de conversa.
+
+As invariantes portadas são:
+
+- a seleção superior é binária, `ChatGPT | Codex`; `Work` não é um terceiro
+  produto;
+- `Chat` é o padrão interno do ChatGPT e `Chat | Work` possui persistência
+  própria;
+- antes de trocar de produto, o desktop salva a localização atual e restaura o
+  último destino do produto escolhido;
+- Chat e Work pertencem ao histórico ChatGPT; tarefas Codex ficam no histórico
+  Codex;
+- Chat não recebe ferramentas do workspace; Work local e Codex recebem as
+  capacidades locais anunciadas pelo runtime;
+- os placeholders oficiais são “Message ChatGPT”, “Work with ChatGPT” e “Do
+  anything”, localizados pela interface.
+
+O seletor de inteligência do Chat também foi validado na sessão autenticada e
+no bundle do mesmo build. O gatilho mostra a seleção efetiva (`Pro`, por
+exemplo), nunca o plano da conta nem o texto `ChatGPT`. Cada opção visível é um
+preset publicado pelo servidor, com faixa (`instant`, `thinking`, `pro`), slug
+de modelo e `thinking_effort` próprios.
+
+O catálogo consumer vem de `/backend-api/models?iim=false&include_icons=false`
+e declara `default_model_slug`, esforço padrão por slug, versões e presets. O
+estado oficial mantém uma preferência global anulável em
+`chatgpt-last-selected-model-v1`: ausência de valor deriva modelo e esforço do
+catálogo e não grava nada; somente uma ação explícita do usuário persiste outra
+seleção. A implementação local conserva essa mesma invariante e descarta
+qualquer preferência cujo contrato não corresponda ao catálogo atual.
+
+Há três contratos diferentes que não podem ser misturados. O Responses público
+da API Platform documenta `reasoning.mode` para modelos compatíveis; o Responses
+do backend Codex usa `reasoning.effort`; o Chat consumidor usa o preset do
+catálogo resolvido em `model` e `thinking_effort`. Portanto, Pro no Chat é uma
+faixa/preset e pode selecionar outro `model_slug`; ele não é serializado como
+`reasoning.mode` no endpoint consumer nem no endpoint Codex.
+
+O transporte consumer do ChatGPT oficial é distinto do Responses do Codex. O
+desktop prepara integridade e conduit token antes de transmitir em
+`/backend-api/f/conversation`. A implementação local agora percorre esse mesmo
+fluxo consumidor com a sessão OAuth da conta ChatGPT, sem chave da API Platform:
+
+1. carrega `/backend-api/models?iim=false&include_icons=false`;
+2. reutiliza um `oai-did` aleatório e persistente, prepara requisitos em
+   `/backend-api/sentinel/chat-requirements/prepare` e resolve o proof-of-work
+   quando solicitado;
+3. tenta `/backend-api/f/conversation/prepare`, tratando falha como fallback
+   permitido pelo cliente oficial;
+4. transmite em `/backend-api/f/conversation`, negocia `supported_encodings:
+   ["v1"]` e aplica os patches incrementais;
+5. persiste `conversation_id` e o último `parent_message_id` para continuar ou
+   bifurcar a conversa.
+
+O desafio interativo Turnstile não é contornado: se o servidor o exigir, o
+turno falha com orientação explícita para restabelecer a sessão no cliente
+oficial. Upload consumer de imagens também permanece ausente; anexos de imagem
+são recusados antes da rede em vez de serem enviados no formato incorreto.
+
+Fontes públicas usadas na comparação:
+
+- [Authentication](https://learn.chatgpt.com/docs/auth);
+- [Models](https://learn.chatgpt.com/docs/models);
+- [Codex App Server](https://learn.chatgpt.com/docs/app-server);
+- [GPT-5.6 model guidance](https://developers.openai.com/api/docs/guides/latest-model).
+
 ## Validação live do transporte
 
 Em 1 de agosto de 2026, uma tarefa real autenticada percorreu 56 itens de

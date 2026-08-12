@@ -51,7 +51,8 @@ export function splitAgentActivityUnits(
     }
     units.push({
       kind: "activityGroup",
-      key: `activity:${activityItems[0]?.id ?? "start"}:${activityItems.at(-1)?.id ?? "end"}`,
+      // A cauda cresce durante o streaming; o primeiro item é a identidade estável do grupo.
+      key: `activity:${activityItems[0]?.id ?? "start"}`,
       items: activityItems,
     });
     activityItems = [];
@@ -75,8 +76,10 @@ export function splitAgentActivityUnits(
 export function shouldRenderAgentActivityGroup(
   items: readonly AgentActivityItem[],
   isCurrent: boolean,
+  expanded = false,
 ): boolean {
   return (
+    expanded ||
     isCurrent ||
     items.length > 1 ||
     items.some((item) => item.type === "fileChange" && item.changes.length > 1)

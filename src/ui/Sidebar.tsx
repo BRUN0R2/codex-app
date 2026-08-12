@@ -227,34 +227,51 @@ export function Sidebar(props: SidebarProps) {
               }}
               type="button"
             >
-              <CodexGlyph size={18} />
-              <strong>Codex</strong>
+              <Show when={props.controller.product() === "codex"}>
+                <CodexGlyph size={18} />
+              </Show>
+              <strong>{props.controller.product() === "codex" ? "Codex" : "ChatGPT"}</strong>
               <Icon name="chevronDown" size={12} />
             </button>
             <Show when={brandMenuOpen()}>
-              <div aria-label="Codex" class="brand-menu" role="menu">
+              <div aria-label="Alternar produto" class="brand-menu" role="menu">
                 <button
+                  aria-checked={props.controller.product() === "chatgpt"}
                   class="brand-menu-item"
-                  onClick={() => setBrandMenuOpen(false)}
-                  role="menuitem"
+                  classList={{ selected: props.controller.product() === "chatgpt" }}
+                  onClick={() => {
+                    setBrandMenuOpen(false);
+                    void props.controller.selectProduct("chatgpt");
+                  }}
+                  role="menuitemradio"
                   type="button"
                 >
                   <div class="brand-menu-item-text">
                     <strong>ChatGPT</strong>
                     <small>Criar, aprender e explorar</small>
                   </div>
+                  <Show when={props.controller.product() === "chatgpt"}>
+                    <Icon name="check" size={14} />
+                  </Show>
                 </button>
                 <button
-                  class="brand-menu-item selected"
-                  onClick={() => setBrandMenuOpen(false)}
-                  role="menuitem"
+                  aria-checked={props.controller.product() === "codex"}
+                  class="brand-menu-item"
+                  classList={{ selected: props.controller.product() === "codex" }}
+                  onClick={() => {
+                    setBrandMenuOpen(false);
+                    void props.controller.selectProduct("codex");
+                  }}
+                  role="menuitemradio"
                   type="button"
                 >
                   <div class="brand-menu-item-text">
                     <strong>Codex</strong>
                     <small>Criar, depurar e publicar</small>
                   </div>
-                  <Icon name="check" size={14} />
+                  <Show when={props.controller.product() === "codex"}>
+                    <Icon name="check" size={14} />
+                  </Show>
                 </button>
               </div>
             </Show>
@@ -278,7 +295,7 @@ export function Sidebar(props: SidebarProps) {
             <span class="sidebar-row-label">Novo chat</span>
           </Show>
         </button>
-        <For each={NEW_CHAT_MODES}>
+        <For each={props.controller.product() === "chatgpt" ? CHATGPT_NAV_ITEMS : CODEX_NAV_ITEMS}>
           {(mode) => (
             <button class="new-chat-mode-row" disabled title={mode.label} type="button">
               <span class="sidebar-item-icon">
@@ -606,8 +623,15 @@ export function Sidebar(props: SidebarProps) {
   );
 }
 
-const NEW_CHAT_MODES: readonly { readonly icon: IconName; readonly label: string }[] = [
+const CODEX_NAV_ITEMS: readonly { readonly icon: IconName; readonly label: string }[] = [
   { icon: "gitPullRequest", label: "Pull requests" },
+  { icon: "monitor", label: "Sites" },
+  { icon: "calendar", label: "Agendado" },
+  { icon: "puzzle", label: "Plugins" },
+];
+
+const CHATGPT_NAV_ITEMS: readonly { readonly icon: IconName; readonly label: string }[] = [
+  { icon: "folder", label: "Projetos" },
   { icon: "monitor", label: "Sites" },
   { icon: "calendar", label: "Agendado" },
   { icon: "puzzle", label: "Plugins" },

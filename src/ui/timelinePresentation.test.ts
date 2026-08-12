@@ -5,7 +5,6 @@ import {
   commandOutputText,
   fileChangeActivityTitle,
   reasoningTitle,
-  shouldCollapseTurnWork,
   toolActivityTitle,
   turnDurationLabel,
   userMessageMarkerWidth,
@@ -15,9 +14,6 @@ describe("timeline presentation", () => {
   it("uses the official running and completed turn semantics", () => {
     expect(turnDurationLabel("inProgress", "18 min 15 s")).toBe("Processando há 18 min 15 s");
     expect(turnDurationLabel("completed", "18 min 15 s")).toBe("Trabalhou por 18 min 15 s");
-    expect(shouldCollapseTurnWork("inProgress", "completed")).toBe(true);
-    expect(shouldCollapseTurnWork("inProgress", "failed")).toBe(true);
-    expect(shouldCollapseTurnWork("completed", "completed")).toBe(false);
   });
 
   it("uses the latest streamed reasoning heading without exposing completed markdown", () => {

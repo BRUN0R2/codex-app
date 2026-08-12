@@ -5,9 +5,11 @@ import {
   createSignal,
   For,
   Index,
+  Match,
   onCleanup,
   onMount,
   Show,
+  Switch,
   useContext,
 } from "solid-js";
 
@@ -39,7 +41,6 @@ import {
   commandOutputText,
   fileChangeActivityTitle,
   reasoningTitle,
-  shouldCollapseTurnWork,
   toolActivityTitle,
   turnDurationLabel,
 } from "./timelinePresentation";
@@ -468,6 +469,7 @@ export function Timeline(props: {
               when={props.controller.currentThread()?.id}
               fallback={
                 <EmptyConversation
+                  mode={props.controller.conversationMode()}
                   onSelectSuggestion={props.onSelectSuggestion}
                   workspace={props.controller.workspace()}
                 />
@@ -478,6 +480,7 @@ export function Timeline(props: {
                   when={props.controller.turns().length > 0}
                   fallback={
                     <EmptyConversation
+                      mode={props.controller.conversationMode()}
                       onSelectSuggestion={props.onSelectSuggestion}
                       workspace={props.controller.workspace()}
                     />
@@ -580,16 +583,7 @@ function ConversationTurn(props: {
     () => `turn:${props.turn.id}`,
     () => props.turn.status === "inProgress",
   );
-  let previousStatus = props.turn.status;
   const failure = () => (props.turn.error === null ? null : presentTurnFailure(props.turn.error));
-
-  createEffect(() => {
-    const status = props.turn.status;
-    if (shouldCollapseTurnWork(previousStatus, status)) {
-      disclosure.setOpen(false);
-    }
-    previousStatus = status;
-  });
 
   const userMessages = createMemo(() =>
     props.turn.items.filter((item) => item.type === "userMessage"),
@@ -762,22 +756,13 @@ function WorkTimelineUnit(props: {
       {(group) => {
         const isCurrent = () => props.turnStatus === "inProgress" && props.isLatest;
         return (
-          <Show
-            when={shouldRenderAgentActivityGroup(group().items, isCurrent())}
-            fallback={
-              <Show when={group().items[0]}>
-                {(item) => <TimelineItem diffDisplay={props.diffDisplay} item={item()} />}
-              </Show>
-            }
-          >
-            <AgentActivityGroup
-              diffDisplay={props.diffDisplay}
-              isCurrent={isCurrent()}
-              items={group().items}
-              reasoningHeading={props.reasoningHeading}
-              turnStatus={props.turnStatus}
-            />
-          </Show>
+          <AgentActivityGroup
+            diffDisplay={props.diffDisplay}
+            disclosureKey={group().key}
+            isCurrent={isCurrent()}
+            items={group().items}
+            reasoningHeading={props.reasoningHeading}
+          />
         );
       }}
     </Show>
@@ -786,15 +771,12 @@ function WorkTimelineUnit(props: {
 
 function AgentActivityGroup(props: {
   readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly disclosureKey: string;
   readonly isCurrent: boolean;
   readonly items: readonly AgentActivityItem[];
   readonly reasoningHeading: string | null;
-  readonly turnStatus: VisibleThreadTurn["status"];
 }) {
-  const disclosure = useTimelineDisclosure(
-    () => `agent-activity:${props.items[0]?.id ?? "start"}:${props.items.at(-1)?.id ?? "end"}`,
-    () => false,
-  );
+  const disclosure = useTimelineDisclosure(() => props.disclosureKey);
   const summaries = createMemo(() => summarizeAgentActivity(props.items));
   const activeActivity = createMemo(() => activeAgentActivity(props.items));
   const title = createMemo(() => {
@@ -806,45 +788,45 @@ function AgentActivityGroup(props: {
   const iconKind = createMemo(() =>
     props.isCurrent ? activeActivity()?.kind : summaries()[0]?.kind,
   );
-  let previousStatus = props.turnStatus;
-
-  createEffect(() => {
-    const status = props.turnStatus;
-    if (shouldCollapseTurnWork(previousStatus, status)) {
-      disclosure.setOpen(false);
-    }
-    previousStatus = status;
-  });
 
   return (
-    <details
-      class="activity-card agent-activity-group"
-      onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
-      open={disclosure.isOpen()}
-    >
-      <summary class="activity-summary agent-activity-summary" data-timeline-disclosure="">
-        <Show when={iconKind()}>
-          {(kind) => (
-            <span class="activity-icon">
-              <Icon name={agentActivityIcon(kind())} size={13} />
-            </span>
-          )}
+    <Show
+      when={shouldRenderAgentActivityGroup(props.items, props.isCurrent, disclosure.isOpen())}
+      fallback={
+        <Show when={props.items[0]}>
+          {(item) => <TimelineItem diffDisplay={props.diffDisplay} item={item()} />}
         </Show>
-        <ActivityHeadline active={props.isCurrent} text={title()} />
-        <span class="activity-chevron">
-          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-        </span>
-      </summary>
-      <div class="agent-activity-viewport">
-        <div class="agent-activity-list">
-          <Index each={props.items}>
-            {(item) => (
-              <TimelineItem diffDisplay={props.diffDisplay} item={item()} variant="grouped" />
+      }
+    >
+      <details
+        class="activity-card agent-activity-group"
+        onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+        open={disclosure.isOpen()}
+      >
+        <summary class="activity-summary agent-activity-summary" data-timeline-disclosure="">
+          <Show when={iconKind()}>
+            {(kind) => (
+              <span class="activity-icon">
+                <Icon name={agentActivityIcon(kind())} size={13} />
+              </span>
             )}
-          </Index>
+          </Show>
+          <ActivityHeadline active={props.isCurrent} text={title()} />
+          <span class="activity-chevron">
+            <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+          </span>
+        </summary>
+        <div class="agent-activity-viewport">
+          <div class="agent-activity-list">
+            <Index each={props.items}>
+              {(item) => (
+                <TimelineItem diffDisplay={props.diffDisplay} item={item()} variant="grouped" />
+              )}
+            </Index>
+          </div>
         </div>
-      </div>
-    </details>
+      </details>
+    </Show>
   );
 }
 
@@ -864,24 +846,33 @@ function agentActivityIcon(kind: AgentActivityKind | undefined): IconName {
 }
 
 function EmptyConversation(props: {
+  readonly mode: "chat" | "work" | "codex";
   readonly onSelectSuggestion: (prompt: string) => void;
   readonly workspace: string | null;
 }) {
   return (
     <section aria-labelledby="empty-conversation-title" class="empty-conversation">
-      <div class="empty-orb">
-        <CodexGlyph />
-      </div>
+      <Show when={props.mode === "codex"}>
+        <div class="empty-orb">
+          <CodexGlyph />
+        </div>
+      </Show>
       <h2 id="empty-conversation-title">
-        <Show when={props.workspace} fallback="Em que vamos trabalhar hoje?">
-          {(workspace) => (
-            <>
-              Em que devemos trabalhar em <span>{projectName(workspace())}</span>?
-            </>
-          )}
-        </Show>
+        <Switch>
+          <Match when={props.mode === "chat"}>Pronto quando você quiser.</Match>
+          <Match when={props.mode === "work"}>No que devemos trabalhar?</Match>
+          <Match when={props.mode === "codex"}>
+            <Show when={props.workspace} fallback="Em que vamos trabalhar hoje?">
+              {(workspace) => (
+                <>
+                  Em que devemos trabalhar em <span>{projectName(workspace())}</span>?
+                </>
+              )}
+            </Show>
+          </Match>
+        </Switch>
       </h2>
-      <Show when={props.workspace !== null}>
+      <Show when={props.mode === "codex" && props.workspace !== null}>
         <fieldset class="starter-suggestions">
           <legend class="visually-hidden">Sugestões para começar</legend>
           <For each={STARTER_SUGGESTIONS}>

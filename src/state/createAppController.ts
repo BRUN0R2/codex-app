@@ -12,13 +12,17 @@ import {
 import type {
   AccountRateLimitsResponse,
   AccountReadResponse,
+  AppProduct,
   ApprovalDecision,
   Attachment,
+  ChatGptMode,
+  ChatModelOption,
   CodexModel,
   CodexThread,
   ConfigReadResponse,
   ConfigUpdate,
   ContextUsageItem,
+  ConversationMode,
   EngineNotification,
   EngineServerRequest,
   EngineStartResponse,
@@ -41,6 +45,7 @@ import {
   forkThread as forkThreadCommand,
   inspectAttachments,
   interruptTurn,
+  listChatModels,
   listModels,
   listThreads,
   loginWithChatGpt,
@@ -82,6 +87,16 @@ import {
   savePinnedThreadIds,
   togglePinnedThreadId,
 } from "./pins";
+import {
+  activeConversationMode,
+  defaultProductFlowState,
+  loadProductFlowState,
+  type ProductFlowState,
+  selectChatGptMode as reduceSelectChatGptMode,
+  selectProduct as reduceSelectProduct,
+  rememberConversationDestination,
+  saveProductFlowState,
+} from "./productFlow";
 import {
   addProject,
   loadProjects,
@@ -131,6 +146,10 @@ export interface AppController {
   readonly contextUsage: Accessor<ContextUsageItem | null>;
   readonly currentThread: Accessor<CodexThread | null>;
   readonly currentThreadTitle: Accessor<string>;
+  readonly product: Accessor<AppProduct>;
+  readonly chatGptMode: Accessor<ChatGptMode>;
+  readonly chatModels: Accessor<readonly ChatModelOption[]>;
+  readonly conversationMode: Accessor<ConversationMode>;
   readonly diagnostics: Accessor<readonly DiagnosticEntry[]>;
   readonly engine: Accessor<EngineStartResponse | null>;
   readonly error: Accessor<string | null>;
@@ -179,6 +198,8 @@ export interface AppController {
   readonly respondToApproval: (requestId: string, decision: ApprovalDecision) => Promise<boolean>;
   readonly saveClipboardImage: (dataBase64: string) => Promise<Attachment | null>;
   readonly selectProject: (path: string) => boolean;
+  readonly selectProduct: (product: AppProduct) => Promise<boolean>;
+  readonly selectChatGptMode: (mode: ChatGptMode) => Promise<boolean>;
   readonly sendMessage: (input: SendMessageInput) => Promise<boolean>;
   readonly sendQueuedMessageNow: (messageId?: string) => Promise<boolean>;
   readonly takeQueuedMessage: (messageId: string) => QueuedMessage | null;
@@ -192,12 +213,21 @@ export interface AppController {
 }
 
 export function createAppController(): AppController {
+  let initialProductFlow = defaultProductFlowState();
+  let productFlowLoadError: Error | null = null;
+  try {
+    initialProductFlow = loadProductFlowState();
+  } catch (reason) {
+    productFlowLoadError = asError(reason);
+  }
+  const [productFlow, setProductFlow] = createSignal<ProductFlowState>(initialProductFlow);
   const [runtimeStatus, setRuntimeStatus] = createSignal<RuntimeStatus>({
     state: "starting",
     message: null,
   });
   const [engine, setEngine] = createSignal<EngineStartResponse | null>(null);
   const [account, setAccount] = createSignal<AccountReadResponse>();
+  const [chatModels, setChatModels] = createSignal<readonly ChatModelOption[]>([]);
   const [models, setModels] = createSignal<readonly CodexModel[]>([]);
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
   const [rateLimits, setRateLimits] = createSignal<AccountRateLimitsResponse | null>(null);
@@ -245,8 +275,23 @@ export function createAppController(): AppController {
     projectLoadError = asError(reason);
   }
   const [projects, setProjects] = createSignal(initialProjects);
-  setWorkspace(initialProjects.at(0)?.path ?? null);
+  setWorkspace(
+    initialProductFlow.destinations[activeConversationMode(initialProductFlow)].workspace,
+  );
 
+  const product = createMemo(() => productFlow().product);
+  const chatGptMode = createMemo(() => productFlow().chatGptMode);
+  const conversationMode = createMemo(() => activeConversationMode(productFlow()));
+  const visibleThreads = createMemo(() =>
+    threads().filter((thread) =>
+      product() === "codex" ? thread.mode === "codex" : thread.mode !== "codex",
+    ),
+  );
+  const visibleArchivedThreads = createMemo(() =>
+    archivedThreads().filter((thread) =>
+      product() === "codex" ? thread.mode === "codex" : thread.mode !== "codex",
+    ),
+  );
   const signedIn = createMemo(() => account()?.account !== null && account() !== undefined);
   const selectedRuntime = createMemo<ThreadRuntimeState | null>(() => {
     const threadId = currentThread()?.id;
@@ -302,6 +347,9 @@ export function createAppController(): AppController {
   });
 
   onMount(() => {
+    if (productFlowLoadError !== null) {
+      reportError(productFlowLoadError);
+    }
     if (projectLoadError !== null) {
       reportError(projectLoadError);
     }
@@ -382,7 +430,7 @@ export function createAppController(): AppController {
   }
 
   async function loadAuthenticatedState(): Promise<void> {
-    await Promise.all([loadLocalAuthenticatedState(), loadModelCatalog()]);
+    await Promise.all([loadLocalAuthenticatedState(), loadModelCatalog(), loadChatModelCatalog()]);
     if (!disposed) {
       void refreshRateLimits();
     }
@@ -404,6 +452,7 @@ export function createAppController(): AppController {
       setArchivedThreads(archivedPage.data);
       setArchivedThreadsNextCursor(archivedPage.nextCursor);
     });
+    await restoreActiveDestination(productFlow());
   }
 
   async function loadModelCatalog(): Promise<void> {
@@ -411,6 +460,19 @@ export function createAppController(): AppController {
       const catalog = await listModels();
       if (!disposed) {
         setModels(catalog.data.filter((model) => !model.hidden));
+      }
+    } catch (reason) {
+      if (!disposed) {
+        reportError(reason);
+      }
+    }
+  }
+
+  async function loadChatModelCatalog(): Promise<void> {
+    try {
+      const catalog = await listChatModels();
+      if (!disposed) {
+        setChatModels(catalog.data);
       }
     } catch (reason) {
       if (!disposed) {
@@ -445,6 +507,12 @@ export function createAppController(): AppController {
         }
         return;
       case "thread.archived":
+        {
+          const selected = currentThread();
+          if (selected?.id === notification.params.threadId) {
+            rememberDestination(selected.mode, null, workspace());
+          }
+        }
         {
           const archived = threads().find((thread) => thread.id === notification.params.threadId);
           if (archived !== undefined) {
@@ -699,6 +767,7 @@ export function createAppController(): AppController {
           refresh: { status: "notRequired", error: null },
         });
         setConfig(null);
+        setChatModels([]);
         setModels([]);
         setRateLimits(null);
         setThreads([]);
@@ -724,6 +793,10 @@ export function createAppController(): AppController {
   }
 
   async function chooseWorkspace(): Promise<string | null> {
+    if (conversationMode() === "chat") {
+      setError("O Chat usa conversas sem acesso a projetos locais. Troque para Work ou Codex.");
+      return null;
+    }
     try {
       const selection = await open({ directory: true, multiple: false });
       if (selection === null) {
@@ -739,7 +812,137 @@ export function createAppController(): AppController {
     }
   }
 
+  function commitProductFlow(next: ProductFlowState): boolean {
+    if (next === productFlow()) {
+      return true;
+    }
+    try {
+      saveProductFlowState(next);
+      setProductFlow(next);
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  function rememberDestination(
+    mode: ConversationMode,
+    threadId: string | null,
+    targetWorkspace: string | null,
+  ): boolean {
+    return commitProductFlow(
+      rememberConversationDestination(productFlow(), mode, {
+        threadId,
+        workspace: targetWorkspace,
+      }),
+    );
+  }
+
+  async function selectProduct(nextProduct: AppProduct): Promise<boolean> {
+    const current = productFlow();
+    if (current.product === nextProduct) {
+      return true;
+    }
+    const withCurrentDestination = rememberConversationDestination(
+      current,
+      activeConversationMode(current),
+      {
+        threadId: currentThread()?.id ?? null,
+        workspace: workspace(),
+      },
+    );
+    const next = reduceSelectProduct(withCurrentDestination, nextProduct);
+    if (!commitProductFlow(next)) {
+      return false;
+    }
+    return restoreActiveDestination(next);
+  }
+
+  async function selectChatGptMode(nextMode: ChatGptMode): Promise<boolean> {
+    const current = productFlow();
+    if (current.product === "chatgpt" && current.chatGptMode === nextMode) {
+      return true;
+    }
+    const withCurrentDestination = rememberConversationDestination(
+      current,
+      activeConversationMode(current),
+      {
+        threadId: currentThread()?.id ?? null,
+        workspace: workspace(),
+      },
+    );
+    const next = reduceSelectChatGptMode(withCurrentDestination, nextMode);
+    if (!commitProductFlow(next)) {
+      return false;
+    }
+    return restoreActiveDestination(next);
+  }
+
+  async function restoreActiveDestination(expected: ProductFlowState): Promise<boolean> {
+    const mode = activeConversationMode(expected);
+    const destination = expected.destinations[mode];
+    batch(() => {
+      clearCurrentThread();
+      setWorkspace(mode === "chat" ? null : destination.workspace);
+    });
+    if (destination.threadId === null) {
+      return true;
+    }
+    try {
+      const response = await withPending(() => resumeThread(destination.threadId as string));
+      if (conversationMode() !== mode) {
+        return true;
+      }
+      if (response.thread.mode !== mode) {
+        throw new Error("A conversa restaurada pertence a outro modo do aplicativo.");
+      }
+      if (!selectThreadProject(response.thread)) {
+        return false;
+      }
+      batch(() => {
+        synchronizeThreadRuntime(response.thread);
+        setCurrentThread(response.thread);
+      });
+      mergeThread(response.thread);
+      rememberDestination(mode, response.thread.id, response.thread.projectPath);
+      return true;
+    } catch (reason) {
+      if (conversationMode() === mode) {
+        rememberDestination(mode, null, destination.workspace);
+        reportError(reason);
+      }
+      return false;
+    }
+  }
+
+  function alignProductFlowToThread(mode: ConversationMode): boolean {
+    const current = productFlow();
+    if (mode === "codex") {
+      return current.product === "codex";
+    }
+    if (current.product !== "chatgpt") {
+      return false;
+    }
+    if (current.chatGptMode === mode) {
+      return true;
+    }
+    const withCurrentDestination = rememberConversationDestination(
+      current,
+      activeConversationMode(current),
+      {
+        threadId: currentThread()?.id ?? null,
+        workspace: workspace(),
+      },
+    );
+    return commitProductFlow(reduceSelectChatGptMode(withCurrentDestination, mode));
+  }
+
   function selectProject(path: string): boolean {
+    if (conversationMode() === "chat") {
+      setError("O Chat não associa conversas a projetos locais.");
+      return false;
+    }
     const thread = currentThread();
     try {
       const next = addProject(projects(), path);
@@ -752,7 +955,11 @@ export function createAppController(): AppController {
           clearCurrentThread();
         }
       });
-      return true;
+      return rememberDestination(
+        conversationMode(),
+        changesConversation ? null : (thread?.id ?? null),
+        path,
+      );
     } catch (reason) {
       reportError(reason);
       return false;
@@ -797,19 +1004,20 @@ export function createAppController(): AppController {
   }
 
   function newThread(targetWorkspace?: string): boolean {
-    const requestedWorkspace = resolveNewThreadWorkspace(targetWorkspace);
+    const mode = conversationMode();
+    const requestedWorkspace = mode === "chat" ? null : resolveNewThreadWorkspace(targetWorkspace);
     if (requestedWorkspace === null) {
       batch(() => {
         setWorkspace(null);
         clearCurrentThread();
       });
-      return true;
+      return rememberDestination(mode, null, null);
     }
     if (!selectProject(requestedWorkspace)) {
       return false;
     }
     clearCurrentThread();
-    return true;
+    return rememberDestination(mode, null, requestedWorkspace);
   }
 
   function selectThreadProject(thread: CodexThread): boolean {
@@ -817,12 +1025,29 @@ export function createAppController(): AppController {
       setWorkspace(null);
       return true;
     }
-    return selectProject(thread.projectPath);
+    try {
+      const next = addProject(projects(), thread.projectPath);
+      saveProjects(next);
+      batch(() => {
+        setProjects(next);
+        setWorkspace(thread.projectPath);
+      });
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
   }
 
-  async function materializeThread(projectPath: string | null): Promise<CodexThread | null> {
+  async function materializeThread(
+    projectPath: string | null,
+    mode: ConversationMode,
+  ): Promise<CodexThread | null> {
     try {
-      const response = await withPending(() => startThread(projectPath));
+      const response = await withPending(() => startThread(projectPath, mode));
+      if (response.thread.mode !== mode) {
+        throw new Error("O engine criou a conversa em um modo diferente do solicitado.");
+      }
       if (!pathsEqual(response.thread.projectPath, projectPath)) {
         throw new Error("O engine criou a tarefa com uma associação de projeto diferente.");
       }
@@ -840,6 +1065,7 @@ export function createAppController(): AppController {
         setCurrentThread(response.thread);
         synchronizeThreadRuntime(response.thread);
       });
+      rememberDestination(mode, response.thread.id, response.thread.projectPath);
       return response.thread;
     } catch (reason) {
       reportError(reason);
@@ -854,6 +1080,9 @@ export function createAppController(): AppController {
       if (!pathsEqual(response.cwd, response.thread.cwd)) {
         throw new Error("O engine retomou a tarefa em um diretório inconsistente.");
       }
+      if (!alignProductFlowToThread(response.thread.mode)) {
+        throw new Error("A conversa selecionada pertence a outro produto do aplicativo.");
+      }
       if (!selectThreadProject(response.thread)) {
         return false;
       }
@@ -862,6 +1091,7 @@ export function createAppController(): AppController {
         setCurrentThread(response.thread);
       });
       mergeThread(response.thread);
+      rememberDestination(response.thread.mode, response.thread.id, response.thread.projectPath);
       return true;
     } catch (reason) {
       reportError(reason);
@@ -961,6 +1191,7 @@ export function createAppController(): AppController {
         synchronizeThreadRuntime(response.thread);
         setCurrentThread(response.thread);
       });
+      rememberDestination(response.thread.mode, response.thread.id, response.thread.projectPath);
       return true;
     } catch (reason) {
       reportError(reason);
@@ -1031,7 +1262,8 @@ export function createAppController(): AppController {
     }
     let thread = currentThread();
     if (thread === null) {
-      thread = await materializeThread(workspace());
+      const mode = conversationMode();
+      thread = await materializeThread(mode === "chat" ? null : workspace(), mode);
     }
     if (thread === null) {
       return false;
@@ -1262,6 +1494,7 @@ export function createAppController(): AppController {
   }
 
   function removeDeletedThread(threadId: string): void {
+    const selected = currentThread();
     batch(() => {
       setThreads((current) => current.filter((thread) => thread.id !== threadId));
       setArchivedThreads((current) => current.filter((thread) => thread.id !== threadId));
@@ -1275,6 +1508,9 @@ export function createAppController(): AppController {
       );
       removePinnedThread(threadId);
     });
+    if (selected?.id === threadId) {
+      rememberDestination(selected.mode, null, workspace());
+    }
   }
 
   function deleteQueuedMessages(threadId: string): void {
@@ -1342,13 +1578,17 @@ export function createAppController(): AppController {
     activePlan,
     activeTurnId,
     approvals,
-    archivedThreads,
+    archivedThreads: visibleArchivedThreads,
     archivedThreadsNextCursor,
     busy,
     config,
     contextUsage,
     currentThread,
     currentThreadTitle,
+    product,
+    chatGptMode,
+    chatModels,
+    conversationMode,
     diagnostics,
     engine,
     error,
@@ -1367,7 +1607,7 @@ export function createAppController(): AppController {
     runtimeStatus,
     signedIn,
     safetyBuffering,
-    threads,
+    threads: visibleThreads,
     threadsNextCursor,
     turnBusy,
     turns,
@@ -1397,6 +1637,8 @@ export function createAppController(): AppController {
     respondToApproval,
     saveClipboardImage: saveClipboard,
     selectProject,
+    selectProduct,
+    selectChatGptMode,
     sendMessage,
     sendQueuedMessageNow,
     takeQueuedMessage,

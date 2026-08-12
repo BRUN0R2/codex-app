@@ -3,10 +3,20 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show }
 
 import type {
   Attachment,
+  ChatModelOption,
   CodexModel,
   PermissionProfile,
   ReasoningEffort,
 } from "../contracts/types";
+import {
+  type ChatIntelligenceSelection,
+  chatOptionLabel,
+  clearChatIntelligenceSelection,
+  loadChatIntelligenceSelection,
+  resolveChatIntelligence,
+  saveChatIntelligenceSelection,
+  selectionFromChatOption,
+} from "../state/chatIntelligence";
 import type { AppController } from "../state/createAppController";
 import {
   loadQueueingEnabled,
@@ -32,14 +42,27 @@ export interface ComposerDraftRequest {
 type ModelMenuSection = "effort" | "model" | "serviceTier";
 
 export function Composer(props: ComposerProps) {
+  let initialChatSelection: ChatIntelligenceSelection | null = null;
+  let initialChatSelectionError: string | null = null;
+  try {
+    initialChatSelection = loadChatIntelligenceSelection();
+  } catch (reason) {
+    initialChatSelectionError = errorMessage(reason);
+  }
+  const mode = () => props.controller.conversationMode();
   const [text, setText] = createSignal("");
   const [attachments, setAttachments] = createSignal<readonly Attachment[]>([]);
   const [model, setModel] = createSignal<string | null>(null);
   const [effort, setEffort] = createSignal<ReasoningEffort | null>(null);
   const [serviceTier, setServiceTier] = createSignal<string | null>(null);
+  const [chatSelection, setChatSelection] = createSignal<ChatIntelligenceSelection | null>(
+    initialChatSelection,
+  );
   const [sending, setSending] = createSignal(false);
   const [queueingEnabled, setQueueingEnabled] = createSignal(loadQueueingEnabled());
-  const [attachmentError, setAttachmentError] = createSignal<string | null>(null);
+  const [attachmentError, setAttachmentError] = createSignal<string | null>(
+    initialChatSelectionError,
+  );
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [modelMenuSection, setModelMenuSection] = createSignal<ModelMenuSection | null>(null);
   const [permissionMenuOpen, setPermissionMenuOpen] = createSignal(false);
@@ -47,14 +70,23 @@ export function Composer(props: ComposerProps) {
   let composerElement: HTMLFormElement | undefined;
   let textArea: HTMLTextAreaElement | undefined;
 
-  const selectedModel = createMemo(() =>
+  const configuredModel = createMemo(() =>
     selectModel(
       props.controller.models(),
       model(),
       props.controller.config()?.config.model ?? null,
     ),
   );
-  const reasoningOptions = createMemo(() => selectedModel()?.supportedReasoningEfforts ?? []);
+  const chatIntelligence = createMemo(() =>
+    resolveChatIntelligence(props.controller.chatModels(), chatSelection()),
+  );
+  const selectedModel = configuredModel;
+  const selectedChatOption = createMemo(() => chatIntelligence().option);
+  const selectedChatLabel = createMemo(() => {
+    const option = selectedChatOption();
+    return option === undefined ? "Carregando" : chatOptionLabel(option);
+  });
+  const reasoningOptions = createMemo(() => configuredModel()?.supportedReasoningEfforts ?? []);
   const canSend = createMemo(
     () => !sending() && (text().trim().length > 0 || attachments().length > 0),
   );
@@ -126,6 +158,27 @@ export function Composer(props: ComposerProps) {
     setServiceTier(next.defaultServiceTier);
   }
 
+  function selectNextChatOption(option: ChatModelOption): void {
+    const selection = selectionFromChatOption(option);
+    try {
+      saveChatIntelligenceSelection(selection);
+      setChatSelection(selection);
+      setAttachmentError(null);
+    } catch (reason) {
+      setAttachmentError(errorMessage(reason));
+    }
+  }
+
+  function resetChatSelection(): void {
+    try {
+      clearChatIntelligenceSelection();
+      setChatSelection(null);
+      setAttachmentError(null);
+    } catch (reason) {
+      setAttachmentError(errorMessage(reason));
+    }
+  }
+
   function resetModelSelection(): void {
     const configured = props.controller.config()?.config;
     const nextModel = selectModel(props.controller.models(), configured?.model ?? null, null);
@@ -170,12 +223,13 @@ export function Composer(props: ComposerProps) {
     if (sending()) {
       return;
     }
+    const selectedChatIntelligence = mode() === "chat" ? chatIntelligence() : null;
     const input = {
       text: text(),
       attachments: attachments(),
-      model: model(),
-      effort: effort(),
-      serviceTier: serviceTier(),
+      model: mode() === "chat" ? (selectedChatIntelligence?.option?.id ?? null) : model(),
+      effort: mode() === "chat" ? null : effort(),
+      serviceTier: mode() === "chat" ? null : serviceTier(),
     };
     if (props.controller.turnBusy() && queueingEnabled()) {
       if (props.controller.enqueueMessage(input)) {
@@ -208,8 +262,15 @@ export function Composer(props: ComposerProps) {
     }
     setText(message.text);
     setAttachments(message.attachments);
-    setModel(message.model);
-    setEffort(message.effort);
+    if (mode() === "chat" && message.model !== null) {
+      setChatSelection({
+        version: 2,
+        optionId: message.model,
+      });
+    } else {
+      setModel(message.model);
+      setEffort(message.effort);
+    }
     setServiceTier(message.serviceTier);
     setAttachmentError(null);
     queueMicrotask(() => {
@@ -275,6 +336,7 @@ export function Composer(props: ComposerProps) {
         aria-label="Compositor"
         class="composer"
         classList={{ busy: props.controller.turnBusy() }}
+        data-mode={mode()}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             closeComposerMenus();
@@ -330,7 +392,7 @@ export function Composer(props: ComposerProps) {
           </div>
         </Show>
         <textarea
-          aria-label="Mensagem para o Codex"
+          aria-label={composerPlaceholder(mode())}
           maxlength={1_048_576}
           onInput={(event) => {
             setText(event.currentTarget.value);
@@ -343,7 +405,7 @@ export function Composer(props: ComposerProps) {
             }
           }}
           onPaste={(event) => void handlePaste(event)}
-          placeholder="Peça qualquer coisa"
+          placeholder={composerPlaceholder(mode())}
           ref={textArea}
           rows={1}
           value={text()}
@@ -393,212 +455,273 @@ export function Composer(props: ComposerProps) {
                       <small>Até 12 anexos por mensagem</small>
                     </span>
                   </button>
-                  <button
-                    onClick={() => {
-                      setAddMenuOpen(false);
-                      void props.controller.chooseWorkspace();
-                    }}
-                    role="menuitem"
-                    type="button"
-                  >
-                    <Icon name="folder" size={16} />
-                    <span>
-                      <strong>
-                        {props.controller.workspace() === null
-                          ? "Escolher projeto"
-                          : "Trocar projeto"}
-                      </strong>
-                      <small>Defina a pasta de trabalho desta tarefa</small>
-                    </span>
-                  </button>
-                </div>
-              </Show>
-            </div>
-            <div class="composer-menu-anchor permission-menu-anchor">
-              <button
-                aria-expanded={permissionMenuOpen()}
-                aria-haspopup="menu"
-                class="permission-button"
-                classList={{
-                  active: permissionMenuOpen(),
-                  elevated:
-                    props.controller.config()?.config.permissionProfile.sandbox ===
-                    "danger-full-access",
-                }}
-                disabled={props.controller.turnBusy() || props.controller.config() === null}
-                onClick={() => {
-                  setPermissionMenuOpen((value) => !value);
-                  setAddMenuOpen(false);
-                  setModelMenuOpen(false);
-                  setModelMenuSection(null);
-                }}
-                title="Permissões"
-                type="button"
-              >
-                <Icon name="shield" size={15} />
-                <span>
-                  {permissionLabel(props.controller.config()?.config.permissionProfile.sandbox)}
-                </span>
-              </button>
-              <Show when={permissionMenuOpen()}>
-                <div aria-label="Permissões" class="composer-popover permission-menu" role="menu">
-                  <header>
-                    <strong>Como as ações do Codex devem ser aprovadas?</strong>
+                  <Show when={mode() !== "chat"}>
                     <button
                       onClick={() => {
-                        setPermissionMenuOpen(false);
-                        props.onOpenSettings();
+                        setAddMenuOpen(false);
+                        void props.controller.chooseWorkspace();
                       }}
+                      role="menuitem"
                       type="button"
                     >
-                      Configurações
+                      <Icon name="folder" size={16} />
+                      <span>
+                        <strong>
+                          {props.controller.workspace() === null
+                            ? "Escolher projeto"
+                            : "Trocar projeto"}
+                        </strong>
+                        <small>Defina a pasta de trabalho desta tarefa</small>
+                      </span>
                     </button>
-                  </header>
-                  <For each={props.controller.engine()?.permissionProfiles ?? []}>
-                    {(profile) => (
-                      <button
-                        aria-checked={samePermission(
-                          profile,
-                          props.controller.config()?.config.permissionProfile,
-                        )}
-                        class="permission-menu-option"
-                        classList={{
-                          selected: samePermission(
-                            profile,
-                            props.controller.config()?.config.permissionProfile,
-                          ),
-                        }}
-                        disabled={props.controller.pendingOperations() > 0}
-                        onClick={() => void selectPermission(profile)}
-                        role="menuitemradio"
-                        type="button"
-                      >
-                        <Icon name="shield" size={16} />
-                        <span>
-                          <strong>{permissionLabel(profile.sandbox)}</strong>
-                          <small>{permissionDescription(profile)}</small>
-                        </span>
-                        <Show
-                          when={samePermission(
-                            profile,
-                            props.controller.config()?.config.permissionProfile,
-                          )}
-                        >
-                          <Icon name="check" size={16} />
-                        </Show>
-                      </button>
-                    )}
-                  </For>
-                </div>
-              </Show>
-            </div>
-          </div>
-          <div class="composer-trailing">
-            <ContextWindowIndicator
-              modelWindow={selectedModel()?.contextWindow ?? null}
-              usage={props.controller.contextUsage()}
-            />
-            <div class="composer-menu-anchor model-menu-anchor">
-              <button
-                aria-expanded={modelMenuOpen()}
-                aria-haspopup="menu"
-                class="model-button"
-                classList={{ active: modelMenuOpen() }}
-                disabled={props.controller.turnBusy() || selectedModel() === undefined}
-                onClick={() => {
-                  setModelMenuOpen((value) => !value);
-                  setAddMenuOpen(false);
-                  setModelMenuSection(null);
-                  setPermissionMenuOpen(false);
-                }}
-                title="Modelo e raciocínio"
-                type="button"
-              >
-                <span class="model-button-name">
-                  {selectedModel() === undefined
-                    ? "Carregando"
-                    : compactModelName(selectedModel()?.displayName ?? "")}
-                </span>
-                <Show when={effort()}>
-                  {(selectedEffort) => (
-                    <span
-                      class="model-button-effort"
-                      classList={{ ultra: selectedEffort() === "ultra" }}
-                    >
-                      {effortLabel(selectedEffort())}
-                    </span>
-                  )}
-                </Show>
-                <Icon name="chevronDown" size={13} />
-              </button>
-              <Show when={modelMenuOpen()}>
-                <div
-                  aria-label="Modelo e raciocínio"
-                  class="composer-popover model-menu"
-                  role="menu"
-                >
-                  <ModelMenuRow
-                    active={modelMenuSection() === "model"}
-                    label="Modelo"
-                    onActivate={() => setModelMenuSection("model")}
-                    value={
-                      selectedModel() === undefined
-                        ? "Carregando"
-                        : compactModelName(selectedModel()?.displayName ?? "")
-                    }
-                  />
-                  <ModelMenuRow
-                    active={modelMenuSection() === "effort"}
-                    disabled={reasoningOptions().length === 0}
-                    label="Esforço"
-                    onActivate={() => setModelMenuSection("effort")}
-                    value={selectedEffortLabel(effort())}
-                    valueTone={effort() === "ultra" ? "ultra" : undefined}
-                  />
-                  <ModelMenuRow
-                    active={modelMenuSection() === "serviceTier"}
-                    label="Velocidade"
-                    onActivate={() => setModelMenuSection("serviceTier")}
-                    value={serviceTierLabel(selectedModel(), serviceTier())}
-                  />
-                  <button
-                    class="model-reset-button"
-                    onClick={() => {
-                      resetModelSelection();
-                      closeComposerMenus();
-                    }}
-                    role="menuitem"
-                    type="button"
-                  >
-                    <span>Redefinir para o padrão</span>
-                    <Icon name="reset" size={14} />
-                  </button>
-                  <Show when={modelMenuSection()}>
-                    {(section) => (
-                      <ModelMenuOptions
-                        effort={effort()}
-                        model={selectedModel()}
-                        models={props.controller.models()}
-                        onSelectEffort={(value) => {
-                          setEffort(value);
-                          closeComposerMenus();
-                        }}
-                        onSelectModel={(value) => {
-                          selectNextModel(value);
-                          closeComposerMenus();
-                        }}
-                        onSelectServiceTier={(value) => {
-                          setServiceTier(value);
-                          closeComposerMenus();
-                        }}
-                        section={section()}
-                        serviceTier={serviceTier()}
-                      />
-                    )}
                   </Show>
                 </div>
               </Show>
             </div>
+            <Show when={mode() !== "chat"}>
+              <div class="composer-menu-anchor permission-menu-anchor">
+                <button
+                  aria-expanded={permissionMenuOpen()}
+                  aria-haspopup="menu"
+                  class="permission-button"
+                  classList={{
+                    active: permissionMenuOpen(),
+                    elevated:
+                      props.controller.config()?.config.permissionProfile.sandbox ===
+                      "danger-full-access",
+                  }}
+                  disabled={props.controller.turnBusy() || props.controller.config() === null}
+                  onClick={() => {
+                    setPermissionMenuOpen((value) => !value);
+                    setAddMenuOpen(false);
+                    setModelMenuOpen(false);
+                    setModelMenuSection(null);
+                  }}
+                  title="Permissões"
+                  type="button"
+                >
+                  <Icon name="shield" size={15} />
+                  <span>
+                    {permissionLabel(props.controller.config()?.config.permissionProfile.sandbox)}
+                  </span>
+                </button>
+                <Show when={permissionMenuOpen()}>
+                  <div aria-label="Permissões" class="composer-popover permission-menu" role="menu">
+                    <header>
+                      <strong>Como as ações do Codex devem ser aprovadas?</strong>
+                      <button
+                        onClick={() => {
+                          setPermissionMenuOpen(false);
+                          props.onOpenSettings();
+                        }}
+                        type="button"
+                      >
+                        Configurações
+                      </button>
+                    </header>
+                    <For each={props.controller.engine()?.permissionProfiles ?? []}>
+                      {(profile) => (
+                        <button
+                          aria-checked={samePermission(
+                            profile,
+                            props.controller.config()?.config.permissionProfile,
+                          )}
+                          class="permission-menu-option"
+                          classList={{
+                            selected: samePermission(
+                              profile,
+                              props.controller.config()?.config.permissionProfile,
+                            ),
+                          }}
+                          disabled={props.controller.pendingOperations() > 0}
+                          onClick={() => void selectPermission(profile)}
+                          role="menuitemradio"
+                          type="button"
+                        >
+                          <Icon name="shield" size={16} />
+                          <span>
+                            <strong>{permissionLabel(profile.sandbox)}</strong>
+                            <small>{permissionDescription(profile)}</small>
+                          </span>
+                          <Show
+                            when={samePermission(
+                              profile,
+                              props.controller.config()?.config.permissionProfile,
+                            )}
+                          >
+                            <Icon name="check" size={16} />
+                          </Show>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+            </Show>
+          </div>
+          <div class="composer-trailing">
+            <Show when={mode() === "chat"}>
+              <div class="composer-menu-anchor model-menu-anchor">
+                <button
+                  aria-expanded={modelMenuOpen()}
+                  aria-haspopup="menu"
+                  class="model-button chat-intelligence-button"
+                  classList={{ active: modelMenuOpen() }}
+                  disabled={props.controller.turnBusy() || selectedChatOption() === undefined}
+                  onClick={() => {
+                    setModelMenuOpen((value) => !value);
+                    setAddMenuOpen(false);
+                    setModelMenuSection(null);
+                    setPermissionMenuOpen(false);
+                  }}
+                  title="Modelo e nível de raciocínio"
+                  type="button"
+                >
+                  <span class="model-button-effort">{selectedChatLabel()}</span>
+                  <Icon name="chevronDown" size={13} />
+                </button>
+                <Show when={modelMenuOpen()}>
+                  <div
+                    aria-label="Modelo e nível de raciocínio"
+                    class="composer-popover model-menu chat-intelligence-menu"
+                    role="menu"
+                  >
+                    <div class="chat-intelligence-heading">
+                      <span>Modelo do ChatGPT</span>
+                    </div>
+                    <ChatModelMenuOptions
+                      model={selectedChatOption()}
+                      models={props.controller.chatModels()}
+                      onSelect={(option) => {
+                        selectNextChatOption(option);
+                        closeComposerMenus();
+                      }}
+                    />
+                    <Show when={chatSelection() !== null}>
+                      <button
+                        class="model-reset-button"
+                        onClick={() => {
+                          resetChatSelection();
+                          closeComposerMenus();
+                        }}
+                        role="menuitem"
+                        type="button"
+                      >
+                        <span>Redefinir para o padrão</span>
+                        <Icon name="reset" size={14} />
+                      </button>
+                    </Show>
+                  </div>
+                </Show>
+              </div>
+            </Show>
+            <Show when={mode() !== "chat"}>
+              <ContextWindowIndicator
+                modelWindow={selectedModel()?.contextWindow ?? null}
+                usage={props.controller.contextUsage()}
+              />
+              <div class="composer-menu-anchor model-menu-anchor">
+                <button
+                  aria-expanded={modelMenuOpen()}
+                  aria-haspopup="menu"
+                  class="model-button"
+                  classList={{ active: modelMenuOpen() }}
+                  disabled={props.controller.turnBusy() || selectedModel() === undefined}
+                  onClick={() => {
+                    setModelMenuOpen((value) => !value);
+                    setAddMenuOpen(false);
+                    setModelMenuSection(null);
+                    setPermissionMenuOpen(false);
+                  }}
+                  title="Modelo e raciocínio"
+                  type="button"
+                >
+                  <span class="model-button-name">
+                    {selectedModel() === undefined
+                      ? "Carregando"
+                      : compactModelName(selectedModel()?.displayName ?? "")}
+                  </span>
+                  <Show when={effort()}>
+                    {(selectedEffort) => (
+                      <span
+                        class="model-button-effort"
+                        classList={{ ultra: selectedEffort() === "ultra" }}
+                      >
+                        {effortLabel(selectedEffort())}
+                      </span>
+                    )}
+                  </Show>
+                  <Icon name="chevronDown" size={13} />
+                </button>
+                <Show when={modelMenuOpen()}>
+                  <div
+                    aria-label="Modelo e raciocínio"
+                    class="composer-popover model-menu"
+                    role="menu"
+                  >
+                    <ModelMenuRow
+                      active={modelMenuSection() === "model"}
+                      label="Modelo"
+                      onActivate={() => setModelMenuSection("model")}
+                      value={
+                        selectedModel() === undefined
+                          ? "Carregando"
+                          : compactModelName(selectedModel()?.displayName ?? "")
+                      }
+                    />
+                    <ModelMenuRow
+                      active={modelMenuSection() === "effort"}
+                      disabled={reasoningOptions().length === 0}
+                      label="Esforço"
+                      onActivate={() => setModelMenuSection("effort")}
+                      value={selectedEffortLabel(effort())}
+                      valueTone={effort() === "ultra" ? "ultra" : undefined}
+                    />
+                    <ModelMenuRow
+                      active={modelMenuSection() === "serviceTier"}
+                      label="Velocidade"
+                      onActivate={() => setModelMenuSection("serviceTier")}
+                      value={serviceTierLabel(selectedModel(), serviceTier())}
+                    />
+                    <button
+                      class="model-reset-button"
+                      onClick={() => {
+                        resetModelSelection();
+                        closeComposerMenus();
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      <span>Redefinir para o padrão</span>
+                      <Icon name="reset" size={14} />
+                    </button>
+                    <Show when={modelMenuSection()}>
+                      {(section) => (
+                        <ModelMenuOptions
+                          effort={effort()}
+                          model={selectedModel()}
+                          models={props.controller.models()}
+                          onSelectEffort={(value) => {
+                            setEffort(value);
+                            closeComposerMenus();
+                          }}
+                          onSelectModel={(value) => {
+                            selectNextModel(value);
+                            closeComposerMenus();
+                          }}
+                          onSelectServiceTier={(value) => {
+                            setServiceTier(value);
+                            closeComposerMenus();
+                          }}
+                          section={section()}
+                          serviceTier={serviceTier()}
+                        />
+                      )}
+                    </Show>
+                  </div>
+                </Show>
+              </div>
+            </Show>
             <Show
               when={!props.controller.turnBusy() || canSend()}
               fallback={
@@ -724,6 +847,34 @@ function ModelMenuRow(props: {
       <small classList={{ "tone-ultra": props.valueTone === "ultra" }}>{props.value}</small>
       <Icon name="chevronRight" size={16} />
     </button>
+  );
+}
+
+function ChatModelMenuOptions(props: {
+  readonly model: ChatModelOption | undefined;
+  readonly models: readonly ChatModelOption[];
+  readonly onSelect: (option: ChatModelOption) => void;
+}) {
+  return (
+    <div class="model-menu-options chat-model-options">
+      <For each={props.models}>
+        {(entry) => (
+          <button
+            aria-checked={entry.id === props.model?.id}
+            class="model-menu-option"
+            classList={{ selected: entry.id === props.model?.id }}
+            onClick={() => props.onSelect(entry)}
+            role="menuitemradio"
+            type="button"
+          >
+            <span>{chatOptionLabel(entry)}</span>
+            <Show when={entry.id === props.model?.id}>
+              <Icon name="check" size={15} />
+            </Show>
+          </button>
+        )}
+      </For>
+    </div>
   );
 }
 
@@ -959,4 +1110,15 @@ function formatBytes(bytes: number): string {
   if (bytes < 1_024) return `${bytes} B`;
   if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KB`;
   return `${(bytes / 1_048_576).toFixed(1)} MB`;
+}
+
+function composerPlaceholder(mode: "chat" | "work" | "codex"): string {
+  switch (mode) {
+    case "chat":
+      return "Mensagem para o ChatGPT";
+    case "work":
+      return "Trabalhe com o ChatGPT";
+    case "codex":
+      return "Peça qualquer coisa";
+  }
 }

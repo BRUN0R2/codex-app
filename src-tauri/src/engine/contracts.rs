@@ -434,11 +434,95 @@ pub struct ModelListResponse {
     pub data: Vec<CodexModel>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChatThinkingEffort {
+    #[serde(rename = "standard")]
+    Standard,
+    #[serde(rename = "extended")]
+    Extended,
+    #[serde(rename = "min")]
+    Min,
+    #[serde(rename = "max")]
+    Max,
+    #[serde(rename = "ultra")]
+    Ultra,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    #[serde(rename = "zero")]
+    Zero,
+}
+
+impl ChatThinkingEffort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Extended => "extended",
+            Self::Min => "min",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+            Self::XHigh => "xhigh",
+            Self::Zero => "zero",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChatModelLane {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "instant")]
+    Instant,
+    #[serde(rename = "thinking")]
+    Thinking,
+    #[serde(rename = "thinking_mini")]
+    ThinkingMini,
+    #[serde(rename = "pro")]
+    Pro,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatModelOption {
+    pub id: String,
+    pub model: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub lane: Option<ChatModelLane>,
+    pub thinking_effort: Option<ChatThinkingEffort>,
+    pub version_id: Option<String>,
+    pub selected_label: Option<String>,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatModelListResponse {
+    pub data: Vec<ChatModelOption>,
+}
+
 #[derive(Debug, Clone)]
 pub enum TurnInput {
     Text(String),
     LocalImage { path: String },
     Mention { name: String, path: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConversationMode {
+    Chat,
+    Work,
+    Codex,
+}
+
+impl ConversationMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Work => "work",
+            Self::Codex => "codex",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -643,6 +727,7 @@ pub enum ThreadActiveFlag {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CodexThread {
     pub id: String,
+    pub mode: ConversationMode,
     pub preview: String,
     pub name: Option<String>,
     pub cwd: String,
@@ -919,6 +1004,7 @@ mod tests {
             PermissionProfile::workspace_write()
         );
         assert!(config.model.is_none());
+        assert!(config.model_verbosity.is_none());
     }
 
     #[test]

@@ -17,11 +17,11 @@ use super::provider::{
 use super::tools::{MAX_PROVIDER_ITEM_BYTES, PreparedTool, ToolExecutionContext};
 use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
 use crate::engine::{
-    ActivityStatus, AppConfig, DiagnosticStream, ImageDetail, IndexedTextDeltaNotification,
-    ItemNotification, MessagePhase, ModelRerouteReason, ModelReroutedNotification,
-    ModelSafetyBufferingUpdatedNotification, ModelVerificationNotification, Personality,
-    TextDeltaNotification, ThreadItem, TurnInput, TurnModerationMetadataNotification,
-    WebSearchMode,
+    ActivityStatus, AppConfig, ConversationMode, DiagnosticStream, ImageDetail,
+    IndexedTextDeltaNotification, ItemNotification, MessagePhase, ModelRerouteReason,
+    ModelReroutedNotification, ModelSafetyBufferingUpdatedNotification,
+    ModelVerificationNotification, Personality, TextDeltaNotification, ThreadItem, TurnInput,
+    TurnModerationMetadataNotification, WebSearchMode,
 };
 use crate::error::AppError;
 
@@ -42,6 +42,7 @@ pub(super) struct TurnRun {
     pub thread_id: String,
     pub turn_id: String,
     pub workspace: PathBuf,
+    pub mode: ConversationMode,
     pub model: SelectedModel,
     pub config: AppConfig,
     pub reasoning_effort: Option<crate::engine::ReasoningEffort>,
@@ -175,7 +176,7 @@ pub(super) async fn run_turn(
     app: AppHandle,
     mut run: TurnRun,
 ) -> Result<RunCompletion, AppError> {
-    let instructions = compose_instructions(&run.model, &run.workspace, &run.config)?;
+    let instructions = compose_instructions(&run.model, &run.workspace, &run.config, run.mode)?;
     let mut provider_state = TurnProviderState::default();
 
     loop {
@@ -456,13 +457,13 @@ pub(super) async fn run_compaction(
     app: AppHandle,
     mut run: TurnRun,
 ) -> Result<RunCompletion, AppError> {
-    let instructions = compose_instructions(&run.model, &run.workspace, &run.config)?;
+    let instructions = compose_instructions(&run.model, &run.workspace, &run.config, run.mode)?;
     let mut provider_state = TurnProviderState::default();
     if *run.cancellation.borrow() {
         return Ok(RunCompletion::Interrupted);
     }
     let history = load_prompt_history(&inner, &app, &run.thread_id).await?;
-    let tools = provider_tools(&inner, &run.config);
+    let tools = provider_tools(&inner, &run.config, run.mode);
     if compact_context(
         &inner,
         &app,
@@ -483,8 +484,13 @@ pub(super) async fn run_compaction(
 pub(super) fn provider_tools(
     inner: &NativeEngineInner,
     config: &AppConfig,
+    mode: ConversationMode,
 ) -> Vec<serde_json::Value> {
-    let mut tools = inner.tools.definitions();
+    let mut tools = if local_tools_enabled(mode) {
+        inner.tools.definitions()
+    } else {
+        Vec::new()
+    };
     if config.web_search == WebSearchMode::Live {
         tools.push(json!({
             "type": "web_search",
@@ -492,6 +498,10 @@ pub(super) fn provider_tools(
         }));
     }
     tools
+}
+
+const fn local_tools_enabled(mode: ConversationMode) -> bool {
+    matches!(mode, ConversationMode::Work | ConversationMode::Codex)
 }
 
 pub(super) async fn load_prompt_history(
@@ -528,7 +538,7 @@ async fn prepare_sampling_input(
     provider_state: &mut TurnProviderState,
 ) -> Result<Option<SamplingInput>, AppError> {
     let history = load_prompt_history(inner, app, &run.thread_id).await?;
-    let tools = provider_tools(inner, &run.config);
+    let tools = provider_tools(inner, &run.config, run.mode);
     let snapshot = inner
         .storage
         .latest_context_usage(run.thread_id.clone())
@@ -842,6 +852,7 @@ fn compose_instructions(
     model: &SelectedModel,
     workspace: &Path,
     config: &AppConfig,
+    mode: ConversationMode,
 ) -> Result<String, AppError> {
     let personality = match config.personality {
         Personality::Friendly => "Communicate warmly and clearly.",
@@ -853,17 +864,38 @@ fn compose_instructions(
         .as_deref()
         .map(|instructions| format!("\n\n# User developer instructions\n{instructions}"))
         .unwrap_or_default();
-    let instructions = format!(
-        "{}\n\n# Native Codex Desktop runtime\n\
-         You are operating through an independent desktop runtime in workspace {}. \
-         Use only the tools advertised in this request. Tool paths are workspace-relative. \
-         For multi-step work, publish a concise plan with update_plan and keep its statuses current. \
-         Skip a plan for trivial requests. \
-         Never claim an operation succeeded until its tool result confirms it. \
-         Surface blockers and failures plainly. {personality}{developer}",
-        model.instructions(),
-        workspace.display(),
-    );
+    let runtime = match mode {
+        ConversationMode::Chat => format!(
+            "# ChatGPT Chat\n\
+             You are ChatGPT in Chat mode. Help the user ask questions, explore ideas, learn, \
+             and have a natural back-and-forth conversation. Do not claim access to local files, \
+             applications, shell commands, or coding tools. Use only tools advertised in this request. \
+             Give the answer directly unless the user asks for a larger deliverable. {personality}"
+        ),
+        ConversationMode::Work => format!(
+            "{}\n\n# ChatGPT Work — local\n\
+             You are completing a substantial task through ChatGPT Work in local mode. \
+             The local workspace is {}. Use only tools advertised in this request, and treat tool paths \
+             as workspace-relative. Drive the task to a reviewable result. For multi-step work, publish \
+             a concise plan with update_plan and keep its statuses current. Skip a plan for trivial work. \
+             Never claim an operation succeeded until its tool result confirms it. \
+             Surface blockers and failures plainly. {personality}",
+            model.instructions(),
+            workspace.display(),
+        ),
+        ConversationMode::Codex => format!(
+            "{}\n\n# Native Codex Desktop runtime\n\
+             You are operating through an independent desktop runtime in workspace {}. \
+             Use only the tools advertised in this request. Tool paths are workspace-relative. \
+             For multi-step work, publish a concise plan with update_plan and keep its statuses current. \
+             Skip a plan for trivial requests. \
+             Never claim an operation succeeded until its tool result confirms it. \
+             Surface blockers and failures plainly. {personality}",
+            model.instructions(),
+            workspace.display(),
+        ),
+    };
+    let instructions = format!("{runtime}{developer}");
     if instructions.len() > MAX_INSTRUCTIONS_BYTES {
         return Err(AppError::Protocol(format!(
             "combined instructions exceed {MAX_INSTRUCTIONS_BYTES} bytes"
@@ -962,13 +994,23 @@ fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_input_bytes, record_turn_state, web_search_activity_detail};
+    use super::{
+        add_input_bytes, local_tools_enabled, record_turn_state, web_search_activity_detail,
+    };
+    use crate::engine::ConversationMode;
     use crate::engine::native::provider::WebSearchAction;
 
     #[test]
     fn combined_input_is_bounded() {
         let mut total = super::MAX_RAW_INPUT_BYTES;
         assert!(add_input_bytes(&mut total, 1).is_err());
+    }
+
+    #[test]
+    fn chat_never_receives_local_agent_tools() {
+        assert!(!local_tools_enabled(ConversationMode::Chat));
+        assert!(local_tools_enabled(ConversationMode::Work));
+        assert!(local_tools_enabled(ConversationMode::Codex));
     }
 
     #[test]

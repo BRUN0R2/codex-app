@@ -1,4 +1,4 @@
-import { createMemo, For, Show } from "solid-js";
+import { createMemo, createSignal, Index, Show } from "solid-js";
 
 import type { FileChange } from "../contracts/types";
 
@@ -39,9 +39,9 @@ export function ReviewPanel(props: ReviewPanelProps) {
       </div>
 
       <div class="review-panel-files">
-        <For each={props.changes}>
-          {(change) => <ReviewFile change={change} defaultOpen={props.changes.length <= 25} />}
-        </For>
+        <Index each={props.changes}>
+          {(change) => <ReviewFile change={change()} defaultOpen={props.changes.length <= 25} />}
+        </Index>
       </div>
     </aside>
   );
@@ -49,11 +49,13 @@ export function ReviewPanel(props: ReviewPanelProps) {
 
 function ReviewFile(props: { readonly change: FileChange; readonly defaultOpen: boolean }) {
   const stats = createMemo(() => summarizeDiff(props.change.diff));
+  const [open, setOpen] = createSignal(props.defaultOpen && props.change.kind.type !== "delete");
   return (
     <details
       class="review-file"
       data-kind={props.change.kind.type}
-      open={props.defaultOpen && props.change.kind.type !== "delete"}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+      open={open()}
     >
       <summary>
         <span class="review-file-type">{fileType(props.change.path)}</span>

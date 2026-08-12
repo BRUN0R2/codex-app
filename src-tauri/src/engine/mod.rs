@@ -51,8 +51,9 @@ impl EngineManager {
         &self,
         app: &AppHandle,
         project_path: Option<String>,
+        mode: ConversationMode,
     ) -> Result<ThreadStartResponse, AppError> {
-        self.engine.thread_start(app, project_path).await
+        self.engine.thread_start(app, project_path, mode).await
     }
 
     pub async fn thread_list(
@@ -158,6 +159,13 @@ impl EngineManager {
 
     pub async fn model_list(&self, app: &AppHandle) -> Result<ModelListResponse, AppError> {
         self.engine.model_list(app).await
+    }
+
+    pub async fn chat_model_list(
+        &self,
+        app: &AppHandle,
+    ) -> Result<ChatModelListResponse, AppError> {
+        self.engine.chat_model_list(app).await
     }
 
     pub async fn server_request_respond(
