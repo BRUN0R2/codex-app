@@ -87,8 +87,8 @@ describe("thread runtime reducer", () => {
     );
 
     expect(turns).toHaveLength(1);
-    expect(turns[0]?.items).toEqual(runtimeItems);
-    expect(turns[0]?.createdAt).toBe(1);
+    expect(turns.at(0)?.items).toEqual(runtimeItems);
+    expect(turns.at(0)?.createdAt).toBe(1);
   });
 
   it("selects only the latest plan from the active turn", () => {
@@ -118,6 +118,30 @@ describe("thread runtime reducer", () => {
 
     expect(readActiveTurnPlan(turns, "turn-a")?.id).toBe("plan-2");
     expect(readActiveTurnPlan(turns, null)).toBeNull();
+  });
+
+  it("projects an active overlay without cloning a long persisted turn array", () => {
+    const persisted = Array.from({ length: 10_000 }, (_, index) => ({
+      id: `turn-${index}`,
+      items: [],
+      status: "completed" as const,
+      error: null,
+      createdAt: index,
+      updatedAt: index,
+    }));
+    const turns = mergeRuntimeThreadItems(
+      threadFixture("inProgress"),
+      persisted,
+      [{ type: "agentMessage", id: "streaming", text: "parcial", phase: null }],
+      "turn-9999",
+    );
+
+    expect(Array.isArray(turns)).toBe(false);
+    expect(turns).toHaveLength(persisted.length);
+    expect(turns.at(0)).toBe(persisted[0]);
+    expect(turns.slice(-1)[0]?.items).toEqual([
+      { type: "agentMessage", id: "streaming", text: "parcial", phase: null },
+    ]);
   });
 
   it("updates multiple streaming threads with one outer map replacement", () => {

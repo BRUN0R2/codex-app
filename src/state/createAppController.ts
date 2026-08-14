@@ -35,6 +35,7 @@ import type {
   ReasoningEffort,
   RuntimeDiagnostic,
   RuntimeStatus,
+  ThreadSummary,
 } from "../contracts/types";
 import {
   archiveThread as archiveThreadCommand,
@@ -55,6 +56,7 @@ import {
   readAccountProfile,
   readConfig,
   readRateLimits,
+  readThread,
   respondToServerRequest,
   resumeThread,
   savePastedImage,
@@ -111,6 +113,7 @@ import {
   createStreamDeltaBatcher,
   type StreamDelta,
 } from "./streamDeltas";
+import { applyThreadSummary, prependThreadHistory } from "./threadHistory";
 import {
   applyThreadRuntimeStreamDeltas,
   mergeRuntimeThreadItems,
@@ -121,9 +124,15 @@ import {
   synchronizeThreadRuntime as reduceSynchronizeThreadRuntime,
   updateThreadRuntime as reduceUpdateThreadRuntime,
   type ThreadRuntimeState,
-  type VisibleThreadTurn,
 } from "./threadRuntime";
-import { applyTurnCompletion } from "./turnCompletion";
+import {
+  applySummaryTurnCompletion,
+  applySummaryTurnStarted,
+  applyTurnCompletion,
+  applyTurnItem,
+  applyTurnStarted,
+} from "./turnCompletion";
+import type { VisibleThreadTurn, VisibleTurnSequence } from "./visibleTurnSequence";
 
 const MAX_DIAGNOSTICS = 50;
 const MAX_PENDING_APPROVALS = 64;
@@ -147,12 +156,14 @@ export interface AppController {
   readonly activeTurnId: Accessor<string | null>;
   readonly activePlan: Accessor<PlanItem | null>;
   readonly approvals: Accessor<readonly EngineServerRequest[]>;
-  readonly archivedThreads: Accessor<readonly CodexThread[]>;
+  readonly archivedThreads: Accessor<readonly ThreadSummary[]>;
   readonly archivedThreadsNextCursor: Accessor<string | null>;
   readonly busy: Accessor<boolean>;
   readonly config: Accessor<ConfigReadResponse | null>;
   readonly contextUsage: Accessor<ContextUsageItem | null>;
   readonly currentThread: Accessor<CodexThread | null>;
+  readonly hasOlderHistory: Accessor<boolean>;
+  readonly historyLoading: Accessor<boolean>;
   readonly currentThreadTitle: Accessor<string>;
   readonly product: Accessor<AppProduct>;
   readonly chatGptMode: Accessor<ChatGptMode>;
@@ -169,16 +180,17 @@ export interface AppController {
   readonly openingThreadId: Accessor<string | null>;
   readonly pendingOperations: Accessor<number>;
   readonly pinnedThreadIds: Accessor<readonly string[]>;
+  readonly persistedTurns: Accessor<readonly VisibleThreadTurn[]>;
   readonly projects: Accessor<readonly ProjectRecord[]>;
   readonly queuedMessages: Accessor<readonly QueuedMessage[]>;
   readonly rateLimits: Accessor<AccountRateLimitsResponse | null>;
   readonly runtimeStatus: Accessor<RuntimeStatus>;
   readonly signedIn: Accessor<boolean>;
   readonly safetyBuffering: Accessor<ModelSafetyBufferingUpdatedNotification["params"] | null>;
-  readonly threads: Accessor<readonly CodexThread[]>;
+  readonly threads: Accessor<readonly ThreadSummary[]>;
   readonly threadsNextCursor: Accessor<string | null>;
   readonly turnBusy: Accessor<boolean>;
-  readonly turns: Accessor<readonly VisibleThreadTurn[]>;
+  readonly turns: Accessor<VisibleTurnSequence>;
   readonly workspace: Accessor<string | null>;
   readonly archiveThread: (threadId: string) => Promise<boolean>;
   readonly cancelLogin: () => Promise<void>;
@@ -194,6 +206,7 @@ export interface AppController {
   readonly isThreadActive: (threadId: string) => boolean;
   readonly loadMoreThreads: () => Promise<boolean>;
   readonly loadMoreArchivedThreads: () => Promise<boolean>;
+  readonly loadOlderHistory: () => Promise<boolean>;
   readonly login: () => Promise<boolean>;
   readonly logout: () => Promise<boolean>;
   readonly newThread: (workspace?: string) => boolean;
@@ -239,13 +252,15 @@ export function createAppController(): AppController {
   const [models, setModels] = createSignal<readonly CodexModel[]>([]);
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
   const [rateLimits, setRateLimits] = createSignal<AccountRateLimitsResponse | null>(null);
-  const [threads, setThreads] = createSignal<readonly CodexThread[]>([]);
+  const [threads, setThreads] = createSignal<readonly ThreadSummary[]>([]);
   const [threadsNextCursor, setThreadsNextCursor] = createSignal<string | null>(null);
-  const [archivedThreads, setArchivedThreads] = createSignal<readonly CodexThread[]>([]);
+  const [archivedThreads, setArchivedThreads] = createSignal<readonly ThreadSummary[]>([]);
   const [archivedThreadsNextCursor, setArchivedThreadsNextCursor] = createSignal<string | null>(
     null,
   );
   const [currentThread, setCurrentThread] = createSignal<CodexThread | null>(null);
+  const [historyCursor, setHistoryCursor] = createSignal<string | null>(null);
+  const [historyLoading, setHistoryLoading] = createSignal(false);
   let initialPinnedThreadIds: readonly string[] = [];
   let pinLoadError: Error | null = null;
   try {
@@ -307,6 +322,7 @@ export function createAppController(): AppController {
     ),
   );
   const signedIn = createMemo(() => account()?.account !== null && account() !== undefined);
+  const hasOlderHistory = createMemo(() => historyCursor() !== null);
   const rateLimitRefresh = createRateLimitRefreshCoordinator({
     getSessionKey: () => (signedIn() ? "chatgpt" : null),
     read: readRateLimits,
@@ -348,7 +364,7 @@ export function createAppController(): AppController {
     const thread = currentThread();
     return thread === null ? [] : readPersistedVisibleTurns(thread);
   });
-  const turns = createMemo<readonly VisibleThreadTurn[]>(() => {
+  const turns = createMemo<VisibleTurnSequence>(() => {
     const thread = currentThread();
     const runtime = selectedRuntime();
     return thread === null
@@ -549,7 +565,9 @@ export function createAppController(): AppController {
 
   function handleNotification(notification: EngineNotification): void {
     if (isStreamNotification(notification)) {
-      streamDeltas.enqueue(streamDeltaFromNotification(notification));
+      for (const delta of streamDeltasFromNotification(notification)) {
+        streamDeltas.enqueue(delta);
+      }
       return;
     }
     batch(() => {
@@ -580,10 +598,11 @@ export function createAppController(): AppController {
       case "thread.created":
       case "thread.updated":
         mergeThread(notification.params.thread);
-        synchronizeThreadRuntime(notification.params.thread);
-        if (currentThread()?.id === notification.params.thread.id) {
-          setCurrentThread(notification.params.thread);
-        }
+        setCurrentThread((current) =>
+          current?.id === notification.params.thread.id
+            ? applyThreadSummary(current, notification.params.thread)
+            : current,
+        );
         return;
       case "thread.archived":
         {
@@ -620,6 +639,18 @@ export function createAppController(): AppController {
         return;
       case "turn.started":
         streamDeltas.releaseThread(notification.params.threadId);
+        setThreads((current) =>
+          current.map((thread) =>
+            thread.id === notification.params.threadId
+              ? applySummaryTurnStarted(thread, notification.params.turn)
+              : thread,
+          ),
+        );
+        setCurrentThread((current) =>
+          current?.id === notification.params.threadId
+            ? applyTurnStarted(current, notification.params.turn)
+            : current,
+        );
         updateThreadRuntime(notification.params.threadId, (runtime) => ({
           ...runtime,
           activeTurnId: notification.params.turn.id,
@@ -638,7 +669,7 @@ export function createAppController(): AppController {
             setThreads((current) =>
               current.map((thread) =>
                 thread.id === notification.params.threadId
-                  ? applyTurnCompletion(thread, notification.params.turn)
+                  ? applySummaryTurnCompletion(thread, notification.params.turn)
                   : thread,
               ),
             );
@@ -652,6 +683,7 @@ export function createAppController(): AppController {
               return {
                 ...runtime,
                 activeTurnId: completedActiveTurn ? null : runtime.activeTurnId,
+                itemOverlays: completedActiveTurn ? [] : runtime.itemOverlays,
                 safetyBuffering: completedActiveTurn ? null : runtime.safetyBuffering,
               };
             });
@@ -701,6 +733,11 @@ export function createAppController(): AppController {
       case "item.completed":
         if (notification.method === "item.completed") {
           streamDeltas.releaseItem(notification.params.threadId, notification.params.item.id);
+          setCurrentThread((current) =>
+            current?.id === notification.params.threadId
+              ? applyTurnItem(current, notification.params.turnId, notification.params.item)
+              : current,
+          );
         }
         updateThreadRuntime(notification.params.threadId, (runtime) => {
           const item = notification.params.item;
@@ -966,6 +1003,7 @@ export function createAppController(): AppController {
       batch(() => {
         synchronizeThreadRuntime(response.thread);
         setCurrentThread(response.thread);
+        setHistoryCursor(response.nextCursor);
       });
       mergeThread(response.thread);
       rememberDestination(mode, response.thread.id, response.thread.projectPath);
@@ -1083,7 +1121,7 @@ export function createAppController(): AppController {
     return rememberDestination(mode, null, requestedWorkspace);
   }
 
-  function selectThreadProject(thread: CodexThread): boolean {
+  function selectThreadProject(thread: ThreadSummary): boolean {
     if (thread.projectPath === null) {
       setWorkspace(null);
       return true;
@@ -1126,6 +1164,7 @@ export function createAppController(): AppController {
       batch(() => {
         mergeThread(response.thread);
         setCurrentThread(response.thread);
+        setHistoryCursor(response.nextCursor);
         synchronizeThreadRuntime(response.thread);
       });
       rememberDestination(mode, response.thread.id, response.thread.projectPath);
@@ -1152,6 +1191,7 @@ export function createAppController(): AppController {
       batch(() => {
         synchronizeThreadRuntime(response.thread);
         setCurrentThread(response.thread);
+        setHistoryCursor(response.nextCursor);
       });
       mergeThread(response.thread);
       rememberDestination(response.thread.mode, response.thread.id, response.thread.projectPath);
@@ -1253,6 +1293,7 @@ export function createAppController(): AppController {
         mergeThread(response.thread);
         synchronizeThreadRuntime(response.thread);
         setCurrentThread(response.thread);
+        setHistoryCursor(response.nextCursor);
       });
       rememberDestination(response.thread.mode, response.thread.id, response.thread.projectPath);
       return true;
@@ -1295,6 +1336,33 @@ export function createAppController(): AppController {
     } catch (reason) {
       reportError(reason);
       return false;
+    }
+  }
+
+  async function loadOlderHistory(): Promise<boolean> {
+    const thread = currentThread();
+    const cursor = historyCursor();
+    if (thread === null || cursor === null || historyLoading()) {
+      return false;
+    }
+    setHistoryLoading(true);
+    try {
+      const page = await readThread(thread.id, cursor);
+      if (currentThread()?.id !== thread.id) {
+        return false;
+      }
+      batch(() => {
+        setCurrentThread((current) =>
+          current?.id === thread.id ? prependThreadHistory(current, page.thread) : current,
+        );
+        setHistoryCursor(page.nextCursor);
+      });
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    } finally {
+      setHistoryLoading(false);
     }
   }
 
@@ -1573,7 +1641,7 @@ export function createAppController(): AppController {
     setMessageQueues((current) => deleteMessageQueue(current, threadId));
   }
 
-  function mergeThread(thread: CodexThread): void {
+  function mergeThread(thread: ThreadSummary): void {
     setThreads((current) => {
       const index = current.findIndex((entry) => entry.id === thread.id);
       if (index === -1) {
@@ -1584,7 +1652,10 @@ export function createAppController(): AppController {
   }
 
   function clearCurrentThread(): void {
-    setCurrentThread(null);
+    batch(() => {
+      setCurrentThread(null);
+      setHistoryCursor(null);
+    });
   }
 
   function surfaceRefreshFailure(value: AccountReadResponse): void {
@@ -1641,6 +1712,8 @@ export function createAppController(): AppController {
     contextUsage,
     currentThread,
     currentThreadTitle,
+    hasOlderHistory,
+    historyLoading,
     product,
     chatGptMode,
     chatModels,
@@ -1656,6 +1729,7 @@ export function createAppController(): AppController {
     openingThreadId,
     pendingOperations,
     pinnedThreadIds,
+    persistedTurns,
     projects,
     queuedMessages,
     rateLimits,
@@ -1681,6 +1755,7 @@ export function createAppController(): AppController {
     isThreadActive,
     loadMoreThreads,
     loadMoreArchivedThreads,
+    loadOlderHistory,
     login,
     logout,
     newThread,
@@ -1708,53 +1783,40 @@ export function createAppController(): AppController {
 type StreamNotification = Extract<
   EngineNotification,
   {
-    readonly method:
-      | "item.agentTextDelta"
-      | "item.reasoningSummaryDelta"
-      | "item.reasoningTextDelta";
+    readonly method: "item.streamDeltas";
   }
 >;
 
 function isStreamNotification(
   notification: EngineNotification,
 ): notification is StreamNotification {
-  return (
-    notification.method === "item.agentTextDelta" ||
-    notification.method === "item.reasoningSummaryDelta" ||
-    notification.method === "item.reasoningTextDelta"
-  );
+  return notification.method === "item.streamDeltas";
 }
 
-function streamDeltaFromNotification(notification: StreamNotification): StreamDelta {
-  switch (notification.method) {
-    case "item.agentTextDelta":
-      return {
-        kind: "agentText",
-        threadId: notification.params.threadId,
-        itemId: notification.params.itemId,
-        delta: notification.params.delta,
-      };
-    case "item.reasoningSummaryDelta":
-      return {
-        kind: "reasoningText",
-        threadId: notification.params.threadId,
-        itemId: notification.params.itemId,
-        index: notification.params.index,
-        target: "summary",
-        delta: notification.params.delta,
-      };
-    case "item.reasoningTextDelta":
-      return {
-        kind: "reasoningText",
-        threadId: notification.params.threadId,
-        itemId: notification.params.itemId,
-        index: notification.params.index,
-        target: "content",
-        delta: notification.params.delta,
-      };
-    default:
-      return assertNever(notification);
-  }
+function streamDeltasFromNotification(notification: StreamNotification): readonly StreamDelta[] {
+  return notification.params.deltas.map((delta): StreamDelta => {
+    switch (delta.kind) {
+      case "agentText":
+        return {
+          kind: "agentText",
+          threadId: notification.params.threadId,
+          itemId: delta.itemId,
+          delta: delta.delta,
+        };
+      case "reasoningSummary":
+      case "reasoningText":
+        return {
+          kind: "reasoningText",
+          threadId: notification.params.threadId,
+          itemId: delta.itemId,
+          index: delta.index,
+          target: delta.kind === "reasoningSummary" ? "summary" : "content",
+          delta: delta.delta,
+        };
+      default:
+        return assertNever(delta);
+    }
+  });
 }
 
 function withBootTimeout<T>(label: string, operation: () => Promise<T>): Promise<T> {
@@ -1772,9 +1834,9 @@ function withBootTimeout<T>(label: string, operation: () => Promise<T>): Promise
 }
 
 function mergeThreadPages(
-  current: readonly CodexThread[],
-  incoming: readonly CodexThread[],
-): readonly CodexThread[] {
+  current: readonly ThreadSummary[],
+  incoming: readonly ThreadSummary[],
+): readonly ThreadSummary[] {
   const byId = new Map(current.map((thread) => [thread.id, thread]));
   for (const thread of incoming) {
     byId.set(thread.id, thread);

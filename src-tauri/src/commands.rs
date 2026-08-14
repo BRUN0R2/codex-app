@@ -43,6 +43,13 @@ pub struct ThreadIdRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadReadRequest {
+    thread_id: String,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadSetNameRequest {
     thread_id: String,
     name: String,
@@ -223,11 +230,11 @@ pub async fn engine_thread_resume(
 #[tauri::command]
 pub async fn engine_thread_read(
     engine: State<'_, EngineManager>,
-    request: ThreadIdRequest,
+    request: ThreadReadRequest,
 ) -> CommandResult<ThreadReadResponse> {
     validate_protocol_id("thread id", &request.thread_id)?;
     engine
-        .thread_read(request.thread_id)
+        .thread_read(request.thread_id, request.cursor)
         .await
         .map_err(Into::into)
 }

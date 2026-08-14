@@ -1886,6 +1886,27 @@ pre {
   outline-offset: 2px;
 }
 
+.timeline-virtual-list {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.timeline-virtual-item {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  min-width: 0;
+  padding-bottom: 18px;
+  contain: layout style;
+  will-change: transform;
+}
+
+.timeline-virtual-item > .conversation-turn {
+  margin-bottom: 0;
+}
+
 .user-message-navigator {
   position: absolute;
   z-index: 6;

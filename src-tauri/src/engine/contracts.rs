@@ -72,12 +72,8 @@ pub enum EngineNotification {
     ItemStarted(ItemNotification),
     #[serde(rename = "item.completed")]
     ItemCompleted(ItemNotification),
-    #[serde(rename = "item.agentTextDelta")]
-    AgentTextDelta(TextDeltaNotification),
-    #[serde(rename = "item.reasoningSummaryDelta")]
-    ReasoningSummaryDelta(IndexedTextDeltaNotification),
-    #[serde(rename = "item.reasoningTextDelta")]
-    ReasoningTextDelta(IndexedTextDeltaNotification),
+    #[serde(rename = "item.streamDeltas")]
+    StreamDeltas(StreamDeltasNotification),
     #[serde(rename = "model.rerouted")]
     ModelRerouted(ModelReroutedNotification),
     #[serde(rename = "model.verification")]
@@ -104,7 +100,7 @@ pub struct AuthSessionChanged {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadNotification {
-    pub thread: CodexThread,
+    pub thread: ThreadSummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,21 +153,33 @@ pub struct ItemNotification {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TextDeltaNotification {
+pub struct StreamDeltasNotification {
     pub thread_id: String,
     pub turn_id: String,
-    pub item_id: String,
-    pub delta: String,
+    pub deltas: Vec<StreamDelta>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IndexedTextDeltaNotification {
-    pub thread_id: String,
-    pub turn_id: String,
-    pub item_id: String,
-    pub index: usize,
-    pub delta: String,
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum StreamDelta {
+    AgentText {
+        item_id: String,
+        delta: String,
+    },
+    ReasoningSummary {
+        item_id: String,
+        index: usize,
+        delta: String,
+    },
+    ReasoningText {
+        item_id: String,
+        index: usize,
+        delta: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -725,7 +733,7 @@ pub enum ThreadActiveFlag {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CodexThread {
+pub struct ThreadSummary {
     pub id: String,
     pub mode: ConversationMode,
     pub preview: String,
@@ -736,22 +744,43 @@ pub struct CodexThread {
     pub updated_at: i64,
     pub recency_at: Option<i64>,
     pub status: ThreadStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CodexThread {
+    #[serde(flatten)]
+    pub summary: ThreadSummary,
     pub turns: Vec<ThreadTurn>,
 }
 
+impl std::ops::Deref for CodexThread {
+    type Target = ThreadSummary;
+
+    fn deref(&self) -> &Self::Target {
+        &self.summary
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadStartResponse {
     pub thread: CodexThread,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadForkResponse {
     pub thread: CodexThread,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadUnarchiveResponse {
     pub thread: CodexThread,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -760,19 +789,23 @@ pub struct ThreadCompactStartResponse {}
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadListResponse {
-    pub data: Vec<CodexThread>,
+    pub data: Vec<ThreadSummary>,
     pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadReadResponse {
     pub thread: CodexThread,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadResumeResponse {
     pub thread: CodexThread,
     pub cwd: String,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -781,9 +814,12 @@ pub struct TurnStartResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnSummary {
     pub id: String,
     pub status: TurnStatus,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]

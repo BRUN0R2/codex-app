@@ -16,7 +16,7 @@ import {
 import type { FileChange, ThreadItem, UserContent, VisibleThreadItem } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
 import { projectName } from "../state/projects";
-import type { VisibleThreadTurn } from "../state/threadRuntime";
+import type { VisibleThreadTurn } from "../state/visibleTurnSequence";
 import { fileName, toolIconName, toolLabel } from "./activityLabels";
 import {
   type AgentActivityItem,
@@ -57,6 +57,7 @@ import {
 } from "./timelineScroll";
 import { presentTurnFailure } from "./turnFailure";
 import { type UserMessageEntry, UserMessageNavigator } from "./UserMessageNavigator";
+import { VariableSizeVirtualizer } from "./variableSizeVirtualizer";
 
 interface StarterSuggestion {
   readonly icon: IconName;
@@ -97,8 +98,13 @@ const STARTER_SUGGESTIONS: readonly StarterSuggestion[] = [
 ];
 
 const USER_MESSAGE_COLLAPSED_LINES = 20;
-const TIMELINE_INITIAL_TURN_LIMIT = 60;
-const TIMELINE_HISTORY_CHUNK_SIZE = 40;
+const TIMELINE_ESTIMATED_TURN_HEIGHT = 498;
+const TIMELINE_VIRTUAL_OVERSCAN_PX = 900;
+const TIMELINE_HISTORY_LOAD_THRESHOLD_PX = 640;
+
+interface TimelineUserMessageEntry extends UserMessageEntry {
+  readonly turnIndex: number;
+}
 
 interface TimelineDisclosureBinding {
   readonly clear: (keys: readonly string[], prefixes?: readonly string[]) => void;
@@ -186,6 +192,7 @@ export function Timeline(props: {
 }) {
   let scrollElement: HTMLDivElement | undefined;
   let contentElement: HTMLDivElement | undefined;
+  let virtualListElement: HTMLDivElement | undefined;
   let scrollbarTrackElement: HTMLDivElement | undefined;
   let scrollbarThumbElement: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
@@ -201,13 +208,9 @@ export function Timeline(props: {
   const [showScrollToEnd, setShowScrollToEnd] = createSignal(false);
   const [activeUserMessageIndex, setActiveUserMessageIndex] = createSignal(0);
   const [clock, setClock] = createSignal(Date.now());
-  const [historyWindow, setHistoryWindow] = createSignal<{
-    readonly threadId: string | null;
-    readonly turnLimit: number;
-  }>({
-    threadId: props.controller.currentThread()?.id ?? null,
-    turnLimit: TIMELINE_INITIAL_TURN_LIMIT,
-  });
+  const virtualizer = new VariableSizeVirtualizer(TIMELINE_ESTIMATED_TURN_HEIGHT);
+  const [virtualRevision, setVirtualRevision] = createSignal(0);
+  const [virtualViewport, setVirtualViewport] = createSignal({ offset: 0, size: 1 });
   const [scrollbar, setScrollbar] = createSignal<ScrollbarMetrics>({
     maximumScroll: 0,
     scrollable: false,
@@ -215,15 +218,21 @@ export function Timeline(props: {
     thumbTop: 0,
   });
   const disclosures = createTimelineDisclosureStore();
-  const visibleStartIndex = createMemo(() => {
-    const threadId = props.controller.currentThread()?.id ?? null;
-    const window = historyWindow();
-    const turnLimit = window.threadId === threadId ? window.turnLimit : TIMELINE_INITIAL_TURN_LIMIT;
-    return Math.max(0, props.controller.turns().length - turnLimit);
+  const virtualRange = createMemo(() => {
+    virtualRevision();
+    const viewport = virtualViewport();
+    return virtualizer.range(viewport.offset, viewport.size, TIMELINE_VIRTUAL_OVERSCAN_PX);
   });
-  const visibleTurns = createMemo(() => props.controller.turns().slice(visibleStartIndex()));
-  const userMessages = createMemo<readonly UserMessageEntry[]>(() =>
-    visibleTurns().flatMap((turn) => {
+  const virtualTurns = createMemo(() => {
+    const range = virtualRange();
+    return props.controller.turns().slice(range.start, range.end);
+  });
+  const virtualTotalSize = createMemo(() => {
+    virtualRevision();
+    return virtualizer.totalSize();
+  });
+  const userMessages = createMemo<readonly TimelineUserMessageEntry[]>(() =>
+    props.controller.persistedTurns().flatMap((turn, turnIndex) => {
       const response = [...turn.items].reverse().find((item) => item.type === "agentMessage");
       const detail =
         response?.type === "agentMessage"
@@ -240,6 +249,7 @@ export function Timeline(props: {
             title,
             detail,
             label: detail === null ? title : `${title}. ${detail.replace(/\s+/gu, " ")}`,
+            turnIndex,
           },
         ];
       });
@@ -248,43 +258,38 @@ export function Timeline(props: {
 
   function measureActiveUserMessage(): void {
     const messages = userMessages();
-    if (scrollElement === undefined || messages.length === 0) {
+    if (scrollElement === undefined || virtualListElement === undefined || messages.length === 0) {
       setActiveUserMessageIndex(0);
       return;
     }
-    const viewportTop = scrollElement.getBoundingClientRect().top + 112;
+    virtualRevision();
+    const viewportTop = Math.max(0, scrollElement.scrollTop - virtualListElement.offsetTop + 112);
     setActiveUserMessageIndex(
       findTimelineAnchorIndex(
         messages.length,
-        (index) => {
-          const message = messages[index];
-          if (message === undefined) {
-            return Number.POSITIVE_INFINITY;
-          }
-          return (
-            document.getElementById(userMessageAnchor(message.id))?.getBoundingClientRect().top ??
-            Number.POSITIVE_INFINITY
-          );
-        },
+        (index) => virtualizer.offsetOf(messages[index]?.turnIndex ?? Number.MAX_SAFE_INTEGER),
         viewportTop,
       ),
     );
   }
 
-  function revealOlderTurns(): void {
+  async function revealOlderTurns(): Promise<void> {
     const threadId = props.controller.currentThread()?.id ?? null;
-    if (scrollElement === undefined || threadId === null || visibleStartIndex() === 0) {
+    if (
+      scrollElement === undefined ||
+      threadId === null ||
+      !props.controller.hasOlderHistory() ||
+      props.controller.historyLoading()
+    ) {
       return;
     }
     const previousScrollHeight = scrollElement.scrollHeight;
     const previousScrollTop = scrollElement.scrollTop;
     setFollowingLatest(false);
-    setHistoryWindow((current) => ({
-      threadId,
-      turnLimit:
-        (current.threadId === threadId ? current.turnLimit : TIMELINE_INITIAL_TURN_LIMIT) +
-        TIMELINE_HISTORY_CHUNK_SIZE,
-    }));
+    const loaded = await props.controller.loadOlderHistory();
+    if (!loaded || props.controller.currentThread()?.id !== threadId) {
+      return;
+    }
     if (historyRevealFrame !== undefined) {
       cancelAnimationFrame(historyRevealFrame);
     }
@@ -299,10 +304,47 @@ export function Timeline(props: {
     });
   }
 
+  function updateVirtualViewport(): void {
+    if (scrollElement === undefined || virtualListElement === undefined) {
+      return;
+    }
+    setVirtualViewport({
+      offset: Math.max(0, scrollElement.scrollTop - virtualListElement.offsetTop),
+      size: Math.max(1, scrollElement.clientHeight),
+    });
+  }
+
+  function virtualOffset(index: number): number {
+    virtualRevision();
+    return virtualizer.offsetOf(index);
+  }
+
+  function virtualTurnKey(turnId: string): string {
+    return `${props.controller.currentThread()?.id ?? ""}\u0000${turnId}`;
+  }
+
+  function measureVirtualTurn(key: string, size: number): void {
+    const change = virtualizer.measure(key, size);
+    if (change === null) {
+      return;
+    }
+    const previousBottom = virtualizer.offsetOf(change.index + 1) - change.delta;
+    if (
+      scrollElement !== undefined &&
+      !followingLatest() &&
+      previousBottom <= virtualViewport().offset
+    ) {
+      scrollElement.scrollTop += change.delta;
+    }
+    setVirtualRevision((revision) => revision + 1);
+    synchronizeScroll();
+  }
+
   function measureScroll(userInitiated: boolean): void {
     if (scrollElement === undefined) {
       return;
     }
+    updateVirtualViewport();
     const trackHeight = scrollbarTrackElement?.clientHeight ?? 0;
     setScrollbar(
       calculateTimelineScrollbar({
@@ -326,6 +368,14 @@ export function Timeline(props: {
       }),
     );
     measureActiveUserMessage();
+    if (
+      userInitiated &&
+      scrollElement.scrollTop <= TIMELINE_HISTORY_LOAD_THRESHOLD_PX &&
+      props.controller.hasOlderHistory() &&
+      !props.controller.historyLoading()
+    ) {
+      void revealOlderTurns();
+    }
   }
 
   function markUserScrollIntent(): void {
@@ -390,15 +440,18 @@ export function Timeline(props: {
   }
 
   function scrollToUserMessage(message: UserMessageEntry): void {
-    if (scrollElement === undefined) {
+    if (scrollElement === undefined || virtualListElement === undefined) {
       return;
     }
-    const element = document.getElementById(userMessageAnchor(message.id));
-    if (element === null) {
+    const target = userMessages().find((entry) => entry.id === message.id);
+    if (target === undefined) {
       return;
     }
     setFollowingLatest(false);
-    scrollElement.scrollTo({ behavior: "smooth", top: Math.max(0, element.offsetTop - 32) });
+    scrollElement.scrollTo({
+      behavior: "smooth",
+      top: Math.max(0, virtualListElement.offsetTop + virtualizer.offsetOf(target.turnIndex) - 32),
+    });
   }
 
   function setScrollTopFromThumb(thumbTop: number, userInitiated: boolean): void {
@@ -510,6 +563,15 @@ export function Timeline(props: {
     measureScroll(true);
   }
 
+  createEffect(() => {
+    const threadId = props.controller.currentThread()?.id ?? "";
+    const keys = props.controller.persistedTurns().map((turn) => `${threadId}\u0000${turn.id}`);
+    if (virtualizer.setKeys(keys)) {
+      setVirtualRevision((revision) => revision + 1);
+      queueMicrotask(updateVirtualViewport);
+    }
+  });
+
   onMount(() => {
     if (scrollElement === undefined || contentElement === undefined) {
       return;
@@ -596,25 +658,36 @@ export function Timeline(props: {
                     />
                   }
                 >
-                  <Show when={visibleStartIndex() > 0}>
+                  <Show when={props.controller.hasOlderHistory()}>
                     <button
                       class="timeline-history-button"
-                      onClick={revealOlderTurns}
+                      disabled={props.controller.historyLoading()}
+                      onClick={() => void revealOlderTurns()}
                       type="button"
                     >
-                      Mostrar {Math.min(TIMELINE_HISTORY_CHUNK_SIZE, visibleStartIndex())} turnos
-                      anteriores
+                      {props.controller.historyLoading()
+                        ? "Carregando histórico…"
+                        : "Carregar turnos anteriores"}
                     </button>
                   </Show>
-                  <Index each={visibleTurns()}>
-                    {(turn) => (
-                      <ConversationTurn
-                        clock={clock()}
-                        diffDisplay={props.controller.config()?.config.desktop.diffDisplay}
-                        turn={turn()}
-                      />
-                    )}
-                  </Index>
+                  <div
+                    class="timeline-virtual-list"
+                    ref={virtualListElement}
+                    style={{ height: `${virtualTotalSize()}px` }}
+                  >
+                    <Index each={virtualTurns()}>
+                      {(turn, relativeIndex) => (
+                        <VirtualConversationTurn
+                          clock={clock()}
+                          diffDisplay={props.controller.config()?.config.desktop.diffDisplay}
+                          measurementKey={virtualTurnKey(turn().id)}
+                          onMeasure={measureVirtualTurn}
+                          top={virtualOffset(virtualRange().start + relativeIndex)}
+                          turn={turn()}
+                        />
+                      )}
+                    </Index>
+                  </div>
                 </Show>
               )}
             </Show>
@@ -691,6 +764,63 @@ export function Timeline(props: {
         </Show>
       </div>
     </TimelineDisclosureContext.Provider>
+  );
+}
+
+function VirtualConversationTurn(props: {
+  readonly clock: number;
+  readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly measurementKey: string;
+  readonly onMeasure: (key: string, size: number) => void;
+  readonly top: number;
+  readonly turn: VisibleThreadTurn;
+}) {
+  let element: HTMLDivElement | undefined;
+  let observer: ResizeObserver | undefined;
+  let measurementFrame: number | undefined;
+
+  function measure(): void {
+    if (element !== undefined) {
+      props.onMeasure(props.measurementKey, element.getBoundingClientRect().height);
+    }
+  }
+
+  function scheduleMeasurement(): void {
+    if (measurementFrame !== undefined) {
+      return;
+    }
+    measurementFrame = requestAnimationFrame(() => {
+      measurementFrame = undefined;
+      measure();
+    });
+  }
+
+  onMount(() => {
+    observer = new ResizeObserver(scheduleMeasurement);
+    if (element !== undefined) {
+      observer.observe(element);
+      scheduleMeasurement();
+    }
+  });
+  createEffect(() => {
+    props.measurementKey;
+    scheduleMeasurement();
+  });
+  onCleanup(() => {
+    observer?.disconnect();
+    if (measurementFrame !== undefined) {
+      cancelAnimationFrame(measurementFrame);
+    }
+  });
+
+  return (
+    <div
+      class="timeline-virtual-item"
+      ref={element}
+      style={{ transform: `translate3d(0, ${props.top}px, 0)` }}
+    >
+      <ConversationTurn clock={props.clock} diffDisplay={props.diffDisplay} turn={props.turn} />
+    </div>
   );
 }
 
@@ -1092,6 +1222,7 @@ function ContextCompaction(props: {
 function UserMessage(props: { readonly item: Extract<ThreadItem, { type: "userMessage" }> }) {
   let bubble: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
+  let measurementFrame: number | undefined;
   const disclosure = useTimelineDisclosure(() => `user-message:${props.item.id}`);
   const [collapsible, setCollapsible] = createSignal(false);
   const imageContent = createMemo(() =>
@@ -1111,14 +1242,29 @@ function UserMessage(props: { readonly item: Extract<ThreadItem, { type: "userMe
     setCollapsible(bubble.scrollHeight > bubble.clientHeight + 1);
   }
 
+  function scheduleMeasurement(): void {
+    if (measurementFrame !== undefined) {
+      return;
+    }
+    measurementFrame = requestAnimationFrame(() => {
+      measurementFrame = undefined;
+      measure();
+    });
+  }
+
   onMount(() => {
-    resizeObserver = new ResizeObserver(measure);
+    resizeObserver = new ResizeObserver(scheduleMeasurement);
     if (bubble !== undefined) {
       resizeObserver.observe(bubble);
     }
-    queueMicrotask(measure);
+    scheduleMeasurement();
   });
-  onCleanup(() => resizeObserver?.disconnect());
+  onCleanup(() => {
+    resizeObserver?.disconnect();
+    if (measurementFrame !== undefined) {
+      cancelAnimationFrame(measurementFrame);
+    }
+  });
 
   return (
     <article class="message-row user-message-row" id={userMessageAnchor(props.item.id)}>

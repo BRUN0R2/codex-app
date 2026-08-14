@@ -42,7 +42,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 4;
+  readonly schemaVersion: 5;
   readonly permissionProfile: PermissionProfile;
   readonly permissionProfiles: readonly PermissionProfile[];
 }
@@ -279,7 +279,7 @@ export type ThreadStatus =
   | { readonly type: "active"; readonly activeFlags: readonly "waitingOnApproval"[] }
   | { readonly type: "idle" | "systemError" };
 
-export interface CodexThread {
+export interface ThreadSummary {
   readonly id: string;
   readonly mode: ConversationMode;
   readonly preview: string;
@@ -290,40 +290,50 @@ export interface CodexThread {
   readonly updatedAt: number;
   readonly recencyAt: number | null;
   readonly status: ThreadStatus;
+}
+
+export interface CodexThread extends ThreadSummary {
   readonly turns: readonly ThreadTurn[];
 }
 
 export interface ThreadStartResponse {
   readonly thread: CodexThread;
+  readonly nextCursor: string | null;
 }
 
 export interface ThreadForkResponse {
   readonly thread: CodexThread;
+  readonly nextCursor: string | null;
 }
 
 export interface ThreadUnarchiveResponse {
   readonly thread: CodexThread;
+  readonly nextCursor: string | null;
 }
 
 export type ThreadCompactStartResponse = Record<string, never>;
 
 export interface ThreadListResponse {
-  readonly data: readonly CodexThread[];
+  readonly data: readonly ThreadSummary[];
   readonly nextCursor: string | null;
 }
 
 export interface ThreadReadResponse {
   readonly thread: CodexThread;
+  readonly nextCursor: string | null;
 }
 
 export interface ThreadResumeResponse {
   readonly thread: CodexThread;
   readonly cwd: string;
+  readonly nextCursor: string | null;
 }
 
 export interface TurnSummary {
   readonly id: string;
   readonly status: TurnStatus;
+  readonly createdAt: number;
+  readonly updatedAt: number;
 }
 
 export interface CompletedTurn {
@@ -481,7 +491,7 @@ export interface AuthSessionChangedNotification {
 
 export interface ThreadNotification {
   readonly method: "thread.created" | "thread.updated";
-  readonly params: { readonly thread: CodexThread };
+  readonly params: { readonly thread: ThreadSummary };
 }
 
 export interface ThreadArchivedNotification {
@@ -522,24 +532,25 @@ export interface ItemNotification {
   };
 }
 
-export interface TextDeltaNotification {
-  readonly method: "item.agentTextDelta";
-  readonly params: {
-    readonly threadId: string;
-    readonly turnId: string;
-    readonly itemId: string;
-    readonly delta: string;
-  };
-}
+export type StreamDeltaPayload =
+  | {
+      readonly kind: "agentText";
+      readonly itemId: string;
+      readonly delta: string;
+    }
+  | {
+      readonly kind: "reasoningSummary" | "reasoningText";
+      readonly itemId: string;
+      readonly index: number;
+      readonly delta: string;
+    };
 
-export interface IndexedTextDeltaNotification {
-  readonly method: "item.reasoningSummaryDelta" | "item.reasoningTextDelta";
+export interface StreamDeltasNotification {
+  readonly method: "item.streamDeltas";
   readonly params: {
     readonly threadId: string;
     readonly turnId: string;
-    readonly itemId: string;
-    readonly index: number;
-    readonly delta: string;
+    readonly deltas: readonly StreamDeltaPayload[];
   };
 }
 
@@ -591,12 +602,11 @@ export interface ModelSafetyBufferingUpdatedNotification {
 export type EngineNotification =
   | AuthLoginCompletedNotification
   | AuthSessionChangedNotification
-  | IndexedTextDeltaNotification
   | ItemNotification
   | ModelReroutedNotification
   | ModelSafetyBufferingUpdatedNotification
   | ModelVerificationNotification
-  | TextDeltaNotification
+  | StreamDeltasNotification
   | ThreadArchivedNotification
   | ThreadDeletedNotification
   | ThreadNotification

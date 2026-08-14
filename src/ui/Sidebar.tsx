@@ -10,7 +10,7 @@ import {
 } from "solid-js";
 import { Portal } from "solid-js/web";
 
-import type { CodexThread, ProjectRecord } from "../contracts/types";
+import type { ProjectRecord, ThreadSummary } from "../contracts/types";
 import type { AppController } from "../state/createAppController";
 import { pathsEqual } from "../state/projects";
 import { threadsWithoutConfiguredProject } from "../state/sidebarThreads";
@@ -159,7 +159,7 @@ export function Sidebar(props: SidebarProps) {
     document.removeEventListener("keydown", closeAccountMenuFromKeyboard);
   });
 
-  function beginRename(thread: CodexThread): void {
+  function beginRename(thread: ThreadSummary): void {
     setRenamingId(thread.id);
     setRenameValue(threadTitle(thread));
   }
@@ -670,7 +670,7 @@ interface ProjectGroupProps {
   readonly collapsed: boolean;
   readonly controller: AppController;
   readonly expanded: boolean;
-  readonly onBeginRename: (thread: CodexThread) => void;
+  readonly onBeginRename: (thread: ThreadSummary) => void;
   readonly onSubmitRename: (event: SubmitEvent) => Promise<void>;
   readonly onToggleExpanded: () => void;
   readonly onToggleThreadList: () => void;
@@ -679,7 +679,7 @@ interface ProjectGroupProps {
   readonly renamingId: string | null;
   readonly setRenameValue: (value: string) => void;
   readonly threadListExpanded: boolean;
-  readonly threads: readonly CodexThread[];
+  readonly threads: readonly ThreadSummary[];
 }
 
 function ProjectGroup(props: ProjectGroupProps) {
@@ -864,14 +864,14 @@ function ProjectGroup(props: ProjectGroupProps) {
 
 interface ThreadButtonProps {
   readonly controller: AppController;
-  readonly onBeginRename: (thread: CodexThread) => void;
+  readonly onBeginRename: (thread: ThreadSummary) => void;
   readonly onSubmitRename: (event: SubmitEvent) => Promise<void>;
   readonly onTogglePinned: () => void;
   readonly pinned: boolean;
   readonly renameValue: string;
   readonly renaming: boolean;
   readonly setRenameValue: (value: string) => void;
-  readonly thread: CodexThread;
+  readonly thread: ThreadSummary;
 }
 
 function ThreadButton(props: ThreadButtonProps) {
@@ -967,7 +967,7 @@ function ThreadButton(props: ThreadButtonProps) {
               <button
                 disabled={
                   props.controller.isThreadActive(props.thread.id) ||
-                  props.thread.turns.length === 0
+                  props.thread.preview.length === 0
                 }
                 onClick={() => {
                   closeMenu();
@@ -1005,7 +1005,7 @@ function ThreadButton(props: ThreadButtonProps) {
   );
 }
 
-export function threadTitle(thread: CodexThread): string {
+export function threadTitle(thread: ThreadSummary): string {
   return (thread.name ?? thread.preview) || "Nova tarefa";
 }
 
@@ -1013,7 +1013,7 @@ function matchesProject(project: ProjectRecord, query: string): boolean {
   return `${project.name}\n${project.path}`.toLocaleLowerCase("pt-BR").includes(query);
 }
 
-function matchesThread(thread: CodexThread, query: string): boolean {
+function matchesThread(thread: ThreadSummary, query: string): boolean {
   return `${threadTitle(thread)}\n${thread.projectPath ?? ""}`
     .toLocaleLowerCase("pt-BR")
     .includes(query);

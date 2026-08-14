@@ -8,6 +8,7 @@ mod content_references;
 mod context_window;
 mod provider;
 mod storage;
+mod stream_notifications;
 mod tools;
 
 use std::collections::HashMap;
@@ -28,20 +29,20 @@ use self::provider::ChatGptCodexProvider;
 use self::storage::NativeStorage;
 use self::tools::ToolRegistry;
 use crate::engine::{
-    AccountRateLimitsResponse, ChatModelListResponse, CodexThread, ConfigReadResponse,
-    ConfigUpdate, ConfigUpdateResponse, ConversationMode, DiagnosticStream, EngineCapability,
-    EngineDescriptor, EngineNotification, EngineStartResponse, EngineStorage, EngineTransport,
-    ItemNotification, ModelListResponse, NOTIFICATION_EVENT, OperationAck, OperationFailure,
-    PermissionProfile, RUNTIME_DIAGNOSTIC_EVENT, RUNTIME_STATUS_EVENT, ReasoningEffort,
-    RuntimeDiagnostic, RuntimeState, RuntimeStatus, ServerResponse, ThreadArchivedNotification,
+    AccountRateLimitsResponse, ChatModelListResponse, ConfigReadResponse, ConfigUpdate,
+    ConfigUpdateResponse, ConversationMode, DiagnosticStream, EngineCapability, EngineDescriptor,
+    EngineNotification, EngineStartResponse, EngineStorage, EngineTransport, ItemNotification,
+    ModelListResponse, NOTIFICATION_EVENT, OperationAck, OperationFailure, PermissionProfile,
+    RUNTIME_DIAGNOSTIC_EVENT, RUNTIME_STATUS_EVENT, ReasoningEffort, RuntimeDiagnostic,
+    RuntimeState, RuntimeStatus, ServerResponse, ThreadArchivedNotification,
     ThreadCompactStartResponse, ThreadDeletedNotification, ThreadForkResponse, ThreadListResponse,
     ThreadNotification, ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse,
-    ThreadUnarchiveResponse, ThreadUnarchivedNotification, TurnCompletedNotification, TurnInput,
-    TurnNotification, TurnStartResponse, TurnStatus,
+    ThreadSummary, ThreadUnarchiveResponse, ThreadUnarchivedNotification,
+    TurnCompletedNotification, TurnInput, TurnNotification, TurnStartResponse, TurnStatus,
 };
 use crate::error::AppError;
 
-const CONTRACT_SCHEMA_VERSION: u32 = 4;
+const CONTRACT_SCHEMA_VERSION: u32 = 5;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -257,7 +258,7 @@ impl NativeEngine {
                 directory.to_string_lossy().into_owned()
             }
         };
-        let thread = self
+        let page = self
             .inner
             .storage
             .create_thread(cwd, project_path, mode)
@@ -265,10 +266,13 @@ impl NativeEngine {
         self.inner.emit_notification(
             app,
             EngineNotification::ThreadCreated(ThreadNotification {
-                thread: thread.clone(),
+                thread: page.thread.summary.clone(),
             }),
         )?;
-        Ok(ThreadStartResponse { thread })
+        Ok(ThreadStartResponse {
+            thread: page.thread,
+            next_cursor: page.next_cursor,
+        })
     }
 
     pub async fn thread_list(
@@ -282,17 +286,28 @@ impl NativeEngine {
 
     pub async fn thread_resume(&self, thread_id: String) -> Result<ThreadResumeResponse, AppError> {
         self.ensure_started()?;
-        let thread = self.inner.storage.read_thread(thread_id).await?;
+        let page = self.inner.storage.read_thread_page(thread_id, None).await?;
         Ok(ThreadResumeResponse {
-            cwd: thread.cwd.clone(),
-            thread,
+            cwd: page.thread.cwd.clone(),
+            thread: page.thread,
+            next_cursor: page.next_cursor,
         })
     }
 
-    pub async fn thread_read(&self, thread_id: String) -> Result<ThreadReadResponse, AppError> {
+    pub async fn thread_read(
+        &self,
+        thread_id: String,
+        cursor: Option<String>,
+    ) -> Result<ThreadReadResponse, AppError> {
         self.ensure_started()?;
+        let page = self
+            .inner
+            .storage
+            .read_thread_page(thread_id, cursor)
+            .await?;
         Ok(ThreadReadResponse {
-            thread: self.inner.storage.read_thread(thread_id).await?,
+            thread: page.thread,
+            next_cursor: page.next_cursor,
         })
     }
 
@@ -342,7 +357,7 @@ impl NativeEngine {
         thread_id: String,
     ) -> Result<ThreadUnarchiveResponse, AppError> {
         self.ensure_started()?;
-        let thread = self
+        let page = self
             .inner
             .storage
             .unarchive_thread(thread_id.clone())
@@ -354,10 +369,13 @@ impl NativeEngine {
         self.inner.emit_notification(
             app,
             EngineNotification::ThreadUpdated(ThreadNotification {
-                thread: thread.clone(),
+                thread: page.thread.summary.clone(),
             }),
         )?;
-        Ok(ThreadUnarchiveResponse { thread })
+        Ok(ThreadUnarchiveResponse {
+            thread: page.thread,
+            next_cursor: page.next_cursor,
+        })
     }
 
     pub async fn thread_delete(
@@ -407,14 +425,17 @@ impl NativeEngine {
                 "wait for the active turn to complete before forking its thread".into(),
             ));
         }
-        let thread = self.inner.storage.fork_thread(thread_id).await?;
+        let page = self.inner.storage.fork_thread(thread_id).await?;
         self.inner.emit_notification(
             app,
             EngineNotification::ThreadCreated(ThreadNotification {
-                thread: thread.clone(),
+                thread: page.thread.summary.clone(),
             }),
         )?;
-        Ok(ThreadForkResponse { thread })
+        Ok(ThreadForkResponse {
+            thread: page.thread,
+            next_cursor: page.next_cursor,
+        })
     }
 
     pub async fn thread_compact_start(
@@ -424,7 +445,11 @@ impl NativeEngine {
     ) -> Result<ThreadCompactStartResponse, AppError> {
         self.ensure_started()?;
         self.reap_finished_tasks().await;
-        let thread = self.inner.storage.read_thread(thread_id.clone()).await?;
+        let thread = self
+            .inner
+            .storage
+            .read_thread_summary(thread_id.clone())
+            .await?;
         if thread.mode == ConversationMode::Chat {
             return Err(AppError::Protocol(
                 "ChatGPT consumer threads are compacted by ChatGPT and cannot be compacted by the Codex engine"
@@ -505,7 +530,12 @@ impl NativeEngine {
                 .rollback_unspawned_turn(app, &thread_id, &turn.id, error)
                 .await);
         }
-        let active_thread = match self.inner.storage.read_thread(thread_id.clone()).await {
+        let active_thread = match self
+            .inner
+            .storage
+            .read_thread_summary(thread_id.clone())
+            .await
+        {
             Ok(thread) => thread,
             Err(error) => {
                 return Err(self
@@ -561,7 +591,7 @@ impl NativeEngine {
         let thread = self
             .inner
             .storage
-            .read_thread(request.thread_id.clone())
+            .read_thread_summary(request.thread_id.clone())
             .await?;
         if thread.mode == ConversationMode::Chat {
             return self.start_chat_turn(app, request, thread).await;
@@ -664,7 +694,7 @@ impl NativeEngine {
         let active_thread = match self
             .inner
             .storage
-            .read_thread(request.thread_id.clone())
+            .read_thread_summary(request.thread_id.clone())
             .await
         {
             Ok(thread) => thread,
@@ -716,7 +746,7 @@ impl NativeEngine {
         &self,
         app: &AppHandle,
         request: StartTurn,
-        thread: CodexThread,
+        thread: ThreadSummary,
     ) -> Result<TurnStartResponse, AppError> {
         if request.effort.is_some() || request.service_tier.is_some() {
             return Err(AppError::Protocol(
@@ -809,7 +839,7 @@ impl NativeEngine {
         let active_thread = match self
             .inner
             .storage
-            .read_thread(request.thread_id.clone())
+            .read_thread_summary(request.thread_id.clone())
             .await
         {
             Ok(thread) => thread,
@@ -865,7 +895,7 @@ impl NativeEngine {
         let thread = self
             .inner
             .storage
-            .read_thread(request.thread_id.clone())
+            .read_thread_summary(request.thread_id.clone())
             .await?;
         if thread.mode == ConversationMode::Chat {
             return Err(AppError::Protocol(
@@ -915,7 +945,12 @@ impl NativeEngine {
             self.inner
                 .emit_diagnostic(app, DiagnosticStream::Runtime, error.to_string());
         }
-        match self.inner.storage.read_thread(request.thread_id).await {
+        match self
+            .inner
+            .storage
+            .read_thread_summary(request.thread_id)
+            .await
+        {
             Ok(thread) => {
                 if let Err(error) = self.inner.emit_notification(
                     app,
@@ -1226,7 +1261,7 @@ impl NativeEngineInner {
         ) {
             self.emit_diagnostic(app, DiagnosticStream::Runtime, error.to_string());
         }
-        match self.storage.read_thread(thread_id).await {
+        match self.storage.read_thread_summary(thread_id).await {
             Ok(thread) => {
                 if let Err(error) = self.emit_notification(
                     app,

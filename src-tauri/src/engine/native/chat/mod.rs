@@ -3,7 +3,7 @@ mod integrity;
 mod models;
 mod stream;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tauri::AppHandle;
@@ -11,20 +11,20 @@ use tokio::sync::{RwLock, watch};
 
 use self::client::{ChatClient, ChatConversationRequest};
 use self::models::{ChatModelCatalog, SelectedChatModel};
-use self::stream::ChatStreamEvent;
+use self::stream::{ChatStreamEvent, MAX_MESSAGE_TEXT_BYTES};
 use super::NativeEngineInner;
 use super::agent::{PreparedTurn, RunCompletion};
 use super::auth::ChatGptAuth;
 use super::content_references::strip_content_reference_markers;
 use super::provider::{ResponseContent, ResponseItem};
+use super::stream_notifications::StreamNotificationBatcher;
 use crate::engine::{
-    ChatModelListResponse, EngineNotification, ItemNotification, MessagePhase,
-    TextDeltaNotification, ThreadItem,
+    ChatModelListResponse, EngineNotification, ItemNotification, MessagePhase, StreamDelta,
+    ThreadItem,
 };
 use crate::error::AppError;
 
 const MAX_MODELS: usize = 100;
-const MAX_STREAM_DELTA_BYTES: usize = 64 * 1_024;
 
 #[derive(Default)]
 pub(super) struct ChatGptConsumerProvider {
@@ -179,117 +179,129 @@ pub(super) async fn run_turn(
 
     let mut messages = BTreeMap::<String, String>::new();
     let mut message_order = Vec::<String>::new();
-    let mut emitted = HashMap::<String, String>::new();
     let mut saw_completed = false;
+    let stream_deltas = StreamNotificationBatcher::new(
+        Arc::clone(&inner),
+        app.clone(),
+        run.thread_id.clone(),
+        run.turn_id.clone(),
+    );
 
-    while let Some(event) = stream.next_event(&mut run.cancellation).await? {
-        match event {
-            ChatStreamEvent::ConversationId(id) => conversation_id = Some(id),
-            ChatStreamEvent::Message(snapshot) => {
-                if let Some(id) = snapshot.conversation_id {
-                    conversation_id = Some(id);
+    let result = async {
+        while let Some(event) = stream.next_event(&mut run.cancellation).await? {
+            match event {
+                ChatStreamEvent::ConversationId(id) => conversation_id = Some(id),
+                ChatStreamEvent::Message(snapshot) => {
+                    if let Some(id) = snapshot.conversation_id {
+                        conversation_id = Some(id);
+                    }
+                    if !messages.contains_key(&snapshot.id) {
+                        message_order.push(snapshot.id.clone());
+                    }
+                    let previous = messages.get(&snapshot.id).map_or("", String::as_str);
+                    if snapshot.text.starts_with(previous) {
+                        let delta = &snapshot.text[previous.len()..];
+                        emit_text_delta(&stream_deltas, &snapshot.id, delta).await?;
+                    }
+                    messages.insert(snapshot.id, snapshot.text);
                 }
-                if !messages.contains_key(&snapshot.id) {
-                    message_order.push(snapshot.id.clone());
+                ChatStreamEvent::MessageDelta(update) => {
+                    if let Some(id) = update.conversation_id {
+                        conversation_id = Some(id);
+                    }
+                    if !messages.contains_key(&update.id) {
+                        message_order.push(update.id.clone());
+                    }
+                    let text = messages.entry(update.id.clone()).or_default();
+                    let next_length =
+                        text.len().checked_add(update.delta.len()).ok_or_else(|| {
+                            AppError::Provider("ChatGPT message size overflowed".into())
+                        })?;
+                    if next_length > MAX_MESSAGE_TEXT_BYTES {
+                        return Err(AppError::Provider(format!(
+                            "ChatGPT assistant message exceeds {MAX_MESSAGE_TEXT_BYTES} bytes"
+                        )));
+                    }
+                    emit_text_delta(&stream_deltas, &update.id, &update.delta).await?;
+                    text.push_str(&update.delta);
                 }
-                let previous = emitted.entry(snapshot.id.clone()).or_default();
-                if snapshot.text.starts_with(previous.as_str()) {
-                    let delta = &snapshot.text[previous.len()..];
-                    emit_text_delta(
-                        &inner,
-                        &app,
-                        &run.thread_id,
-                        &run.turn_id,
-                        &snapshot.id,
-                        delta,
-                    )?;
+                ChatStreamEvent::Completed => {
+                    stream_deltas.flush().await?;
+                    saw_completed = true;
+                    break;
                 }
-                *previous = snapshot.text.clone();
-                messages.insert(snapshot.id, snapshot.text);
+                ChatStreamEvent::Interrupted => {
+                    stream_deltas.flush().await?;
+                    return Ok(RunCompletion::Interrupted);
+                }
             }
-            ChatStreamEvent::Completed => {
-                saw_completed = true;
-                break;
-            }
-            ChatStreamEvent::Interrupted => return Ok(RunCompletion::Interrupted),
         }
-    }
-    if !saw_completed {
-        return Err(AppError::Provider(
-            "ChatGPT response stream ended before completion".into(),
-        ));
-    }
-    let conversation_id = conversation_id
-        .ok_or_else(|| AppError::Provider("ChatGPT completed without a conversation id".into()))?;
-    let completed_messages = message_order
-        .into_iter()
-        .filter_map(|id| {
-            messages
-                .remove(&id)
-                .filter(|text| !text.is_empty())
-                .map(|text| (id, text))
-        })
-        .collect::<Vec<_>>();
-    let parent_message_id = completed_messages
-        .last()
-        .map(|(id, _)| id.clone())
-        .ok_or_else(|| {
-            AppError::Provider("ChatGPT completed without an assistant message".into())
+        stream_deltas.flush().await?;
+        if !saw_completed {
+            return Err(AppError::Provider(
+                "ChatGPT response stream ended before completion".into(),
+            ));
+        }
+        let conversation_id = conversation_id.ok_or_else(|| {
+            AppError::Provider("ChatGPT completed without a conversation id".into())
         })?;
+        let completed_messages = message_order
+            .into_iter()
+            .filter_map(|id| {
+                messages
+                    .remove(&id)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| (id, text))
+            })
+            .collect::<Vec<_>>();
+        let parent_message_id = completed_messages
+            .last()
+            .map(|(id, _)| id.clone())
+            .ok_or_else(|| {
+                AppError::Provider("ChatGPT completed without an assistant message".into())
+            })?;
 
-    for (id, text) in completed_messages {
-        let item = ThreadItem::AgentMessage {
-            id,
-            text: strip_content_reference_markers(&text),
-            phase: Some(MessagePhase::FinalAnswer),
-        };
+        for (id, text) in completed_messages {
+            let item = ThreadItem::AgentMessage {
+                id,
+                text: strip_content_reference_markers(&text),
+                phase: Some(MessagePhase::FinalAnswer),
+            };
+            inner
+                .storage
+                .append_thread_item(run.turn_id.clone(), item.clone())
+                .await?;
+            inner.emit_notification(
+                &app,
+                EngineNotification::ItemCompleted(ItemNotification {
+                    thread_id: run.thread_id.clone(),
+                    turn_id: run.turn_id.clone(),
+                    item,
+                }),
+            )?;
+        }
         inner
             .storage
-            .append_thread_item(run.turn_id.clone(), item.clone())
+            .update_chat_conversation_state(run.thread_id, conversation_id, parent_message_id)
             .await?;
-        inner.emit_notification(
-            &app,
-            EngineNotification::ItemCompleted(ItemNotification {
-                thread_id: run.thread_id.clone(),
-                turn_id: run.turn_id.clone(),
-                item,
-            }),
-        )?;
+        Ok(RunCompletion::Completed)
     }
-    inner
-        .storage
-        .update_chat_conversation_state(run.thread_id, conversation_id, parent_message_id)
-        .await?;
-    Ok(RunCompletion::Completed)
+    .await;
+    stream_deltas.flush().await?;
+    result
 }
 
-fn emit_text_delta(
-    inner: &NativeEngineInner,
-    app: &AppHandle,
-    thread_id: &str,
-    turn_id: &str,
+async fn emit_text_delta(
+    stream_deltas: &StreamNotificationBatcher,
     item_id: &str,
     delta: &str,
 ) -> Result<(), AppError> {
-    let mut remaining = delta;
-    while !remaining.is_empty() {
-        let mut boundary = remaining.len().min(MAX_STREAM_DELTA_BYTES);
-        while !remaining.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        let (chunk, rest) = remaining.split_at(boundary);
-        inner.emit_notification(
-            app,
-            EngineNotification::AgentTextDelta(TextDeltaNotification {
-                thread_id: thread_id.to_string(),
-                turn_id: turn_id.to_string(),
-                item_id: item_id.to_string(),
-                delta: chunk.to_string(),
-            }),
-        )?;
-        remaining = rest;
-    }
-    Ok(())
+    stream_deltas
+        .push(StreamDelta::AgentText {
+            item_id: item_id.to_string(),
+            delta: delta.to_string(),
+        })
+        .await
 }
 
 #[cfg(test)]

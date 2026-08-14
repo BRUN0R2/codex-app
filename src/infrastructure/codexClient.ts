@@ -167,9 +167,9 @@ export function resumeThread(threadId: string): Promise<ThreadResumeResponse> {
   });
 }
 
-export function readThread(threadId: string): Promise<ThreadReadResponse> {
+export function readThread(threadId: string, cursor: string | null): Promise<ThreadReadResponse> {
   return invokeDecoded("engine_thread_read", decodeThreadReadResponse, {
-    request: { threadId },
+    request: { cursor, threadId },
   });
 }
 

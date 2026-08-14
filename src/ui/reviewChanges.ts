@@ -1,5 +1,5 @@
 import type { FileChange } from "../contracts/types";
-import type { VisibleThreadTurn } from "../state/threadRuntime";
+import { findVisibleTurn, type VisibleTurnSequence } from "../state/visibleTurnSequence";
 
 import { type DiffStats, summarizeDiff } from "./SplitDiffView";
 
@@ -8,13 +8,11 @@ export interface ReviewStats extends DiffStats {
 }
 
 export function latestTurnFileChanges(
-  turns: readonly VisibleThreadTurn[],
+  turns: VisibleTurnSequence,
   activeTurnId: string | null,
 ): readonly FileChange[] {
   const turn =
-    (activeTurnId === null
-      ? undefined
-      : turns.find((candidate) => candidate.id === activeTurnId)) ?? turns.at(-1);
+    (activeTurnId === null ? undefined : findVisibleTurn(turns, activeTurnId)) ?? turns.at(-1);
   if (turn === undefined) {
     return [];
   }

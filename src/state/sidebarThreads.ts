@@ -1,10 +1,10 @@
-import type { CodexThread, ProjectRecord } from "../contracts/types";
+import type { ProjectRecord, ThreadSummary } from "../contracts/types";
 import { pathsEqual } from "./projects";
 
 export function threadsWithoutConfiguredProject(
-  threads: readonly CodexThread[],
+  threads: readonly ThreadSummary[],
   projects: readonly ProjectRecord[],
-): readonly CodexThread[] {
+): readonly ThreadSummary[] {
   if (projects.length === 0) {
     return threads;
   }

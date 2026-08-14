@@ -1,16 +1,16 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import DOMPurify from "dompurify";
-import { marked } from "marked";
-import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { presentAssistantText } from "./contentReferenceMarkers";
 import { useImageViewer } from "./ImageViewer";
 import { resolveImageSource } from "./imageSource";
+import { renderMarkdown } from "./markdownRenderer";
+import { createMarkdownStreamRenderer, type MarkdownRenderUpdate } from "./markdownStreamRenderer";
+import { renderMarkdownOffThread, shouldRenderMarkdownOffThread } from "./markdownWorkerClient";
 import {
   createBrowserRenderThrottleScheduler,
   createLatestValueThrottle,
   markdownStreamRenderInterval,
 } from "./renderThrottle";
-import { highlightCode } from "./syntaxHighlight";
 
 export interface MarkdownProps {
   readonly class?: string;
@@ -20,13 +20,83 @@ export interface MarkdownProps {
 
 export function Markdown(props: MarkdownProps) {
   let element: HTMLDivElement | undefined;
+  let tailStart: Comment | undefined;
+  let tailEnd: Comment | undefined;
+  let pendingMarkdownRender: AbortController | undefined;
   const [presentedText, setPresentedText] = createSignal(presentAssistantText(props.text));
   const renderThrottle = createLatestValueThrottle({
     emit: setPresentedText,
     scheduler: createBrowserRenderThrottleScheduler(),
   });
-  const html = createMemo(() => renderMarkdown(presentedText()));
+  const markdownRenderer = createMarkdownStreamRenderer(renderMarkdown);
   const viewer = useImageViewer();
+
+  function renderPresentedText(source: string, streaming: boolean): void {
+    if (element === undefined) {
+      return;
+    }
+    pendingMarkdownRender?.abort();
+    pendingMarkdownRender = undefined;
+    if (!streaming && shouldRenderMarkdownOffThread(source)) {
+      const render = new AbortController();
+      pendingMarkdownRender = render;
+      void renderMarkdownOffThread(source, render.signal)
+        .then((html) => {
+          if (render.signal.aborted) {
+            return;
+          }
+          pendingMarkdownRender = undefined;
+          applyRenderUpdate(markdownRenderer.finalize(source, html));
+        })
+        .catch((reason: unknown) => {
+          if (render.signal.aborted) {
+            return;
+          }
+          pendingMarkdownRender = undefined;
+          console.error("Failed to render Markdown off the UI thread", reason);
+          applyRenderUpdate(markdownRenderer.render(source, false));
+        });
+      return;
+    }
+    applyRenderUpdate(markdownRenderer.render(source, streaming));
+  }
+
+  function applyRenderUpdate(update: MarkdownRenderUpdate): void {
+    if (element === undefined) {
+      return;
+    }
+    if (update.reset || tailStart === undefined || tailEnd === undefined) {
+      element.replaceChildren();
+      tailStart = document.createComment("markdown-tail-start");
+      tailEnd = document.createComment("markdown-tail-end");
+      element.append(tailStart, tailEnd);
+    }
+    clearTail();
+    insertHtml(update.appendHtml, tailStart);
+    insertHtml(update.tailHtml, tailEnd);
+    queueMicrotask(hydrateImages);
+  }
+
+  function clearTail(): void {
+    if (tailStart === undefined || tailEnd === undefined) {
+      return;
+    }
+    let node = tailStart.nextSibling;
+    while (node !== null && node !== tailEnd) {
+      const next = node.nextSibling;
+      node.remove();
+      node = next;
+    }
+  }
+
+  function insertHtml(html: string, before: Node | undefined): void {
+    if (element === undefined || before === undefined || html.length === 0) {
+      return;
+    }
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    element.insertBefore(template.content, before);
+  }
 
   function handleClick(event: MouseEvent): void {
     const target = event.target;
@@ -119,8 +189,7 @@ export function Markdown(props: MarkdownProps) {
   });
 
   createEffect(() => {
-    html();
-    queueMicrotask(hydrateImages);
+    renderPresentedText(presentedText(), props.streaming === true);
   });
 
   onMount(() => {
@@ -128,57 +197,13 @@ export function Markdown(props: MarkdownProps) {
     element?.addEventListener("keydown", handleKeyDown);
   });
   onCleanup(() => {
+    pendingMarkdownRender?.abort();
     renderThrottle.dispose();
     element?.removeEventListener("click", handleClick);
     element?.removeEventListener("keydown", handleKeyDown);
   });
 
-  return <div class={`markdown ${props.class ?? ""}`} innerHTML={html()} ref={element} />;
-}
-
-function renderMarkdown(source: string): string {
-  const renderer = new marked.Renderer();
-  renderer.code = ({ text, lang }: { text: string; lang?: string }) => {
-    const highlighted = highlightCode(text, lang);
-    const langClass = lang ? ` class="language-${lang}"` : "";
-    return `<pre><code${langClass}>${highlighted}</code></pre>`;
-  };
-  renderer.image = ({
-    href,
-    text,
-    title,
-  }: {
-    href: string;
-    text: string;
-    title: string | null;
-  }) => {
-    const titleAttribute = title === null ? "" : ` title="${escapeAttribute(title)}"`;
-    return `<img alt="${escapeAttribute(text)}" data-image-source="${escapeAttribute(href)}" loading="lazy" role="button" tabindex="0"${titleAttribute}>`;
-  };
-
-  const parsed = marked.parse(source.replace(/^[\u200B-\u200F\uFEFF]/u, ""), {
-    async: false,
-    breaks: false,
-    gfm: true,
-    renderer,
-  }) as string;
-
-  return DOMPurify.sanitize(parsed, {
-    ADD_ATTR: ["target", "class", "data-image-source", "loading", "role", "tabindex", "title"],
-    ADD_TAGS: ["span"],
-    FORBID_ATTR: ["style"],
-    FORBID_TAGS: ["button", "form", "input", "select", "textarea"],
-    RETURN_TRUSTED_TYPE: false,
-    USE_PROFILES: { html: true },
-  });
-}
-
-function escapeAttribute(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+  return <div class={`markdown ${props.class ?? ""}`} ref={element} />;
 }
 
 function safeExternalUrl(href: string): string | null {

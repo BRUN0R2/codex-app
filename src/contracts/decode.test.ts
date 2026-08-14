@@ -93,7 +93,7 @@ describe("decodificação dos contratos nativos", () => {
           "explicitApprovals",
         ],
       },
-      schemaVersion: 4,
+      schemaVersion: 5,
       permissionProfile: { sandbox: "workspace-write", approvals: "on-request" },
       permissionProfiles: [
         { sandbox: "read-only", approvals: "untrusted" },
@@ -118,7 +118,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 4,
+        schemaVersion: 5,
         permissionProfile: { sandbox: "danger-full-access", approvals: "on-request" },
         permissionProfiles: [],
       }),
@@ -196,6 +196,7 @@ describe("decodificação dos contratos nativos", () => {
 
   it("mantém saídas de ferramenta dentro do limite publicado pelo motor", () => {
     const response = (output: string) => ({
+      nextCursor: null,
       thread: {
         id: "thread-output-limit",
         mode: "codex",
@@ -371,6 +372,44 @@ describe("decodificação dos contratos nativos", () => {
     }
   });
 
+  it("decodifica lotes heterogêneos de deltas com limites explícitos", () => {
+    const decoded = decodeEngineNotification({
+      method: "item.streamDeltas",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        deltas: [
+          { kind: "agentText", itemId: "message-1", delta: "Olá" },
+          {
+            kind: "reasoningSummary",
+            itemId: "reasoning-1",
+            index: 0,
+            delta: "Analisando",
+          },
+        ],
+      },
+    });
+    expect(decoded.method).toBe("item.streamDeltas");
+    if (decoded.method !== "item.streamDeltas") {
+      throw new Error("O lote de deltas mudou de método.");
+    }
+    expect(decoded.params.deltas).toHaveLength(2);
+    expect(() =>
+      decodeEngineNotification({
+        method: "item.streamDeltas",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          deltas: Array.from({ length: 129 }, () => ({
+            kind: "agentText",
+            itemId: "message-1",
+            delta: "x",
+          })),
+        },
+      }),
+    ).toThrow(ContractError);
+  });
+
   it("decodifica somente projeções terminais completas", () => {
     const notification = (turn: Record<string, unknown>) => ({
       method: "turn.completed",
@@ -452,6 +491,7 @@ describe("decodificação dos contratos nativos", () => {
 
   it("preserva falhas de turno e rejeita estados incoerentes", () => {
     const response = {
+      nextCursor: null,
       thread: {
         id: "thread-1",
         mode: "codex",
@@ -481,6 +521,7 @@ describe("decodificação dos contratos nativos", () => {
     );
     expect(
       decodeThreadReadResponse({
+        nextCursor: null,
         thread: {
           ...response.thread,
           cwd: "C:\\app-data\\projectless-workspace",
@@ -490,6 +531,7 @@ describe("decodificação dos contratos nativos", () => {
     ).toBeNull();
     expect(() =>
       decodeThreadReadResponse({
+        nextCursor: null,
         thread: {
           ...response.thread,
           turns: [{ ...response.thread.turns[0], status: "completed" }],
@@ -498,6 +540,7 @@ describe("decodificação dos contratos nativos", () => {
     ).toThrow("failed turns require an error");
     expect(() =>
       decodeThreadReadResponse({
+        nextCursor: null,
         thread: {
           ...response.thread,
           turns: [{ ...response.thread.turns[0], createdAt: 3, updatedAt: 2 }],

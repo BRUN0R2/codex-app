@@ -14,6 +14,7 @@ import type {
   PermissionProfile,
   ProjectRecord,
   ThreadListResponse,
+  ThreadSummary,
   VisibleThreadItem,
 } from "../contracts/types";
 import { saveProjects } from "../state/projects";
@@ -53,7 +54,7 @@ const PREVIEW_ENGINE = {
       "nativeTools",
     ],
   },
-  schemaVersion: 4,
+  schemaVersion: 5,
   permissionProfile: PREVIEW_PERMISSION_PROFILE,
   permissionProfiles: [
     { sandbox: "read-only", approvals: "untrusted" },
@@ -516,9 +517,24 @@ const PREVIEW_CONTEXT_THREAD = {
 } as const satisfies CodexThread;
 
 const PREVIEW_THREADS = {
-  data: [PREVIEW_CONTEXT_THREAD],
+  data: [previewThreadSummary(PREVIEW_CONTEXT_THREAD)],
   nextCursor: null,
 } as const satisfies ThreadListResponse;
+
+function previewThreadSummary(thread: CodexThread): ThreadSummary {
+  return {
+    id: thread.id,
+    mode: thread.mode,
+    preview: thread.preview,
+    name: thread.name,
+    cwd: thread.cwd,
+    projectPath: thread.projectPath,
+    createdAt: thread.createdAt,
+    updatedAt: thread.updatedAt,
+    recencyAt: thread.recencyAt,
+    status: thread.status,
+  };
+}
 
 const PREVIEW_RATE_LIMITS = {
   rateLimits: {
@@ -564,20 +580,28 @@ export function setupBrowserPreview(): void {
         case "engine_thread_list":
           return PREVIEW_THREADS;
         case "engine_thread_resume":
-          return { thread: PREVIEW_CONTEXT_THREAD, cwd: PREVIEW_CONTEXT_THREAD.cwd };
+          return {
+            thread: PREVIEW_CONTEXT_THREAD,
+            cwd: PREVIEW_CONTEXT_THREAD.cwd,
+            nextCursor: null,
+          };
         case "engine_account_rate_limits_read":
           return PREVIEW_RATE_LIMITS;
         case "engine_turn_interrupt":
           return { applied: true };
         case "engine_turn_steer":
           return { applied: true };
-        case "engine_turn_start":
+        case "engine_turn_start": {
+          const now = Math.floor(Date.now() / 1_000);
           return {
             turn: {
               id: `preview-turn-${Date.now()}`,
               status: "inProgress",
+              createdAt: now,
+              updatedAt: now,
             },
           };
+        }
         case "plugin:dialog|open": {
           const options = (args as { options?: { directory?: boolean } }).options;
           return options?.directory === true

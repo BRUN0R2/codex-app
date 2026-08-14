@@ -77,8 +77,12 @@ impl EngineManager {
         self.engine.thread_resume(thread_id).await
     }
 
-    pub async fn thread_read(&self, thread_id: String) -> Result<ThreadReadResponse, AppError> {
-        self.engine.thread_read(thread_id).await
+    pub async fn thread_read(
+        &self,
+        thread_id: String,
+        cursor: Option<String>,
+    ) -> Result<ThreadReadResponse, AppError> {
+        self.engine.thread_read(thread_id, cursor).await
     }
 
     pub async fn thread_set_name(

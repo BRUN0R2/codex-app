@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -11,11 +13,18 @@ use uuid::Uuid;
 use super::context_window::ContextUsageSnapshot;
 use super::provider::ResponseItem;
 use crate::engine::{
-    AppConfig, CodexThread, CompletedTurn, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
+    AppConfig, CompletedTurn, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
     ConversationMode, DesktopPreferences, OperationAck, ThreadActiveFlag, ThreadItem,
-    ThreadListResponse, ThreadStatus, ThreadTurn, TurnStatus, TurnSummary,
+    ThreadListResponse, ThreadStatus, ThreadSummary, TurnStatus, TurnSummary,
 };
 use crate::error::AppError;
+
+#[cfg(test)]
+use crate::engine::CodexThread;
+
+mod history;
+
+use self::history::{StoredThreadPage, parse_history_cursor, read_thread_page as load_thread_page};
 
 const DATABASE_FILE_NAME: &str = "native-state-profile-v2.sqlite3";
 const DATABASE_SCHEMA_VERSION: i64 = 1;
@@ -30,15 +39,23 @@ const MAX_CURSOR_BYTES: usize = 20;
 const MAX_ITEM_BYTES: usize = 2 * 1_048_576;
 const MAX_HISTORY_BYTES: usize = 32 * 1_048_576;
 const MAX_HISTORY_ITEMS: usize = 20_000;
-const MAX_THREAD_TURNS: usize = 1_000;
 const MAX_THREAD_NAME_BYTES: usize = 256;
 const MAX_PREVIEW_BYTES: usize = 512;
 const MAX_DEVELOPER_INSTRUCTIONS_BYTES: usize = 262_144;
 const MAX_IDENTIFIER_BYTES: usize = 256;
+const MAX_DATABASE_CONNECTIONS: u32 = 8;
+
+type SqlitePool = Pool<SqliteConnectionManager>;
+
+#[derive(Debug)]
+struct Database {
+    path: PathBuf,
+    pool: SqlitePool,
+}
 
 #[derive(Debug)]
 pub struct NativeStorage {
-    database_path: RwLock<Option<PathBuf>>,
+    database: RwLock<Option<Database>>,
     owner_id: String,
 }
 
@@ -94,7 +111,7 @@ struct ProviderHistoryPage {
 impl Default for NativeStorage {
     fn default() -> Self {
         Self {
-            database_path: RwLock::new(None),
+            database: RwLock::new(None),
             owner_id: Uuid::now_v7().to_string(),
         }
     }
@@ -110,7 +127,13 @@ impl NativeStorage {
     }
 
     async fn initialize_at(&self, database_path: PathBuf) -> Result<(), AppError> {
-        if self.database_path.read().await.as_ref() == Some(&database_path) {
+        if self
+            .database
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|database| database.path == database_path)
+        {
             return Ok(());
         }
         let parent = database_path
@@ -120,9 +143,8 @@ impl NativeStorage {
             .await
             .map_err(|error| AppError::Storage(error.to_string()))?;
 
-        let path = database_path.clone();
-        run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+        let database = run_blocking(move || {
+            let mut connection = open_database_connection(&database_path)?;
             let version: i64 = connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .map_err(storage_error)?;
@@ -145,11 +167,25 @@ impl NativeStorage {
                     [unix_timestamp()?],
                 )
                 .map_err(storage_error)?;
-            transaction.commit().map_err(storage_error)
+            transaction.commit().map_err(storage_error)?;
+            drop(connection);
+
+            let manager = SqliteConnectionManager::file(&database_path)
+                .with_init(|connection| configure_database_connection(connection));
+            let pool = Pool::builder()
+                .max_size(database_connection_limit())
+                .min_idle(Some(1))
+                .connection_timeout(Duration::from_secs(5))
+                .build(manager)
+                .map_err(pool_error)?;
+            Ok(Database {
+                path: database_path,
+                pool,
+            })
         })
         .await?;
 
-        *self.database_path.write().await = Some(database_path);
+        *self.database.write().await = Some(database);
         Ok(())
     }
 
@@ -158,10 +194,10 @@ impl NativeStorage {
         cwd: String,
         project_path: Option<String>,
         mode: ConversationMode,
-    ) -> Result<CodexThread, AppError> {
-        let path = self.path().await?;
+    ) -> Result<StoredThreadPage, AppError> {
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             let id = Uuid::now_v7().to_string();
             let now = unix_timestamp()?;
             connection
@@ -172,7 +208,7 @@ impl NativeStorage {
                     params![id, cwd, project_path, mode.as_str(), now],
                 )
                 .map_err(storage_error)?;
-            read_thread(&connection, &id)
+            load_thread_page(&connection, &id, None)
         })
         .await
     }
@@ -183,9 +219,9 @@ impl NativeStorage {
         archived: bool,
     ) -> Result<ThreadListResponse, AppError> {
         let offset = parse_cursor(cursor.as_deref())?;
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             let requested = THREAD_PAGE_SIZE + 1;
             let requested_sql = i64::try_from(requested)
                 .map_err(|error| AppError::Storage(error.to_string()))?;
@@ -221,7 +257,7 @@ impl NativeStorage {
                 .map_err(storage_error)?;
             let has_more = data.len() > THREAD_PAGE_SIZE;
             data.truncate(THREAD_PAGE_SIZE);
-            let data = data.into_iter().map(ThreadHeader::without_turns).collect();
+            let data = data.into_iter().map(ThreadHeader::into_summary).collect();
             Ok(ThreadListResponse {
                 data,
                 next_cursor: has_more.then(|| (offset + THREAD_PAGE_SIZE).to_string()),
@@ -230,11 +266,30 @@ impl NativeStorage {
         .await
     }
 
-    pub async fn read_thread(&self, thread_id: String) -> Result<CodexThread, AppError> {
-        let path = self.path().await?;
+    #[cfg(test)]
+    async fn read_thread(&self, thread_id: String) -> Result<CodexThread, AppError> {
+        Ok(self.read_thread_page(thread_id, None).await?.thread)
+    }
+
+    pub async fn read_thread_page(
+        &self,
+        thread_id: String,
+        cursor: Option<String>,
+    ) -> Result<StoredThreadPage, AppError> {
+        let cursor = parse_history_cursor(cursor.as_deref(), &thread_id)?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
-            read_thread(&connection, &thread_id)
+            let connection = pool.get().map_err(pool_error)?;
+            load_thread_page(&connection, &thread_id, cursor.as_ref())
+        })
+        .await
+    }
+
+    pub async fn read_thread_summary(&self, thread_id: String) -> Result<ThreadSummary, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            read_thread_header(&connection, &thread_id).map(ThreadHeader::into_summary)
         })
         .await
     }
@@ -243,11 +298,11 @@ impl NativeStorage {
         &self,
         thread_id: String,
         name: String,
-    ) -> Result<CodexThread, AppError> {
+    ) -> Result<ThreadSummary, AppError> {
         validate_text("thread name", &name, MAX_THREAD_NAME_BYTES)?;
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             let changed = connection
                 .execute(
                     "UPDATE threads SET name = ?1, updated_at = ?2
@@ -256,15 +311,15 @@ impl NativeStorage {
                 )
                 .map_err(storage_error)?;
             require_changed(changed, "thread")?;
-            read_thread(&connection, &thread_id)
+            read_thread_header(&connection, &thread_id).map(ThreadHeader::into_summary)
         })
         .await
     }
 
     pub async fn archive_thread(&self, thread_id: String) -> Result<OperationAck, AppError> {
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             let transaction = connection
                 .unchecked_transaction()
                 .map_err(storage_error)?;
@@ -294,10 +349,10 @@ impl NativeStorage {
         .await
     }
 
-    pub async fn unarchive_thread(&self, thread_id: String) -> Result<CodexThread, AppError> {
-        let path = self.path().await?;
+    pub async fn unarchive_thread(&self, thread_id: String) -> Result<StoredThreadPage, AppError> {
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             let changed = connection
                 .execute(
                     "UPDATE threads SET archived = 0, updated_at = ?1
@@ -306,7 +361,7 @@ impl NativeStorage {
                 )
                 .map_err(storage_error)?;
             require_changed(changed, "archived thread")?;
-            read_thread(&connection, &thread_id)
+            load_thread_page(&connection, &thread_id, None)
         })
         .await
     }
@@ -329,9 +384,9 @@ impl NativeStorage {
         thread_id: String,
         active_turn_id: Option<String>,
     ) -> Result<OperationAck, AppError> {
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+            let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection.transaction().map_err(storage_error)?;
             if let Some(active_turn_id) = active_turn_id {
                 let owned: bool = transaction
@@ -376,10 +431,13 @@ impl NativeStorage {
         .await
     }
 
-    pub async fn fork_thread(&self, source_thread_id: String) -> Result<CodexThread, AppError> {
-        let path = self.path().await?;
+    pub async fn fork_thread(
+        &self,
+        source_thread_id: String,
+    ) -> Result<StoredThreadPage, AppError> {
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+            let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection.transaction().map_err(storage_error)?;
             let source = transaction
                 .query_row(
@@ -414,31 +472,6 @@ impl NativeStorage {
                 return Err(AppError::State(
                     "an active thread cannot be forked until its current turn completes".into(),
                 ));
-            }
-
-            let turn_count: i64 = transaction
-                .query_row(
-                    "SELECT COUNT(*) FROM turns WHERE thread_id = ?1",
-                    [&source_thread_id],
-                    |row| row.get(0),
-                )
-                .map_err(storage_error)?;
-            if turn_count > MAX_THREAD_TURNS as i64 {
-                return Err(AppError::Storage(format!(
-                    "source thread exceeds {MAX_THREAD_TURNS} turns"
-                )));
-            }
-            let provider_item_count: i64 = transaction
-                .query_row(
-                    "SELECT COUNT(*) FROM provider_items WHERE thread_id = ?1",
-                    [&source_thread_id],
-                    |row| row.get(0),
-                )
-                .map_err(storage_error)?;
-            if provider_item_count > MAX_HISTORY_ITEMS as i64 {
-                return Err(AppError::Storage(format!(
-                    "source provider history exceeds {MAX_HISTORY_ITEMS} items"
-                )));
             }
 
             let fork_id = Uuid::now_v7().to_string();
@@ -531,7 +564,7 @@ impl NativeStorage {
                 )
                 .map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
-            read_thread(&connection, &fork_id)
+            load_thread_page(&connection, &fork_id, None)
         })
         .await
     }
@@ -549,9 +582,9 @@ impl NativeStorage {
         let item_payload = encode_bounded(&user_item, MAX_ITEM_BYTES, "ChatGPT thread item")?;
         let preview = truncate_utf8(preview.trim(), MAX_PREVIEW_BYTES);
         let owner_id = self.owner_id.clone();
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+            let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage_error)?;
@@ -607,6 +640,8 @@ impl NativeStorage {
             Ok(TurnSummary {
                 id: turn_id,
                 status: TurnStatus::InProgress,
+                created_at: now,
+                updated_at: now,
             })
         })
         .await
@@ -616,9 +651,9 @@ impl NativeStorage {
         &self,
         thread_id: String,
     ) -> Result<ChatConversationState, AppError> {
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             let thread_mode = connection
                 .query_row(
                     "SELECT mode FROM threads WHERE id = ?1 AND archived = 0",
@@ -668,9 +703,9 @@ impl NativeStorage {
             &parent_message_id,
             MAX_IDENTIFIER_BYTES,
         )?;
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+            let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection.transaction().map_err(storage_error)?;
             let available: bool = transaction
                 .query_row(
@@ -724,9 +759,9 @@ impl NativeStorage {
         let provider_payload = encode_bounded(&provider_item, MAX_ITEM_BYTES, "provider item")?;
         let preview = truncate_utf8(preview.trim(), MAX_PREVIEW_BYTES);
         let owner_id = self.owner_id.clone();
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+            let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage_error)?;
@@ -776,6 +811,8 @@ impl NativeStorage {
             Ok(TurnSummary {
                 id: turn_id,
                 status: TurnStatus::InProgress,
+                created_at: now,
+                updated_at: now,
             })
         })
         .await
@@ -788,9 +825,9 @@ impl NativeStorage {
         reasoning_effort: Option<String>,
     ) -> Result<TurnSummary, AppError> {
         let owner_id = self.owner_id.clone();
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+            let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage_error)?;
@@ -825,6 +862,8 @@ impl NativeStorage {
             Ok(TurnSummary {
                 id: turn_id,
                 status: TurnStatus::InProgress,
+                created_at: now,
+                updated_at: now,
             })
         })
         .await
@@ -837,9 +876,9 @@ impl NativeStorage {
     ) -> Result<(), AppError> {
         let item_id = item.id().to_string();
         let payload = encode_bounded(&item, MAX_ITEM_BYTES, "thread item")?;
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             connection
                 .execute(
                     "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
@@ -863,9 +902,9 @@ impl NativeStorage {
         let item_payload = encode_bounded(&user_item, MAX_ITEM_BYTES, "steered thread item")?;
         let provider_payload =
             encode_bounded(&provider_item, MAX_ITEM_BYTES, "steered provider item")?;
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+            let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection.transaction().map_err(storage_error)?;
             let active: bool = transaction
                 .query_row(
@@ -916,9 +955,9 @@ impl NativeStorage {
         item: &ResponseItem,
     ) -> Result<(), AppError> {
         let payload = encode_bounded(&item, MAX_ITEM_BYTES, "provider item")?;
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             connection
                 .execute(
                     "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
@@ -926,6 +965,37 @@ impl NativeStorage {
                 )
                 .map_err(storage_error)?;
             Ok(())
+        })
+        .await
+    }
+
+    pub async fn append_provider_and_thread_item(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        provider_item: &ResponseItem,
+        thread_item: ThreadItem,
+    ) -> Result<(), AppError> {
+        let item_id = thread_item.id().to_string();
+        let provider_payload = encode_bounded(provider_item, MAX_ITEM_BYTES, "provider item")?;
+        let thread_payload = encode_bounded(&thread_item, MAX_ITEM_BYTES, "thread item")?;
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
+                    params![thread_id, provider_payload],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
+                    params![turn_id, item_id, thread_payload],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)
         })
         .await
     }
@@ -939,9 +1009,9 @@ impl NativeStorage {
         &self,
         thread_id: String,
     ) -> Result<ProviderHistorySnapshot, AppError> {
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             require_readable_thread(&connection, &thread_id)?;
             let page = read_provider_history_page(&connection, &thread_id, 0)?;
             Ok(ProviderHistorySnapshot {
@@ -958,10 +1028,10 @@ impl NativeStorage {
         thread_id: String,
         snapshot: &mut ProviderHistorySnapshot,
     ) -> Result<(), AppError> {
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         let after_sequence = snapshot.last_sequence;
         let page = run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             require_readable_thread(&connection, &thread_id)?;
             read_provider_history_page(&connection, &thread_id, after_sequence)
         })
@@ -975,9 +1045,9 @@ impl NativeStorage {
         items: Vec<ResponseItem>,
     ) -> Result<(), AppError> {
         let payloads = encode_provider_history(items)?;
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+            let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection.transaction().map_err(storage_error)?;
             let exists: bool = transaction
                 .query_row(
@@ -1010,9 +1080,9 @@ impl NativeStorage {
         };
         let compaction_payload =
             encode_bounded(&compaction_item, MAX_ITEM_BYTES, "context compaction item")?;
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+            let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection.transaction().map_err(storage_error)?;
             let active: bool = transaction
                 .query_row(
@@ -1057,9 +1127,9 @@ impl NativeStorage {
         &self,
         thread_id: String,
     ) -> Result<Option<ContextUsageSnapshot>, AppError> {
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             let exists: bool = connection
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1 AND archived = 0)",
@@ -1117,9 +1187,9 @@ impl NativeStorage {
                 "complete_turn cannot preserve an in-progress status".into(),
             ));
         }
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+            let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection.transaction().map_err(storage_error)?;
             let now = unix_timestamp()?;
             let changed = transaction
@@ -1154,9 +1224,9 @@ impl NativeStorage {
     }
 
     pub async fn read_config(&self) -> Result<ConfigReadResponse, AppError> {
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = open_connection(&path)?;
+            let connection = pool.get().map_err(pool_error)?;
             let (version, payload): (i64, String) = connection
                 .query_row(
                     "SELECT version, payload FROM app_config WHERE singleton = 1",
@@ -1178,9 +1248,9 @@ impl NativeStorage {
         expected_version: u64,
         update: ConfigUpdate,
     ) -> Result<ConfigUpdateResponse, AppError> {
-        let path = self.path().await?;
+        let pool = self.pool().await?;
         run_blocking(move || {
-            let mut connection = open_connection(&path)?;
+            let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection.transaction().map_err(storage_error)?;
             let (current_version, payload): (i64, String) = transaction
                 .query_row(
@@ -1217,11 +1287,12 @@ impl NativeStorage {
         .await
     }
 
-    async fn path(&self) -> Result<PathBuf, AppError> {
-        self.database_path
+    async fn pool(&self) -> Result<SqlitePool, AppError> {
+        self.database
             .read()
             .await
-            .clone()
+            .as_ref()
+            .map(|database| database.pool.clone())
             .ok_or_else(|| AppError::Storage("native storage is not initialized".into()))
     }
 }
@@ -1367,8 +1438,8 @@ struct ThreadHeader {
 }
 
 impl ThreadHeader {
-    fn without_turns(self) -> CodexThread {
-        CodexThread {
+    fn into_summary(self) -> ThreadSummary {
+        ThreadSummary {
             id: self.id,
             mode: self.mode,
             preview: self.preview,
@@ -1385,13 +1456,12 @@ impl ThreadHeader {
             } else {
                 ThreadStatus::Idle
             },
-            turns: Vec::new(),
         }
     }
 }
 
-fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, AppError> {
-    let header = connection
+fn read_thread_header(connection: &Connection, thread_id: &str) -> Result<ThreadHeader, AppError> {
+    connection
         .query_row(
             "SELECT id, cwd, project_path, mode, name, preview, created_at, updated_at,
                     EXISTS(SELECT 1 FROM turns WHERE thread_id = threads.id AND status = 'inProgress')
@@ -1413,85 +1483,7 @@ fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, 
         )
         .optional()
         .map_err(storage_error)?
-        .ok_or_else(|| AppError::State("thread does not exist or is archived".into()))?;
-    let mut turns_statement = connection
-        .prepare(
-            "SELECT turns.id, turns.status, turns.error, turns.created_at, turns.updated_at,
-                    thread_items.payload
-             FROM turns
-             LEFT JOIN thread_items ON thread_items.turn_id = turns.id
-             WHERE turns.thread_id = ?1
-             ORDER BY turns.created_at, turns.id, thread_items.sequence",
-        )
-        .map_err(storage_error)?;
-    let turn_rows = turns_statement
-        .query_map([thread_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        })
-        .map_err(storage_error)?;
-    let mut turns: Vec<ThreadTurn> = Vec::new();
-    let mut total_item_bytes = 0usize;
-    let mut total_items = 0usize;
-    for row in turn_rows {
-        let (turn_id, status, error, created_at, updated_at, payload) =
-            row.map_err(storage_error)?;
-        if turns.last().is_none_or(|turn| turn.id != turn_id) {
-            if turns.len() >= MAX_THREAD_TURNS {
-                return Err(AppError::Storage(format!(
-                    "thread exceeds {MAX_THREAD_TURNS} turns"
-                )));
-            }
-            let status = parse_status(&status)?;
-            if (status == TurnStatus::Failed) != error.is_some() {
-                return Err(AppError::Storage(format!(
-                    "turn `{turn_id}` has an incoherent failure status"
-                )));
-            }
-            turns.push(ThreadTurn {
-                id: turn_id,
-                items: Vec::new(),
-                status,
-                error,
-                created_at,
-                updated_at,
-            });
-        }
-        let Some(payload) = payload else {
-            continue;
-        };
-        total_item_bytes = total_item_bytes
-            .checked_add(payload.len())
-            .ok_or_else(|| AppError::Storage("stored thread items size overflow".into()))?;
-        if total_item_bytes > MAX_HISTORY_BYTES {
-            return Err(AppError::Storage(format!(
-                "stored thread items exceeds {MAX_HISTORY_BYTES} bytes"
-            )));
-        }
-        total_items = total_items
-            .checked_add(1)
-            .ok_or_else(|| AppError::Storage("stored thread items item count overflow".into()))?;
-        if total_items > MAX_HISTORY_ITEMS {
-            return Err(AppError::Storage(format!(
-                "stored thread items exceeds {MAX_HISTORY_ITEMS} items"
-            )));
-        }
-        let item = decode_bounded(&payload, MAX_ITEM_BYTES, "thread items")?;
-        turns
-            .last_mut()
-            .ok_or_else(|| AppError::State("thread item has no owning turn".into()))?
-            .items
-            .push(item);
-    }
-    let mut thread = header.without_turns();
-    thread.turns = turns;
-    Ok(thread)
+        .ok_or_else(|| AppError::State("thread does not exist or is archived".into()))
 }
 
 fn require_available_thread(
@@ -1877,17 +1869,29 @@ fn turn_columns(connection: &Connection) -> Result<String, AppError> {
         .map_err(storage_error)
 }
 
-fn open_connection(path: &Path) -> Result<Connection, AppError> {
+fn open_database_connection(path: &Path) -> Result<Connection, AppError> {
     let connection = Connection::open(path).map_err(storage_error)?;
+    configure_database_connection(&connection).map_err(storage_error)?;
     connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(storage_error)?;
-    connection
-        .execute_batch(
-            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA wal_checkpoint(PASSIVE);",
-        )
+        .execute_batch("PRAGMA journal_mode = WAL;")
         .map_err(storage_error)?;
     Ok(connection)
+}
+
+fn configure_database_connection(connection: &Connection) -> rusqlite::Result<()> {
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch(
+        "PRAGMA foreign_keys = ON;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA wal_autocheckpoint = 1000;",
+    )
+}
+
+fn database_connection_limit() -> u32 {
+    std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .clamp(4, MAX_DATABASE_CONNECTIONS as usize) as u32
 }
 
 fn unix_timestamp() -> Result<i64, AppError> {
@@ -1912,6 +1916,10 @@ fn storage_error(error: rusqlite::Error) -> AppError {
     AppError::Storage(error.to_string())
 }
 
+fn pool_error(error: r2d2::Error) -> AppError {
+    AppError::Storage(format!("database connection pool failed: {error}"))
+}
+
 async fn run_blocking<T, F>(operation: F) -> Result<T, AppError>
 where
     T: Send + 'static,
@@ -1928,8 +1936,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, MAX_HISTORY_ITEMS, MAX_THREAD_TURNS,
-        NativeStorage, encode_bounded, initialize_database,
+        DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, NativeStorage, encode_bounded,
+        initialize_database,
     };
     use crate::engine::native::provider::{ResponseContent, ResponseItem};
     use crate::engine::{
@@ -1985,7 +1993,7 @@ mod tests {
         drop(connection);
 
         let loaded = storage
-            .read_thread(thread.id)
+            .read_thread(thread.id.clone())
             .await
             .expect("thread with failed turn should load");
         let failed_turn = loaded.turns.first().expect("failed turn should be present");
@@ -1994,8 +2002,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn materializes_a_thread_at_the_declared_turn_and_item_limits() {
-        const ITEMS_PER_TURN: usize = MAX_HISTORY_ITEMS / MAX_THREAD_TURNS;
+    async fn paginates_threads_beyond_the_previous_turn_limit() {
+        const TURN_COUNT: usize = 1_200;
 
         let directory = TempDir::new().expect("temporary directory should be created");
         let database_path = directory.path().join("maximum-thread.sqlite3");
@@ -2018,7 +2026,7 @@ mod tests {
             .execute("PRAGMA foreign_keys = ON", [])
             .expect("foreign keys should enable");
         let transaction = connection.transaction().expect("transaction should begin");
-        for turn_index in 0..MAX_THREAD_TURNS {
+        for turn_index in 0..TURN_COUNT {
             let turn_id = format!("turn-{turn_index:04}");
             let timestamp = i64::try_from(turn_index).expect("turn index should fit SQLite");
             transaction
@@ -2029,47 +2037,51 @@ mod tests {
                     params![turn_id, thread.id, timestamp],
                 )
                 .expect("stress turn should persist");
-            for item_index in 0..ITEMS_PER_TURN {
-                let item_id = format!("item-{turn_index:04}-{item_index:02}");
-                let payload = encode_bounded(
-                    &ThreadItem::AgentMessage {
-                        id: item_id.clone(),
-                        text: "x".into(),
-                        phase: None,
-                    },
-                    super::MAX_ITEM_BYTES,
-                    "stress thread item",
+            let item_id = format!("item-{turn_index:04}");
+            let payload = encode_bounded(
+                &ThreadItem::AgentMessage {
+                    id: item_id.clone(),
+                    text: "x".into(),
+                    phase: None,
+                },
+                super::MAX_ITEM_BYTES,
+                "stress thread item",
+            )
+            .expect("stress item should encode");
+            transaction
+                .execute(
+                    "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
+                    params![turn_id, item_id, payload],
                 )
-                .expect("stress item should encode");
-                transaction
-                    .execute(
-                        "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
-                        params![turn_id, item_id, payload],
-                    )
-                    .expect("stress item should persist");
-            }
+                .expect("stress item should persist");
         }
         transaction.commit().expect("stress fixture should commit");
         drop(connection);
 
-        let loaded = storage
-            .read_thread(thread.id)
-            .await
-            .expect("maximum bounded thread should load");
-        assert_eq!(loaded.turns.len(), MAX_THREAD_TURNS);
-        assert_eq!(
-            loaded
+        let mut cursor = None;
+        let mut turn_ids = Vec::new();
+        loop {
+            let page = storage
+                .read_thread_page(thread.id.clone(), cursor)
+                .await
+                .expect("history page should load");
+            assert!(page.thread.turns.len() <= super::history::THREAD_HISTORY_PAGE_ROWS);
+            let mut page_ids = page
+                .thread
                 .turns
                 .iter()
-                .map(|turn| turn.items.len())
-                .sum::<usize>(),
-            MAX_HISTORY_ITEMS
-        );
-        assert_eq!(loaded.turns[0].items[0].id(), "item-0000-00");
-        assert_eq!(
-            loaded.turns[MAX_THREAD_TURNS - 1].items[ITEMS_PER_TURN - 1].id(),
-            "item-0999-19"
-        );
+                .map(|turn| turn.id.clone())
+                .collect::<Vec<_>>();
+            page_ids.extend(turn_ids);
+            turn_ids = page_ids;
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(turn_ids.len(), TURN_COUNT);
+        assert_eq!(turn_ids.first().map(String::as_str), Some("turn-0000"));
+        assert_eq!(turn_ids.last().map(String::as_str), Some("turn-1199"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2218,11 +2230,11 @@ mod tests {
         assert!(history.is_empty());
 
         let fork = storage
-            .fork_thread(thread.id)
+            .fork_thread(thread.id.clone())
             .await
             .expect("Chat thread should fork");
         let fork_state = storage
-            .chat_conversation_state(fork.id)
+            .chat_conversation_state(fork.id.clone())
             .await
             .expect("fork continuity should load");
         assert_eq!(fork_state, state);
@@ -2297,7 +2309,7 @@ mod tests {
 
         let completed = storage
             .complete_turn(
-                thread.id,
+                thread.id.clone(),
                 turn.id,
                 TurnStatus::Interrupted,
                 Some("interrupted by user".into()),
@@ -2358,7 +2370,7 @@ mod tests {
         assert!(history.is_empty());
 
         storage
-            .complete_turn(thread.id, turn.id, TurnStatus::Completed, None)
+            .complete_turn(thread.id.clone(), turn.id, TurnStatus::Completed, None)
             .await
             .expect("compaction turn should complete");
     }
@@ -2452,7 +2464,7 @@ mod tests {
             .expect("compaction marker should persist");
         assert!(
             storage
-                .latest_context_usage(thread.id)
+                .latest_context_usage(thread.id.clone())
                 .await
                 .expect("context state should load")
                 .is_none()
@@ -2521,7 +2533,7 @@ mod tests {
         ));
         assert!(
             storage
-                .latest_context_usage(thread.id)
+                .latest_context_usage(thread.id.clone())
                 .await
                 .expect("context state should load")
                 .is_none()
@@ -2587,7 +2599,7 @@ mod tests {
 
         assert!(result.is_err());
         let history = storage
-            .provider_history(thread.id)
+            .provider_history(thread.id.clone())
             .await
             .expect("original history should remain readable");
         let encoded = serde_json::to_string(&history).expect("history should encode");
@@ -2685,7 +2697,7 @@ mod tests {
         assert!(
             storage
                 .append_turn_input(
-                    thread.id,
+                    thread.id.clone(),
                     turn.id,
                     ThreadItem::UserMessage {
                         id: "user-3".into(),
@@ -2759,7 +2771,7 @@ mod tests {
             .await
             .expect("the owning active turn should authorize deletion");
         assert!(response.applied);
-        assert!(storage.read_thread(thread.id).await.is_err());
+        assert!(storage.read_thread(thread.id.clone()).await.is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2842,7 +2854,7 @@ mod tests {
             .delete_thread(fork.id.clone())
             .await
             .expect("fork should delete");
-        assert!(storage.read_thread(fork.id).await.is_err());
+        assert!(storage.read_thread(fork.id.clone()).await.is_err());
     }
 
     #[test]

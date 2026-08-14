@@ -5,11 +5,17 @@ import type {
   ModelSafetyBufferingUpdatedNotification,
   ModelVerification,
   PlanItem,
-  ThreadTurn,
+  ThreadSummary,
   VisibleThreadItem,
 } from "../contracts/types";
 import { applyStreamDeltas, readLatestContextUsage } from "./conversation";
 import type { StreamDelta } from "./streamDeltas";
+import {
+  findVisibleTurn,
+  overlayVisibleTurn,
+  type VisibleThreadTurn,
+  type VisibleTurnSequence,
+} from "./visibleTurnSequence";
 
 export interface ThreadRuntimeState {
   readonly activeTurnId: string | null;
@@ -19,10 +25,6 @@ export interface ThreadRuntimeState {
   readonly modelVerifications: readonly ModelVerification[];
   readonly moderationMetadata: unknown | null;
   readonly safetyBuffering: ModelSafetyBufferingUpdatedNotification["params"] | null;
-}
-
-export interface VisibleThreadTurn extends Omit<ThreadTurn, "items"> {
-  readonly items: readonly VisibleThreadItem[];
 }
 
 export type ThreadRuntimeMap = ReadonlyMap<string, ThreadRuntimeState>;
@@ -97,25 +99,30 @@ export function deleteThreadRuntime(current: ThreadRuntimeMap, threadId: string)
 }
 
 export function activeTurnFromThread(thread: CodexThread): string | null {
-  const active = [...thread.turns].reverse().find((turn) => turn.status === "inProgress");
-  return active?.id ?? null;
+  for (let index = thread.turns.length - 1; index >= 0; index -= 1) {
+    const turn = thread.turns[index];
+    if (turn?.status === "inProgress") {
+      return turn.id;
+    }
+  }
+  return null;
 }
 
 export function isThreadActive(
-  thread: CodexThread,
+  thread: ThreadSummary,
   runtime: ThreadRuntimeState | undefined,
 ): boolean {
   return thread.status.type === "active" || (runtime?.activeTurnId ?? null) !== null;
 }
 
 export function readActiveTurnPlan(
-  turns: readonly VisibleThreadTurn[],
+  turns: VisibleTurnSequence,
   activeTurnId: string | null,
 ): PlanItem | null {
   if (activeTurnId === null) {
     return null;
   }
-  const activeTurn = turns.find((turn) => turn.id === activeTurnId);
+  const activeTurn = findVisibleTurn(turns, activeTurnId);
   if (activeTurn === undefined) {
     return null;
   }
@@ -140,7 +147,7 @@ export function mergeRuntimeThreadItems(
   persistedTurns: readonly VisibleThreadTurn[],
   itemOverlays: readonly VisibleThreadItem[],
   activeTurnId: string | null,
-): readonly VisibleThreadTurn[] {
+): VisibleTurnSequence {
   if (itemOverlays.length === 0) {
     return persistedTurns;
   }
@@ -149,31 +156,29 @@ export function mergeRuntimeThreadItems(
     throw new Error("Os itens transitórios da conversa contêm identificadores duplicados.");
   }
   if (persistedTurns.length === 0) {
-    return [
-      {
-        id: activeTurnId ?? `${thread.id}:runtime`,
-        items: itemOverlays,
-        status: activeTurnId === null ? "completed" : "inProgress",
-        error: null,
-        createdAt: thread.updatedAt,
-        updatedAt: thread.updatedAt,
-      },
-    ];
+    const runtimeTurn: VisibleThreadTurn = {
+      id: activeTurnId ?? `${thread.id}:runtime`,
+      items: itemOverlays,
+      status: activeTurnId === null ? "completed" : "inProgress",
+      error: null,
+      createdAt: thread.updatedAt,
+      updatedAt: thread.updatedAt,
+    };
+    return [runtimeTurn];
   }
   const targetIndex =
-    activeTurnId === null ? persistedTurns.length - 1 : findTurnIndex(persistedTurns, activeTurnId);
+    activeTurnId === null
+      ? persistedTurns.length - 1
+      : findPersistedTurnIndex(persistedTurns, activeTurnId);
   if (targetIndex === -1 && activeTurnId !== null) {
-    return [
-      ...persistedTurns,
-      {
-        id: activeTurnId,
-        items: itemOverlays,
-        status: "inProgress",
-        error: null,
-        createdAt: thread.updatedAt,
-        updatedAt: thread.updatedAt,
-      },
-    ];
+    return overlayVisibleTurn(persistedTurns, persistedTurns.length, {
+      id: activeTurnId,
+      items: itemOverlays,
+      status: "inProgress",
+      error: null,
+      createdAt: thread.updatedAt,
+      updatedAt: thread.updatedAt,
+    });
   }
   const target = persistedTurns[targetIndex];
   if (target === undefined) {
@@ -189,9 +194,7 @@ export function mergeRuntimeThreadItems(
       mergedItems.push(item);
     }
   }
-  const next = [...persistedTurns];
-  next[targetIndex] = { ...target, items: mergedItems };
-  return next;
+  return overlayVisibleTurn(persistedTurns, targetIndex, { ...target, items: mergedItems });
 }
 
 function emptyThreadRuntime(): ThreadRuntimeState {
@@ -206,8 +209,11 @@ function emptyThreadRuntime(): ThreadRuntimeState {
   };
 }
 
-function findTurnIndex(turns: readonly VisibleThreadTurn[], turnId: string): number {
-  for (let index = turns.length - 1; index >= 0; index -= 1) {
+function findPersistedTurnIndex(turns: readonly VisibleThreadTurn[], turnId: string): number {
+  if (turns.at(-1)?.id === turnId) {
+    return turns.length - 1;
+  }
+  for (let index = turns.length - 2; index >= 0; index -= 1) {
     if (turns[index]?.id === turnId) {
       return index;
     }

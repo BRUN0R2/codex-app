@@ -8,7 +8,7 @@ use crate::error::AppError;
 
 const MAX_SSE_LINE_BYTES: usize = 1_048_576;
 const MAX_SSE_EVENT_BYTES: usize = 4 * 1_048_576;
-const MAX_MESSAGE_TEXT_BYTES: usize = 8 * 1_048_576;
+pub(super) const MAX_MESSAGE_TEXT_BYTES: usize = 8 * 1_048_576;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -20,8 +20,16 @@ pub(super) struct ChatMessageSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ChatMessageDelta {
+    pub conversation_id: Option<String>,
+    pub id: String,
+    pub delta: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ChatStreamEvent {
     Message(ChatMessageSnapshot),
+    MessageDelta(ChatMessageDelta),
     ConversationId(String),
     Completed,
     Interrupted,
@@ -177,10 +185,8 @@ impl ChatSseParser {
             output.push_back(ChatStreamEvent::Completed);
             return Ok(());
         }
-        if let Some(payload) = self.payload_decoder.decode(event.as_deref(), &data)? {
-            decode_payload(payload, output)?;
-        }
-        Ok(())
+        self.payload_decoder
+            .decode_into(event.as_deref(), &data, output)
     }
 }
 
@@ -190,7 +196,12 @@ struct PayloadDecoder {
 }
 
 impl PayloadDecoder {
-    fn decode(&mut self, event: Option<&str>, data: &str) -> Result<Option<Value>, AppError> {
+    fn decode_into(
+        &mut self,
+        event: Option<&str>,
+        data: &str,
+        output: &mut VecDeque<ChatStreamEvent>,
+    ) -> Result<(), AppError> {
         match event {
             Some("delta_encoding") => {
                 let encoding = serde_json::from_str::<Value>(data)
@@ -203,7 +214,7 @@ impl PayloadDecoder {
                     )));
                 }
                 self.delta = Some(DeltaDecoder::default());
-                Ok(None)
+                Ok(())
             }
             Some("delta") => {
                 let delta: Value = serde_json::from_str(data).map_err(|error| {
@@ -212,11 +223,14 @@ impl PayloadDecoder {
                 let decoder = self.delta.as_mut().ok_or_else(|| {
                     AppError::Provider("ChatGPT sent a delta before declaring its encoding".into())
                 })?;
-                decoder.apply(delta).map(Some)
+                decoder.apply(delta, output)
             }
-            _ => serde_json::from_str(data)
-                .map(Some)
-                .map_err(|error| AppError::Provider(format!("invalid ChatGPT SSE event: {error}"))),
+            _ => {
+                let payload = serde_json::from_str(data).map_err(|error| {
+                    AppError::Provider(format!("invalid ChatGPT SSE event: {error}"))
+                })?;
+                decode_payload(&payload, output)
+            }
         }
     }
 }
@@ -259,16 +273,24 @@ impl Default for DeltaDecoder {
 }
 
 impl DeltaDecoder {
-    fn apply(&mut self, value: Value) -> Result<Value, AppError> {
+    fn apply(
+        &mut self,
+        value: Value,
+        output: &mut VecDeque<ChatStreamEvent>,
+    ) -> Result<(), AppError> {
         let delta = decode_delta(value, self.previous.as_ref())?;
         let root = self
             .value_by_channel
             .entry(delta.channel)
             .or_insert(Value::Null);
         apply_delta(root, &delta)?;
-        let result = root.clone();
+        if let Some(event) = decode_appended_message_delta(root, &delta)? {
+            output.push_back(ChatStreamEvent::MessageDelta(event));
+        } else {
+            decode_payload(root, output)?;
+        }
         self.previous = Some(delta);
-        Ok(result)
+        Ok(())
     }
 }
 
@@ -533,7 +555,7 @@ fn parse_pointer(value: &str) -> Result<Vec<PathSegment>, AppError> {
         .collect()
 }
 
-fn decode_payload(payload: Value, output: &mut VecDeque<ChatStreamEvent>) -> Result<(), AppError> {
+fn decode_payload(payload: &Value, output: &mut VecDeque<ChatStreamEvent>) -> Result<(), AppError> {
     let Some(object) = payload.as_object() else {
         return Ok(());
     };
@@ -565,10 +587,74 @@ fn decode_payload(payload: Value, output: &mut VecDeque<ChatStreamEvent>) -> Res
     Ok(())
 }
 
+fn decode_appended_message_delta(
+    payload: &Value,
+    delta: &Delta,
+) -> Result<Option<ChatMessageDelta>, AppError> {
+    if !matches!(delta.operation, DeltaOperation::Append) {
+        return Ok(None);
+    }
+    let Some(text) = delta.value.as_ref().and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let segments = parse_pointer(&delta.path)?;
+    let message_key = match segments.as_slice() {
+        [
+            PathSegment::Key(message),
+            PathSegment::Key(content),
+            PathSegment::Key(parts),
+            PathSegment::Index(_),
+        ] if content == "content" && parts == "parts" => message,
+        [
+            PathSegment::Key(message),
+            PathSegment::Key(content),
+            PathSegment::Key(text_key),
+        ] if content == "content" && text_key == "text" => message,
+        _ => return Ok(None),
+    };
+    if message_key != "message" && message_key != "input_message" {
+        return Ok(None);
+    }
+    let Some(object) = payload.as_object() else {
+        return Ok(None);
+    };
+    let conversation_id = object
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .map(validate_identifier)
+        .transpose()?;
+    let Some(message) = object.get(message_key) else {
+        return Ok(None);
+    };
+    let Some(id) = decode_message_id(message)? else {
+        return Ok(None);
+    };
+    Ok(Some(ChatMessageDelta {
+        conversation_id,
+        id,
+        delta: text.into(),
+    }))
+}
+
 fn decode_message(
     value: &Value,
     conversation_id: Option<String>,
 ) -> Result<Option<ChatMessageSnapshot>, AppError> {
+    let Some(id) = decode_message_id(value)? else {
+        return Ok(None);
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| AppError::Provider("ChatGPT assistant message is invalid".into()))?;
+    let text = message_text(object.get("content"))?;
+    Ok(Some(ChatMessageSnapshot {
+        conversation_id,
+        id,
+        text,
+    }))
+}
+
+fn decode_message_id(value: &Value) -> Result<Option<String>, AppError> {
     let Some(object) = value.as_object() else {
         return Ok(None);
     };
@@ -592,12 +678,7 @@ fn decode_message(
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::Provider("ChatGPT assistant message has no id".into()))
         .and_then(validate_identifier)?;
-    let text = message_text(object.get("content"))?;
-    Ok(Some(ChatMessageSnapshot {
-        conversation_id,
-        id,
-        text,
-    }))
+    Ok(Some(id))
 }
 
 fn message_text(content: Option<&Value>) -> Result<String, AppError> {
@@ -654,7 +735,7 @@ mod tests {
     use super::{ChatSseParser, ChatStreamEvent};
 
     #[test]
-    fn decodes_v1_delta_snapshots_and_message_completion() {
+    fn decodes_v1_delta_updates_without_cloning_the_accumulated_message() {
         let mut parser = ChatSseParser::default();
         let mut events = VecDeque::new();
         let frames = concat!(
@@ -672,14 +753,15 @@ mod tests {
             .push(frames.as_bytes(), &mut events)
             .expect("stream should decode");
 
-        let messages = events
+        let updates = events
             .iter()
             .filter_map(|event| match event {
                 ChatStreamEvent::Message(message) => Some(message.text.as_str()),
+                ChatStreamEvent::MessageDelta(message) => Some(message.delta.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(messages, ["Ol", "Olá"]);
+        assert_eq!(updates, ["Ol", "á"]);
         assert!(
             events
                 .iter()

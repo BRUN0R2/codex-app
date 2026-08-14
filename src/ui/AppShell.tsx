@@ -36,6 +36,7 @@ export function AppShell(props: { readonly controller: AppController }) {
   let chatPageElement: HTMLElement | undefined;
   let chatDockElement: HTMLDivElement | undefined;
   let chatDockResizeObserver: ResizeObserver | undefined;
+  let chatDockResizeFrame: number | undefined;
   let disposed = false;
   const eventUnlisteners: Array<() => void> = [];
 
@@ -71,12 +72,22 @@ export function AppShell(props: { readonly controller: AppController }) {
     chatPageElement.style.setProperty("--chat-dock-height", `${dockHeight}px`);
   }
 
+  function scheduleChatDockInset(): void {
+    if (chatDockResizeFrame !== undefined) {
+      return;
+    }
+    chatDockResizeFrame = requestAnimationFrame(() => {
+      chatDockResizeFrame = undefined;
+      synchronizeChatDockInset();
+    });
+  }
+
   onMount(() => {
     window.addEventListener("keydown", handleKeyboardShortcut);
     if (chatDockElement !== undefined) {
-      chatDockResizeObserver = new ResizeObserver(synchronizeChatDockInset);
+      chatDockResizeObserver = new ResizeObserver(scheduleChatDockInset);
       chatDockResizeObserver.observe(chatDockElement);
-      synchronizeChatDockInset();
+      scheduleChatDockInset();
     }
     const unlisteners = [
       listen("menu:new-thread", () => props.controller.newThread()),
@@ -100,6 +111,9 @@ export function AppShell(props: { readonly controller: AppController }) {
     }
     window.removeEventListener("keydown", handleKeyboardShortcut);
     chatDockResizeObserver?.disconnect();
+    if (chatDockResizeFrame !== undefined) {
+      cancelAnimationFrame(chatDockResizeFrame);
+    }
   });
   const showWindowChrome = isDesktopRuntime();
 

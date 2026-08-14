@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { VisibleThreadTurn } from "../state/threadRuntime";
+import type { VisibleThreadTurn } from "../state/visibleTurnSequence";
 
 import { latestTurnFileChanges, summarizeReviewChanges } from "./reviewChanges";
 

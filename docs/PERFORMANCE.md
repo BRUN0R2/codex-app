@@ -109,38 +109,75 @@ As proteções permanentes são:
 O caminho crítico local agora possui limites proporcionais ao trabalho novo,
 não ao tamanho integral da conversa:
 
-- o primeiro delta de cada item é publicado imediatamente; deltas seguintes do
-  mesmo frame são combinados em uma única atualização de estado;
-- o runtime mantém somente overlays transitórios do turno ativo e não duplica o
-  histórico persistido inteiro;
-- Markdown em streaming publica o primeiro fragmento sem espera, limita
-  reprocessamentos conforme o texto cresce e força o conteúdo final
-  imediatamente;
-- a timeline monta os 60 turnos mais recentes e revela histórico em blocos de
-  40, preservando a posição visual; turnos fora da viewport também usam
-  contenção de renderização;
-- a seleção do marcador de mensagem ativo usa busca binária nos anchors
-  ordenados, evitando uma leitura de layout por mensagem a cada scroll;
-- `read_thread` materializa turnos e itens com uma consulta ordenada, sem o
-  padrão N+1;
+- o contrato 5 envia lotes heterogêneos de deltas: o primeiro delta de cada
+  fluxo é imediato, os seguintes usam uma janela nativa de 8 ms e todo evento
+  semântico força `flush`, preservando ordem e baixa TTFT;
+- o decoder ChatGPT aplica `append` diretamente, sem clonar a árvore JSON nem
+  reconstruir a mensagem acumulada a cada fragmento;
+- o runtime mantém somente overlays transitórios do turno ativo e os projeta por
+  uma sequência indexada, sem copiar todo o vetor de turnos a cada lote; listas
+  laterais recebem `ThreadSummary` e nunca retêm snapshots completos;
+- Markdown em streaming consolida blocos terminados e substitui somente o bloco
+  instável; ao concluir, executa uma renderização integral autoritativa;
+- Markdown final com pelo menos 32.000 caracteres delega parsing e syntax
+  highlighting a um Web Worker compartilhado e cancelável. Sanitização e DOM
+  permanecem na UI; o limiar decide escalonamento, não limita conteúdo;
+- a timeline não possui janela máxima de turnos. Um índice de alturas variáveis
+  constrói a árvore Fenwick em `O(n)`, mede em `O(log n)` e monta somente
+  viewport mais overscan;
+- o histórico usa cursor opaco, versionado e vinculado à tarefa. Limites de
+  linhas/bytes pertencem à página de transporte, não ao total persistido;
+- ao chegar ao topo por uma ação do usuário, a página anterior é carregada e a
+  âncora visual é mantida sem remover histórico já carregado;
+- o SQLite usa WAL e pool persistente dimensionado pela máquina; leituras podem
+  avançar em paralelo e pares provider/timeline são gravados numa transação;
 - durante uma execução, o agente conserva o histórico decodificado em memória,
   lê do SQLite apenas itens posteriores ao cursor e serializa requests por
   referência. Steers continuam entrando na ordem transacional do banco.
 
 O cenário sintético reproduzível usa 20.000 itens e 1.200 deltas destinados à
 última mensagem. Antes da alteração, a projeção integral anterior levou
-994,21 ms em uma amostra local. Em 14 de agosto de 2026, `pnpm
-measure:streaming` coletou sete amostras após duas de aquecimento:
+994,21 ms em uma amostra local. Em três execuções de 14 de agosto de 2026,
+`pnpm measure:streaming` coletou sete amostras após duas de aquecimento por
+execução:
 
 | Caminho atual | Mediana |
 | --- | ---: |
-| 1.200 atualizações sequenciais | 20,344 ms |
-| um lote coalescido | 0,121 ms |
+| 1.200 atualizações sequenciais | 18,887–19,287 ms |
+| um lote coalescido | 0,100–0,126 ms |
 
-O lote ficou aproximadamente 168 vezes mais rápido que as atualizações
-sequenciais já otimizadas nesse cenário. Este benchmark mede somente custo
-local de redução de estado; não representa TTFT de rede, tempo do modelo ou
-tempo de ferramentas.
+O lote ficou entre 150 e 193 vezes mais rápido que as atualizações sequenciais
+já otimizadas nesse cenário. Este benchmark mede somente custo local de redução
+de estado; não representa TTFT de rede, tempo do modelo ou tempo de ferramentas.
+
+O comando `pnpm measure:soak` cobre estruturas destinadas a sessões longas sem
+simular rede ou provider. Em cinco coletas de 14 de agosto de 2026, 100.000
+turnos, 10.000 medições de altura, 50.000 consultas de viewport e 5.000 blocos
+Markdown produziram; a coleta final incluiu também 50.000 projeções do overlay
+ativo:
+
+| Operação sintética | Resultado |
+| --- | ---: |
+| construção do índice de 100.000 turnos | 62,818–75,018 ms |
+| 10.000 atualizações de altura | 4,868–6,046 ms |
+| 50.000 consultas de viewport | 31,615–32,858 ms |
+| maior conjunto montado por viewport | 8 turnos |
+| 50.000 projeções do overlay sobre 100.000 turnos | 21,679–23,804 ms |
+| 5.000 atualizações incrementais Markdown | 1.088,267–1.116,955 ms |
+
+O teste nativo também persiste e percorre 1.200 turnos — acima do antigo teto
+de 1.000 — por todas as páginas, validando cardinalidade e ordem sem um limite
+total de histórico. Uma regressão frontend adicional projeta um overlay ativo
+sobre 10.000 turnos sem materializar uma nova matriz. Esses cenários são
+regressões locais reproduzíveis; o trace
+de produção com heap, nós DOM e INP continua sendo a evidência necessária para
+caracterizar uma sessão real de muitas horas.
+
+A interface preview também foi validada ao vivo em 14 de agosto de 2026 nos
+viewports solicitados de `920 × 640`, `1280 × 820` e `1920 × 1080`. Nos três
+casos não houve overflow horizontal, e timeline e compositor permaneceram
+visíveis. Escritas de layout originadas por `ResizeObserver` são coalescidas no
+próximo frame; a repetição do teste não produziu warnings ou erros no console.
 
 Em novas medições, “demora para responder” deve ser decomposta em pelo menos
 quatro intervalos: aceitação de `turn_start`, primeira rodada, espera de

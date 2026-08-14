@@ -59,6 +59,7 @@ import type {
   ThreadResumeResponse,
   ThreadStartResponse,
   ThreadStatus,
+  ThreadSummary,
   ThreadTurn,
   ThreadUnarchiveResponse,
   TokenUsage,
@@ -169,7 +170,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [4] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [5] as const);
   return {
     engine: {
       id: text(engine.id, "$.engine.id"),
@@ -302,18 +303,18 @@ export function decodeChatModelListResponse(value: unknown): ChatModelListRespon
 }
 
 export function decodeThreadStartResponse(value: unknown): ThreadStartResponse {
-  const object = exactRecord(value, "$", ["thread"]);
-  return { thread: decodeThread(object.thread, "$.thread") };
+  const object = exactRecord(value, "$", ["nextCursor", "thread"]);
+  return decodeThreadPage(object);
 }
 
 export function decodeThreadForkResponse(value: unknown): ThreadForkResponse {
-  const object = exactRecord(value, "$", ["thread"]);
-  return { thread: decodeThread(object.thread, "$.thread") };
+  const object = exactRecord(value, "$", ["nextCursor", "thread"]);
+  return decodeThreadPage(object);
 }
 
 export function decodeThreadUnarchiveResponse(value: unknown): ThreadUnarchiveResponse {
-  const object = exactRecord(value, "$", ["thread"]);
-  return { thread: decodeThread(object.thread, "$.thread") };
+  const object = exactRecord(value, "$", ["nextCursor", "thread"]);
+  return decodeThreadPage(object);
 }
 
 export function decodeThreadCompactStartResponse(value: unknown): ThreadCompactStartResponse {
@@ -324,21 +325,32 @@ export function decodeThreadCompactStartResponse(value: unknown): ThreadCompactS
 export function decodeThreadListResponse(value: unknown): ThreadListResponse {
   const object = exactRecord(value, "$", ["data", "nextCursor"]);
   return {
-    data: array(object.data, "$.data", decodeThread),
+    data: array(object.data, "$.data", decodeThreadSummary),
     nextCursor: nullableText(object.nextCursor, "$.nextCursor"),
   };
 }
 
 export function decodeThreadReadResponse(value: unknown): ThreadReadResponse {
-  const object = exactRecord(value, "$", ["thread"]);
-  return { thread: decodeThread(object.thread, "$.thread") };
+  const object = exactRecord(value, "$", ["nextCursor", "thread"]);
+  return decodeThreadPage(object);
 }
 
 export function decodeThreadResumeResponse(value: unknown): ThreadResumeResponse {
-  const object = exactRecord(value, "$", ["cwd", "thread"]);
+  const object = exactRecord(value, "$", ["cwd", "nextCursor", "thread"]);
   return {
     thread: decodeThread(object.thread, "$.thread"),
     cwd: text(object.cwd, "$.cwd"),
+    nextCursor: nullableText(object.nextCursor, "$.nextCursor"),
+  };
+}
+
+function decodeThreadPage(value: {
+  readonly nextCursor: unknown;
+  readonly thread: unknown;
+}): ThreadReadResponse {
+  return {
+    thread: decodeThread(value.thread, "$.thread"),
+    nextCursor: nullableText(value.nextCursor, "$.nextCursor"),
   };
 }
 
@@ -423,7 +435,10 @@ export function decodeEngineNotification(value: unknown): EngineNotification {
     case "thread.updated": {
       exactKeys(root, "$", ["method", "params"]);
       const params = exactRecord(root.params, "$.params", ["thread"]);
-      return { method, params: { thread: decodeThread(params.thread, "$.params.thread") } };
+      return {
+        method,
+        params: { thread: decodeThreadSummary(params.thread, "$.params.thread") },
+      };
     }
     case "thread.archived":
     case "thread.deleted":
@@ -551,34 +566,15 @@ export function decodeEngineNotification(value: unknown): EngineNotification {
         },
       };
     }
-    case "item.agentTextDelta": {
+    case "item.streamDeltas": {
       exactKeys(root, "$", ["method", "params"]);
-      const params = exactRecord(root.params, "$.params", [
-        "delta",
-        "itemId",
-        "threadId",
-        "turnId",
-      ]);
-      return {
-        method,
-        params: decodeTextDeltaParams(params, "$.params"),
-      };
-    }
-    case "item.reasoningSummaryDelta":
-    case "item.reasoningTextDelta": {
-      exactKeys(root, "$", ["method", "params"]);
-      const params = exactRecord(root.params, "$.params", [
-        "delta",
-        "index",
-        "itemId",
-        "threadId",
-        "turnId",
-      ]);
+      const params = exactRecord(root.params, "$.params", ["deltas", "threadId", "turnId"]);
       return {
         method,
         params: {
-          ...decodeTextDeltaParams(params, "$.params"),
-          index: integer(params.index, "$.params.index", 0, 1_024),
+          threadId: identifier(params.threadId, "$.params.threadId"),
+          turnId: identifier(params.turnId, "$.params.turnId"),
+          deltas: array(params.deltas, "$.params.deltas", decodeStreamDeltaPayload, 128),
         },
       };
     }
@@ -820,20 +816,35 @@ function decodeServiceTier(value: unknown, path: string): ModelServiceTier {
   };
 }
 
+const THREAD_SUMMARY_KEYS = [
+  "createdAt",
+  "cwd",
+  "id",
+  "mode",
+  "name",
+  "preview",
+  "projectPath",
+  "recencyAt",
+  "status",
+  "updatedAt",
+] as const;
+
+function decodeThreadSummary(value: unknown, path: string): ThreadSummary {
+  return decodeThreadSummaryRecord(exactRecord(value, path, THREAD_SUMMARY_KEYS), path);
+}
+
 function decodeThread(value: unknown, path: string): CodexThread {
-  const object = exactRecord(value, path, [
-    "createdAt",
-    "cwd",
-    "id",
-    "mode",
-    "name",
-    "preview",
-    "projectPath",
-    "recencyAt",
-    "status",
-    "turns",
-    "updatedAt",
-  ]);
+  const object = exactRecord(value, path, [...THREAD_SUMMARY_KEYS, "turns"]);
+  return {
+    ...decodeThreadSummaryRecord(object, path),
+    turns: array(object.turns, `${path}.turns`, decodeThreadTurn),
+  };
+}
+
+function decodeThreadSummaryRecord(
+  object: Record<(typeof THREAD_SUMMARY_KEYS)[number], unknown>,
+  path: string,
+): ThreadSummary {
   const createdAt = integer(object.createdAt, `${path}.createdAt`, 0, Number.MAX_SAFE_INTEGER);
   const updatedAt = integer(object.updatedAt, `${path}.updatedAt`, 0, Number.MAX_SAFE_INTEGER);
   if (updatedAt < createdAt) {
@@ -857,7 +868,6 @@ function decodeThread(value: unknown, path: string): CodexThread {
     updatedAt,
     recencyAt,
     status: decodeThreadStatus(object.status, `${path}.status`),
-    turns: array(object.turns, `${path}.turns`, decodeThreadTurn),
   };
 }
 
@@ -1170,10 +1180,17 @@ function decodeFileChangeKind(value: unknown, path: string): FileChangeKind {
 }
 
 function decodeTurnSummary(value: unknown, path: string) {
-  const object = exactRecord(value, path, ["id", "status"]);
+  const object = exactRecord(value, path, ["createdAt", "id", "status", "updatedAt"]);
+  const createdAt = integer(object.createdAt, `${path}.createdAt`, 0, Number.MAX_SAFE_INTEGER);
+  const updatedAt = integer(object.updatedAt, `${path}.updatedAt`, 0, Number.MAX_SAFE_INTEGER);
+  if (updatedAt < createdAt) {
+    throw new ContractError(path, "turn updatedAt must not precede createdAt");
+  }
   return {
     id: identifier(object.id, `${path}.id`),
     status: literal(object.status, `${path}.status`, TURN_STATUSES),
+    createdAt,
+    updatedAt,
   };
 }
 
@@ -1336,16 +1353,31 @@ function decodeOperationFailure(value: unknown, path: string) {
   };
 }
 
-function decodeTextDeltaParams(
-  object: Record<"delta" | "itemId" | "threadId" | "turnId", unknown>,
-  path: string,
-) {
-  return {
-    threadId: identifier(object.threadId, `${path}.threadId`),
-    turnId: identifier(object.turnId, `${path}.turnId`),
-    itemId: identifier(object.itemId, `${path}.itemId`),
-    delta: text(object.delta, `${path}.delta`, 262_144, true),
-  };
+function decodeStreamDeltaPayload(value: unknown, path: string) {
+  const object = record(value, path);
+  const kind = text(field(object, "kind"), `${path}.kind`, 32);
+  switch (kind) {
+    case "agentText": {
+      const delta = exactRecord(object, path, ["delta", "itemId", "kind"]);
+      return {
+        kind,
+        itemId: identifier(delta.itemId, `${path}.itemId`),
+        delta: text(delta.delta, `${path}.delta`, 262_144, true),
+      };
+    }
+    case "reasoningSummary":
+    case "reasoningText": {
+      const delta = exactRecord(object, path, ["delta", "index", "itemId", "kind"]);
+      return {
+        kind,
+        itemId: identifier(delta.itemId, `${path}.itemId`),
+        index: integer(delta.index, `${path}.index`, 0, 1_024),
+        delta: text(delta.delta, `${path}.delta`, 262_144, true),
+      };
+    }
+    default:
+      throw new ContractError(`${path}.kind`, `unsupported stream delta ${JSON.stringify(kind)}`);
+  }
 }
 
 function exactRecord<const Keys extends readonly string[]>(
