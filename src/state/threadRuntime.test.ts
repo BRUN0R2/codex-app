@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import type { CodexThread } from "../contracts/types";
 import {
+  applyThreadRuntimeStreamDeltas,
   deleteThreadRuntime,
   isThreadActive,
+  mergeRuntimeThreadItems,
   readActiveTurnPlan,
-  readVisibleThreadTurns,
+  readPersistedVisibleTurns,
   synchronizeThreadRuntime,
   updateThreadRuntime,
 } from "./threadRuntime";
@@ -15,18 +17,18 @@ describe("thread runtime reducer", () => {
     let state = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
       ...runtime,
       activeTurnId: "turn-a",
-      items: [{ type: "agentMessage", id: "message-a", text: "A", phase: null }],
+      itemOverlays: [{ type: "agentMessage", id: "message-a", text: "A", phase: null }],
     }));
     state = updateThreadRuntime(state, "thread-b", (runtime) => ({
       ...runtime,
       activeTurnId: "turn-b",
-      items: [{ type: "agentMessage", id: "message-b", text: "B", phase: null }],
+      itemOverlays: [{ type: "agentMessage", id: "message-b", text: "B", phase: null }],
     }));
 
-    expect(state.get("thread-a")?.items).toEqual([
+    expect(state.get("thread-a")?.itemOverlays).toEqual([
       { type: "agentMessage", id: "message-a", text: "A", phase: null },
     ]);
-    expect(state.get("thread-b")?.items).toEqual([
+    expect(state.get("thread-b")?.itemOverlays).toEqual([
       { type: "agentMessage", id: "message-b", text: "B", phase: null },
     ]);
   });
@@ -35,11 +37,11 @@ describe("thread runtime reducer", () => {
     const streamed = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
       ...runtime,
       activeTurnId: "turn-a",
-      items: [{ type: "agentMessage", id: "streaming", text: "parcial", phase: null }],
+      itemOverlays: [{ type: "agentMessage", id: "streaming", text: "parcial", phase: null }],
     }));
     const refreshed = synchronizeThreadRuntime(streamed, threadFixture("inProgress"));
 
-    expect(refreshed.get("thread-a")?.items).toEqual([
+    expect(refreshed.get("thread-a")?.itemOverlays).toEqual([
       { type: "agentMessage", id: "streaming", text: "parcial", phase: null },
     ]);
     expect(refreshed.get("thread-a")?.activeTurnId).toBe("turn-a");
@@ -49,13 +51,11 @@ describe("thread runtime reducer", () => {
     const streamed = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
       ...runtime,
       activeTurnId: "turn-a",
-      items: [{ type: "agentMessage", id: "streaming", text: "parcial", phase: null }],
+      itemOverlays: [{ type: "agentMessage", id: "streaming", text: "parcial", phase: null }],
     }));
     const completed = synchronizeThreadRuntime(streamed, threadFixture("completed"));
 
-    expect(completed.get("thread-a")?.items).toEqual([
-      { type: "agentMessage", id: "final", text: "pronto", phase: "finalAnswer" },
-    ]);
+    expect(completed.get("thread-a")?.itemOverlays).toEqual([]);
     expect(completed.get("thread-a")?.activeTurnId).toBeNull();
     expect(deleteThreadRuntime(completed, "thread-a").has("thread-a")).toBe(false);
   });
@@ -79,7 +79,12 @@ describe("thread runtime reducer", () => {
       { type: "agentMessage", id: "streaming", text: "parcial", phase: null },
     ] as const;
 
-    const turns = readVisibleThreadTurns(thread, runtimeItems, "turn-a");
+    const turns = mergeRuntimeThreadItems(
+      thread,
+      readPersistedVisibleTurns(thread),
+      runtimeItems,
+      "turn-a",
+    );
 
     expect(turns).toHaveLength(1);
     expect(turns[0]?.items).toEqual(runtimeItems);
@@ -88,8 +93,9 @@ describe("thread runtime reducer", () => {
 
   it("selects only the latest plan from the active turn", () => {
     const thread = threadFixture("inProgress");
-    const turns = readVisibleThreadTurns(
+    const turns = mergeRuntimeThreadItems(
       thread,
+      readPersistedVisibleTurns(thread),
       [
         {
           type: "plan",
@@ -112,6 +118,33 @@ describe("thread runtime reducer", () => {
 
     expect(readActiveTurnPlan(turns, "turn-a")?.id).toBe("plan-2");
     expect(readActiveTurnPlan(turns, null)).toBeNull();
+  });
+
+  it("updates multiple streaming threads with one outer map replacement", () => {
+    const firstThread = updateThreadRuntime(new Map(), "thread-a", (runtime) => runtime);
+    const current = updateThreadRuntime(firstThread, "thread-b", (runtime) => runtime);
+    const result = applyThreadRuntimeStreamDeltas(current, [
+      {
+        kind: "agentText",
+        threadId: "thread-a",
+        itemId: "message-a",
+        delta: "A",
+      },
+      {
+        kind: "agentText",
+        threadId: "thread-b",
+        itemId: "message-b",
+        delta: "B",
+      },
+    ]);
+
+    expect(result).not.toBe(current);
+    expect(result.get("thread-a")?.itemOverlays).toEqual([
+      { type: "agentMessage", id: "message-a", text: "A", phase: null },
+    ]);
+    expect(result.get("thread-b")?.itemOverlays).toEqual([
+      { type: "agentMessage", id: "message-b", text: "B", phase: null },
+    ]);
   });
 });
 

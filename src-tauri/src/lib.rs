@@ -13,6 +13,14 @@ use engine::EngineManager;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
 
+fn focus_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let novo_chat = MenuItem::with_id(app, "new-thread", "Novo chat", true, Some("Ctrl+N"))?;
     let sair = MenuItem::with_id(app, "quit", "Sair", true, Some("Alt+F4"))?;
@@ -77,6 +85,9 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = match tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            focus_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .menu(build_menu)
@@ -112,6 +123,7 @@ pub fn run() {
             attachments::attachment_save_pasted_image,
             commands::engine_start,
             commands::engine_account_read,
+            commands::engine_account_profile_read,
             commands::engine_account_rate_limits_read,
             commands::engine_login_chatgpt,
             commands::engine_login_cancel,

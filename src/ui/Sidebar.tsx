@@ -592,7 +592,12 @@ export function Sidebar(props: SidebarProps) {
                 props.onOpenSettings();
                 return;
               }
-              setAccountMenuOpen((value) => !value);
+              const opening = !accountMenuOpen();
+              setAccountMenuOpen(opening);
+              if (opening) {
+                void props.controller.refreshAccountProfile();
+                void props.controller.refreshRateLimits();
+              }
             }}
             title="Conta"
             type="button"

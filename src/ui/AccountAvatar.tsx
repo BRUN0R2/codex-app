@@ -1,4 +1,4 @@
-import { Show } from "solid-js";
+import { createSignal, Show } from "solid-js";
 
 import type { ChatGptAccount } from "../contracts/types";
 
@@ -8,23 +8,23 @@ interface AccountAvatarProps {
 }
 
 export function AccountAvatar(props: AccountAvatarProps) {
+  const [failedPicture, setFailedPicture] = createSignal<string | null>(null);
+  const picture = () => {
+    const source = props.account?.picture ?? null;
+    return source !== failedPicture() ? source : null;
+  };
+
   return (
     <span aria-hidden="true" class="account-avatar" classList={{ large: props.large === true }}>
       <span>{accountInitials(props.account)}</span>
-      <Show when={props.account?.picture}>
-        {(picture) => (
+      <Show when={picture()}>
+        {(source) => (
           <img
             alt=""
             decoding="async"
-            loading="lazy"
-            onError={(event) => {
-              event.currentTarget.hidden = true;
-            }}
-            onLoad={(event) => {
-              event.currentTarget.hidden = false;
-            }}
+            onError={() => setFailedPicture(source())}
             referrerpolicy="no-referrer"
-            src={picture()}
+            src={source()}
           />
         )}
       </Show>

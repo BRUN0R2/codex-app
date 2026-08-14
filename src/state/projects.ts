@@ -1,7 +1,8 @@
 import type { ProjectRecord } from "../contracts/types";
 import type { IconName } from "../ui/Icon";
+import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 
-const STORAGE_KEY = "codex-desktop.projects.v1";
+const STORAGE_KEY = PROFILE_STORAGE_KEYS.projects;
 const MAX_PROJECTS = 32;
 const MAX_PATH_CHARACTERS = 4_096;
 

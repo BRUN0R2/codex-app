@@ -9,6 +9,7 @@ import {
   saveChatIntelligenceSelection,
   selectionFromChatOption,
 } from "./chatIntelligence";
+import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 
 class MemoryStorage implements Storage {
   readonly #values = new Map<string, string>();
@@ -116,7 +117,7 @@ describe("seleção de inteligência do Chat", () => {
 
   it("descarta qualquer preferência incompatível sem manter contrato legado", () => {
     localStorage.setItem(
-      "chatgpt-last-selected-model-v1",
+      PROFILE_STORAGE_KEYS.chatIntelligence,
       JSON.stringify({
         version: 1,
         obsoleteOption: "pro",
@@ -125,5 +126,12 @@ describe("seleção de inteligência do Chat", () => {
 
     expect(loadChatIntelligenceSelection()).toBeNull();
     expect(localStorage.length).toBe(0);
+  });
+
+  it("não lê nem remove a preferência do perfil anterior", () => {
+    localStorage.setItem("chatgpt-last-selected-model-v1", JSON.stringify({ version: 2 }));
+
+    expect(loadChatIntelligenceSelection()).toBeNull();
+    expect(localStorage.getItem("chatgpt-last-selected-model-v1")).not.toBeNull();
   });
 });

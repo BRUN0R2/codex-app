@@ -18,10 +18,11 @@ use super::super::error::AuthError;
 use super::super::token::AuthRecord;
 use super::keyring::KeyringStore;
 
-const CREDENTIAL_VERSION: u8 = 1;
-const KEYRING_SERVICE: &str = "codex-desktop-next";
-const KEYRING_ACCOUNT: &str = "chatgpt-oauth-v1";
-const CREDENTIAL_FILE_NAME: &str = "chatgpt-oauth.age";
+const CREDENTIAL_VERSION: u8 = 2;
+const KEYRING_ACCOUNT: &str = "chatgpt-oauth-v2";
+const KEYRING_SERVICE_SUFFIX: &str = "credentials-v2";
+const CREDENTIAL_FILE_NAME: &str = "chatgpt-oauth-v2.age";
+const MAX_APPLICATION_IDENTIFIER_BYTES: usize = 256;
 const PASSPHRASE_BYTES: usize = 32;
 
 #[derive(Serialize, Deserialize)]
@@ -32,14 +33,44 @@ struct CredentialEnvelope {
 }
 
 #[derive(Clone)]
+pub(super) struct CredentialNamespace {
+    service: String,
+}
+
+impl CredentialNamespace {
+    pub(super) fn for_application(application_identifier: &str) -> Result<Self, AuthError> {
+        if application_identifier.trim().is_empty()
+            || application_identifier.len() > MAX_APPLICATION_IDENTIFIER_BYTES
+            || application_identifier.chars().any(char::is_control)
+        {
+            return Err(storage_error(
+                "the application credential namespace is invalid",
+            ));
+        }
+        Ok(Self {
+            service: format!("{application_identifier}.{KEYRING_SERVICE_SUFFIX}"),
+        })
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct CredentialVault {
     directory: PathBuf,
     keyring: Arc<dyn KeyringStore>,
+    namespace: CredentialNamespace,
 }
 
 impl CredentialVault {
-    pub fn new(directory: PathBuf, keyring: Arc<dyn KeyringStore>) -> Self {
-        Self { directory, keyring }
+    pub fn new(
+        directory: PathBuf,
+        keyring: Arc<dyn KeyringStore>,
+        namespace: CredentialNamespace,
+    ) -> Self {
+        Self {
+            directory,
+            keyring,
+            namespace,
+        }
     }
 
     pub fn load(&self) -> Result<Option<AuthRecord>, AuthError> {
@@ -56,7 +87,7 @@ impl CredentialVault {
         };
         let passphrase = self
             .keyring
-            .load(KEYRING_SERVICE, KEYRING_ACCOUNT)?
+            .load(&self.namespace.service, KEYRING_ACCOUNT)?
             .ok_or_else(|| {
                 storage_error(format!(
                     "the encryption key for {} is missing from the system credential store",
@@ -116,7 +147,9 @@ impl CredentialVault {
                 )));
             }
         };
-        let key_removed = self.keyring.delete(KEYRING_SERVICE, KEYRING_ACCOUNT)?;
+        let key_removed = self
+            .keyring
+            .delete(&self.namespace.service, KEYRING_ACCOUNT)?;
         Ok(file_removed || key_removed)
     }
 
@@ -125,12 +158,18 @@ impl CredentialVault {
     }
 
     fn load_or_create_passphrase(&self) -> Result<SecretString, AuthError> {
-        if let Some(passphrase) = self.keyring.load(KEYRING_SERVICE, KEYRING_ACCOUNT)? {
+        if let Some(passphrase) = self
+            .keyring
+            .load(&self.namespace.service, KEYRING_ACCOUNT)?
+        {
             return Ok(SecretString::from(passphrase));
         }
         let passphrase = generate_passphrase();
-        self.keyring
-            .save(KEYRING_SERVICE, KEYRING_ACCOUNT, passphrase.expose_secret())?;
+        self.keyring.save(
+            &self.namespace.service,
+            KEYRING_ACCOUNT,
+            passphrase.expose_secret(),
+        )?;
         Ok(passphrase)
     }
 }
@@ -246,12 +285,26 @@ mod tests {
         .unwrap_or_else(|error| panic!("credential fixture should deserialize: {error}"))
     }
 
+    fn test_vault(
+        directory: PathBuf,
+        keyring: Arc<MemoryKeyring>,
+        application_identifier: &str,
+    ) -> CredentialVault {
+        let namespace = CredentialNamespace::for_application(application_identifier)
+            .unwrap_or_else(|error| panic!("test namespace should be valid: {error}"));
+        CredentialVault::new(directory, keyring, namespace)
+    }
+
     #[test]
     fn credentials_round_trip_in_the_private_encrypted_envelope() {
         let directory = tempfile::tempdir()
             .unwrap_or_else(|error| panic!("temporary credential directory should exist: {error}"));
         let keyring = Arc::new(MemoryKeyring::default());
-        let vault = CredentialVault::new(directory.path().to_path_buf(), keyring.clone());
+        let vault = test_vault(
+            directory.path().to_path_buf(),
+            keyring.clone(),
+            "dev.codexapp.desktop",
+        );
         let record = large_record();
 
         vault
@@ -277,7 +330,7 @@ mod tests {
         );
         assert_eq!(
             keyring
-                .load(KEYRING_SERVICE, KEYRING_ACCOUNT)
+                .load(&vault.namespace.service, KEYRING_ACCOUNT)
                 .unwrap_or_else(|error| panic!("passphrase should load: {error}"))
                 .map(|value| value.len()),
             Some(44)
@@ -289,7 +342,11 @@ mod tests {
         let directory = tempfile::tempdir()
             .unwrap_or_else(|error| panic!("temporary credential directory should exist: {error}"));
         let keyring = Arc::new(MemoryKeyring::default());
-        let vault = CredentialVault::new(directory.path().to_path_buf(), keyring.clone());
+        let vault = test_vault(
+            directory.path().to_path_buf(),
+            keyring.clone(),
+            "dev.codexapp.desktop",
+        );
 
         vault
             .save(large_record())
@@ -303,9 +360,48 @@ mod tests {
         assert!(!vault.credential_path().exists());
         assert!(
             keyring
-                .load(KEYRING_SERVICE, KEYRING_ACCOUNT)
+                .load(&vault.namespace.service, KEYRING_ACCOUNT)
                 .unwrap_or_else(|error| panic!("keyring should remain readable: {error}"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn application_profiles_use_independent_keyring_entries() {
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary credential directory should exist: {error}"));
+        let keyring = Arc::new(MemoryKeyring::default());
+        let release = test_vault(
+            directory.path().join("release"),
+            keyring.clone(),
+            "dev.codexapp.desktop",
+        );
+        let development = test_vault(
+            directory.path().join("development"),
+            keyring,
+            "dev.codexapp.desktop.dev",
+        );
+
+        release
+            .save(large_record())
+            .and_then(|()| development.save(large_record()))
+            .unwrap_or_else(|error| panic!("both profiles should persist credentials: {error}"));
+        release
+            .delete()
+            .unwrap_or_else(|error| panic!("release credentials should delete: {error}"));
+
+        assert!(
+            release
+                .load()
+                .unwrap_or_else(|error| panic!("release vault should remain readable: {error}"))
+                .is_none()
+        );
+        assert!(
+            development
+                .load()
+                .unwrap_or_else(|error| panic!("development vault should remain readable: {error}"))
+                .is_some()
+        );
+        assert_ne!(release.namespace.service, development.namespace.service);
     }
 }

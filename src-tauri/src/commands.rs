@@ -5,12 +5,13 @@ use tauri::{AppHandle, State};
 
 use crate::attachments::{AttachmentKind, inspect_path};
 use crate::engine::{
-    AccountRateLimitsResponse, AccountReadResponse, CancelLoginResponse, ChatModelListResponse,
-    ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse, ConversationMode, EngineManager,
-    EngineStartResponse, LoginResponse, LogoutResponse, ModelListResponse, OperationAck,
-    ReasoningEffort, ServerResponse, StartTurn, SteerTurn, ThreadCompactStartResponse,
-    ThreadForkResponse, ThreadListResponse, ThreadReadResponse, ThreadResumeResponse,
-    ThreadStartResponse, ThreadUnarchiveResponse, TurnInput, TurnStartResponse,
+    AccountProfileResponse, AccountRateLimitsResponse, AccountReadResponse, CancelLoginResponse,
+    ChatModelListResponse, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
+    ConversationMode, EngineManager, EngineStartResponse, LoginResponse, LogoutResponse,
+    ModelListResponse, OperationAck, ReasoningEffort, ServerResponse, StartTurn, SteerTurn,
+    ThreadCompactStartResponse, ThreadForkResponse, ThreadListResponse, ThreadReadResponse,
+    ThreadResumeResponse, ThreadStartResponse, ThreadUnarchiveResponse, TurnInput,
+    TurnStartResponse,
 };
 use crate::error::{AppError, CommandError, CommandResult};
 
@@ -134,6 +135,14 @@ pub async fn engine_account_read(
     engine: State<'_, EngineManager>,
 ) -> CommandResult<AccountReadResponse> {
     engine.account_read(&app).await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_account_profile_read(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+) -> CommandResult<AccountProfileResponse> {
+    engine.account_profile_read(&app).await.map_err(Into::into)
 }
 
 #[tauri::command]

@@ -1,19 +1,31 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { createEffect, createMemo, onCleanup, onMount } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { presentAssistantText } from "./contentReferenceMarkers";
 import { useImageViewer } from "./ImageViewer";
 import { resolveImageSource } from "./imageSource";
+import {
+  createBrowserRenderThrottleScheduler,
+  createLatestValueThrottle,
+  markdownStreamRenderInterval,
+} from "./renderThrottle";
 import { highlightCode } from "./syntaxHighlight";
 
 export interface MarkdownProps {
   readonly class?: string;
+  readonly streaming?: boolean;
   readonly text: string;
 }
 
 export function Markdown(props: MarkdownProps) {
   let element: HTMLDivElement | undefined;
-  const html = createMemo(() => renderMarkdown(props.text));
+  const [presentedText, setPresentedText] = createSignal(presentAssistantText(props.text));
+  const renderThrottle = createLatestValueThrottle({
+    emit: setPresentedText,
+    scheduler: createBrowserRenderThrottleScheduler(),
+  });
+  const html = createMemo(() => renderMarkdown(presentedText()));
   const viewer = useImageViewer();
 
   function handleClick(event: MouseEvent): void {
@@ -98,6 +110,15 @@ export function Markdown(props: MarkdownProps) {
   }
 
   createEffect(() => {
+    const source = presentAssistantText(props.text);
+    renderThrottle.push(
+      source,
+      markdownStreamRenderInterval(source.length),
+      props.streaming !== true,
+    );
+  });
+
+  createEffect(() => {
     html();
     queueMicrotask(hydrateImages);
   });
@@ -107,6 +128,7 @@ export function Markdown(props: MarkdownProps) {
     element?.addEventListener("keydown", handleKeyDown);
   });
   onCleanup(() => {
+    renderThrottle.dispose();
     element?.removeEventListener("click", handleClick);
     element?.removeEventListener("keydown", handleKeyDown);
   });

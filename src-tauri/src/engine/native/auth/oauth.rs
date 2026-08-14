@@ -3,6 +3,7 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use reqwest::Client;
 use reqwest::Response;
+use reqwest::header::ACCEPT;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderValue;
 use serde::Deserialize;
@@ -10,6 +11,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use url::Url;
 
+use super::AuthSession;
 use super::error::AuthError;
 use super::pkce::PkceCodes;
 use super::token::SecretString;
@@ -24,15 +26,18 @@ const AUTHORIZE_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const REVOKE_ENDPOINT: &str = "https://auth.openai.com/oauth/revoke";
 const USERINFO_ENDPOINT: &str = "https://auth.openai.com/api/accounts/oauth/userinfo";
+const CHATGPT_PROFILE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/profiles/me";
 const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OAUTH_SCOPE: &str =
     "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const ORIGINATOR: &str = "codex_desktop_next";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const USERINFO_TIMEOUT: Duration = Duration::from_secs(5);
+const CHATGPT_PROFILE_TIMEOUT: Duration = Duration::from_secs(5);
 const REVOKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TOKEN_RESPONSE_BYTES: usize = 65_536;
 const MAX_USERINFO_RESPONSE_BYTES: usize = 32_768;
+const MAX_CHATGPT_PROFILE_RESPONSE_BYTES: usize = 1_048_576;
 const MAX_ERROR_RESPONSE_BYTES: usize = 16_384;
 const MAX_ERROR_MESSAGE_CHARS: usize = 320;
 
@@ -189,6 +194,32 @@ impl OAuthClient {
         Ok(AccountProfile::from(response))
     }
 
+    pub async fn chatgpt_profile(
+        &self,
+        session: &AuthSession,
+    ) -> Result<AccountProfile, AuthError> {
+        let response = self
+            .client
+            .get(CHATGPT_PROFILE_ENDPOINT)
+            .timeout(CHATGPT_PROFILE_TIMEOUT)
+            .bearer_auth(session.access_token())
+            .header("ChatGPT-Account-ID", session.account_id())
+            .header(ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|error| transport_error("ChatGPT profile request", error))?;
+        if !response.status().is_success() {
+            return Err(endpoint_error("ChatGPT profile request", response).await);
+        }
+        let response = decode_response_limited::<ChatGptProfileResponse>(
+            response,
+            "ChatGPT profile request",
+            MAX_CHATGPT_PROFILE_RESPONSE_BYTES,
+        )
+        .await?;
+        Ok(AccountProfile::from(response))
+    }
+
     pub async fn revoke_tokens(&self, tokens: &TokenSet) -> Result<(), AuthError> {
         if !tokens.refresh_token.is_empty() {
             return self
@@ -275,12 +306,37 @@ struct UserInfoResponse {
     picture: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ChatGptProfileResponse {
+    #[serde(default)]
+    profile: Option<ChatGptProfile>,
+}
+
+#[derive(Default, Deserialize)]
+struct ChatGptProfile {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    profile_picture_url: Option<String>,
+}
+
 impl From<UserInfoResponse> for AccountProfile {
     fn from(response: UserInfoResponse) -> Self {
         Self {
             email: clean_profile_text(response.email, 320),
             name: clean_profile_text(response.name, 256),
             picture: clean_profile_picture(response.picture),
+        }
+    }
+}
+
+impl From<ChatGptProfileResponse> for AccountProfile {
+    fn from(response: ChatGptProfileResponse) -> Self {
+        let profile = response.profile.unwrap_or_default();
+        Self {
+            email: None,
+            name: clean_profile_text(profile.display_name, 256),
+            picture: clean_profile_picture(profile.profile_picture_url),
         }
     }
 }
@@ -437,6 +493,8 @@ fn sanitized_nonempty(message: &str) -> Option<String> {
 mod tests {
     use super::AUTH_ISSUER;
     use super::AccountProfile;
+    use super::ChatGptProfile;
+    use super::ChatGptProfileResponse;
     use super::OAUTH_CLIENT_ID;
     use super::OAUTH_SCOPE;
     use super::OAuthClient;
@@ -519,5 +577,25 @@ mod tests {
         });
         assert_eq!(rejected.name, None);
         assert_eq!(rejected.picture, None);
+    }
+
+    #[test]
+    fn maps_the_official_chatgpt_profile_shape() {
+        let profile = AccountProfile::from(ChatGptProfileResponse {
+            profile: Some(ChatGptProfile {
+                display_name: Some(" Bruno Silva ".into()),
+                profile_picture_url: Some("https://images.example.com/bruno.png".into()),
+            }),
+        });
+
+        assert_eq!(profile.email, None);
+        assert_eq!(profile.name.as_deref(), Some("Bruno Silva"));
+        assert_eq!(
+            profile.picture.as_deref(),
+            Some("https://images.example.com/bruno.png")
+        );
+
+        let missing = AccountProfile::from(ChatGptProfileResponse { profile: None });
+        assert_eq!(missing, AccountProfile::default());
     }
 }

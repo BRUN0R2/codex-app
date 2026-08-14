@@ -129,6 +129,10 @@ impl ChatGptAuth {
         self.inner.read_account(app).await.map_err(Into::into)
     }
 
+    pub async fn read_profile(&self, app: &AppHandle) -> Result<AccountProfileResponse, AppError> {
+        self.inner.read_profile(app).await.map_err(Into::into)
+    }
+
     pub async fn start_login(&self, app: &AppHandle) -> Result<LoginResponse, AppError> {
         self.inner.start_login(app).await.map_err(Into::into)
     }
@@ -186,6 +190,19 @@ impl AuthInner {
             account,
             requires_openai_auth: true,
             refresh: outcome.refresh,
+        })
+    }
+
+    async fn read_profile(&self, app: &AppHandle) -> Result<AccountProfileResponse, AuthError> {
+        // Resolve and refresh the session under the credential gate, then release
+        // it before the network request so profile loading never serializes login,
+        // logout, or provider work behind a non-essential image fetch.
+        let session = self.session(app).await?;
+        let context = self.context(app).await?;
+        let profile = context.oauth.chatgpt_profile(&session).await?;
+        Ok(AccountProfileResponse {
+            name: profile.name,
+            picture: profile.picture,
         })
     }
 
@@ -484,6 +501,13 @@ pub struct AccountReadResponse {
     refresh: RefreshResult,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountProfileResponse {
+    name: Option<String>,
+    picture: Option<String>,
+}
+
 impl AccountReadResponse {
     fn signed_out() -> Self {
         Self {
@@ -513,7 +537,10 @@ async fn account_from_record(
     record: &AuthRecord,
 ) -> Result<Account, AuthError> {
     let claims = record.account_claims()?;
-    let profile = if claims.email.is_none() || claims.name.is_none() || claims.picture.is_none() {
+    // The official ChatGPT profile picture is fetched independently from
+    // /wham/profiles/me. Do not hold account startup on OIDC userinfo merely
+    // because the identity token has no picture.
+    let profile = if claims.email.is_none() || claims.name.is_none() {
         match context.oauth.userinfo(&record.tokens().access_token).await {
             Ok(profile) => profile,
             Err(error) => {

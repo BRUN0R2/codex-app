@@ -5,12 +5,20 @@ import {
   commandOutputText,
   fileChangeActivityTitle,
   reasoningTitle,
+  thinkingPresentation,
   toolActivityTitle,
   turnDurationLabel,
   userMessageMarkerWidth,
 } from "./timelinePresentation";
 
 describe("timeline presentation", () => {
+  it("shows thinking immediately and stops it when the final answer starts", () => {
+    expect(thinkingPresentation("inProgress", false, false)).toBe("standalone");
+    expect(thinkingPresentation("inProgress", false, true)).toBe("activity");
+    expect(thinkingPresentation("inProgress", true, false)).toBe("none");
+    expect(thinkingPresentation("completed", false, false)).toBe("none");
+  });
+
   it("uses the official running and completed turn semantics", () => {
     expect(turnDurationLabel("inProgress", "18 min 15 s")).toBe("Processando há 18 min 15 s");
     expect(turnDurationLabel("completed", "18 min 15 s")).toBe("Trabalhou por 18 min 15 s");

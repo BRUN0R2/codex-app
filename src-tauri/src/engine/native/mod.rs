@@ -4,6 +4,7 @@ mod approval;
 pub(crate) mod auth;
 mod chat;
 mod compaction;
+mod content_references;
 mod context_window;
 mod provider;
 mod storage;
@@ -192,6 +193,14 @@ impl NativeEngine {
     ) -> Result<auth::AccountReadResponse, AppError> {
         self.ensure_started()?;
         self.inner.auth.read_account(app).await
+    }
+
+    pub async fn account_profile_read(
+        &self,
+        app: &AppHandle,
+    ) -> Result<auth::AccountProfileResponse, AppError> {
+        self.ensure_started()?;
+        self.inner.auth.read_profile(app).await
     }
 
     pub async fn account_rate_limits_read(

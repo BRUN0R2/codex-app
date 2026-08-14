@@ -1,4 +1,6 @@
-const STORAGE_KEY = "codex-desktop.pinned-threads.v1";
+import { PROFILE_STORAGE_KEYS } from "./profileStorage";
+
+const STORAGE_KEY = PROFILE_STORAGE_KEYS.pinnedThreads;
 const MAX_PINNED_THREADS = 128;
 const MAX_ID_CHARACTERS = 256;
 

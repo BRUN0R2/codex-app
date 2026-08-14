@@ -68,6 +68,11 @@ export interface AccountReadResponse {
   readonly refresh: AuthRefreshResult;
 }
 
+export interface AccountProfileResponse {
+  readonly name: string | null;
+  readonly picture: string | null;
+}
+
 export interface LoginResponse {
   readonly type: "chatgpt";
   readonly loginId: string;

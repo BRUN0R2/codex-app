@@ -31,6 +31,7 @@
     "verify:transitive": "node scripts/verify-transitive-dependencies.mjs",
     "verify:version": "node scripts/verify-version.mjs",
     "measure:release": "pwsh -File scripts/measure-release.ps1",
+    "measure:streaming": "node --experimental-strip-types scripts/measure-streaming.ts",
     "format:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --all",
     "tauri": "tauri"
   },

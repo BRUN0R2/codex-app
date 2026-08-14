@@ -30,6 +30,7 @@ import {
   webSearchActivityTitle,
 } from "./agentActivityPresentation";
 import { CodexGlyph } from "./CodexGlyph";
+import { presentAssistantText } from "./contentReferenceMarkers";
 import { Icon, type IconName } from "./Icon";
 import { ImagePreview } from "./ImagePreview";
 import { extractToolImageSource } from "./imageSource";
@@ -41,14 +42,17 @@ import {
   commandOutputText,
   fileChangeActivityTitle,
   reasoningTitle,
+  thinkingPresentation,
   toolActivityTitle,
   turnDurationLabel,
 } from "./timelinePresentation";
 import {
   calculateTimelineScrollbar,
+  findTimelineAnchorIndex,
   hasRecentTimelineUserScrollIntent,
   isTimelineNearEnd,
   resolveTimelineFollowing,
+  revealExpandedDisclosureScrollTop,
   type ScrollbarMetrics,
 } from "./timelineScroll";
 import { presentTurnFailure } from "./turnFailure";
@@ -93,8 +97,11 @@ const STARTER_SUGGESTIONS: readonly StarterSuggestion[] = [
 ];
 
 const USER_MESSAGE_COLLAPSED_LINES = 20;
+const TIMELINE_INITIAL_TURN_LIMIT = 60;
+const TIMELINE_HISTORY_CHUNK_SIZE = 40;
 
 interface TimelineDisclosureBinding {
+  readonly clear: (keys: readonly string[], prefixes?: readonly string[]) => void;
   readonly isOpen: () => boolean;
   readonly setOpen: (open: boolean) => void;
   readonly toggle: () => void;
@@ -111,20 +118,66 @@ function useTimelineDisclosure(
     throw new Error("O estado visual da timeline não foi inicializado.");
   }
 
+  let activeKey = key();
   createEffect(() => {
-    if (initialOpen()) {
-      disclosures.keepOpen(key());
+    const nextKey = key();
+    if (nextKey !== activeKey) {
+      disclosures.clear([activeKey]);
+      activeKey = nextKey;
     }
   });
+  onCleanup(() => disclosures.clear([activeKey]));
 
   const isOpen = () => disclosures.read(key(), initialOpen());
   const setOpen = (open: boolean) => disclosures.write(key(), open);
 
   return {
+    clear: disclosures.clear,
     isOpen,
     setOpen,
     toggle: () => setOpen(!isOpen()),
   };
+}
+
+function disclosurePhase(status: AgentActivityItem["status"]): "running" | "settled" {
+  return status === "inProgress" ? "running" : "settled";
+}
+
+function handleDetailsToggle(
+  event: ToggleEvent & { readonly currentTarget: HTMLDetailsElement },
+  disclosure: TimelineDisclosureBinding,
+): void {
+  const details = event.currentTarget;
+  disclosure.setOpen(details.open);
+  if (!details.open) {
+    return;
+  }
+  requestAnimationFrame(() => revealExpandedDetails(details));
+}
+
+function revealExpandedDetails(details: HTMLDetailsElement): void {
+  if (!details.isConnected || !details.open) {
+    return;
+  }
+  const viewport = details.closest<HTMLElement>(".agent-activity-viewport");
+  const summary = details.querySelector<HTMLElement>(":scope > summary");
+  if (viewport === null || summary === null) {
+    return;
+  }
+  const viewportBounds = viewport.getBoundingClientRect();
+  const detailsBounds = details.getBoundingClientRect();
+  const targetScrollTop = revealExpandedDisclosureScrollTop({
+    clientHeight: viewport.clientHeight,
+    detailsBottom: detailsBounds.bottom,
+    detailsTop: detailsBounds.top,
+    scrollHeight: viewport.scrollHeight,
+    scrollTop: viewport.scrollTop,
+    summaryBottom: summary.getBoundingClientRect().bottom,
+    viewportTop: viewportBounds.top,
+  });
+  if (targetScrollTop > viewport.scrollTop) {
+    viewport.scrollTop = targetScrollTop;
+  }
 }
 
 export function Timeline(props: {
@@ -137,6 +190,7 @@ export function Timeline(props: {
   let scrollbarThumbElement: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let animationFrame: number | undefined;
+  let historyRevealFrame: number | undefined;
   let lastUserScrollIntentAt = Number.NEGATIVE_INFINITY;
   let observedActiveTurnId: string | null | undefined;
   let observedThreadId: string | null | undefined;
@@ -147,6 +201,13 @@ export function Timeline(props: {
   const [showScrollToEnd, setShowScrollToEnd] = createSignal(false);
   const [activeUserMessageIndex, setActiveUserMessageIndex] = createSignal(0);
   const [clock, setClock] = createSignal(Date.now());
+  const [historyWindow, setHistoryWindow] = createSignal<{
+    readonly threadId: string | null;
+    readonly turnLimit: number;
+  }>({
+    threadId: props.controller.currentThread()?.id ?? null,
+    turnLimit: TIMELINE_INITIAL_TURN_LIMIT,
+  });
   const [scrollbar, setScrollbar] = createSignal<ScrollbarMetrics>({
     maximumScroll: 0,
     scrollable: false,
@@ -154,10 +215,20 @@ export function Timeline(props: {
     thumbTop: 0,
   });
   const disclosures = createTimelineDisclosureStore();
+  const visibleStartIndex = createMemo(() => {
+    const threadId = props.controller.currentThread()?.id ?? null;
+    const window = historyWindow();
+    const turnLimit = window.threadId === threadId ? window.turnLimit : TIMELINE_INITIAL_TURN_LIMIT;
+    return Math.max(0, props.controller.turns().length - turnLimit);
+  });
+  const visibleTurns = createMemo(() => props.controller.turns().slice(visibleStartIndex()));
   const userMessages = createMemo<readonly UserMessageEntry[]>(() =>
-    props.controller.turns().flatMap((turn) => {
+    visibleTurns().flatMap((turn) => {
       const response = [...turn.items].reverse().find((item) => item.type === "agentMessage");
-      const detail = response?.type === "agentMessage" ? blockPreview(response.text, 320) : null;
+      const detail =
+        response?.type === "agentMessage"
+          ? blockPreview(presentAssistantText(response.text), 320)
+          : null;
       return turn.items.flatMap((item) => {
         if (item.type !== "userMessage") {
           return [];
@@ -176,20 +247,56 @@ export function Timeline(props: {
   );
 
   function measureActiveUserMessage(): void {
-    if (scrollElement === undefined || userMessages().length === 0) {
+    const messages = userMessages();
+    if (scrollElement === undefined || messages.length === 0) {
       setActiveUserMessageIndex(0);
       return;
     }
     const viewportTop = scrollElement.getBoundingClientRect().top + 112;
-    let activeIndex = 0;
-    for (const [index, message] of userMessages().entries()) {
-      const element = document.getElementById(userMessageAnchor(message.id));
-      if (element === null || element.getBoundingClientRect().top > viewportTop) {
-        break;
-      }
-      activeIndex = index;
+    setActiveUserMessageIndex(
+      findTimelineAnchorIndex(
+        messages.length,
+        (index) => {
+          const message = messages[index];
+          if (message === undefined) {
+            return Number.POSITIVE_INFINITY;
+          }
+          return (
+            document.getElementById(userMessageAnchor(message.id))?.getBoundingClientRect().top ??
+            Number.POSITIVE_INFINITY
+          );
+        },
+        viewportTop,
+      ),
+    );
+  }
+
+  function revealOlderTurns(): void {
+    const threadId = props.controller.currentThread()?.id ?? null;
+    if (scrollElement === undefined || threadId === null || visibleStartIndex() === 0) {
+      return;
     }
-    setActiveUserMessageIndex(activeIndex);
+    const previousScrollHeight = scrollElement.scrollHeight;
+    const previousScrollTop = scrollElement.scrollTop;
+    setFollowingLatest(false);
+    setHistoryWindow((current) => ({
+      threadId,
+      turnLimit:
+        (current.threadId === threadId ? current.turnLimit : TIMELINE_INITIAL_TURN_LIMIT) +
+        TIMELINE_HISTORY_CHUNK_SIZE,
+    }));
+    if (historyRevealFrame !== undefined) {
+      cancelAnimationFrame(historyRevealFrame);
+    }
+    historyRevealFrame = requestAnimationFrame(() => {
+      historyRevealFrame = undefined;
+      if (scrollElement === undefined || props.controller.currentThread()?.id !== threadId) {
+        return;
+      }
+      scrollElement.scrollTop =
+        previousScrollTop + Math.max(0, scrollElement.scrollHeight - previousScrollHeight);
+      measureScroll(false);
+    });
   }
 
   function measureScroll(userInitiated: boolean): void {
@@ -427,6 +534,9 @@ export function Timeline(props: {
     if (animationFrame !== undefined) {
       cancelAnimationFrame(animationFrame);
     }
+    if (historyRevealFrame !== undefined) {
+      cancelAnimationFrame(historyRevealFrame);
+    }
   });
 
   createEffect(() => {
@@ -486,7 +596,17 @@ export function Timeline(props: {
                     />
                   }
                 >
-                  <Index each={props.controller.turns()}>
+                  <Show when={visibleStartIndex() > 0}>
+                    <button
+                      class="timeline-history-button"
+                      onClick={revealOlderTurns}
+                      type="button"
+                    >
+                      Mostrar {Math.min(TIMELINE_HISTORY_CHUNK_SIZE, visibleStartIndex())} turnos
+                      anteriores
+                    </button>
+                  </Show>
+                  <Index each={visibleTurns()}>
                     {(turn) => (
                       <ConversationTurn
                         clock={clock()}
@@ -637,6 +757,14 @@ function ConversationTurn(props: {
     }
     return null;
   });
+  const activeThinkingPresentation = createMemo(() => {
+    const latestUnit = workUnits().at(-1);
+    return thinkingPresentation(
+      props.turn.status,
+      finalAgentMessage() !== null,
+      latestUnit !== undefined && workUnitOwnsActiveHeadline(latestUnit),
+    );
+  });
 
   function turnLabel(): string {
     const end =
@@ -679,25 +807,25 @@ function ConversationTurn(props: {
         </div>
 
         <Show when={props.turn.status === "inProgress" || disclosure.isOpen()}>
-          <Show when={workItems().length > 0}>
+          <Show when={workItems().length > 0 || activeThinkingPresentation() === "standalone"}>
             <div class="turn-body">
               <Index each={workUnits()}>
                 {(unit, index) => (
                   <WorkTimelineUnit
                     diffDisplay={props.diffDisplay}
-                    isLatest={index === workUnits().length - 1}
+                    isCurrent={
+                      index === workUnits().length - 1 &&
+                      activeThinkingPresentation() === "activity"
+                    }
                     reasoningHeading={latestReasoningHeading()}
-                    turnStatus={props.turn.status}
                     unit={unit()}
                   />
                 )}
               </Index>
               <Show
                 when={
-                  props.turn.status === "inProgress" &&
-                  workItems().at(-1)?.type === "reasoning" &&
-                  workUnits().at(-1)?.kind !== "activityGroup"
-                    ? latestReasoningHeading()
+                  activeThinkingPresentation() === "standalone"
+                    ? (latestReasoningHeading() ?? "Pensando")
                     : null
                 }
               >
@@ -713,7 +841,13 @@ function ConversationTurn(props: {
       </Show>
 
       <Show when={finalAgentMessage()}>
-        {(msg) => <TimelineItem diffDisplay={props.diffDisplay} item={msg()} />}
+        {(msg) => (
+          <TimelineItem
+            active={props.turn.status === "inProgress"}
+            diffDisplay={props.diffDisplay}
+            item={msg()}
+          />
+        )}
       </Show>
 
       <Show when={failure()}>
@@ -733,9 +867,8 @@ function ConversationTurn(props: {
 
 function WorkTimelineUnit(props: {
   readonly diffDisplay?: "split" | "unified" | undefined;
-  readonly isLatest: boolean;
+  readonly isCurrent: boolean;
   readonly reasoningHeading: string | null;
-  readonly turnStatus: VisibleThreadTurn["status"];
   readonly unit: AgentActivityRenderUnit;
 }) {
   return (
@@ -744,28 +877,39 @@ function WorkTimelineUnit(props: {
       fallback={
         <Show when={props.unit.kind === "item" ? props.unit.item : null}>
           {(item) => (
-            <TimelineItem
-              active={props.turnStatus === "inProgress"}
-              diffDisplay={props.diffDisplay}
-              item={item()}
-            />
+            <TimelineItem active={props.isCurrent} diffDisplay={props.diffDisplay} item={item()} />
           )}
         </Show>
       }
     >
       {(group) => {
-        const isCurrent = () => props.turnStatus === "inProgress" && props.isLatest;
         return (
           <AgentActivityGroup
             diffDisplay={props.diffDisplay}
             disclosureKey={group().key}
-            isCurrent={isCurrent()}
+            isCurrent={props.isCurrent}
             items={group().items}
             reasoningHeading={props.reasoningHeading}
           />
         );
       }}
     </Show>
+  );
+}
+
+function workUnitOwnsActiveHeadline(unit: AgentActivityRenderUnit): boolean {
+  if (unit.kind === "activityGroup") {
+    return true;
+  }
+  const item = unit.item;
+  if (item.type === "contextCompaction") {
+    return true;
+  }
+  return (
+    (item.type === "commandExecution" ||
+      item.type === "fileChange" ||
+      item.type === "toolExecution") &&
+    item.status === "inProgress"
   );
 }
 
@@ -800,7 +944,7 @@ function AgentActivityGroup(props: {
     >
       <details
         class="activity-card agent-activity-group"
-        onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+        onToggle={(event) => handleDetailsToggle(event, disclosure)}
         open={disclosure.isOpen()}
       >
         <summary class="activity-summary agent-activity-summary" data-timeline-disclosure="">
@@ -816,15 +960,17 @@ function AgentActivityGroup(props: {
             <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
           </span>
         </summary>
-        <div class="agent-activity-viewport">
-          <div class="agent-activity-list">
-            <Index each={props.items}>
-              {(item) => (
-                <TimelineItem diffDisplay={props.diffDisplay} item={item()} variant="grouped" />
-              )}
-            </Index>
+        <Show when={disclosure.isOpen()}>
+          <div class="agent-activity-viewport">
+            <div class="agent-activity-list">
+              <Index each={props.items}>
+                {(item) => (
+                  <TimelineItem diffDisplay={props.diffDisplay} item={item()} variant="grouped" />
+                )}
+              </Index>
+            </div>
           </div>
-        </div>
+        </Show>
       </details>
     </Show>
   );
@@ -904,9 +1050,9 @@ function TimelineItem(props: {
       return <UserMessage item={props.item} />;
     case "agentMessage":
       return props.item.phase === "commentary" ? (
-        <CommentaryMessage item={props.item} />
+        <CommentaryMessage item={props.item} streaming={props.active === true} />
       ) : (
-        <AgentMessage item={props.item} />
+        <AgentMessage item={props.item} streaming={props.active === true} />
       );
     case "contextCompaction":
       return <ContextCompaction active={props.active} item={props.item} />;
@@ -1041,51 +1187,67 @@ function UserContentPart(props: { readonly content: UserContent }) {
 
 function CommentaryMessage(props: {
   readonly item: Extract<ThreadItem, { type: "agentMessage" }>;
+  readonly streaming: boolean;
 }) {
   const disclosure = useTimelineDisclosure(() => `commentary:${props.item.id}`);
-  const content = () => props.item.text.trim();
+  const content = () => presentAssistantText(props.item.text).trim();
   const title = () => reasoningTitle([], [content()]);
   const hasDetails = () => content().includes("\n") || content() !== title();
 
   return (
-    <Show
-      when={hasDetails()}
-      fallback={
-        <section class="activity-card commentary-card">
-          <p class="commentary-message-text">{content()}</p>
-        </section>
-      }
-    >
-      <details
-        class="activity-card commentary-card"
-        onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
-        open={disclosure.isOpen()}
-      >
-        <summary class="activity-summary" data-timeline-disclosure="">
-          <ActivityHeadline text={title()} />
-          <span class="activity-chevron">
-            <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-          </span>
-        </summary>
-        <div class="commentary-content">
-          <Markdown text={content()} />
-        </div>
-      </details>
+    <Show when={content()}>
+      {(visibleContent) => (
+        <Show
+          when={hasDetails()}
+          fallback={
+            <section class="activity-card commentary-card">
+              <p class="commentary-message-text">{visibleContent()}</p>
+            </section>
+          }
+        >
+          <details
+            class="activity-card commentary-card"
+            onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+            open={disclosure.isOpen()}
+          >
+            <summary class="activity-summary" data-timeline-disclosure="">
+              <ActivityHeadline text={title()} />
+              <span class="activity-chevron">
+                <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+              </span>
+            </summary>
+            <div class="commentary-content">
+              <Markdown streaming={props.streaming} text={props.item.text} />
+            </div>
+          </details>
+        </Show>
+      )}
     </Show>
   );
 }
 
-function AgentMessage(props: { readonly item: Extract<ThreadItem, { type: "agentMessage" }> }) {
+function AgentMessage(props: {
+  readonly item: Extract<ThreadItem, { type: "agentMessage" }>;
+  readonly streaming: boolean;
+}) {
+  const content = () => presentAssistantText(props.item.text);
+  const visibleContent = () => content().trim().length > 0;
   return (
-    <article class="message-row agent-message-row">
-      <div class="message-content">
-        <span class="visually-hidden">Codex disse:</span>
-        <Markdown class="agent-message-markdown" text={props.item.text} />
-        <div class="message-actions">
-          <CopyMessageButton text={props.item.text} />
+    <Show when={visibleContent()}>
+      <article class="message-row agent-message-row">
+        <div class="message-content">
+          <span class="visually-hidden">Codex disse:</span>
+          <Markdown
+            class="agent-message-markdown"
+            streaming={props.streaming}
+            text={props.item.text}
+          />
+          <div class="message-actions">
+            <CopyMessageButton text={content()} />
+          </div>
         </div>
-      </div>
-    </article>
+      </article>
+    </Show>
   );
 }
 
@@ -1160,7 +1322,9 @@ function CommandItem(props: {
   readonly item: Extract<ThreadItem, { type: "commandExecution" }>;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
-  const disclosure = useTimelineDisclosure(() => `command:${props.item.id}`);
+  const disclosure = useTimelineDisclosure(
+    () => `command:${props.item.id}:${disclosurePhase(props.item.status)}`,
+  );
   const title = () =>
     commandActivityTitle(
       props.item.command,
@@ -1173,7 +1337,7 @@ function CommandItem(props: {
     <details
       class="activity-card command-activity-card"
       classList={{ "grouped-activity-item": props.variant === "grouped" }}
-      onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+      onToggle={(event) => handleDetailsToggle(event, disclosure)}
       open={disclosure.isOpen()}
     >
       <summary class="activity-summary" data-timeline-disclosure="">
@@ -1185,25 +1349,27 @@ function CommandItem(props: {
           <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
         </span>
       </summary>
-      <div class="command-card-inner">
-        <div class="command-card-header">Shell</div>
-        <div class="command-card-scroll">
-          <div class="command-card-prompt">
-            <span class="prompt-symbol">$</span> {props.item.command}
+      <Show when={disclosure.isOpen()}>
+        <div class="command-card-inner">
+          <div class="command-card-header">Shell</div>
+          <div class="command-card-scroll">
+            <div class="command-card-prompt">
+              <span class="prompt-symbol">$</span> {props.item.command}
+            </div>
+            <Show when={output()}>
+              {(visibleOutput) => <pre class="command-card-output">{visibleOutput()}</pre>}
+            </Show>
           </div>
-          <Show when={output()}>
-            {(visibleOutput) => <pre class="command-card-output">{visibleOutput()}</pre>}
+          <Show when={props.item.status === "failed" || props.item.status === "declined"}>
+            <div class="command-card-footer">
+              <span class="status-failed-text">
+                <Icon name="close" size={12} />
+                {props.item.status === "declined" ? "Recusado" : "Falhou"}
+              </span>
+            </div>
           </Show>
         </div>
-        <Show when={props.item.status === "failed" || props.item.status === "declined"}>
-          <div class="command-card-footer">
-            <span class="status-failed-text">
-              <Icon name="close" size={12} />
-              {props.item.status === "declined" ? "Recusado" : "Falhou"}
-            </span>
-          </div>
-        </Show>
-      </div>
+      </Show>
     </details>
   );
 }
@@ -1212,7 +1378,9 @@ function ToolItem(props: {
   readonly item: Extract<ThreadItem, { type: "toolExecution" }>;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
-  const disclosure = useTimelineDisclosure(() => `tool:${props.item.id}`);
+  const disclosure = useTimelineDisclosure(
+    () => `tool:${props.item.id}:${disclosurePhase(props.item.status)}`,
+  );
   const description = () => props.item.description || toolLabel(props.item.name);
   const imageSource = () => extractToolImageSource(props.item.name, props.item.output);
   const isWebSearch = () => props.item.name === "web_search" || props.item.name === "web_fetch";
@@ -1255,7 +1423,7 @@ function ToolItem(props: {
           "grouped-activity-item": props.variant === "grouped",
           "image-tool-activity": imageSource() !== null,
         }}
-        onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+        onToggle={(event) => handleDetailsToggle(event, disclosure)}
         open={disclosure.isOpen()}
       >
         <summary class="activity-summary" data-timeline-disclosure="">
@@ -1264,40 +1432,42 @@ function ToolItem(props: {
             <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
           </span>
         </summary>
-        <div class="command-card-inner">
-          <Show when={imageSource() === null}>
-            <div class="command-card-header">{toolLabel(props.item.name)}</div>
-          </Show>
-          <Show
-            when={imageSource()}
-            fallback={
-              <Show when={props.item.output !== null && props.item.output.length > 0}>
-                <div class="command-card-scroll">
-                  <pre class="command-card-output">{props.item.output}</pre>
+        <Show when={disclosure.isOpen()}>
+          <div class="command-card-inner">
+            <Show when={imageSource() === null}>
+              <div class="command-card-header">{toolLabel(props.item.name)}</div>
+            </Show>
+            <Show
+              when={imageSource()}
+              fallback={
+                <Show when={props.item.output !== null && props.item.output.length > 0}>
+                  <div class="command-card-scroll">
+                    <pre class="command-card-output">{props.item.output}</pre>
+                  </div>
+                </Show>
+              }
+            >
+              {(source) => (
+                <div class="tool-image-result">
+                  <ImagePreview
+                    alt={description()}
+                    class="tool-image-preview"
+                    name={description()}
+                    source={source()}
+                  />
                 </div>
-              </Show>
-            }
-          >
-            {(source) => (
-              <div class="tool-image-result">
-                <ImagePreview
-                  alt={description()}
-                  class="tool-image-preview"
-                  name={description()}
-                  source={source()}
-                />
+              )}
+            </Show>
+            <Show when={props.item.status === "failed" || props.item.status === "declined"}>
+              <div class="command-card-footer">
+                <span class="status-failed-text">
+                  <Icon name="close" size={12} />
+                  {props.item.status === "declined" ? "Recusada" : "Falhou"}
+                </span>
               </div>
-            )}
-          </Show>
-          <Show when={props.item.status === "failed" || props.item.status === "declined"}>
-            <div class="command-card-footer">
-              <span class="status-failed-text">
-                <Icon name="close" size={12} />
-                {props.item.status === "declined" ? "Recusada" : "Falhou"}
-              </span>
-            </div>
-          </Show>
-        </div>
+            </Show>
+          </div>
+        </Show>
       </details>
     </Show>
   );
@@ -1309,8 +1479,7 @@ function FileChangeItem(props: {
   readonly variant?: "default" | "grouped" | undefined;
 }) {
   const disclosure = useTimelineDisclosure(
-    () => `file-change:${props.item.id}`,
-    () => props.item.status === "inProgress",
+    () => `file-change:${props.item.id}:${disclosurePhase(props.item.status)}`,
   );
   const title = () => fileChangeActivityTitle(props.item.changes);
 
@@ -1321,7 +1490,7 @@ function FileChangeItem(props: {
         <details
           class="activity-card file-change-card"
           classList={{ "grouped-activity-item": props.variant === "grouped" }}
-          onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+          onToggle={(event) => handleDetailsToggle(event, disclosure)}
           open={disclosure.isOpen()}
         >
           <summary class="activity-summary" data-timeline-disclosure="">
@@ -1333,27 +1502,29 @@ function FileChangeItem(props: {
               <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
             </span>
           </summary>
-          <div class="file-change-list">
-            <Index each={props.item.changes}>
-              {(change, index) => (
-                <Change
-                  change={change()}
-                  defaultOpen={props.item.status === "inProgress"}
-                  diffDisplay={props.diffDisplay}
-                  disclosureKey={`change:${props.item.id}:${index}`}
-                  variant={props.variant}
-                />
-              )}
-            </Index>
-          </div>
+          <Show when={disclosure.isOpen()}>
+            <div class="file-change-list">
+              <Index each={props.item.changes}>
+                {(change, index) => (
+                  <Change
+                    change={change()}
+                    diffDisplay={props.diffDisplay}
+                    disclosureKey={`change:${props.item.id}:${index}`}
+                    status={props.item.status}
+                    variant={props.variant}
+                  />
+                )}
+              </Index>
+            </div>
+          </Show>
         </details>
       }
     >
       <Change
         change={props.item.changes[0] as FileChange}
-        defaultOpen={props.item.status === "inProgress"}
         diffDisplay={props.diffDisplay}
         disclosureKey={`change:${props.item.id}:0`}
+        status={props.item.status}
         variant="grouped"
       />
     </Show>
@@ -1362,14 +1533,13 @@ function FileChangeItem(props: {
 
 function Change(props: {
   readonly change: FileChange;
-  readonly defaultOpen: boolean;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly disclosureKey: string;
+  readonly status: Extract<ThreadItem, { type: "fileChange" }>["status"];
   readonly variant?: "default" | "grouped" | undefined;
 }) {
   const disclosure = useTimelineDisclosure(
-    () => props.disclosureKey,
-    () => props.defaultOpen,
+    () => `${props.disclosureKey}:${disclosurePhase(props.status)}`,
   );
   const stats = createMemo(() => summarizeDiff(props.change.diff));
   const [copyState, setCopyState] = createSignal<"copied" | "failed" | "idle">("idle");
@@ -1409,7 +1579,7 @@ function Change(props: {
       class="diff-block"
       classList={{ "grouped-diff-block": props.variant === "grouped" }}
       data-kind={props.change.kind.type}
-      onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
+      onToggle={(event) => handleDetailsToggle(event, disclosure)}
       open={disclosure.isOpen()}
     >
       <summary data-timeline-disclosure="">
@@ -1448,15 +1618,17 @@ function Change(props: {
           </button>
         </span>
       </summary>
-      <Show
-        when={props.change.diff.trim().length > 0}
-        fallback={<div class="diff-empty-state">Nenhuma diferença textual disponível.</div>}
-      >
+      <Show when={disclosure.isOpen()}>
         <Show
-          when={props.diffDisplay === "split"}
-          fallback={<UnifiedDiffView diff={props.change.diff} path={props.change.path} />}
+          when={props.change.diff.trim().length > 0}
+          fallback={<div class="diff-empty-state">Nenhuma diferença textual disponível.</div>}
         >
-          <SplitDiffView diff={props.change.diff} path={props.change.path} />
+          <Show
+            when={props.diffDisplay === "split"}
+            fallback={<UnifiedDiffView diff={props.change.diff} path={props.change.path} />}
+          >
+            <SplitDiffView diff={props.change.diff} path={props.change.path} />
+          </Show>
         </Show>
       </Show>
     </details>

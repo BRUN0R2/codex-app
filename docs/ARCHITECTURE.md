@@ -51,6 +51,14 @@ No encerramento, novas operações são rejeitadas, aprovações são canceladas
 processos recebem cancelamento e as tasks possuem prazo de drenagem de dez
 segundos.
 
+Dev e release são perfis de runtime distintos. Release mantém o identificador
+`dev.codexapp.desktop`; dev é iniciado com o override
+`dev.codexapp.desktop.dev`. Cada perfil possui diretório Tauri, WebView e cofre
+próprios, e o plugin de instância única impede dois processos do mesmo perfil.
+O SQLite também grava um `owner_id` por processo e impõe, por índice parcial,
+somente um turno `inProgress` por tarefa. A defesa no banco continua válida
+mesmo se uma verificação de processo falhar.
+
 ## Frontend
 
 O frontend possui quatro camadas:
@@ -70,6 +78,22 @@ fila otimista e modelo, esforço e tier são gravados atomicamente. Login duplic
 é coalescido e qualquer falha de contrato entra nos diagnósticos e no alerta
 visível.
 
+Deltas de texto atravessam `streamDeltas.ts`: o primeiro fragmento de cada item
+é aplicado imediatamente e os seguintes são coalescidos por frame. O runtime
+armazena somente overlays do turno ativo; o histórico persistido permanece uma
+única fonte de verdade. `Markdown.tsx` limita apenas recomputações intermediárias
+durante streaming e sempre publica o valor terminal sem atraso. A timeline
+mantém uma janela explícita de turnos montados e expande o histórico sob demanda
+sem alterar a ordem, os identificadores ou a posição de leitura.
+
+`response.output_item.added` preserva a fase de mensagem antes do primeiro
+delta. Por isso “Pensando” aparece imediatamente, acompanha o título da atividade
+mais recente e desaparece quando a resposta final começa, sem montar cards vazios.
+Disclosures de atividade, comando e diff nascem fechados e só montam o corpo
+pesado quando abertos. Recolher o trabalho do turno desmonta os filhos e limpa
+suas expansões; reabrir sempre produz uma árvore enxuta. A viewport interna
+recalcula o espaço após a expansão e revela o painel inteiro quando ele cabe.
+
 O fluxo de produto possui duas camadas independentes: `ChatGPT | Codex` e,
 dentro do ChatGPT, `Chat | Work`. A troca salva o destino atual antes de
 restaurar a última conversa e o último projeto do destino escolhido. A lista do
@@ -78,18 +102,18 @@ Codex. Abrir uma conversa Chat ou Work também sincroniza o seletor interno.
 
 ## Dados e segredos
 
-- SQLite: `native-state-unified-v1.sqlite3` no diretório de dados do aplicativo;
-- sessão: `credentials/chatgpt-oauth.age` no mesmo domínio privado;
+- SQLite: `native-state-profile-v2.sqlite3` no diretório de dados do perfil;
+- sessão: `credentials-v2/chatgpt-oauth-v2.age` no mesmo domínio privado;
 - identidade estável do cliente consumer: `chatgpt-consumer-device-id` no diretório
   de dados do aplicativo; contém somente um UUID aleatório, nunca tokens;
-- chave do envelope: serviço `codex-desktop-next`, conta
-  `chatgpt-oauth-v1`, no Windows Credential Manager;
-- projetos conhecidos: schema local `codex-desktop.projects.v1` no WebView;
-- tarefas fixadas: schema local `codex-desktop.pins.v1` no WebView.
+- chave do envelope: serviço `<identificador Tauri>.credentials-v2`, conta
+  `chatgpt-oauth-v2`, no Windows Credential Manager;
+- projetos conhecidos: schema local `codex-desktop.profile-v2.projects` no WebView;
+- tarefas fixadas: schema local `codex-desktop.profile-v2.pinned-threads` no WebView.
 - produto, modo e últimos destinos: schema local
-  `codex-desktop.product-flow.v1` no WebView.
+  `codex-desktop.profile-v2.product-flow` no WebView.
 - preferência explícita de modelo/raciocínio do Chat:
-  `chatgpt-last-selected-model-v1` no WebView; a chave não existe enquanto o
+  `codex-desktop.profile-v2.chat-intelligence` no WebView; a chave não existe enquanto o
   usuário usa o padrão dinâmico do catálogo.
 - continuidade consumer do Chat: `conversation_id` e `parent_message_id` na
   tabela SQLite `chat_conversations`; tokens de integridade e conduit não são
@@ -115,3 +139,9 @@ inseridos para chamadas interrompidas e resultados sem chamada são removidos;
 a forma reparada substitui o histórico atomicamente e gera um diagnóstico
 visível. Assim, uma interrupção ou encerramento no meio de um lote de ferramentas
 não pode invalidar os turnos seguintes.
+
+Durante um turno, o snapshot normalizado permanece em memória com o último
+`sequence` SQLite observado. Cada rodada incorpora somente as linhas novas —
+inclusive steers persistidos concorrentemente — e mantém os mesmos limites
+globais de bytes e itens. Compactação substitui o histórico em transação e
+recarrega um snapshot completo, tornando a troca explícita e previsível.

@@ -1,6 +1,7 @@
 import type { AppProduct, ChatGptMode, ConversationMode } from "../contracts/types";
+import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 
-const STORAGE_KEY = "codex-desktop.product-flow.v1";
+const STORAGE_KEY = PROFILE_STORAGE_KEYS.productFlow;
 const MAX_STORED_VALUE_CHARACTERS = 4_096;
 
 export interface ConversationDestination {

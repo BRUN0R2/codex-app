@@ -1,5 +1,18 @@
 import type { ActivityStatus, TurnStatus } from "../contracts/types";
 
+export type ThinkingPresentation = "activity" | "none" | "standalone";
+
+export function thinkingPresentation(
+  status: TurnStatus,
+  finalAnswerStarted: boolean,
+  latestWorkOwnsHeadline: boolean,
+): ThinkingPresentation {
+  if (status !== "inProgress" || finalAnswerStarted) {
+    return "none";
+  }
+  return latestWorkOwnsHeadline ? "activity" : "standalone";
+}
+
 export function turnDurationLabel(status: TurnStatus, duration: string): string {
   switch (status) {
     case "completed":

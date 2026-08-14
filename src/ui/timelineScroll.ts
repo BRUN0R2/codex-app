@@ -64,3 +64,50 @@ export function resolveTimelineFollowing(input: {
 }): boolean {
   return input.userInitiated ? input.nearEnd : input.followingLatest;
 }
+
+export function findTimelineAnchorIndex(
+  anchorCount: number,
+  readAnchorTop: (index: number) => number,
+  viewportTop: number,
+): number {
+  if (anchorCount <= 1) {
+    return 0;
+  }
+
+  let lowerBound = 0;
+  let upperBound = anchorCount - 1;
+  let activeIndex = 0;
+  while (lowerBound <= upperBound) {
+    const midpoint = lowerBound + Math.floor((upperBound - lowerBound) / 2);
+    if (readAnchorTop(midpoint) <= viewportTop) {
+      activeIndex = midpoint;
+      lowerBound = midpoint + 1;
+    } else {
+      upperBound = midpoint - 1;
+    }
+  }
+  return activeIndex;
+}
+
+export function revealExpandedDisclosureScrollTop(input: {
+  readonly clientHeight: number;
+  readonly detailsBottom: number;
+  readonly detailsTop: number;
+  readonly scrollHeight: number;
+  readonly scrollTop: number;
+  readonly summaryBottom: number;
+  readonly viewportTop: number;
+}): number {
+  const clientHeight = Math.max(0, input.clientHeight);
+  const maximumScroll = Math.max(0, input.scrollHeight - clientHeight);
+  const currentScroll = Math.min(maximumScroll, Math.max(0, input.scrollTop));
+  const previewHeight = Math.max(120, clientHeight * 0.65);
+  const detailsHeight = Math.max(0, input.detailsBottom - input.detailsTop);
+  const fitsInsideViewport = detailsHeight <= clientHeight;
+  const desiredBottom = fitsInsideViewport
+    ? input.detailsBottom
+    : Math.min(input.detailsBottom, input.summaryBottom + previewHeight);
+  const availableBottom = input.viewportTop + clientHeight - (fitsInsideViewport ? 0 : 8);
+  const hiddenPixels = Math.max(0, desiredBottom - availableBottom);
+  return Math.min(maximumScroll, currentScroll + hiddenPixels);
+}

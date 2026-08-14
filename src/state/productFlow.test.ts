@@ -9,6 +9,7 @@ import {
   selectChatGptMode,
   selectProduct,
 } from "./productFlow";
+import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 
 class MemoryStorage implements Storage {
   readonly #values = new Map<string, string>();
@@ -77,7 +78,7 @@ describe("product flow", () => {
 
   it("rejects malformed persisted state instead of guessing", () => {
     localStorage.setItem(
-      "codex-desktop.product-flow.v1",
+      PROFILE_STORAGE_KEYS.productFlow,
       JSON.stringify({ version: 1, product: "chatgpt", chatGptMode: "chat" }),
     );
 

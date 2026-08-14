@@ -7,7 +7,9 @@ use crate::error::AppError;
 
 pub use contracts::*;
 use native::NativeEngine;
-pub use native::auth::{AccountReadResponse, CancelLoginResponse, LoginResponse, LogoutResponse};
+pub use native::auth::{
+    AccountProfileResponse, AccountReadResponse, CancelLoginResponse, LoginResponse, LogoutResponse,
+};
 
 pub const NOTIFICATION_EVENT: &str = "engine://notification";
 pub const SERVER_REQUEST_EVENT: &str = "engine://server-request";
@@ -26,6 +28,13 @@ impl EngineManager {
 
     pub async fn account_read(&self, app: &AppHandle) -> Result<AccountReadResponse, AppError> {
         self.engine.account_read(app).await
+    }
+
+    pub async fn account_profile_read(
+        &self,
+        app: &AppHandle,
+    ) -> Result<AccountProfileResponse, AppError> {
+        self.engine.account_profile_read(app).await
     }
 
     pub async fn account_rate_limits_read(

@@ -78,7 +78,7 @@ impl ChatGptCodexProvider {
         &self,
         app: &AppHandle,
         auth: &ChatGptAuth,
-        request: ResponseRequest,
+        request: ResponseRequest<'_>,
         thread_id: &str,
         turn_state: Option<&str>,
         cancellation: &mut tokio::sync::watch::Receiver<bool>,

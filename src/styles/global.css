@@ -121,7 +121,7 @@
   --padding-row-y: calc(var(--spacing) * 1);
   --padding-row-x: calc(var(--spacing) * 2);
   --padding-toolbar: calc(var(--spacing) * 4);
-  --thread-content-max-width: 40rem;
+  --thread-content-max-width: 54rem;
   --thread-content-inline-padding: 16px;
   --composer-inline-overhang: calc(var(--spacing) * 6);
   --home-composer-inline-inset: calc(var(--spacing) * 3.25);
@@ -483,6 +483,13 @@ pre {
   display: grid;
   min-height: 100%;
   place-items: center;
+}
+
+.boot-screen {
+  background: var(--bg);
+}
+
+.login-screen {
   background:
     radial-gradient(circle at 50% 40%, rgb(75 79 67 / 16%), transparent 34%),
     var(--bg);
@@ -1690,7 +1697,7 @@ pre {
 }
 
 .chat-page.chatgpt-surface .composer-wrap {
-  width: min(640px, calc(100% - 32px));
+  width: min(var(--thread-content-max-width), calc(100% - 32px));
 }
 
 .chat-page.chatgpt-empty .timeline-inner {
@@ -1851,6 +1858,32 @@ pre {
   margin: 0 auto;
   padding: 32px var(--thread-content-inline-padding)
     calc(var(--chat-dock-height) + 32px);
+}
+
+.timeline-history-button {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 22px;
+  padding: 5px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--surface-elevated);
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.timeline-history-button:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.timeline-history-button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .user-message-navigator {
@@ -2512,6 +2545,8 @@ pre {
   max-width: 100%;
   flex-direction: column;
   margin-bottom: 18px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 480px;
 }
 
 .turn-header-wrapper {
@@ -2679,8 +2714,11 @@ pre {
   max-height: 224px;
   overflow-x: hidden;
   overflow-y: auto;
+  overflow-anchor: none;
+  overscroll-behavior: contain;
   margin: 1px 0 4px;
   padding-right: 6px;
+  scrollbar-gutter: stable;
 }
 
 .agent-activity-list {
@@ -2763,24 +2801,32 @@ pre {
   inset: 0;
   width: 100%;
   overflow: hidden;
-  animation: activity-reflection-sweep 2.4s linear infinite;
+  animation: activity-reflection-sweep 4s linear 600ms infinite;
   color: var(--color-token-text-primary);
-  mask-image: linear-gradient(90deg, transparent 0%, #000 42%, #000 58%, transparent 100%);
+  mask-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    #000 20%,
+    #000 30%,
+    transparent 50%,
+    transparent 100%
+  );
   pointer-events: none;
-  transform: translate3d(-100%, 0, 0);
+  transform: translate3d(-50%, 0, 0);
   will-change: transform;
   -webkit-mask-image: linear-gradient(
     90deg,
     transparent 0%,
-    #000 42%,
-    #000 58%,
+    #000 20%,
+    #000 30%,
+    transparent 50%,
     transparent 100%
   );
 }
 
 .activity-title-highlight {
-  animation: activity-reflection-text 2.4s linear infinite;
-  transform: translate3d(100%, 0, 0);
+  animation: activity-reflection-text 4s linear 600ms infinite;
+  transform: translate3d(50%, 0, 0);
   will-change: transform;
 }
 
@@ -3114,13 +3160,21 @@ pre {
 }
 
 @keyframes activity-reflection-sweep {
-  from { transform: translate3d(-100%, 0, 0); }
-  to { transform: translate3d(100%, 0, 0); }
+  0% {
+    transform: translate3d(-50%, 0, 0);
+    animation-timing-function: steps(48, end);
+  }
+  25%,
+  100% { transform: translate3d(125%, 0, 0); }
 }
 
 @keyframes activity-reflection-text {
-  from { transform: translate3d(100%, 0, 0); }
-  to { transform: translate3d(-100%, 0, 0); }
+  0% {
+    transform: translate3d(50%, 0, 0);
+    animation-timing-function: steps(48, end);
+  }
+  25%,
+  100% { transform: translate3d(-125%, 0, 0); }
 }
 
 @keyframes spin {

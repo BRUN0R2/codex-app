@@ -10,6 +10,7 @@ import {
 } from "solid-js";
 
 import type {
+  AccountProfileResponse,
   AccountRateLimitsResponse,
   AccountReadResponse,
   AppProduct,
@@ -34,7 +35,6 @@ import type {
   ReasoningEffort,
   RuntimeDiagnostic,
   RuntimeStatus,
-  VisibleThreadItem,
 } from "../contracts/types";
 import {
   archiveThread as archiveThreadCommand,
@@ -52,6 +52,7 @@ import {
   logout as logoutCommand,
   openExternalUrl,
   readAccount,
+  readAccountProfile,
   readConfig,
   readRateLimits,
   respondToServerRequest,
@@ -66,12 +67,8 @@ import {
   unarchiveThread as unarchiveThreadCommand,
   updateConfig,
 } from "../infrastructure/codexClient";
-import {
-  appendAgentText,
-  appendReasoningText,
-  readLatestTurnFailure,
-  upsertItem,
-} from "./conversation";
+import { createAccountProfileRefreshCoordinator } from "./accountProfileRefresh";
+import { readLatestTurnFailure, upsertItem } from "./conversation";
 import {
   appendQueuedMessage,
   deleteMessageQueue,
@@ -106,9 +103,20 @@ import {
   updateProject as updateProjectsList,
 } from "./projects";
 import {
+  createBrowserRateLimitRefreshHost,
+  createRateLimitRefreshCoordinator,
+} from "./rateLimitRefresh";
+import {
+  createBrowserStreamDeltaScheduler,
+  createStreamDeltaBatcher,
+  type StreamDelta,
+} from "./streamDeltas";
+import {
+  applyThreadRuntimeStreamDeltas,
+  mergeRuntimeThreadItems,
   readActiveTurnPlan,
+  readPersistedVisibleTurns,
   isThreadActive as readThreadActive,
-  readVisibleThreadTurns,
   deleteThreadRuntime as reduceDeleteThreadRuntime,
   synchronizeThreadRuntime as reduceSynchronizeThreadRuntime,
   updateThreadRuntime as reduceUpdateThreadRuntime,
@@ -153,7 +161,6 @@ export interface AppController {
   readonly diagnostics: Accessor<readonly DiagnosticEntry[]>;
   readonly engine: Accessor<EngineStartResponse | null>;
   readonly error: Accessor<string | null>;
-  readonly items: Accessor<readonly VisibleThreadItem[]>;
   readonly lastTurnFailure: Accessor<string | null>;
   readonly loginPending: Accessor<boolean>;
   readonly models: Accessor<readonly CodexModel[]>;
@@ -191,6 +198,7 @@ export interface AppController {
   readonly logout: () => Promise<boolean>;
   readonly newThread: (workspace?: string) => boolean;
   readonly openThread: (threadId: string) => Promise<boolean>;
+  readonly refreshAccountProfile: () => Promise<boolean>;
   readonly refreshRateLimits: () => Promise<boolean>;
   readonly removeProject: (path: string) => void;
   readonly renameThread: (threadId: string, name: string) => Promise<boolean>;
@@ -249,6 +257,12 @@ export function createAppController(): AppController {
   const [threadRuntime, setThreadRuntime] = createSignal<ReadonlyMap<string, ThreadRuntimeState>>(
     new Map(),
   );
+  const streamDeltas = createStreamDeltaBatcher({
+    apply: (deltas) =>
+      setThreadRuntime((current) => applyThreadRuntimeStreamDeltas(current, deltas)),
+    reportError,
+    scheduler: createBrowserStreamDeltaScheduler(),
+  });
   const [messageQueues, setMessageQueues] = createSignal<MessageQueueMap>(new Map());
   const [pendingApprovals, setPendingApprovals] = createSignal<readonly EngineServerRequest[]>([]);
   const [diagnostics, setDiagnostics] = createSignal<readonly DiagnosticEntry[]>([]);
@@ -293,19 +307,58 @@ export function createAppController(): AppController {
     ),
   );
   const signedIn = createMemo(() => account()?.account !== null && account() !== undefined);
+  const rateLimitRefresh = createRateLimitRefreshCoordinator({
+    getSessionKey: () => (signedIn() ? "chatgpt" : null),
+    read: readRateLimits,
+    apply: setRateLimits,
+    reportError: (reason) => {
+      addDiagnostic({ stream: "runtime", message: describeError(reason) });
+    },
+    host: createBrowserRateLimitRefreshHost(),
+  });
+  const accountProfileRefresh = createAccountProfileRefreshCoordinator({
+    getSessionKey: () => (signedIn() ? "chatgpt" : null),
+    read: readAccountProfile,
+    apply: (profile: AccountProfileResponse) => {
+      setAccount((current) => {
+        if (current?.account === null || current?.account === undefined) {
+          return current;
+        }
+        return {
+          ...current,
+          account: {
+            ...current.account,
+            name: profile.name ?? current.account.name,
+            picture: profile.picture ?? current.account.picture,
+          },
+        };
+      });
+    },
+    reportError: (reason) => {
+      addDiagnostic({ stream: "runtime", message: describeError(reason) });
+    },
+  });
   const selectedRuntime = createMemo<ThreadRuntimeState | null>(() => {
     const threadId = currentThread()?.id;
     return threadId === undefined ? null : (threadRuntime().get(threadId) ?? null);
   });
   const activeTurnId = createMemo(() => selectedRuntime()?.activeTurnId ?? null);
   const contextUsage = createMemo(() => selectedRuntime()?.contextUsage ?? null);
-  const items = createMemo(() => selectedRuntime()?.items ?? []);
+  const persistedTurns = createMemo<readonly VisibleThreadTurn[]>(() => {
+    const thread = currentThread();
+    return thread === null ? [] : readPersistedVisibleTurns(thread);
+  });
   const turns = createMemo<readonly VisibleThreadTurn[]>(() => {
     const thread = currentThread();
     const runtime = selectedRuntime();
     return thread === null
       ? []
-      : readVisibleThreadTurns(thread, runtime?.items ?? [], runtime?.activeTurnId ?? null);
+      : mergeRuntimeThreadItems(
+          thread,
+          persistedTurns(),
+          runtime?.itemOverlays ?? [],
+          runtime?.activeTurnId ?? null,
+        );
   });
   const activePlan = createMemo(() => readActiveTurnPlan(turns(), activeTurnId()));
   const modelReroute = createMemo(() => selectedRuntime()?.modelReroute ?? null);
@@ -347,6 +400,7 @@ export function createAppController(): AppController {
   });
 
   onMount(() => {
+    rateLimitRefresh.start();
     if (productFlowLoadError !== null) {
       reportError(productFlowLoadError);
     }
@@ -361,6 +415,9 @@ export function createAppController(): AppController {
 
   onCleanup(() => {
     disposed = true;
+    accountProfileRefresh.dispose();
+    rateLimitRefresh.dispose();
+    streamDeltas.dispose();
     unsubscribe?.();
     unsubscribe = null;
   });
@@ -392,16 +449,22 @@ export function createAppController(): AppController {
       if (disposed) {
         return;
       }
+      accountProfileRefresh.invalidateSession();
+      rateLimitRefresh.invalidateSession();
       setAccount(currentAccount);
       surfaceRefreshFailure(currentAccount);
       if (currentAccount.account !== null) {
+        void accountProfileRefresh.refreshIfStale();
         await loadAuthenticatedState();
       }
     } catch (reason) {
       const message = describeError(reason);
       batch(() => {
+        accountProfileRefresh.invalidateSession();
+        rateLimitRefresh.invalidateSession();
         setEngine(null);
         setAccount(undefined);
+        setRateLimits(null);
         setError(message);
         setRuntimeStatus({ state: "failed", message });
       });
@@ -421,8 +484,11 @@ export function createAppController(): AppController {
 
   function retryInitialization(): void {
     batch(() => {
+      accountProfileRefresh.invalidateSession();
+      rateLimitRefresh.invalidateSession();
       setEngine(null);
       setAccount(undefined);
+      setRateLimits(null);
       setError(null);
       setRuntimeStatus({ state: "starting", message: null });
     });
@@ -432,7 +498,7 @@ export function createAppController(): AppController {
   async function loadAuthenticatedState(): Promise<void> {
     await Promise.all([loadLocalAuthenticatedState(), loadModelCatalog(), loadChatModelCatalog()]);
     if (!disposed) {
-      void refreshRateLimits();
+      void rateLimitRefresh.refreshIfStale();
     }
   }
 
@@ -482,6 +548,19 @@ export function createAppController(): AppController {
   }
 
   function handleNotification(notification: EngineNotification): void {
+    if (isStreamNotification(notification)) {
+      streamDeltas.enqueue(streamDeltaFromNotification(notification));
+      return;
+    }
+    batch(() => {
+      streamDeltas.flush();
+      handleSemanticNotification(notification);
+    });
+  }
+
+  function handleSemanticNotification(
+    notification: Exclude<EngineNotification, StreamNotification>,
+  ): void {
     switch (notification.method) {
       case "auth.loginCompleted":
         if (notification.params.loginId !== loginId) {
@@ -540,6 +619,7 @@ export function createAppController(): AppController {
         removeDeletedThread(notification.params.threadId);
         return;
       case "turn.started":
+        streamDeltas.releaseThread(notification.params.threadId);
         updateThreadRuntime(notification.params.threadId, (runtime) => ({
           ...runtime,
           activeTurnId: notification.params.turn.id,
@@ -548,9 +628,11 @@ export function createAppController(): AppController {
           moderationMetadata: null,
           safetyBuffering: null,
         }));
+        void rateLimitRefresh.refreshIfStale();
         return;
       case "turn.completed":
         {
+          streamDeltas.releaseThread(notification.params.threadId);
           let completedActiveTurn = false;
           batch(() => {
             setThreads((current) =>
@@ -588,6 +670,7 @@ export function createAppController(): AppController {
               void scheduleQueuedMessage(notification.params.threadId);
             });
           }
+          void rateLimitRefresh.refresh();
         }
         return;
       case "model.rerouted":
@@ -616,6 +699,9 @@ export function createAppController(): AppController {
         return;
       case "item.started":
       case "item.completed":
+        if (notification.method === "item.completed") {
+          streamDeltas.releaseItem(notification.params.threadId, notification.params.item.id);
+        }
         updateThreadRuntime(notification.params.threadId, (runtime) => {
           const item = notification.params.item;
           if (item.type === "contextUsage") {
@@ -624,43 +710,9 @@ export function createAppController(): AppController {
           return {
             ...runtime,
             contextUsage: item.type === "contextCompaction" ? null : runtime.contextUsage,
-            items: upsertItem(runtime.items, item),
+            itemOverlays: upsertItem(runtime.itemOverlays, item),
           };
         });
-        return;
-      case "item.agentTextDelta":
-        updateThreadRuntime(notification.params.threadId, (runtime) => ({
-          ...runtime,
-          items: appendAgentText(
-            runtime.items,
-            notification.params.itemId,
-            notification.params.delta,
-          ),
-        }));
-        return;
-      case "item.reasoningSummaryDelta":
-        updateThreadRuntime(notification.params.threadId, (runtime) => ({
-          ...runtime,
-          items: appendReasoningText(
-            runtime.items,
-            notification.params.itemId,
-            notification.params.index,
-            notification.params.delta,
-            "summary",
-          ),
-        }));
-        return;
-      case "item.reasoningTextDelta":
-        updateThreadRuntime(notification.params.threadId, (runtime) => ({
-          ...runtime,
-          items: appendReasoningText(
-            runtime.items,
-            notification.params.itemId,
-            notification.params.index,
-            notification.params.delta,
-            "content",
-          ),
-        }));
         return;
       default:
         assertNever(notification);
@@ -689,6 +741,8 @@ export function createAppController(): AppController {
     const promise = predecessor
       .then(async () => {
         const currentAccount = await readAccount();
+        accountProfileRefresh.invalidateSession();
+        rateLimitRefresh.invalidateSession();
         setAccount(currentAccount);
         surfaceRefreshFailure(currentAccount);
         if ((currentAccount.account !== null) !== expectedSignedIn) {
@@ -696,8 +750,15 @@ export function createAppController(): AppController {
             "O estado de autenticação lido diverge da transição emitida pelo engine.",
           );
         }
+        if (expectedSignedIn) {
+          void accountProfileRefresh.refreshIfStale();
+        }
         if (expectedSignedIn && config() === null) {
           await loadAuthenticatedState();
+        } else if (expectedSignedIn) {
+          void rateLimitRefresh.refreshIfStale();
+        } else {
+          setRateLimits(null);
         }
       })
       .catch(reportError)
@@ -760,6 +821,8 @@ export function createAppController(): AppController {
   async function logout(): Promise<boolean> {
     try {
       const response = await withPending(() => logoutCommand());
+      accountProfileRefresh.invalidateSession();
+      rateLimitRefresh.invalidateSession();
       batch(() => {
         setAccount({
           account: null,
@@ -1450,14 +1513,7 @@ export function createAppController(): AppController {
   }
 
   async function refreshRateLimits(): Promise<boolean> {
-    try {
-      const response = await readRateLimits();
-      setRateLimits(response);
-      return true;
-    } catch (reason) {
-      addDiagnostic({ stream: "runtime", message: describeError(reason) });
-      return false;
-    }
+    return rateLimitRefresh.refresh();
   }
 
   async function saveClipboard(dataBase64: string): Promise<Attachment | null> {
@@ -1592,7 +1648,6 @@ export function createAppController(): AppController {
     diagnostics,
     engine,
     error,
-    items,
     lastTurnFailure,
     loginPending,
     models,
@@ -1630,6 +1685,7 @@ export function createAppController(): AppController {
     logout,
     newThread,
     openThread,
+    refreshAccountProfile: accountProfileRefresh.refreshIfStale,
     refreshRateLimits,
     removeProject: removeProjectFromSidebar,
     renameThread,
@@ -1647,6 +1703,58 @@ export function createAppController(): AppController {
     updateSetting,
     unarchiveThread,
   };
+}
+
+type StreamNotification = Extract<
+  EngineNotification,
+  {
+    readonly method:
+      | "item.agentTextDelta"
+      | "item.reasoningSummaryDelta"
+      | "item.reasoningTextDelta";
+  }
+>;
+
+function isStreamNotification(
+  notification: EngineNotification,
+): notification is StreamNotification {
+  return (
+    notification.method === "item.agentTextDelta" ||
+    notification.method === "item.reasoningSummaryDelta" ||
+    notification.method === "item.reasoningTextDelta"
+  );
+}
+
+function streamDeltaFromNotification(notification: StreamNotification): StreamDelta {
+  switch (notification.method) {
+    case "item.agentTextDelta":
+      return {
+        kind: "agentText",
+        threadId: notification.params.threadId,
+        itemId: notification.params.itemId,
+        delta: notification.params.delta,
+      };
+    case "item.reasoningSummaryDelta":
+      return {
+        kind: "reasoningText",
+        threadId: notification.params.threadId,
+        itemId: notification.params.itemId,
+        index: notification.params.index,
+        target: "summary",
+        delta: notification.params.delta,
+      };
+    case "item.reasoningTextDelta":
+      return {
+        kind: "reasoningText",
+        threadId: notification.params.threadId,
+        itemId: notification.params.itemId,
+        index: notification.params.index,
+        target: "content",
+        delta: notification.params.delta,
+      };
+    default:
+      return assertNever(notification);
+  }
 }
 
 function withBootTimeout<T>(label: string, operation: () => Promise<T>): Promise<T> {

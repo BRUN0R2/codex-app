@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tauri::{AppHandle, Manager as _};
@@ -17,12 +17,14 @@ use crate::engine::{
 };
 use crate::error::AppError;
 
-const DATABASE_FILE_NAME: &str = "native-state-unified-v1.sqlite3";
-const DATABASE_SCHEMA_VERSION: i64 = 2;
-const DATABASE_APPLICATION_ID: i64 = 1_128_552_526;
+const DATABASE_FILE_NAME: &str = "native-state-profile-v2.sqlite3";
+const DATABASE_SCHEMA_VERSION: i64 = 1;
+const DATABASE_APPLICATION_ID: i64 = 1_128_552_527;
 const DATABASE_TABLES: &str =
     "app_config,chat_conversations,provider_items,thread_items,threads,turns";
 const THREAD_COLUMNS: &str = "id,cwd,name,preview,archived,created_at,updated_at,project_path,mode";
+const TURN_COLUMNS: &str =
+    "id,thread_id,owner_id,status,model,reasoning_effort,error,created_at,updated_at";
 const THREAD_PAGE_SIZE: usize = 50;
 const MAX_CURSOR_BYTES: usize = 20;
 const MAX_ITEM_BYTES: usize = 2 * 1_048_576;
@@ -34,15 +36,68 @@ const MAX_PREVIEW_BYTES: usize = 512;
 const MAX_DEVELOPER_INSTRUCTIONS_BYTES: usize = 262_144;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct NativeStorage {
     database_path: RwLock<Option<PathBuf>>,
+    owner_id: String,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct ChatConversationState {
     pub conversation_id: Option<String>,
     pub parent_message_id: Option<String>,
+}
+
+#[derive(Debug)]
+pub(super) struct ProviderHistorySnapshot {
+    pub items: Vec<ResponseItem>,
+    encoded_bytes: usize,
+    last_sequence: i64,
+}
+
+impl ProviderHistorySnapshot {
+    fn extend(&mut self, page: ProviderHistoryPage) -> Result<(), AppError> {
+        let total_items = self
+            .items
+            .len()
+            .checked_add(page.items.len())
+            .ok_or_else(|| {
+                AppError::Storage("stored provider history item count overflow".into())
+            })?;
+        if total_items > MAX_HISTORY_ITEMS {
+            return Err(AppError::Storage(format!(
+                "stored provider history exceeds {MAX_HISTORY_ITEMS} items"
+            )));
+        }
+        let total_bytes = self
+            .encoded_bytes
+            .checked_add(page.encoded_bytes)
+            .ok_or_else(|| AppError::Storage("stored provider history size overflow".into()))?;
+        if total_bytes > MAX_HISTORY_BYTES {
+            return Err(AppError::Storage(format!(
+                "stored provider history exceeds {MAX_HISTORY_BYTES} bytes"
+            )));
+        }
+        self.items.extend(page.items);
+        self.encoded_bytes = total_bytes;
+        self.last_sequence = page.last_sequence;
+        Ok(())
+    }
+}
+
+struct ProviderHistoryPage {
+    items: Vec<ResponseItem>,
+    encoded_bytes: usize,
+    last_sequence: i64,
+}
+
+impl Default for NativeStorage {
+    fn default() -> Self {
+        Self {
+            database_path: RwLock::new(None),
+            owner_id: Uuid::now_v7().to_string(),
+        }
+    }
 }
 
 impl NativeStorage {
@@ -77,21 +132,20 @@ impl NativeStorage {
             if version == 0 && application_id == 0 {
                 initialize_database(&mut connection)?;
             } else {
-                migrate_database(&mut connection, version, application_id)?;
-                let current_version: i64 = connection
-                    .query_row("PRAGMA user_version", [], |row| row.get(0))
-                    .map_err(storage_error)?;
-                validate_database(&connection, current_version, application_id)?;
+                validate_database(&connection, version, application_id)?;
             }
 
-            connection
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
+            transaction
                 .execute(
                     "UPDATE turns SET status = 'interrupted', updated_at = ?1
                      WHERE status = 'inProgress'",
                     [unix_timestamp()?],
                 )
                 .map_err(storage_error)?;
-            Ok(())
+            transaction.commit().map_err(storage_error)
         })
         .await?;
 
@@ -401,7 +455,7 @@ impl NativeStorage {
             let source_turns = {
                 let mut statement = transaction
                     .prepare(
-                        "SELECT id, status, model, reasoning_effort, error, created_at, updated_at
+                        "SELECT id, status, owner_id, model, reasoning_effort, error, created_at, updated_at
                          FROM turns
                          WHERE thread_id = ?1
                          ORDER BY created_at, id",
@@ -413,27 +467,29 @@ impl NativeStorage {
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
-                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, String>(3)?,
                             row.get::<_, Option<String>>(4)?,
-                            row.get::<_, i64>(5)?,
+                            row.get::<_, Option<String>>(5)?,
                             row.get::<_, i64>(6)?,
+                            row.get::<_, i64>(7)?,
                         ))
                     })
                     .map_err(storage_error)?;
                 rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?
             };
-            for (source_turn_id, status, model, effort, error, created_at, updated_at) in
+            for (source_turn_id, status, owner_id, model, effort, error, created_at, updated_at) in
                 source_turns
             {
                 let fork_turn_id = Uuid::now_v7().to_string();
                 transaction
                     .execute(
                         "INSERT INTO turns
-                             (id, thread_id, status, model, reasoning_effort, error, created_at, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                             (id, thread_id, owner_id, status, model, reasoning_effort, error, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
                             fork_turn_id,
                             fork_id,
+                            owner_id,
                             status,
                             model,
                             effort,
@@ -488,13 +544,17 @@ impl NativeStorage {
         user_item: ThreadItem,
         preview: String,
     ) -> Result<TurnSummary, AppError> {
+        validate_user_item(&user_item)?;
         let item_id = user_item.id().to_string();
         let item_payload = encode_bounded(&user_item, MAX_ITEM_BYTES, "ChatGPT thread item")?;
         let preview = truncate_utf8(preview.trim(), MAX_PREVIEW_BYTES);
+        let owner_id = self.owner_id.clone();
         let path = self.path().await?;
         run_blocking(move || {
             let mut connection = open_connection(&path)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
             require_available_thread(&transaction, &thread_id)?;
             let mode: String = transaction
                 .query_row(
@@ -523,9 +583,9 @@ impl NativeStorage {
             transaction
                 .execute(
                     "INSERT INTO turns
-                         (id, thread_id, status, model, reasoning_effort, error, created_at, updated_at)
-                     VALUES (?1, ?2, 'inProgress', ?3, ?4, NULL, ?5, ?5)",
-                    params![turn_id, thread_id, model, thinking_effort, now],
+                         (id, thread_id, owner_id, status, model, reasoning_effort, error, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'inProgress', ?4, ?5, NULL, ?6, ?6)",
+                    params![turn_id, thread_id, owner_id, model, thinking_effort, now],
                 )
                 .map_err(storage_error)?;
             transaction
@@ -658,14 +718,18 @@ impl NativeStorage {
         provider_item: ResponseItem,
         preview: String,
     ) -> Result<TurnSummary, AppError> {
+        validate_user_item(&user_item)?;
         let item_id = user_item.id().to_string();
         let item_payload = encode_bounded(&user_item, MAX_ITEM_BYTES, "thread item")?;
         let provider_payload = encode_bounded(&provider_item, MAX_ITEM_BYTES, "provider item")?;
         let preview = truncate_utf8(preview.trim(), MAX_PREVIEW_BYTES);
+        let owner_id = self.owner_id.clone();
         let path = self.path().await?;
         run_blocking(move || {
             let mut connection = open_connection(&path)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
             require_available_thread(&transaction, &thread_id)?;
             let active: bool = transaction
                 .query_row(
@@ -682,9 +746,9 @@ impl NativeStorage {
             transaction
                 .execute(
                     "INSERT INTO turns
-                         (id, thread_id, status, model, reasoning_effort, error, created_at, updated_at)
-                     VALUES (?1, ?2, 'inProgress', ?3, ?4, NULL, ?5, ?5)",
-                    params![turn_id, thread_id, model, reasoning_effort, now],
+                         (id, thread_id, owner_id, status, model, reasoning_effort, error, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'inProgress', ?4, ?5, NULL, ?6, ?6)",
+                    params![turn_id, thread_id, owner_id, model, reasoning_effort, now],
                 )
                 .map_err(storage_error)?;
             transaction
@@ -723,10 +787,13 @@ impl NativeStorage {
         model: String,
         reasoning_effort: Option<String>,
     ) -> Result<TurnSummary, AppError> {
+        let owner_id = self.owner_id.clone();
         let path = self.path().await?;
         run_blocking(move || {
             let mut connection = open_connection(&path)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
             require_available_thread(&transaction, &thread_id)?;
             let active: bool = transaction
                 .query_row(
@@ -743,9 +810,9 @@ impl NativeStorage {
             transaction
                 .execute(
                     "INSERT INTO turns
-                         (id, thread_id, status, model, reasoning_effort, error, created_at, updated_at)
-                     VALUES (?1, ?2, 'inProgress', ?3, ?4, NULL, ?5, ?5)",
-                    params![turn_id, thread_id, model, reasoning_effort, now],
+                         (id, thread_id, owner_id, status, model, reasoning_effort, error, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'inProgress', ?4, ?5, NULL, ?6, ?6)",
+                    params![turn_id, thread_id, owner_id, model, reasoning_effort, now],
                 )
                 .map_err(storage_error)?;
             transaction
@@ -791,6 +858,7 @@ impl NativeStorage {
         user_item: ThreadItem,
         provider_item: ResponseItem,
     ) -> Result<(), AppError> {
+        validate_user_item(&user_item)?;
         let item_id = user_item.id().to_string();
         let item_payload = encode_bounded(&user_item, MAX_ITEM_BYTES, "steered thread item")?;
         let provider_payload =
@@ -845,7 +913,7 @@ impl NativeStorage {
     pub async fn append_provider_item(
         &self,
         thread_id: String,
-        item: ResponseItem,
+        item: &ResponseItem,
     ) -> Result<(), AppError> {
         let payload = encode_bounded(&item, MAX_ITEM_BYTES, "provider item")?;
         let path = self.path().await?;
@@ -862,35 +930,43 @@ impl NativeStorage {
         .await
     }
 
+    #[cfg(test)]
     pub async fn provider_history(&self, thread_id: String) -> Result<Vec<ResponseItem>, AppError> {
+        Ok(self.provider_history_snapshot(thread_id).await?.items)
+    }
+
+    pub(super) async fn provider_history_snapshot(
+        &self,
+        thread_id: String,
+    ) -> Result<ProviderHistorySnapshot, AppError> {
         let path = self.path().await?;
         run_blocking(move || {
             let connection = open_connection(&path)?;
-            let exists: bool = connection
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1 AND archived = 0)",
-                    [&thread_id],
-                    |row| row.get(0),
-                )
-                .map_err(storage_error)?;
-            if !exists {
-                return Err(AppError::State(
-                    "thread does not exist or is archived".into(),
-                ));
-            }
-            let mut statement = connection
-                .prepare(
-                    "SELECT payload FROM provider_items WHERE thread_id = ?1 ORDER BY sequence",
-                )
-                .map_err(storage_error)?;
-            let rows = statement
-                .query_map([thread_id], |row| row.get::<_, String>(0))
-                .map_err(storage_error)?;
-            let mut total_bytes = 0;
-            let mut total_items = 0;
-            decode_rows(rows, "provider history", &mut total_bytes, &mut total_items)
+            require_readable_thread(&connection, &thread_id)?;
+            let page = read_provider_history_page(&connection, &thread_id, 0)?;
+            Ok(ProviderHistorySnapshot {
+                items: page.items,
+                encoded_bytes: page.encoded_bytes,
+                last_sequence: page.last_sequence,
+            })
         })
         .await
+    }
+
+    pub(super) async fn refresh_provider_history(
+        &self,
+        thread_id: String,
+        snapshot: &mut ProviderHistorySnapshot,
+    ) -> Result<(), AppError> {
+        let path = self.path().await?;
+        let after_sequence = snapshot.last_sequence;
+        let page = run_blocking(move || {
+            let connection = open_connection(&path)?;
+            require_readable_thread(&connection, &thread_id)?;
+            read_provider_history_page(&connection, &thread_id, after_sequence)
+        })
+        .await?;
+        snapshot.extend(page)
     }
 
     pub async fn replace_provider_history(
@@ -1195,6 +1271,72 @@ fn replace_provider_history_rows(
     Ok(())
 }
 
+fn require_readable_thread(connection: &Connection, thread_id: &str) -> Result<(), AppError> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1 AND archived = 0)",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::State(
+            "thread does not exist or is archived".into(),
+        ))
+    }
+}
+
+fn read_provider_history_page(
+    connection: &Connection,
+    thread_id: &str,
+    after_sequence: i64,
+) -> Result<ProviderHistoryPage, AppError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT sequence, payload
+             FROM provider_items
+             WHERE thread_id = ?1 AND sequence > ?2
+             ORDER BY sequence",
+        )
+        .map_err(storage_error)?;
+    let rows = statement
+        .query_map(params![thread_id, after_sequence], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage_error)?;
+    let mut page = ProviderHistoryPage {
+        items: Vec::new(),
+        encoded_bytes: 0,
+        last_sequence: after_sequence,
+    };
+    for row in rows {
+        let (sequence, payload) = row.map_err(storage_error)?;
+        page.encoded_bytes = page
+            .encoded_bytes
+            .checked_add(payload.len())
+            .ok_or_else(|| AppError::Storage("stored provider history size overflow".into()))?;
+        if page.encoded_bytes > MAX_HISTORY_BYTES {
+            return Err(AppError::Storage(format!(
+                "stored provider history exceeds {MAX_HISTORY_BYTES} bytes"
+            )));
+        }
+        if page.items.len() >= MAX_HISTORY_ITEMS {
+            return Err(AppError::Storage(format!(
+                "stored provider history exceeds {MAX_HISTORY_ITEMS} items"
+            )));
+        }
+        page.items.push(decode_bounded(
+            &payload,
+            MAX_ITEM_BYTES,
+            "provider history",
+        )?);
+        page.last_sequence = sequence;
+    }
+    Ok(page)
+}
+
 impl ThreadItem {
     pub fn id(&self) -> &str {
         match self {
@@ -1274,8 +1416,12 @@ fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, 
         .ok_or_else(|| AppError::State("thread does not exist or is archived".into()))?;
     let mut turns_statement = connection
         .prepare(
-            "SELECT id, status, error, created_at, updated_at
-             FROM turns WHERE thread_id = ?1 ORDER BY created_at, id",
+            "SELECT turns.id, turns.status, turns.error, turns.created_at, turns.updated_at,
+                    thread_items.payload
+             FROM turns
+             LEFT JOIN thread_items ON thread_items.turn_id = turns.id
+             WHERE turns.thread_id = ?1
+             ORDER BY turns.created_at, turns.id, thread_items.sequence",
         )
         .map_err(storage_error)?;
     let turn_rows = turns_statement
@@ -1286,45 +1432,62 @@ fn read_thread(connection: &Connection, thread_id: &str) -> Result<CodexThread, 
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, i64>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })
         .map_err(storage_error)?;
-    let mut turns = Vec::new();
-    let mut total_item_bytes = 0;
-    let mut total_items = 0;
-    for turn in turn_rows {
-        if turns.len() >= MAX_THREAD_TURNS {
+    let mut turns: Vec<ThreadTurn> = Vec::new();
+    let mut total_item_bytes = 0usize;
+    let mut total_items = 0usize;
+    for row in turn_rows {
+        let (turn_id, status, error, created_at, updated_at, payload) =
+            row.map_err(storage_error)?;
+        if turns.last().is_none_or(|turn| turn.id != turn_id) {
+            if turns.len() >= MAX_THREAD_TURNS {
+                return Err(AppError::Storage(format!(
+                    "thread exceeds {MAX_THREAD_TURNS} turns"
+                )));
+            }
+            let status = parse_status(&status)?;
+            if (status == TurnStatus::Failed) != error.is_some() {
+                return Err(AppError::Storage(format!(
+                    "turn `{turn_id}` has an incoherent failure status"
+                )));
+            }
+            turns.push(ThreadTurn {
+                id: turn_id,
+                items: Vec::new(),
+                status,
+                error,
+                created_at,
+                updated_at,
+            });
+        }
+        let Some(payload) = payload else {
+            continue;
+        };
+        total_item_bytes = total_item_bytes
+            .checked_add(payload.len())
+            .ok_or_else(|| AppError::Storage("stored thread items size overflow".into()))?;
+        if total_item_bytes > MAX_HISTORY_BYTES {
             return Err(AppError::Storage(format!(
-                "thread exceeds {MAX_THREAD_TURNS} turns"
+                "stored thread items exceeds {MAX_HISTORY_BYTES} bytes"
             )));
         }
-        let (turn_id, status, error, created_at, updated_at) = turn.map_err(storage_error)?;
-        let status = parse_status(&status)?;
-        if (status == TurnStatus::Failed) != error.is_some() {
+        total_items = total_items
+            .checked_add(1)
+            .ok_or_else(|| AppError::Storage("stored thread items item count overflow".into()))?;
+        if total_items > MAX_HISTORY_ITEMS {
             return Err(AppError::Storage(format!(
-                "turn `{turn_id}` has an incoherent failure status"
+                "stored thread items exceeds {MAX_HISTORY_ITEMS} items"
             )));
         }
-        let mut items_statement = connection
-            .prepare("SELECT payload FROM thread_items WHERE turn_id = ?1 ORDER BY sequence")
-            .map_err(storage_error)?;
-        let item_rows = items_statement
-            .query_map([&turn_id], |row| row.get::<_, String>(0))
-            .map_err(storage_error)?;
-        let items = decode_rows(
-            item_rows,
-            "thread items",
-            &mut total_item_bytes,
-            &mut total_items,
-        )?;
-        turns.push(ThreadTurn {
-            id: turn_id,
-            items,
-            status,
-            error,
-            created_at,
-            updated_at,
-        });
+        let item = decode_bounded(&payload, MAX_ITEM_BYTES, "thread items")?;
+        turns
+            .last_mut()
+            .ok_or_else(|| AppError::State("thread item has no owning turn".into()))?
+            .items
+            .push(item);
     }
     let mut thread = header.without_turns();
     thread.turns = turns;
@@ -1433,6 +1596,26 @@ fn validate_text(label: &str, value: &str, maximum_bytes: usize) -> Result<(), A
     Ok(())
 }
 
+fn validate_user_item(item: &ThreadItem) -> Result<(), AppError> {
+    let ThreadItem::UserMessage { id, content } = item else {
+        return Err(AppError::State(
+            "a turn must begin with a user message item".into(),
+        ));
+    };
+    validate_text("user message id", id, MAX_IDENTIFIER_BYTES)?;
+    if id.chars().any(char::is_control) {
+        return Err(AppError::Protocol(
+            "user message id contains control characters".into(),
+        ));
+    }
+    if content.is_empty() {
+        return Err(AppError::Protocol(
+            "a turn cannot begin with an empty user message".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
     if value.len() <= maximum_bytes {
         return value.to_string();
@@ -1526,36 +1709,6 @@ fn decode_bounded<T: DeserializeOwned>(
         .map_err(|error| AppError::Storage(format!("stored {label} is invalid: {error}")))
 }
 
-fn decode_rows<T: DeserializeOwned>(
-    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<String>>,
-    label: &str,
-    total_bytes: &mut usize,
-    total_items: &mut usize,
-) -> Result<Vec<T>, AppError> {
-    let mut values = Vec::new();
-    for payload in rows {
-        let payload = payload.map_err(storage_error)?;
-        *total_bytes = total_bytes
-            .checked_add(payload.len())
-            .ok_or_else(|| AppError::Storage(format!("stored {label} size overflow")))?;
-        if *total_bytes > MAX_HISTORY_BYTES {
-            return Err(AppError::Storage(format!(
-                "stored {label} exceeds {MAX_HISTORY_BYTES} bytes"
-            )));
-        }
-        *total_items = total_items
-            .checked_add(1)
-            .ok_or_else(|| AppError::Storage(format!("stored {label} item count overflow")))?;
-        if *total_items > MAX_HISTORY_ITEMS {
-            return Err(AppError::Storage(format!(
-                "stored {label} exceeds {MAX_HISTORY_ITEMS} items"
-            )));
-        }
-        values.push(decode_bounded(&payload, MAX_ITEM_BYTES, label)?);
-    }
-    Ok(values)
-}
-
 fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
     let existing_tables = database_tables(connection)?;
     if !existing_tables.is_empty() {
@@ -1581,6 +1734,7 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
              CREATE TABLE turns (
                  id TEXT PRIMARY KEY,
                  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                 owner_id TEXT NOT NULL,
                  status TEXT NOT NULL CHECK (status IN ('completed', 'failed', 'inProgress', 'interrupted')),
                  model TEXT NOT NULL,
                  reasoning_effort TEXT,
@@ -1589,6 +1743,8 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
                  updated_at INTEGER NOT NULL
              );
              CREATE INDEX turns_thread_created ON turns(thread_id, created_at, id);
+             CREATE UNIQUE INDEX turns_one_active_per_thread
+                 ON turns(thread_id) WHERE status = 'inProgress';
              CREATE TABLE thread_items (
                  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                  turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
@@ -1632,42 +1788,6 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
     transaction.commit().map_err(storage_error)
 }
 
-fn migrate_database(
-    connection: &mut Connection,
-    version: i64,
-    application_id: i64,
-) -> Result<(), AppError> {
-    if application_id != DATABASE_APPLICATION_ID {
-        return Err(AppError::Storage(format!(
-            "database identity is unsupported; expected application {DATABASE_APPLICATION_ID}, received application {application_id}"
-        )));
-    }
-    if version == DATABASE_SCHEMA_VERSION {
-        return Ok(());
-    }
-    if version == 1 {
-        let transaction = connection.transaction().map_err(storage_error)?;
-        transaction
-            .execute_batch(
-                "CREATE TABLE chat_conversations (
-                     thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
-                     conversation_id TEXT NOT NULL,
-                     parent_message_id TEXT NOT NULL,
-                     updated_at INTEGER NOT NULL
-                 );",
-            )
-            .map_err(storage_error)?;
-        transaction
-            .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
-            .map_err(storage_error)?;
-        transaction.commit().map_err(storage_error)?;
-        return Ok(());
-    }
-    Err(AppError::Storage(format!(
-        "database schema {version} cannot be migrated to {DATABASE_SCHEMA_VERSION}"
-    )))
-}
-
 fn validate_database(
     connection: &Connection,
     version: i64,
@@ -1688,6 +1808,12 @@ fn validate_database(
     if columns != THREAD_COLUMNS {
         return Err(AppError::Storage(format!(
             "thread columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
+        )));
+    }
+    let columns = turn_columns(connection)?;
+    if columns != TURN_COLUMNS {
+        return Err(AppError::Storage(format!(
+            "turn columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
         )));
     }
     let integrity: String = connection
@@ -1734,6 +1860,17 @@ fn thread_columns(connection: &Connection) -> Result<String, AppError> {
         .query_row(
             "SELECT COALESCE(group_concat(name, ','), '')
              FROM (SELECT name FROM pragma_table_info('threads') ORDER BY cid)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
+fn turn_columns(connection: &Connection) -> Result<String, AppError> {
+    connection
+        .query_row(
+            "SELECT COALESCE(group_concat(name, ','), '')
+             FROM (SELECT name FROM pragma_table_info('turns') ORDER BY cid)",
             [],
             |row| row.get(0),
         )
@@ -1791,7 +1928,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, NativeStorage, initialize_database,
+        DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, MAX_HISTORY_ITEMS, MAX_THREAD_TURNS,
+        NativeStorage, encode_bounded, initialize_database,
     };
     use crate::engine::native::provider::{ResponseContent, ResponseItem};
     use crate::engine::{
@@ -1839,8 +1977,8 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO turns
-                     (id, thread_id, status, model, reasoning_effort, error, created_at, updated_at)
-                 VALUES (?1, ?2, 'failed', 'gpt-test', NULL, ?3, 1, 1)",
+                     (id, thread_id, owner_id, status, model, reasoning_effort, error, created_at, updated_at)
+                 VALUES (?1, ?2, 'test-owner', 'failed', 'gpt-test', NULL, ?3, 1, 1)",
                 params!["failed-turn", thread.id, "provider stream failed"],
             )
             .expect("failed turn fixture should persist");
@@ -1853,6 +1991,85 @@ mod tests {
         let failed_turn = loaded.turns.first().expect("failed turn should be present");
         assert_eq!(failed_turn.status, TurnStatus::Failed);
         assert_eq!(failed_turn.error.as_deref(), Some("provider stream failed"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn materializes_a_thread_at_the_declared_turn_and_item_limits() {
+        const ITEMS_PER_TURN: usize = MAX_HISTORY_ITEMS / MAX_THREAD_TURNS;
+
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("maximum-thread.sqlite3");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(database_path.clone())
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("thread should persist");
+
+        let mut connection = Connection::open(database_path).expect("database should reopen");
+        connection
+            .execute("PRAGMA foreign_keys = ON", [])
+            .expect("foreign keys should enable");
+        let transaction = connection.transaction().expect("transaction should begin");
+        for turn_index in 0..MAX_THREAD_TURNS {
+            let turn_id = format!("turn-{turn_index:04}");
+            let timestamp = i64::try_from(turn_index).expect("turn index should fit SQLite");
+            transaction
+                .execute(
+                    "INSERT INTO turns
+                         (id, thread_id, owner_id, status, model, reasoning_effort, error, created_at, updated_at)
+                     VALUES (?1, ?2, 'stress-owner', 'completed', 'gpt-test', NULL, NULL, ?3, ?3)",
+                    params![turn_id, thread.id, timestamp],
+                )
+                .expect("stress turn should persist");
+            for item_index in 0..ITEMS_PER_TURN {
+                let item_id = format!("item-{turn_index:04}-{item_index:02}");
+                let payload = encode_bounded(
+                    &ThreadItem::AgentMessage {
+                        id: item_id.clone(),
+                        text: "x".into(),
+                        phase: None,
+                    },
+                    super::MAX_ITEM_BYTES,
+                    "stress thread item",
+                )
+                .expect("stress item should encode");
+                transaction
+                    .execute(
+                        "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
+                        params![turn_id, item_id, payload],
+                    )
+                    .expect("stress item should persist");
+            }
+        }
+        transaction.commit().expect("stress fixture should commit");
+        drop(connection);
+
+        let loaded = storage
+            .read_thread(thread.id)
+            .await
+            .expect("maximum bounded thread should load");
+        assert_eq!(loaded.turns.len(), MAX_THREAD_TURNS);
+        assert_eq!(
+            loaded
+                .turns
+                .iter()
+                .map(|turn| turn.items.len())
+                .sum::<usize>(),
+            MAX_HISTORY_ITEMS
+        );
+        assert_eq!(loaded.turns[0].items[0].id(), "item-0000-00");
+        assert_eq!(
+            loaded.turns[MAX_THREAD_TURNS - 1].items[ITEMS_PER_TURN - 1].id(),
+            "item-0999-19"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2012,7 +2229,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn migrates_schema_one_to_chat_conversation_storage() {
+    async fn rejects_an_incomplete_profile_database_without_hidden_migration() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let database_path = directory.path().join("schema-one.sqlite3");
         let mut connection = Connection::open(&database_path).expect("database should open");
@@ -2020,16 +2237,18 @@ mod tests {
         connection
             .execute("DROP TABLE chat_conversations", [])
             .expect("new table should be removed from the legacy fixture");
-        connection
-            .pragma_update(None, "user_version", 1)
-            .expect("legacy schema version should persist");
         drop(connection);
 
         let storage = NativeStorage::default();
-        storage
+        let error = storage
             .initialize_at(database_path.clone())
             .await
-            .expect("schema one should migrate");
+            .expect_err("an incomplete profile database must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("database tables do not match schema")
+        );
 
         let connection = Connection::open(database_path).expect("database should reopen");
         let table_exists: bool = connection
@@ -2045,7 +2264,7 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version should be readable");
-        assert!(table_exists);
+        assert!(!table_exists);
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
     }
 
@@ -2270,7 +2489,6 @@ mod tests {
             )
             .await
             .expect("turn should begin");
-
         storage
             .install_compacted_history(
                 thread.id.clone(),
@@ -2411,6 +2629,11 @@ mod tests {
             )
             .await
             .expect("turn should begin");
+        let mut incremental_history = storage
+            .provider_history_snapshot(thread.id.clone())
+            .await
+            .expect("initial provider history should load");
+        assert_eq!(incremental_history.items.len(), 1);
 
         storage
             .append_turn_input(
@@ -2428,6 +2651,16 @@ mod tests {
             )
             .await
             .expect("steer should append");
+        storage
+            .refresh_provider_history(thread.id.clone(), &mut incremental_history)
+            .await
+            .expect("incremental provider history should refresh");
+        assert_eq!(incremental_history.items.len(), 2);
+        storage
+            .refresh_provider_history(thread.id.clone(), &mut incremental_history)
+            .await
+            .expect("an unchanged provider history should remain refreshable");
+        assert_eq!(incremental_history.items.len(), 2);
 
         let loaded = storage
             .read_thread(thread.id.clone())

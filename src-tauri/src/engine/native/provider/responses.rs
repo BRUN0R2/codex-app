@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use crate::engine::ImageDetail;
 use crate::engine::ModelVerbosity;
@@ -23,49 +24,49 @@ const MAX_USAGE_TOKENS: u64 = 1_000_000_000;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ResponseRequest {
-    pub model: String,
-    pub instructions: String,
-    pub input: Vec<ResponseItem>,
-    pub tools: Vec<Value>,
-    pub tool_choice: String,
+pub struct ResponseRequest<'a> {
+    pub model: &'a str,
+    pub instructions: &'a str,
+    pub input: &'a [ResponseItem],
+    pub tools: &'a [Value],
+    pub tool_choice: &'static str,
     pub parallel_tool_calls: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningOptions>,
     pub store: bool,
     pub stream: bool,
-    pub include: Vec<String>,
+    pub include: [&'static str; 1],
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<String>,
+    pub service_tier: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_cache_key: Option<String>,
+    pub prompt_cache_key: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<TextOptions>,
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ResponseRequestSettings {
+pub struct ResponseRequestSettings<'a> {
     pub parallel_tool_calls: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
-    pub service_tier: Option<String>,
-    pub prompt_cache_key: Option<String>,
+    pub service_tier: Option<&'a str>,
+    pub prompt_cache_key: Option<&'a str>,
     pub verbosity: Option<ModelVerbosity>,
 }
 
-impl ResponseRequest {
+impl<'a> ResponseRequest<'a> {
     pub fn new(
-        model: String,
-        instructions: String,
-        input: Vec<ResponseItem>,
-        tools: Vec<Value>,
-        settings: ResponseRequestSettings,
+        model: &'a str,
+        instructions: &'a str,
+        input: &'a [ResponseItem],
+        tools: &'a [Value],
+        settings: ResponseRequestSettings<'a>,
     ) -> Self {
         Self {
             model,
             instructions,
             input,
             tools,
-            tool_choice: "auto".into(),
+            tool_choice: "auto",
             parallel_tool_calls: settings.parallel_tool_calls,
             reasoning: settings.reasoning_effort.map(|effort| ReasoningOptions {
                 effort,
@@ -73,7 +74,7 @@ impl ResponseRequest {
             }),
             store: false,
             stream: true,
-            include: vec!["reasoning.encrypted_content".into()],
+            include: ["reasoning.encrypted_content"],
             service_tier: settings.service_tier,
             prompt_cache_key: settings.prompt_cache_key,
             text: settings
@@ -340,6 +341,7 @@ enum ReasoningContentType {
 
 #[derive(Debug)]
 pub enum ResponseEvent {
+    OutputItemAdded(ResponseItem),
     OutputTextDelta {
         item_id: String,
         delta: String,
@@ -403,6 +405,9 @@ impl ResponseStream {
         &mut self,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<Option<ResponseEvent>, AppError> {
+        // Heartbeat chunks are transport activity, not model progress. Keep one deadline for the
+        // next decoded event so a heartbeat-only connection cannot remain in progress forever.
+        let event_deadline = Instant::now() + STREAM_IDLE_TIMEOUT;
         loop {
             if let Some(event) = self.pending.pop_front() {
                 return Ok(Some(event));
@@ -415,7 +420,7 @@ impl ResponseStream {
                 return Ok(Some(ResponseEvent::Interrupted));
             }
 
-            let next_chunk = tokio::time::timeout(STREAM_IDLE_TIMEOUT, self.response.chunk());
+            let next_chunk = tokio::time::timeout_at(event_deadline, self.response.chunk());
             let chunk = tokio::select! {
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() {
@@ -621,6 +626,15 @@ fn decode_event(
         .map_err(|error| AppError::Provider(format!("invalid SSE event: {error}")))?;
     emit_metadata_events(&event, safety_faster_model, output)?;
     let decoded = match event.kind.as_str() {
+        "response.output_item.added" => {
+            let item = event.item.ok_or_else(|| {
+                AppError::Provider("response.output_item.added is missing item".into())
+            })?;
+            let item = serde_json::from_value(item).map_err(|error| {
+                AppError::Provider(format!("unsupported response output item: {error}"))
+            })?;
+            Some(ResponseEvent::OutputItemAdded(item))
+        }
         "response.output_text.delta" => Some(ResponseEvent::OutputTextDelta {
             item_id: required_id(event.item_id, &event.kind)?,
             delta: required_delta(event.delta, &event.kind)?,
@@ -940,6 +954,7 @@ mod tests {
 
     use super::ResponseEvent;
     use super::ResponseItem;
+    use super::ResponseMessagePhase;
     use super::ResponseRequest;
     use super::ResponseRequestSettings;
     use super::SseParser;
@@ -1070,6 +1085,30 @@ mod tests {
     }
 
     #[test]
+    fn emits_output_item_added_with_the_message_phase_before_text_deltas() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+        parser
+            .push(
+                br#"data: {"type":"response.output_item.added","item":{"type":"message","id":"message-1","role":"assistant","phase":"commentary","content":[]}}
+
+"#,
+                &mut events,
+            )
+            .expect("an added assistant message should decode");
+
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::OutputItemAdded(ResponseItem::Message {
+                id: Some(id),
+                phase: Some(ResponseMessagePhase::Commentary),
+                ..
+            })) if id == "message-1"
+        ));
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn emits_safety_buffering_before_the_underlying_response_event() {
         let mut parser = SseParser::new(Some("gpt-fast-header".into()));
         let mut events = VecDeque::new();
@@ -1113,10 +1152,10 @@ mod tests {
     #[test]
     fn omits_reasoning_when_the_model_has_no_selected_effort() {
         let request = ResponseRequest::new(
-            "gpt-test".into(),
-            "Be useful.".into(),
-            Vec::new(),
-            Vec::new(),
+            "gpt-test",
+            "Be useful.",
+            &[],
+            &[],
             ResponseRequestSettings::default(),
         );
         let encoded = serde_json::to_value(request).expect("request should serialize");
@@ -1127,10 +1166,10 @@ mod tests {
     #[test]
     fn serializes_codex_reasoning_as_an_effort_without_a_mode() {
         let request = ResponseRequest::new(
-            "gpt-5.6-sol".into(),
-            "Be useful.".into(),
-            Vec::new(),
-            Vec::new(),
+            "gpt-5.6-sol",
+            "Be useful.",
+            &[],
+            &[],
             ResponseRequestSettings {
                 reasoning_effort: Some(ReasoningEffort::XHigh),
                 ..ResponseRequestSettings::default()
@@ -1146,10 +1185,10 @@ mod tests {
     #[test]
     fn omits_output_detail_when_the_model_default_is_selected() {
         let request = ResponseRequest::new(
-            "gpt-test".into(),
-            "Be useful.".into(),
-            Vec::new(),
-            Vec::new(),
+            "gpt-test",
+            "Be useful.",
+            &[],
+            &[],
             ResponseRequestSettings::default(),
         );
         let encoded = serde_json::to_value(request).expect("request should serialize");
@@ -1160,10 +1199,10 @@ mod tests {
     #[test]
     fn serializes_an_explicit_output_detail_override() {
         let request = ResponseRequest::new(
-            "gpt-test".into(),
-            "Be useful.".into(),
-            Vec::new(),
-            Vec::new(),
+            "gpt-test",
+            "Be useful.",
+            &[],
+            &[],
             ResponseRequestSettings {
                 verbosity: Some(ModelVerbosity::Low),
                 ..ResponseRequestSettings::default()
@@ -1176,11 +1215,12 @@ mod tests {
 
     #[test]
     fn compaction_uses_the_current_streaming_trigger() {
+        let input = [ResponseItem::compaction_trigger()];
         let request = ResponseRequest::new(
-            "gpt-test".into(),
-            "Be useful.".into(),
-            vec![ResponseItem::compaction_trigger()],
-            Vec::new(),
+            "gpt-test",
+            "Be useful.",
+            &input,
+            &[],
             ResponseRequestSettings::default(),
         );
         let encoded = serde_json::to_value(request).expect("request should serialize");

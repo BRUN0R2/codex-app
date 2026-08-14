@@ -110,7 +110,7 @@ impl ProviderClient {
     pub async fn start_response(
         &self,
         session: &AuthSession,
-        request: ResponseRequest,
+        request: ResponseRequest<'_>,
         thread_id: &str,
         turn_state: Option<&str>,
         cancellation: &mut watch::Receiver<bool>,

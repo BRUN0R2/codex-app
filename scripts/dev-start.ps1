@@ -4,45 +4,14 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$loopbackAddresses = @("127.0.0.1", "::1", "localhost")
 $defaultPort = 1420
-$maxProbePorts = 120
+$devIdentifier = "dev.codexapp.desktop.dev"
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot ".." )).Path
 $tauriConfigPath = Join-Path $projectRoot "src-tauri\tauri.conf.json"
+$debugExecutablePath = Join-Path $projectRoot "src-tauri\target\debug\codex-desktop-next.exe"
 $tempConfigPath = Join-Path $env:TEMP ("codex-tauri-dev-{0}.json" -f ([System.Guid]::NewGuid().ToString("N")))
-
-function Get-ListeningProcesses {
-  param([int]$Port)
-
-  try {
-    return Get-NetTCPConnection -State Listen -ErrorAction Stop |
-      Where-Object { $_.LocalPort -eq $Port -and $_.LocalAddress -in $loopbackAddresses }
-  } catch {
-    Write-Warning "Não foi possível consultar conexões TCP locais. Continue com cautela."
-    return @()
-  }
-}
-
-function Get-PortOwnerDetails {
-  param([int[]]$ProcessIds)
-
-  foreach ($processId in $ProcessIds) {
-    $process = $null
-    try {
-      $process = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
-    } catch {}
-
-    $path = if ($process -and $process.ExecutablePath) { $process.ExecutablePath } else { "<desconhecido>" }
-    $command = if ($process -and $process.CommandLine) { $process.CommandLine } else { "node" }
-
-    [pscustomobject]@{
-      Pid = $processId
-      Path = $path
-      Command = $command
-    }
-  }
-}
+. (Join-Path $PSScriptRoot "runtime-profile.ps1")
 
 $requestedPort = $defaultPort
 
@@ -62,34 +31,30 @@ if ($requestedPort -lt 1 -or $requestedPort -gt 65535) {
   throw "Porta inválida para desenvolvimento: $requestedPort. Use um valor entre 1 e 65535."
 }
 
-$resolvedPort = $requestedPort
-$current = @(Get-ListeningProcesses -Port $resolvedPort)
-$attempt = 0
-while ($current.Count -gt 0) {
-  if ($attempt -ge $maxProbePorts -or ($requestedPort + $attempt + 1) -gt 65535) {
-    $conflictIds = $current | Select-Object -ExpandProperty OwningProcess -Unique
-    $conflictDetails = Get-PortOwnerDetails -ProcessIds $conflictIds
-    $detailsText = $conflictDetails | ForEach-Object {
-      "pid=$($_.Pid) caminho=$($_.Path) comando=$($_.Command)"
-    }
-
-    throw @(
-      "Não foi possível localizar uma porta livre entre $requestedPort e $($requestedPort + $maxProbePorts).",
-      "A porta inicial em conflito tinha processos:",
-      $detailsText -join "`n"
-    ) -join "`n"
+$existingDevProcesses = @(Get-ProcessesByExecutablePath -ExecutablePath $debugExecutablePath)
+if ($existingDevProcesses.Count -gt 0) {
+  $processes = $existingDevProcesses | ForEach-Object {
+    "pid=$($_.Pid) caminho=$($_.Path) comando=$($_.Command)"
   }
-
-  $resolvedPort += 1
-  $attempt += 1
-  $current = @(Get-ListeningProcesses -Port $resolvedPort)
+  throw @(
+    "Já existe uma instância dev deste perfil em execução.",
+    ($processes -join "`n")
+  ) -join "`n"
 }
 
-if ($resolvedPort -ne $requestedPort) {
-  Write-Host "Porta $requestedPort em uso; usando fallback $resolvedPort."
+$listeners = @(Get-LoopbackListeners -Port $requestedPort)
+if ($listeners.Count -gt 0) {
+  $details = $listeners |
+    Select-Object -ExpandProperty OwningProcess -Unique |
+    ForEach-Object { Get-ProcessDetails -ProcessId $_ } |
+    ForEach-Object { "pid=$($_.Pid) caminho=$($_.Path) comando=$($_.Command)" }
+  throw @(
+    "A porta fixa do perfil dev, 127.0.0.1:$requestedPort, já está em uso.",
+    ($details -join "`n")
+  ) -join "`n"
 }
 
-$devUrl = "http://127.0.0.1:$resolvedPort"
+$devUrl = "http://127.0.0.1:$requestedPort"
 $baseConfig = Get-Content -Path $tauriConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -Depth 20
 $baseDevCsp = $null
 
@@ -106,10 +71,12 @@ if ($null -ne $baseConfig -and $baseConfig.PSObject.Properties.Name -contains "a
 $runtimeDevCsp = if ([string]::IsNullOrWhiteSpace($baseDevCsp)) {
   $baseDevCsp
 } else {
-  $baseDevCsp -replace "ws://127\\.0\\.0\\.1:\\d+", ("ws://127.0.0.1:{0}" -f $resolvedPort)
+  $baseDevCsp -replace "ws://127\\.0\\.0\\.1:\\d+", ("ws://127.0.0.1:{0}" -f $requestedPort)
 }
 
 $runtimeConfig = [ordered]@{
+  identifier = $devIdentifier
+  productName = "Codex App Dev"
   build = @{
     beforeDevCommand = "pnpm dev:server"
     devUrl = $devUrl
@@ -132,9 +99,10 @@ try {
   throw "Falha ao gerar a configuração de execução em $tempConfigPath. $_"
 }
 
-$env:CODEX_DESKTOP_DEV_PORT = "$resolvedPort"
+$env:CODEX_DESKTOP_DEV_PORT = "$requestedPort"
 Write-Host "Iniciando dev em $devUrl"
 
+$exitCode = 1
 try {
   & pnpm tauri dev --config $tempConfigPath
   $exitCode = $LASTEXITCODE

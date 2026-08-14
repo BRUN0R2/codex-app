@@ -1,5 +1,6 @@
 import type {
   AccountPlanType,
+  AccountProfileResponse,
   AccountRateLimitsResponse,
   AccountReadResponse,
   ActivityStatus,
@@ -213,6 +214,14 @@ export function decodeAccountReadResponse(value: unknown): AccountReadResponse {
     account: object.account === null ? null : decodeAccount(object.account, "$.account"),
     requiresOpenaiAuth: literal(object.requiresOpenaiAuth, "$.requiresOpenaiAuth", [true] as const),
     refresh: decodeRefresh(object.refresh, "$.refresh"),
+  };
+}
+
+export function decodeAccountProfileResponse(value: unknown): AccountProfileResponse {
+  const object = exactRecord(value, "$", ["name", "picture"]);
+  return {
+    name: object.name === null ? null : text(object.name, "$.name", 256),
+    picture: object.picture === null ? null : urlText(object.picture, "$.picture", ["https:"]),
   };
 }
 

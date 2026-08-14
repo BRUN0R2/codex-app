@@ -1,6 +1,7 @@
 import type { ChatModelOption } from "../contracts/types";
+import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 
-const STORAGE_KEY = "chatgpt-last-selected-model-v1";
+const STORAGE_KEY = PROFILE_STORAGE_KEYS.chatIntelligence;
 const MAX_STORED_VALUE_CHARACTERS = 1_024;
 
 export interface ChatIntelligenceSelection {

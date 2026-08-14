@@ -15,6 +15,7 @@ use self::stream::ChatStreamEvent;
 use super::NativeEngineInner;
 use super::agent::{PreparedTurn, RunCompletion};
 use super::auth::ChatGptAuth;
+use super::content_references::strip_content_reference_markers;
 use super::provider::{ResponseContent, ResponseItem};
 use crate::engine::{
     ChatModelListResponse, EngineNotification, ItemNotification, MessagePhase,
@@ -239,7 +240,7 @@ pub(super) async fn run_turn(
     for (id, text) in completed_messages {
         let item = ThreadItem::AgentMessage {
             id,
-            text,
+            text: strip_content_reference_markers(&text),
             phase: Some(MessagePhase::FinalAnswer),
         };
         inner

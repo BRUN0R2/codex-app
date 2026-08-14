@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
+  decodeAccountProfileResponse,
   decodeAccountRateLimitsResponse,
   decodeAccountReadResponse,
   decodeAttachment,
@@ -32,6 +33,7 @@ import {
   decodeTurnStartResponse,
 } from "../contracts/decode";
 import type {
+  AccountProfileResponse,
   AccountRateLimitsResponse,
   AccountReadResponse,
   ApprovalDecision,
@@ -120,6 +122,10 @@ export function startEngine(): Promise<EngineStartResponse> {
 
 export function readAccount(): Promise<AccountReadResponse> {
   return invokeDecoded("engine_account_read", decodeAccountReadResponse);
+}
+
+export function readAccountProfile(): Promise<AccountProfileResponse> {
+  return invokeDecoded("engine_account_profile_read", decodeAccountProfileResponse);
 }
 
 export function readRateLimits(): Promise<AccountRateLimitsResponse> {

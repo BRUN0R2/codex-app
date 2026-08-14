@@ -8,12 +8,13 @@ import type {
   ThreadTurn,
   VisibleThreadItem,
 } from "../contracts/types";
-import { readConversationState, upsertItem } from "./conversation";
+import { applyStreamDeltas, readLatestContextUsage } from "./conversation";
+import type { StreamDelta } from "./streamDeltas";
 
 export interface ThreadRuntimeState {
   readonly activeTurnId: string | null;
   readonly contextUsage: ContextUsageItem | null;
-  readonly items: readonly VisibleThreadItem[];
+  readonly itemOverlays: readonly VisibleThreadItem[];
   readonly modelReroute: ModelReroutedNotification["params"] | null;
   readonly modelVerifications: readonly ModelVerification[];
   readonly moderationMetadata: unknown | null;
@@ -32,18 +33,35 @@ export function updateThreadRuntime(
   update: (runtime: ThreadRuntimeState) => ThreadRuntimeState,
 ): ThreadRuntimeMap {
   const next = new Map(current);
-  const existing =
-    current.get(threadId) ??
-    ({
-      activeTurnId: null,
-      contextUsage: null,
-      items: [],
-      modelReroute: null,
-      modelVerifications: [],
-      moderationMetadata: null,
-      safetyBuffering: null,
-    } satisfies ThreadRuntimeState);
+  const existing = current.get(threadId) ?? emptyThreadRuntime();
   next.set(threadId, update(existing));
+  return next;
+}
+
+export function applyThreadRuntimeStreamDeltas(
+  current: ThreadRuntimeMap,
+  deltas: readonly StreamDelta[],
+): ThreadRuntimeMap {
+  if (deltas.length === 0) {
+    return current;
+  }
+  const deltasByThread = new Map<string, StreamDelta[]>();
+  for (const delta of deltas) {
+    const threadDeltas = deltasByThread.get(delta.threadId);
+    if (threadDeltas === undefined) {
+      deltasByThread.set(delta.threadId, [delta]);
+    } else {
+      threadDeltas.push(delta);
+    }
+  }
+  const next = new Map(current);
+  for (const [threadId, threadDeltas] of deltasByThread) {
+    const runtime = current.get(threadId) ?? emptyThreadRuntime();
+    next.set(threadId, {
+      ...runtime,
+      itemOverlays: applyStreamDeltas(runtime.itemOverlays, threadDeltas),
+    });
+  }
   return next;
 }
 
@@ -51,35 +69,21 @@ export function synchronizeThreadRuntime(
   current: ThreadRuntimeMap,
   thread: CodexThread,
 ): ThreadRuntimeMap {
-  const conversation = readConversationState(thread);
   const incomingActiveTurnId = activeTurnFromThread(thread);
   const existing = current.get(thread.id);
   const next = new Map(current);
-  if (existing !== undefined && existing.activeTurnId !== null && incomingActiveTurnId !== null) {
-    const mergedItems = conversation.items.reduce(
-      (items, item) => upsertItem(items, item),
-      existing.items,
-    );
-    next.set(thread.id, {
-      activeTurnId: incomingActiveTurnId,
-      contextUsage: conversation.contextUsage ?? existing.contextUsage,
-      items: mergedItems,
-      modelReroute: existing.modelReroute,
-      modelVerifications: existing.modelVerifications,
-      moderationMetadata: existing.moderationMetadata,
-      safetyBuffering: existing.safetyBuffering,
-    });
-  } else {
-    next.set(thread.id, {
-      activeTurnId: incomingActiveTurnId,
-      contextUsage: conversation.contextUsage,
-      items: conversation.items,
-      modelReroute: existing?.modelReroute ?? null,
-      modelVerifications: existing?.modelVerifications ?? [],
-      moderationMetadata: existing?.moderationMetadata ?? null,
-      safetyBuffering: existing?.safetyBuffering ?? null,
-    });
-  }
+  next.set(thread.id, {
+    activeTurnId: incomingActiveTurnId,
+    contextUsage: readLatestContextUsage(thread),
+    itemOverlays:
+      existing?.activeTurnId === incomingActiveTurnId && incomingActiveTurnId !== null
+        ? existing.itemOverlays
+        : [],
+    modelReroute: existing?.modelReroute ?? null,
+    modelVerifications: existing?.modelVerifications ?? [],
+    moderationMetadata: existing?.moderationMetadata ?? null,
+    safetyBuffering: existing?.safetyBuffering ?? null,
+  });
   return next;
 }
 
@@ -124,32 +128,31 @@ export function readActiveTurnPlan(
   return null;
 }
 
-export function readVisibleThreadTurns(
+export function readPersistedVisibleTurns(thread: CodexThread): readonly VisibleThreadTurn[] {
+  return thread.turns.map((turn) => ({
+    ...turn,
+    items: turn.items.filter((item) => item.type !== "contextUsage"),
+  }));
+}
+
+export function mergeRuntimeThreadItems(
   thread: CodexThread,
-  runtimeItems: readonly VisibleThreadItem[],
+  persistedTurns: readonly VisibleThreadTurn[],
+  itemOverlays: readonly VisibleThreadItem[],
   activeTurnId: string | null,
 ): readonly VisibleThreadTurn[] {
-  const runtimeById = new Map(runtimeItems.map((item) => [item.id, item]));
-  const assignedIds = new Set<string>();
-  const turns = thread.turns.map((turn) => {
-    const items = turn.items.flatMap((item) => {
-      if (item.type === "contextUsage") {
-        return [];
-      }
-      assignedIds.add(item.id);
-      return [runtimeById.get(item.id) ?? item];
-    });
-    return { ...turn, items } satisfies VisibleThreadTurn;
-  });
-  const unassigned = runtimeItems.filter((item) => !assignedIds.has(item.id));
-  if (unassigned.length === 0) {
-    return turns;
+  if (itemOverlays.length === 0) {
+    return persistedTurns;
   }
-  if (turns.length === 0) {
+  const overlayById = new Map(itemOverlays.map((item) => [item.id, item]));
+  if (overlayById.size !== itemOverlays.length) {
+    throw new Error("Os itens transitórios da conversa contêm identificadores duplicados.");
+  }
+  if (persistedTurns.length === 0) {
     return [
       {
         id: activeTurnId ?? `${thread.id}:runtime`,
-        items: unassigned,
+        items: itemOverlays,
         status: activeTurnId === null ? "completed" : "inProgress",
         error: null,
         createdAt: thread.updatedAt,
@@ -157,18 +160,14 @@ export function readVisibleThreadTurns(
       },
     ];
   }
-  const targetIndex = turns.findIndex((turn) => turn.id === activeTurnId);
-  if (targetIndex >= 0) {
-    return turns.map((turn, index) =>
-      index === targetIndex ? { ...turn, items: [...turn.items, ...unassigned] } : turn,
-    );
-  }
-  if (activeTurnId !== null) {
+  const targetIndex =
+    activeTurnId === null ? persistedTurns.length - 1 : findTurnIndex(persistedTurns, activeTurnId);
+  if (targetIndex === -1 && activeTurnId !== null) {
     return [
-      ...turns,
+      ...persistedTurns,
       {
         id: activeTurnId,
-        items: unassigned,
+        items: itemOverlays,
         status: "inProgress",
         error: null,
         createdAt: thread.updatedAt,
@@ -176,8 +175,42 @@ export function readVisibleThreadTurns(
       },
     ];
   }
-  const lastIndex = turns.length - 1;
-  return turns.map((turn, index) =>
-    index === lastIndex ? { ...turn, items: [...turn.items, ...unassigned] } : turn,
-  );
+  const target = persistedTurns[targetIndex];
+  if (target === undefined) {
+    throw new Error("O turno de destino dos itens transitórios ficou inconsistente.");
+  }
+  const assignedIds = new Set<string>();
+  const mergedItems = target.items.map((item) => {
+    assignedIds.add(item.id);
+    return overlayById.get(item.id) ?? item;
+  });
+  for (const item of itemOverlays) {
+    if (!assignedIds.has(item.id)) {
+      mergedItems.push(item);
+    }
+  }
+  const next = [...persistedTurns];
+  next[targetIndex] = { ...target, items: mergedItems };
+  return next;
+}
+
+function emptyThreadRuntime(): ThreadRuntimeState {
+  return {
+    activeTurnId: null,
+    contextUsage: null,
+    itemOverlays: [],
+    modelReroute: null,
+    modelVerifications: [],
+    moderationMetadata: null,
+    safetyBuffering: null,
+  };
+}
+
+function findTurnIndex(turns: readonly VisibleThreadTurn[], turnId: string): number {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    if (turns[index]?.id === turnId) {
+      return index;
+    }
+  }
+  return -1;
 }

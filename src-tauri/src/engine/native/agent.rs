@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::{Engine as _, prelude::BASE64_STANDARD};
+use futures_util::future::join_all;
 use serde_json::json;
 use tauri::AppHandle;
 use tokio::sync::watch;
@@ -9,11 +10,13 @@ use uuid::Uuid;
 
 use super::NativeEngineInner;
 use super::compaction::compact_context;
-use super::context_window::{evaluate_context_window, full_context_usage};
+use super::content_references::strip_content_reference_markers;
+use super::context_window::{ContextUsageSnapshot, evaluate_context_window, full_context_usage};
 use super::provider::{
     ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseRequest,
     ResponseRequestSettings, SelectedModel, WebSearchAction, normalize_provider_history,
 };
+use super::storage::ProviderHistorySnapshot;
 use super::tools::{MAX_PROVIDER_ITEM_BYTES, PreparedTool, ToolExecutionContext};
 use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
 use crate::engine::{
@@ -31,6 +34,7 @@ const MAX_IMAGE_BYTES: usize = 10 * 1_048_576;
 const MAX_RAW_INPUT_BYTES: usize = 16 * 1_048_576;
 const MAX_INSTRUCTIONS_BYTES: usize = 524_288;
 const MAX_PROVIDER_ITEM_ID_BYTES: usize = 256;
+const MAX_PARALLEL_READ_TOOLS: usize = 8;
 
 pub(super) struct PreparedTurn {
     pub user_item: ThreadItem,
@@ -56,9 +60,12 @@ pub(super) enum RunCompletion {
     Interrupted,
 }
 
-struct SamplingInput {
-    history: Vec<ResponseItem>,
-    tools: Vec<serde_json::Value>,
+struct SamplingContext<'a> {
+    app: &'a AppHandle,
+    inner: &'a NativeEngineInner,
+    instructions: &'a str,
+    snapshot: Option<&'a ContextUsageSnapshot>,
+    tools: &'a [serde_json::Value],
 }
 
 pub(super) async fn prepare_user_input(
@@ -178,27 +185,51 @@ pub(super) async fn run_turn(
 ) -> Result<RunCompletion, AppError> {
     let instructions = compose_instructions(&run.model, &run.workspace, &run.config, run.mode)?;
     let mut provider_state = TurnProviderState::default();
+    let tools = provider_tools(&inner, &run.config, run.mode);
+    let mut history = load_prompt_history(&inner, &app, &run.thread_id).await?;
+    let mut context_snapshot = inner
+        .storage
+        .latest_context_usage(run.thread_id.clone())
+        .await?;
+    let mut history_requires_refresh = false;
 
     loop {
         if *run.cancellation.borrow() {
             return Ok(RunCompletion::Interrupted);
         }
-        let Some(SamplingInput { history, tools }) =
-            prepare_sampling_input(&inner, &app, &mut run, &instructions, &mut provider_state)
-                .await?
-        else {
+        if history_requires_refresh {
+            inner
+                .storage
+                .refresh_provider_history(run.thread_id.clone(), &mut history)
+                .await?;
+        }
+        history_requires_refresh = true;
+        if !prepare_sampling_input(
+            SamplingContext {
+                app: &app,
+                inner: &inner,
+                instructions: &instructions,
+                snapshot: context_snapshot.as_ref(),
+                tools: &tools,
+            },
+            &mut run,
+            &mut provider_state,
+            &mut history,
+        )
+        .await?
+        {
             return Ok(RunCompletion::Interrupted);
-        };
+        }
         let request = ResponseRequest::new(
-            run.model.id().into(),
-            instructions.clone(),
-            history,
-            tools,
+            run.model.id(),
+            &instructions,
+            &history.items,
+            &tools,
             ResponseRequestSettings {
                 parallel_tool_calls: run.model.supports_parallel_tool_calls(),
                 reasoning_effort: run.reasoning_effort,
-                service_tier: run.service_tier.clone(),
-                prompt_cache_key: Some(run.thread_id.clone()),
+                service_tier: run.service_tier.as_deref(),
+                prompt_cache_key: Some(&run.thread_id),
                 verbosity: run.config.model_verbosity,
             },
         );
@@ -243,6 +274,23 @@ pub(super) async fn run_turn(
                 continue;
             };
             match event {
+                ResponseEvent::OutputItemAdded(item) => {
+                    validate_response_item(&item)?;
+                    if matches!(
+                        &item,
+                        ResponseItem::Message { .. } | ResponseItem::Reasoning { .. }
+                    ) && let Some(thread_item) = visible_item(&item)?
+                    {
+                        emit_item_notification(
+                            &inner,
+                            &app,
+                            &run.thread_id,
+                            &run.turn_id,
+                            thread_item,
+                            true,
+                        )?;
+                    }
+                }
                 ResponseEvent::OutputTextDelta { item_id, delta } => {
                     validate_delta(&item_id, &delta)?;
                     inner.emit_notification(
@@ -297,7 +345,7 @@ pub(super) async fn run_turn(
                     validate_response_item(&item)?;
                     inner
                         .storage
-                        .append_provider_item(run.thread_id.clone(), item.clone())
+                        .append_provider_item(run.thread_id.clone(), &item)
                         .await?;
                     if let Some(thread_item) = visible_item(&item)? {
                         persist_and_emit_item(
@@ -344,6 +392,10 @@ pub(super) async fn run_turn(
                 }
                 ResponseEvent::Completed(usage) => {
                     if let Some(usage) = usage {
+                        context_snapshot = Some(ContextUsageSnapshot {
+                            model: run.model.id().into(),
+                            usage: usage.clone(),
+                        });
                         persist_and_emit_item(
                             &inner,
                             &app,
@@ -386,68 +438,95 @@ pub(super) async fn run_turn(
             return Ok(RunCompletion::Completed);
         }
 
-        for pending in pending_tools {
-            if *run.cancellation.borrow() {
-                return Ok(RunCompletion::Interrupted);
+        let allow_parallel_reads = run.model.supports_parallel_tool_calls();
+        let mut pending_tools = pending_tools.into_iter().peekable();
+        while let Some(first) = pending_tools.next() {
+            let parallel_batch = allow_parallel_reads && first.prepared.is_parallel_safe();
+            let mut batch = vec![first];
+            while parallel_batch
+                && batch.len() < MAX_PARALLEL_READ_TOOLS
+                && pending_tools
+                    .peek()
+                    .is_some_and(|pending| pending.prepared.is_parallel_safe())
+            {
+                if let Some(pending) = pending_tools.next() {
+                    batch.push(pending);
+                }
             }
-            let started_item = pending.prepared.started_item(&run.workspace);
-            inner.emit_notification(
-                &app,
-                crate::engine::EngineNotification::ItemStarted(ItemNotification {
-                    thread_id: run.thread_id.clone(),
-                    turn_id: run.turn_id.clone(),
-                    item: started_item,
-                }),
-            )?;
-            let result = pending
-                .prepared
-                .execute(
-                    ToolExecutionContext {
-                        app: &app,
-                        workspace: &run.workspace,
-                        permissions: run.config.permission_profile,
-                        thread_id: &run.thread_id,
-                        turn_id: &run.turn_id,
-                        approvals: &inner.approvals,
-                    },
-                    &mut run.cancellation,
-                )
-                .await;
-            let (provider_output, completed_item) = match result {
-                Ok(result) => (result.provider_output, result.completed_item),
-                Err(AppError::Cancelled(message)) => {
-                    let error = AppError::Cancelled(message);
-                    let item = pending.prepared.failed_item(&run.workspace, &error);
-                    persist_and_emit_item(&inner, &app, &run.thread_id, &run.turn_id, item, false)
-                        .await?;
+
+            for pending in &batch {
+                if *run.cancellation.borrow() {
                     return Ok(RunCompletion::Interrupted);
                 }
-                Err(error) => {
-                    let item = pending.prepared.failed_item(&run.workspace, &error);
-                    (format!("Tool failed: {error}"), item)
-                }
-            };
-            persist_and_emit_item(
-                &inner,
-                &app,
-                &run.thread_id,
-                &run.turn_id,
-                completed_item,
-                false,
-            )
-            .await?;
-            let output = match pending.output_kind {
-                ToolOutputKind::Function => {
-                    ResponseItem::function_output(pending.call_id, provider_output)
-                }
-                ToolOutputKind::Custom => {
-                    ResponseItem::custom_output(pending.call_id, provider_output)
-                }
-            };
-            inner
-                .storage
-                .append_provider_item(run.thread_id.clone(), output)
+                inner.emit_notification(
+                    &app,
+                    crate::engine::EngineNotification::ItemStarted(ItemNotification {
+                        thread_id: run.thread_id.clone(),
+                        turn_id: run.turn_id.clone(),
+                        item: pending.prepared.started_item(&run.workspace),
+                    }),
+                )?;
+            }
+
+            let executions = batch.iter().map(|pending| {
+                let mut cancellation = run.cancellation.clone();
+                let context = ToolExecutionContext {
+                    app: &app,
+                    workspace: &run.workspace,
+                    permissions: run.config.permission_profile,
+                    thread_id: &run.thread_id,
+                    turn_id: &run.turn_id,
+                    approvals: &inner.approvals,
+                };
+                async move { pending.prepared.execute(context, &mut cancellation).await }
+            });
+            let results = join_all(executions).await;
+
+            // Provider outputs remain in call order even when read-only execution overlaps.
+            for (pending, result) in batch.into_iter().zip(results) {
+                let (provider_output, completed_item) = match result {
+                    Ok(result) => (result.provider_output, result.completed_item),
+                    Err(AppError::Cancelled(message)) => {
+                        let error = AppError::Cancelled(message);
+                        let item = pending.prepared.failed_item(&run.workspace, &error);
+                        persist_and_emit_item(
+                            &inner,
+                            &app,
+                            &run.thread_id,
+                            &run.turn_id,
+                            item,
+                            false,
+                        )
+                        .await?;
+                        return Ok(RunCompletion::Interrupted);
+                    }
+                    Err(error) => {
+                        let item = pending.prepared.failed_item(&run.workspace, &error);
+                        (format!("Tool failed: {error}"), item)
+                    }
+                };
+                persist_and_emit_item(
+                    &inner,
+                    &app,
+                    &run.thread_id,
+                    &run.turn_id,
+                    completed_item,
+                    false,
+                )
                 .await?;
+                let output = match pending.output_kind {
+                    ToolOutputKind::Function => {
+                        ResponseItem::function_output(pending.call_id, provider_output)
+                    }
+                    ToolOutputKind::Custom => {
+                        ResponseItem::custom_output(pending.call_id, provider_output)
+                    }
+                };
+                inner
+                    .storage
+                    .append_provider_item(run.thread_id.clone(), &output)
+                    .await?;
+            }
         }
     }
 }
@@ -470,7 +549,7 @@ pub(super) async fn run_compaction(
         &mut run,
         &instructions,
         &mut provider_state,
-        history,
+        &history.items,
         &tools,
     )
     .await?
@@ -508,11 +587,15 @@ pub(super) async fn load_prompt_history(
     inner: &NativeEngineInner,
     app: &AppHandle,
     thread_id: &str,
-) -> Result<Vec<ResponseItem>, AppError> {
-    let history = inner.storage.provider_history(thread_id.into()).await?;
-    let normalized = normalize_provider_history(history)?;
+) -> Result<ProviderHistorySnapshot, AppError> {
+    let mut history = inner
+        .storage
+        .provider_history_snapshot(thread_id.into())
+        .await?;
+    let normalized = normalize_provider_history(std::mem::take(&mut history.items))?;
     if !normalized.changed() {
-        return Ok(normalized.items);
+        history.items = normalized.items;
+        return Ok(history);
     }
 
     inner
@@ -527,38 +610,34 @@ pub(super) async fn load_prompt_history(
             normalized.inserted_aborted_outputs, normalized.removed_orphan_outputs
         ),
     );
-    Ok(normalized.items)
+    inner
+        .storage
+        .provider_history_snapshot(thread_id.into())
+        .await
 }
 
 async fn prepare_sampling_input(
-    inner: &NativeEngineInner,
-    app: &AppHandle,
+    context: SamplingContext<'_>,
     run: &mut TurnRun,
-    instructions: &str,
     provider_state: &mut TurnProviderState,
-) -> Result<Option<SamplingInput>, AppError> {
-    let history = load_prompt_history(inner, app, &run.thread_id).await?;
-    let tools = provider_tools(inner, &run.config, run.mode);
-    let snapshot = inner
-        .storage
-        .latest_context_usage(run.thread_id.clone())
-        .await?;
+    history: &mut ProviderHistorySnapshot,
+) -> Result<bool, AppError> {
     let context_window = run.model.context_window();
     let status = evaluate_context_window(
         run.model.id(),
-        instructions,
-        &history,
-        &tools,
-        snapshot.as_ref(),
+        context.instructions,
+        &history.items,
+        context.tools,
+        context.snapshot,
         run.model.auto_compact_token_limit(),
         context_window.as_ref(),
     );
     if !status.should_compact {
-        return Ok(Some(SamplingInput { history, tools }));
+        return Ok(true);
     }
 
-    inner.emit_diagnostic(
-        app,
+    context.inner.emit_diagnostic(
+        context.app,
         DiagnosticStream::Runtime,
         format!(
             "Automatically compacting {active_tokens} active context tokens before sampling.",
@@ -566,23 +645,21 @@ async fn prepare_sampling_input(
         ),
     );
     if !compact_context(
-        inner,
-        app,
+        context.inner,
+        context.app,
         run,
-        instructions,
+        context.instructions,
         provider_state,
-        history,
-        &tools,
+        &history.items,
+        context.tools,
     )
     .await?
     {
-        return Ok(None);
+        return Ok(false);
     }
 
-    Ok(Some(SamplingInput {
-        history: load_prompt_history(inner, app, &run.thread_id).await?,
-        tools,
-    }))
+    *history = load_prompt_history(context.inner, context.app, &run.thread_id).await?;
+    Ok(true)
 }
 
 async fn persist_full_context_usage(
@@ -706,14 +783,8 @@ pub(super) fn handle_provider_control_event(
 }
 
 fn record_turn_state(current: &mut Option<String>, incoming: String) -> Result<(), AppError> {
-    match current.as_deref() {
-        None => *current = Some(incoming),
-        Some(value) if value == incoming => {}
-        Some(_) => {
-            return Err(AppError::Provider(
-                "provider changed x-codex-turn-state within one turn".into(),
-            ));
-        }
+    if current.is_none() {
+        *current = Some(incoming);
     }
     Ok(())
 }
@@ -779,7 +850,7 @@ fn visible_item(item: &ResponseItem) -> Result<Option<ThreadItem>, AppError> {
             })?;
             Ok(Some(ThreadItem::AgentMessage {
                 id: item_id,
-                text,
+                text: strip_content_reference_markers(&text),
                 phase: phase.map(|phase| match phase {
                     ResponseMessagePhase::Commentary => MessagePhase::Commentary,
                     ResponseMessagePhase::FinalAnswer => MessagePhase::FinalAnswer,
@@ -793,8 +864,14 @@ fn visible_item(item: &ResponseItem) -> Result<Option<ThreadItem>, AppError> {
             })?;
             Ok(Some(ThreadItem::Reasoning {
                 id: item_id,
-                summary,
-                content,
+                summary: summary
+                    .into_iter()
+                    .map(|part| strip_content_reference_markers(&part))
+                    .collect(),
+                content: content
+                    .into_iter()
+                    .map(|part| strip_content_reference_markers(&part))
+                    .collect(),
             }))
         }
         ResponseItem::WebSearchCall { action, .. } => Ok(Some(ThreadItem::ToolExecution {
@@ -1014,11 +1091,12 @@ mod tests {
     }
 
     #[test]
-    fn turn_routing_state_is_sticky_within_one_turn() {
+    fn turn_routing_state_keeps_the_first_value_within_one_turn() {
         let mut state = None;
         record_turn_state(&mut state, "route-1".into()).expect("first route should be recorded");
         record_turn_state(&mut state, "route-1".into()).expect("same route should be idempotent");
-        assert!(record_turn_state(&mut state, "route-2".into()).is_err());
+        record_turn_state(&mut state, "route-2".into())
+            .expect("later provider metadata must not replace or fail the active route");
         assert_eq!(state.as_deref(), Some("route-1"));
     }
 

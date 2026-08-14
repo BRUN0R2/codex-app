@@ -2,6 +2,7 @@ import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 
 import type {
+  AccountProfileResponse,
   AccountRateLimitsResponse,
   AccountReadResponse,
   ChatModelListResponse,
@@ -73,6 +74,14 @@ const PREVIEW_ACCOUNT = {
   requiresOpenaiAuth: true,
   refresh: { status: "notRequired", error: null },
 } as const satisfies AccountReadResponse;
+
+const PREVIEW_ACCOUNT_PROFILE = {
+  name: "Bruno",
+  // The production endpoint only accepts HTTPS profile URLs. Keep the
+  // self-contained data URI on the base account and exercise a valid nullable
+  // profile response without weakening the IPC contract for browser preview.
+  picture: null,
+} as const satisfies AccountProfileResponse;
 
 const PREVIEW_CONFIG = {
   config: {
@@ -356,6 +365,66 @@ const PREVIEW_CONTEXT_THREAD = {
           durationMs: 19,
         },
         {
+          type: "commandExecution",
+          id: "preview-command-scroll-1",
+          command: "Get-Content -LiteralPath src/ui/Timeline.tsx -Raw",
+          cwd: PREVIEW_WORKSPACE,
+          processId: null,
+          source: "agent",
+          status: "completed",
+          aggregatedOutput: null,
+          exitCode: 0,
+          durationMs: 28,
+        },
+        {
+          type: "commandExecution",
+          id: "preview-command-scroll-2",
+          command: 'rg -n "agent-activity-viewport|diff-block" src/styles/global.css',
+          cwd: PREVIEW_WORKSPACE,
+          processId: null,
+          source: "agent",
+          status: "completed",
+          aggregatedOutput: null,
+          exitCode: 0,
+          durationMs: 14,
+        },
+        {
+          type: "commandExecution",
+          id: "preview-command-scroll-3",
+          command: "pnpm exec vitest run src/ui/timelineScroll.test.ts",
+          cwd: PREVIEW_WORKSPACE,
+          processId: null,
+          source: "agent",
+          status: "completed",
+          aggregatedOutput: null,
+          exitCode: 0,
+          durationMs: 410,
+        },
+        {
+          type: "commandExecution",
+          id: "preview-command-scroll-4",
+          command: "pnpm typecheck",
+          cwd: PREVIEW_WORKSPACE,
+          processId: null,
+          source: "agent",
+          status: "completed",
+          aggregatedOutput: null,
+          exitCode: 0,
+          durationMs: 1_240,
+        },
+        {
+          type: "commandExecution",
+          id: "preview-command-scroll-5",
+          command: "git diff --check",
+          cwd: PREVIEW_WORKSPACE,
+          processId: null,
+          source: "agent",
+          status: "completed",
+          aggregatedOutput: null,
+          exitCode: 0,
+          durationMs: 17,
+        },
+        {
           type: "fileChange",
           id: "preview-file-change",
           status: "completed",
@@ -420,7 +489,7 @@ const PREVIEW_CONTEXT_THREAD = {
         {
           type: "agentMessage",
           id: "preview-latest-commentary",
-          text: "Vou investigar em três frentes: entender a implementação do menu e do perfil neste projeto, localizar a instalação oficial do Codex Desktop e comparar como ela resolve e carrega a imagem do usuário antes de alterar qualquer código.",
+          text: "Vou investigar em três frentes: entender a implementação do menu e do perfil neste projeto, localizar a instalação oficial do Codex Desktop e comparar como ela resolve e carrega a imagem do usuário antes de alterar qualquer código.\uE200cite\uE202turn0search0\uE202turn0search5\uE201",
           phase: "commentary",
         },
         {
@@ -484,6 +553,8 @@ export function setupBrowserPreview(): void {
         }
         case "engine_account_read":
           return PREVIEW_ACCOUNT;
+        case "engine_account_profile_read":
+          return PREVIEW_ACCOUNT_PROFILE;
         case "engine_config_read":
           return PREVIEW_CONFIG;
         case "engine_model_list":

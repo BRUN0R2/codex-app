@@ -8,7 +8,7 @@ O único backend é `NativeEngine`:
 - provider: `ChatGPT Codex`;
 - autenticação: `ChatGPT OAuth`;
 - armazenamento: `sqlite`;
-- schema IPC: versão `1`.
+- schema IPC: versão `4`.
 
 Não existe variável de ambiente para trocar backend nem execução de binário
 externo. A CLI aberta é uma referência de estudo, não uma integração.
@@ -18,7 +18,7 @@ externo. A CLI aberta é uma referência de estudo, não uma integração.
 | Área | Comandos |
 | --- | --- |
 | lifecycle | `engine_start` |
-| conta | `engine_account_read`, `engine_account_rate_limits_read`, `engine_login_chatgpt`, `engine_login_cancel`, `engine_logout` |
+| conta | `engine_account_read`, `engine_account_profile_read`, `engine_account_rate_limits_read`, `engine_login_chatgpt`, `engine_login_cancel`, `engine_logout` |
 | tarefas | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive`, `engine_thread_unarchive`, `engine_thread_delete`, `engine_thread_fork`, `engine_thread_compact_start` |
 | turnos | `engine_turn_start`, `engine_turn_steer`, `engine_turn_interrupt` |
 | projeto | `workspace_repository_read` |
@@ -95,7 +95,20 @@ Para Work local e Codex:
 
 - catálogo em `https://chatgpt.com/backend-api/codex/models`;
 - respostas em `https://chatgpt.com/backend-api/codex/responses`;
+- perfil em `https://chatgpt.com/backend-api/wham/profiles/me`;
 - uso em `https://chatgpt.com/backend-api/wham/usage`.
+
+O perfil segue o fluxo do Desktop oficial: `display_name` e
+`profile_picture_url` são buscados depois que a conta local já foi apresentada.
+A chamada tem deadline próprio de cinco segundos, não participa do caminho de
+boot e fica válida por seis horas. Respostas de uma sessão substituída são
+descartadas; URL ausente ou imagem que falha mantém as iniciais. A ausência de
+foto no token OIDC não aciona `userinfo` nem atrasa a inicialização.
+
+O uso segue uma política separada: revalidação a cada minuto somente com a
+janela visível, ao recuperar foco, ao abrir o menu se o valor estiver obsoleto e
+depois da conclusão de um turno. Há uma única chamada em voo por revisão de
+sessão, e respostas de conta antiga nunca atualizam a interface.
 
 Headers de conta e sessão são montados somente no Rust. Tokens, cookies e
 respostas brutas não são expostos ao frontend. O parser consumer negocia e
@@ -108,6 +121,19 @@ oficial: toda chamada de ferramenta possui exatamente uma saída compatível e
 toda saída possui uma chamada. Uma interrupção que deixou uma chamada pendente
 recebe a saída explícita `aborted`; saídas órfãs são removidas. Qualquer correção
 é regravada em uma única transação e publicada nos diagnósticos de runtime.
+
+Chunks SSE sem evento decodificado são apenas atividade de transporte. O
+deadline de stream é calculado para o próximo evento semântico e não é reiniciado
+por heartbeats. Quando uma rodada devolve chamadas consecutivas de ferramentas
+somente leitura, o agente pode executar até oito em paralelo e persiste os
+resultados na ordem original; qualquer ferramenta mutável cria uma barreira.
+
+Envelopes privados de referência de conteúdo (`U+E200 … U+E201`) pertencem ao
+protocolo do provider e nunca ao texto apresentado. A projeção persistida da
+timeline remove envelopes completos; durante o streaming, uma cauda ainda sem
+delimitador final também fica oculta. Renderização, prévias e cópia aplicam a
+mesma fronteira, impedindo que identificadores como `turn0search0` apareçam ao
+usuário mesmo ao abrir uma conversa antiga.
 
 ## Compactação dinâmica de contexto
 

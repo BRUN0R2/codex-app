@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ContractError,
+  decodeAccountProfileResponse,
   decodeAccountReadResponse,
   decodeAttachmentImageResponse,
   decodeChatModelListResponse,
@@ -58,6 +59,21 @@ describe("decodificação dos contratos nativos", () => {
 
     expect(decoded.account?.name).toBe("Bruno");
     expect(decoded.account?.picture).toBe("https://images.example.com/bruno.png");
+  });
+
+  it("valida o perfil carregado pelo endpoint oficial do ChatGPT", () => {
+    expect(
+      decodeAccountProfileResponse({
+        name: "Bruno Silva",
+        picture: "https://images.example.com/bruno.png",
+      }),
+    ).toEqual({
+      name: "Bruno Silva",
+      picture: "https://images.example.com/bruno.png",
+    });
+    expect(() =>
+      decodeAccountProfileResponse({ name: "Bruno", picture: "http://example.com/photo.png" }),
+    ).toThrow(ContractError);
   });
 
   it("aceita somente a composição de engine publicada", () => {

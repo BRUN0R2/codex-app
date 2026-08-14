@@ -1,10 +1,6 @@
 [CmdletBinding()]
 param(
   [Parameter()]
-  [ValidateRange(1024, 65535)]
-  [int]$DevPort = 1420,
-
-  [Parameter()]
   [switch]$CheckOnly,
 
   [Parameter()]
@@ -16,56 +12,17 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot ".." )).Path
 $exePath = Join-Path $projectRoot "src-tauri\target\release\codex-desktop-next.exe"
-$appProcessName = "codex-desktop-next"
+. (Join-Path $PSScriptRoot "runtime-profile.ps1")
 
-function Get-ProcessesListeningOnPort {
-  param([int]$Port)
+$existingProcesses = @(Get-ProcessesByExecutablePath -ExecutablePath $exePath)
 
-  try {
-    return Get-NetTCPConnection -State Listen -ErrorAction Stop |
-      Where-Object { $_.LocalPort -eq $Port -and $_.LocalAddress -in @("127.0.0.1", "::1", "localhost") }
-  } catch {
-    Write-Warning "Não foi possível consultar conexões TCP locais (possível limitação do ambiente)."
-    return @()
-  }
-}
-
-$existingProcesses = Get-Process -Name $appProcessName -ErrorAction SilentlyContinue |
-  Where-Object { $_.Path -eq $exePath }
-
-if ($existingProcesses) {
-  $pids = ($existingProcesses | Select-Object -ExpandProperty Id) -join ", "
-  throw "Fecha o aplicativo release atual antes de executar release:processos encontrados: $pids"
-}
-
-$listeners = Get-ProcessesListeningOnPort -Port $DevPort
-if ($listeners) {
-  $details = foreach ($listener in $listeners) {
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue
-    [pscustomobject]@{
-      endereco = $listener.LocalAddress
-      porta = $listener.LocalPort
-      pid = $listener.OwningProcess
-      comando = $process.CommandLine
-      caminho = $process.ExecutablePath
-    }
-  }
-
-  $detailsText = $details | ForEach-Object {
-    "pid=$($_.pid) caminho=$($_.caminho) comando=$($_.comando)"
-  }
-
-  $message = @(
-    "Detectei processos escutando em http://127.0.0.1:${DevPort}:",
-    $detailsText -join "`n",
-    "Isso normalmente indica o Vite de outro app em dev.",
-    "Feche ou mova a porta desse processo antes de abrir o release."
-  ) -join "`n"
-  throw $message
+if ($existingProcesses.Count -gt 0) {
+  $pids = ($existingProcesses | Select-Object -ExpandProperty Pid) -join ", "
+  throw "Feche o aplicativo release atual antes de executar a release. Processos encontrados: $pids"
 }
 
 if ($CheckOnly) {
-  Write-Host "Sanidade concluída: sem conflitos de porta e sem instância release em execução."
+  Write-Host "Sanidade concluída: sem instância release em execução."
   if (Test-Path -LiteralPath $exePath) {
     Write-Host "Executável release existente: $exePath"
   } else {

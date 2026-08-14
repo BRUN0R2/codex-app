@@ -7,7 +7,7 @@ use tauri::AppHandle;
 use tauri::Manager as _;
 
 use self::keyring::system_keyring;
-use self::vault::CredentialVault;
+use self::vault::{CredentialNamespace, CredentialVault};
 use super::error::AuthError;
 use super::token::AuthRecord;
 
@@ -16,6 +16,7 @@ use super::token::AuthRecord;
 /// service (locked vault, RDP session) must surface as an error instead of
 /// blocking `read_account` forever during boot.
 const CREDENTIAL_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+const CREDENTIALS_DIRECTORY_NAME: &str = "credentials-v2";
 
 #[derive(Clone)]
 pub(super) struct CredentialStorage {
@@ -24,6 +25,7 @@ pub(super) struct CredentialStorage {
 
 impl CredentialStorage {
     pub fn new(app: &AppHandle) -> Result<Self, AuthError> {
+        let namespace = CredentialNamespace::for_application(&app.config().identifier)?;
         let credentials_directory = app
             .path()
             .app_data_dir()
@@ -32,9 +34,9 @@ impl CredentialStorage {
                     "could not resolve the application data directory: {error}"
                 ))
             })?
-            .join("credentials");
+            .join(CREDENTIALS_DIRECTORY_NAME);
         Ok(Self {
-            vault: CredentialVault::new(credentials_directory, system_keyring()),
+            vault: CredentialVault::new(credentials_directory, system_keyring(), namespace),
         })
     }
 

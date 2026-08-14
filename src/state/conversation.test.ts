@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   appendAgentText,
   appendReasoningText,
+  applyStreamDeltas,
   readConversationState,
   readLatestTurnFailure,
   upsertItem,
@@ -111,5 +112,66 @@ describe("conversation reducer", () => {
         ],
       }),
     ).toBe("Falha persistida");
+  });
+
+  it("applies a large stream batch with one immutable item-array replacement", () => {
+    const stable = Array.from({ length: 20_000 }, (_, index) => ({
+      type: "agentMessage" as const,
+      id: `message-${index}`,
+      text: "stable",
+      phase: null,
+    }));
+    const target = stable.length - 1;
+    const result = applyStreamDeltas(stable, [
+      {
+        kind: "agentText",
+        threadId: "thread-a",
+        itemId: `message-${target}`,
+        delta: "A",
+      },
+      {
+        kind: "agentText",
+        threadId: "thread-a",
+        itemId: `message-${target}`,
+        delta: "B",
+      },
+    ]);
+
+    expect(result).not.toBe(stable);
+    expect(result[0]).toBe(stable[0]);
+    expect(result[target]).toEqual({ ...stable[target], text: "stableAB" });
+  });
+
+  it("creates and updates sparse reasoning parts within one stream batch", () => {
+    const result = applyStreamDeltas(
+      [],
+      [
+        {
+          kind: "reasoningText",
+          threadId: "thread-a",
+          itemId: "reasoning-a",
+          index: 2,
+          target: "summary",
+          delta: "parte",
+        },
+        {
+          kind: "reasoningText",
+          threadId: "thread-a",
+          itemId: "reasoning-a",
+          index: 2,
+          target: "summary",
+          delta: " final",
+        },
+      ],
+    );
+
+    expect(result).toEqual([
+      {
+        type: "reasoning",
+        id: "reasoning-a",
+        summary: ["", "", "parte final"],
+        content: [],
+      },
+    ]);
   });
 });

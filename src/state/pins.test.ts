@@ -6,6 +6,7 @@ import {
   savePinnedThreadIds,
   togglePinnedThreadId,
 } from "./pins";
+import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 
 class MemoryStorage implements Storage {
   readonly #values = new Map<string, string>();
@@ -54,7 +55,7 @@ describe("pinned threads", () => {
 
   it("rejects malformed persisted state", () => {
     localStorage.setItem(
-      "codex-desktop.pinned-threads.v1",
+      PROFILE_STORAGE_KEYS.pinnedThreads,
       JSON.stringify({ version: 1, threadIds: ["duplicate", "duplicate"] }),
     );
     expect(() => loadPinnedThreadIds()).toThrow(/duplicada/u);

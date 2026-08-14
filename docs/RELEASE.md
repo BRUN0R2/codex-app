@@ -30,16 +30,15 @@ concluídos.
 
 ## Fluxo de Release seguro (desenvolvimento local)
 
-Antes de abrir o app release manualmente, execute:
+Para trabalhar com o app release localmente, execute:
 
-- `pnpm release:check` para validar que não há conflito de porta em `127.0.0.1:1420`.
+- `pnpm release:check` para validar que não há outra instância release em execução.
 - `pnpm release` para reconstruir release e executar imediatamente o binário novo.
 - `pnpm release:build` para reconstruir release sem abrir janela.
 
-Esses comandos são intencionalmente separadores:
+Esses comandos têm responsabilidades separadas:
 
-- `release:check` verifica se há processo antigo do `codex-desktop-next` e se a porta de
-  desenvolvimento está livre.
-- `release` só encerra se houver conflito, evitando abrir a versão errada por engano.
-- `vite.config.ts` aceita sobrescrever a porta de dev via `CODEX_DESKTOP_DEV_PORT` para
-  rodar outros projetos em paralelo sem sobrescrita de 1420.
+- `release:check` verifica se há processo antigo do `codex-desktop-next`.
+- `release` só é interrompido quando outra instância release está aberta.
+- Servidores Vite podem permanecer ativos durante o build e a execução da release; a porta
+  de desenvolvimento não é usada pelo executável compilado.

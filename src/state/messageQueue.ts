@@ -1,6 +1,7 @@
 import type { Attachment, ReasoningEffort } from "../contracts/types";
+import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 
-const QUEUEING_STORAGE_KEY = "codex-desktop.follow-up-queue.v1";
+const QUEUEING_STORAGE_KEY = PROFILE_STORAGE_KEYS.followUpBehavior;
 export const MAX_QUEUED_MESSAGES = 32;
 
 export interface QueuedMessage {

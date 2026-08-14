@@ -29,6 +29,7 @@ const MAX_LIST_RESULTS: usize = 500;
 const MAX_LIST_DEPTH: usize = 12;
 const MAX_SEARCH_RESULTS: usize = 200;
 const MAX_SEARCH_FILES: usize = 10_000;
+const MAX_SEARCH_DIRECTORIES: usize = 10_000;
 const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 const MAX_COMMAND_BYTES: usize = 16_384;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1_048_576;
@@ -377,6 +378,13 @@ impl ToolRegistry {
 }
 
 impl PreparedTool {
+    pub fn is_parallel_safe(&self) -> bool {
+        matches!(
+            &self.operation,
+            ToolOperation::ReadFile(_) | ToolOperation::ListFiles(_) | ToolOperation::SearchText(_)
+        )
+    }
+
     pub fn started_item(&self, workspace: &Path) -> ThreadItem {
         match &self.operation {
             ToolOperation::ApplyPatch(patch) => ThreadItem::FileChange {
@@ -747,7 +755,7 @@ async fn search_text(workspace: &Path, args: &SearchTextArgs) -> Result<String, 
         if root.is_file() {
             files.push(root);
         } else {
-            collect_search_files(&root, MAX_LIST_DEPTH, &mut files)?;
+            collect_search_files(&root, &mut files)?;
         }
         files.sort();
         let needle = (!case_sensitive).then(|| query.to_lowercase());
@@ -1301,35 +1309,36 @@ fn walk_files(
     Ok(())
 }
 
-fn collect_search_files(
-    directory: &Path,
-    remaining_depth: usize,
-    output: &mut Vec<PathBuf>,
-) -> Result<(), AppError> {
-    if remaining_depth == 0 {
-        return Err(AppError::Tool(format!(
-            "search traversal exceeds {MAX_LIST_DEPTH} directory levels"
-        )));
-    }
-    let entries =
-        std::fs::read_dir(directory).map_err(|error| AppError::FileSystem(error.to_string()))?;
-    for entry in entries {
-        if output.len() >= MAX_SEARCH_FILES {
+fn collect_search_files(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), AppError> {
+    let mut pending_directories = vec![directory.to_path_buf()];
+    let mut visited_directories = 0usize;
+    while let Some(directory) = pending_directories.pop() {
+        visited_directories += 1;
+        if visited_directories > MAX_SEARCH_DIRECTORIES {
             return Err(AppError::Tool(format!(
-                "search traversal exceeds {MAX_SEARCH_FILES} files"
+                "search traversal exceeds {MAX_SEARCH_DIRECTORIES} directories"
             )));
         }
-        let entry = entry.map_err(|error| AppError::FileSystem(error.to_string()))?;
-        let file_type = entry
-            .file_type()
+        let entries = std::fs::read_dir(directory)
             .map_err(|error| AppError::FileSystem(error.to_string()))?;
-        if file_type.is_symlink() || ignored_directory(&entry.file_name()) {
-            continue;
-        }
-        if file_type.is_dir() {
-            collect_search_files(&entry.path(), remaining_depth - 1, output)?;
-        } else if file_type.is_file() {
-            output.push(entry.path());
+        for entry in entries {
+            let entry = entry.map_err(|error| AppError::FileSystem(error.to_string()))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| AppError::FileSystem(error.to_string()))?;
+            if file_type.is_symlink() || ignored_directory(&entry.file_name()) {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending_directories.push(entry.path());
+            } else if file_type.is_file() {
+                if output.len() >= MAX_SEARCH_FILES {
+                    return Err(AppError::Tool(format!(
+                        "search traversal exceeds {MAX_SEARCH_FILES} files"
+                    )));
+                }
+                output.push(entry.path());
+            }
         }
     }
     Ok(())
@@ -1498,8 +1507,8 @@ mod tests {
     use crate::engine::{ActivityStatus, PermissionProfile, PlanStepStatus, ThreadItem};
 
     use super::{
-        MAX_TOOL_OUTPUT_BYTES, ToolOperation, ToolRegistry, ToolResult, atomic_write,
-        execute_patch_operation, resolve_write_target,
+        MAX_TOOL_OUTPUT_BYTES, SearchTextArgs, ToolOperation, ToolRegistry, ToolResult,
+        atomic_write, execute_patch_operation, resolve_write_target, search_text,
     };
 
     #[test]
@@ -1551,6 +1560,36 @@ mod tests {
     }
 
     #[test]
+    fn only_read_only_workspace_tools_are_parallel_safe() {
+        let registry = ToolRegistry;
+        let read = registry
+            .prepare(
+                "read-1".into(),
+                "read_file",
+                r#"{"path":"a","start_line":1,"end_line":1}"#,
+            )
+            .expect("read_file should prepare");
+        let search = registry
+            .prepare(
+                "search-1".into(),
+                "search_text",
+                r#"{"path":".","query":"needle","case_sensitive":true}"#,
+            )
+            .expect("search_text should prepare");
+        let command = registry
+            .prepare(
+                "command-1".into(),
+                "exec_command",
+                r#"{"command":"Get-Date","cwd":".","reason":"test"}"#,
+            )
+            .expect("exec_command should prepare");
+
+        assert!(read.is_parallel_safe());
+        assert!(search.is_parallel_safe());
+        assert!(!command.is_parallel_safe());
+    }
+
+    #[test]
     fn update_plan_is_validated_and_exposed_as_structured_state() {
         let registry = ToolRegistry;
         let definition = registry
@@ -1599,6 +1638,37 @@ mod tests {
                 "invalid plan {item_id} should fail"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn search_text_reaches_files_beyond_twelve_directory_levels() {
+        let directory = TempDir::new().expect("temporary workspace should exist");
+        let workspace = tokio::fs::canonicalize(directory.path())
+            .await
+            .expect("workspace should canonicalize");
+        let mut nested = workspace.clone();
+        for depth in 0..16 {
+            nested.push(format!("level-{depth:02}"));
+        }
+        tokio::fs::create_dir_all(&nested)
+            .await
+            .expect("deep directory should exist");
+        tokio::fs::write(nested.join("needle.txt"), "before\nDeep marker\nafter\n")
+            .await
+            .expect("deep file should exist");
+
+        let output = search_text(
+            &workspace,
+            &SearchTextArgs {
+                path: ".".into(),
+                query: "deep marker".into(),
+                case_sensitive: false,
+            },
+        )
+        .await
+        .expect("directory depth must not prevent a workspace search");
+
+        assert!(output.contains("needle.txt:2:Deep marker"));
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ pub(super) async fn compact_context(
     run: &mut TurnRun,
     instructions: &str,
     provider_state: &mut TurnProviderState,
-    history: Vec<ResponseItem>,
+    history: &[ResponseItem],
     tools: &[serde_json::Value],
 ) -> Result<bool, AppError> {
     if *run.cancellation.borrow() {
@@ -26,7 +26,7 @@ pub(super) async fn compact_context(
     let context_window = run.model.context_window();
     let mut compaction_input = prepare_compaction_history(
         instructions,
-        &history,
+        history,
         tools,
         context_window.as_ref().map(|window| window.tokens),
     );
@@ -46,15 +46,15 @@ pub(super) async fn compact_context(
     )?;
 
     let request = ResponseRequest::new(
-        run.model.id().into(),
-        instructions.into(),
-        compaction_input,
-        tools.to_vec(),
+        run.model.id(),
+        instructions,
+        &compaction_input,
+        tools,
         ResponseRequestSettings {
             parallel_tool_calls: run.model.supports_parallel_tool_calls(),
             reasoning_effort: run.reasoning_effort,
-            service_tier: run.service_tier.clone(),
-            prompt_cache_key: Some(run.thread_id.clone()),
+            service_tier: run.service_tier.as_deref(),
+            prompt_cache_key: Some(&run.thread_id),
             verbosity: run.config.model_verbosity,
         },
     );
@@ -83,6 +83,7 @@ pub(super) async fn compact_context(
             continue;
         };
         match event {
+            ResponseEvent::OutputItemAdded(_) => {}
             ResponseEvent::OutputItemDone(item) => {
                 output_item_count = output_item_count
                     .checked_add(1)
@@ -123,7 +124,7 @@ pub(super) async fn compact_context(
             "context compaction returned no checkpoint in {output_item_count} output items"
         )));
     };
-    let compacted = build_compacted_history(&history, checkpoint);
+    let compacted = build_compacted_history(history, checkpoint);
     inner
         .storage
         .install_compacted_history(
