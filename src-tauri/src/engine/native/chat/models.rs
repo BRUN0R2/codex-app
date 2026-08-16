@@ -97,19 +97,17 @@ impl ChatModelCatalog {
             .as_deref()
             .and_then(|slug| model_metadata.get(slug))
             .and_then(|model| model.default_thinking_effort);
-        let default_index = default_slug
-            .as_deref()
-            .and_then(|slug| {
-                default_effort
-                    .and_then(|effort| {
-                        models.iter().position(|model| {
-                            model.model() == slug && model.thinking_effort() == Some(effort)
-                        })
+        if let Some(default_index) = default_slug.as_deref().and_then(|slug| {
+            default_effort
+                .and_then(|effort| {
+                    models.iter().position(|model| {
+                        model.model() == slug && model.thinking_effort() == Some(effort)
                     })
-                    .or_else(|| models.iter().position(|model| model.model() == slug))
-            })
-            .unwrap_or(0);
-        models[default_index].summary.is_default = true;
+                })
+                .or_else(|| models.iter().position(|model| model.model() == slug))
+        }) {
+            models[default_index].summary.is_default = true;
+        }
         Ok(Self { models })
     }
 
@@ -132,7 +130,9 @@ impl ChatModelCatalog {
                 .models
                 .iter()
                 .find(|model| model.summary.is_default)
-                .unwrap_or(&self.models[0]),
+                .ok_or_else(|| {
+                    AppError::Protocol("the current model catalog has no default".into())
+                })?,
         };
         Ok(selected.clone())
     }
@@ -561,5 +561,21 @@ mod tests {
             catalog.models()[1].thinking_effort(),
             Some(ChatThinkingEffort::Standard)
         );
+    }
+
+    #[test]
+    fn catalog_without_a_default_requires_an_explicit_selection() {
+        let wire: ModelsWire = serde_json::from_str(
+            r#"{
+                "models":[{"slug":"gpt-5.6"}],
+                "categories":[],
+                "versions":[]
+            }"#,
+        )
+        .expect("wire should decode");
+
+        let catalog = ChatModelCatalog::from_wire(wire, 100).expect("catalog should decode");
+        assert!(catalog.select(None).is_err());
+        assert!(catalog.select(Some("gpt-5.6#default#default")).is_ok());
     }
 }

@@ -2,12 +2,20 @@ use std::path::Path;
 
 use crate::error::{AppError, CommandError, CommandResult};
 
-pub const MAX_PROTOCOL_ID_BYTES: usize = 256;
+pub const MAX_IDENTIFIER_BYTES: usize = 256;
 pub const MAX_MODEL_NAME_BYTES: usize = 256;
 pub const MAX_TIMEZONE_BYTES: usize = 128;
 pub const MAX_TURN_TEXT_BYTES: usize = 1_048_576;
 pub const MAX_TURN_ATTACHMENTS: usize = 12;
 pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 4_096;
+
+/// Single semantic rule for every engine identifier: non-blank, bounded and
+/// free of control characters.
+pub fn identifier_is_valid(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAX_IDENTIFIER_BYTES
+        && !value.chars().any(char::is_control)
+}
 
 pub async fn validate_workspace(value: &str) -> CommandResult<String> {
     let path = Path::new(value);
@@ -37,16 +45,13 @@ pub fn normalize_windows_canonical_path(value: &str) -> String {
 }
 
 pub fn validate_protocol_id(label: &str, value: &str) -> CommandResult<()> {
-    if value.trim().is_empty()
-        || value.len() > MAX_PROTOCOL_ID_BYTES
-        || value.chars().any(char::is_control)
-    {
-        return Err(AppError::Protocol(format!(
-            "{label} must contain between 1 and {MAX_PROTOCOL_ID_BYTES} bytes without control characters"
-        ))
-        .into());
+    if identifier_is_valid(value) {
+        return Ok(());
     }
-    Ok(())
+    Err(AppError::Protocol(format!(
+        "{label} must contain between 1 and {MAX_IDENTIFIER_BYTES} bytes without control characters"
+    ))
+    .into())
 }
 
 pub fn validate_model_name(model: String) -> CommandResult<String> {
@@ -118,9 +123,10 @@ mod tests {
         assert!(validate_protocol_id("thread id", "").is_err());
         assert!(validate_protocol_id("thread id", "thread\n1").is_err());
         assert!(
-            validate_protocol_id("thread id", &"x".repeat(super::MAX_PROTOCOL_ID_BYTES + 1))
+            validate_protocol_id("thread id", &"x".repeat(super::MAX_IDENTIFIER_BYTES + 1))
                 .is_err()
         );
+        assert!(validate_protocol_id("thread id", "   ").is_err());
     }
 
     #[test]

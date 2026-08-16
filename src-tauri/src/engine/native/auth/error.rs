@@ -22,6 +22,8 @@ pub(super) enum AuthError {
     InvalidToken(String),
     #[error("secure credential storage failed: {0}")]
     CredentialStorage(String),
+    #[error("stored credentials cannot be decrypted: {0}")]
+    CredentialsCorrupt(String),
     #[cfg(not(windows))]
     #[error("native secure credential storage is currently supported only on Windows")]
     UnsupportedPlatform,

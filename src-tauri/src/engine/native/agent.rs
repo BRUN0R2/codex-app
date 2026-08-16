@@ -20,6 +20,7 @@ use super::provider::{
 };
 use super::storage::ProviderHistorySnapshot;
 use super::stream_notifications::StreamNotificationBatcher;
+use super::text::{format_duration, truncate_utf8};
 use super::tools::{
     MAX_PROVIDER_ITEM_BYTES, PreparedTool, ToolExecutionContext, ToolExecutionResult, ToolRegistry,
 };
@@ -37,12 +38,14 @@ const MAX_ATTACHMENT_TEXT_BYTES: usize = 2 * 1_048_576;
 const MAX_IMAGE_BYTES: usize = 10 * 1_048_576;
 const MAX_RAW_INPUT_BYTES: usize = 16 * 1_048_576;
 const MAX_INSTRUCTIONS_BYTES: usize = 524_288;
-const MAX_PROVIDER_ITEM_ID_BYTES: usize = 256;
+const MAX_TURN_PREVIEW_BYTES: usize = 160;
+const MAX_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_ERROR_BYTES: usize = 4_096;
 const MAX_PARALLEL_READ_TOOLS: usize = 8;
 const MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS: u64 = 60;
+pub(super) const DEFAULT_RETRY_AFTER_SECONDS: u64 = 60;
 
 pub(super) struct PreparedTurn {
     pub user_item: ThreadItem,
@@ -100,7 +103,7 @@ pub(super) async fn prepare_user_input(
                     )));
                 }
                 add_input_bytes(&mut raw_bytes, text.len())?;
-                preview.get_or_insert_with(|| truncate_utf8(&text, 160));
+                preview.get_or_insert_with(|| truncate_utf8(&text, MAX_TURN_PREVIEW_BYTES));
                 user_content.push(crate::engine::UserContent::Text { text: text.clone() });
                 provider_content.push(ResponseContent::InputText { text });
             }
@@ -275,7 +278,7 @@ pub(super) async fn run_turn(
                             &inner,
                             &app,
                             &mut run,
-                            retry_after_seconds.unwrap_or(60),
+                            retry_after_seconds.unwrap_or(DEFAULT_RETRY_AFTER_SECONDS),
                         )
                         .await
                         {
@@ -323,7 +326,7 @@ pub(super) async fn run_turn(
                                 &inner,
                                 &app,
                                 &mut run,
-                                retry_after_seconds.unwrap_or(60),
+                                retry_after_seconds.unwrap_or(DEFAULT_RETRY_AFTER_SECONDS),
                             )
                             .await
                             {
@@ -652,7 +655,7 @@ async fn wait_for_rate_limit_reset(
         DiagnosticStream::Runtime,
         format!(
             "Provider usage limit reached; keeping the turn active and retrying in {}.",
-            describe_duration(wait.as_secs())
+            format_duration(wait.as_secs())
         ),
     );
     if *run.cancellation.borrow() {
@@ -697,7 +700,7 @@ async fn wait_for_transient_provider_retry(
         DiagnosticStream::Runtime,
         format!(
             "Transient provider failure; keeping the turn active and retrying in {}: {error}",
-            describe_duration(wait.as_secs())
+            format_duration(wait.as_secs())
         ),
     );
     if *run.cancellation.borrow() {
@@ -725,21 +728,6 @@ pub(super) fn automatic_provider_retry_wait(failure_count: u32) -> Duration {
             .unwrap_or(u64::MAX)
             .min(MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS),
     )
-}
-
-pub(super) fn describe_duration(seconds: u64) -> String {
-    let days = seconds / (24 * 60 * 60);
-    let hours = (seconds % (24 * 60 * 60)) / (60 * 60);
-    let minutes = (seconds % (60 * 60)) / 60;
-    if days > 0 {
-        format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {minutes}m")
-    } else if minutes > 0 {
-        format!("{minutes}m")
-    } else {
-        format!("{seconds}s")
-    }
 }
 
 pub(super) async fn run_compaction(
@@ -1361,13 +1349,19 @@ pub(super) fn validate_response_item(item: &ResponseItem) -> Result<(), AppError
     match item {
         ResponseItem::FunctionCall { name, call_id, .. } => {
             validate_provider_id(call_id)?;
-            if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+            if name.is_empty()
+                || name.len() > MAX_TOOL_NAME_BYTES
+                || name.chars().any(char::is_control)
+            {
                 return Err(AppError::Provider("tool name is invalid".into()));
             }
         }
         ResponseItem::CustomToolCall { name, call_id, .. } => {
             validate_provider_id(call_id)?;
-            if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+            if name.is_empty()
+                || name.len() > MAX_TOOL_NAME_BYTES
+                || name.chars().any(char::is_control)
+            {
                 return Err(AppError::Provider("custom tool name is invalid".into()));
             }
         }
@@ -1401,13 +1395,11 @@ fn validate_delta(item_id: &str, delta: &str) -> Result<(), AppError> {
 }
 
 fn validate_provider_id(value: &str) -> Result<(), AppError> {
-    if value.is_empty()
-        || value.len() > MAX_PROVIDER_ITEM_ID_BYTES
-        || value.chars().any(char::is_control)
-    {
-        return Err(AppError::Provider("provider item id is invalid".into()));
+    if crate::command_validation::identifier_is_valid(value) {
+        Ok(())
+    } else {
+        Err(AppError::Provider("provider item id is invalid".into()))
     }
-    Ok(())
 }
 
 fn add_input_bytes(total: &mut usize, bytes: usize) -> Result<(), AppError> {
@@ -1421,17 +1413,6 @@ fn add_input_bytes(total: &mut usize, bytes: usize) -> Result<(), AppError> {
         )));
     }
     Ok(())
-}
-
-fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
-    if value.len() <= maximum_bytes {
-        return value.to_string();
-    }
-    let mut end = maximum_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_string()
 }
 
 fn tool_failure_diagnostic(tool_name: &str, item: &ThreadItem) -> Option<String> {

@@ -15,14 +15,15 @@ use self::models::{ChatModelCatalog, SelectedChatModel};
 use self::stream::{ChatStreamEvent, MAX_MESSAGE_TEXT_BYTES};
 use super::NativeEngineInner;
 use super::agent::{
-    PreparedTurn, RunCompletion, automatic_provider_retry_wait, automatic_rate_limit_wait,
-    describe_duration,
+    DEFAULT_RETRY_AFTER_SECONDS, PreparedTurn, RunCompletion, automatic_provider_retry_wait,
+    automatic_rate_limit_wait,
 };
 use super::auth::ChatGptAuth;
 use super::content_references::strip_content_reference_markers;
 use super::diagnostics::RuntimeDiagnostics;
 use super::provider::{ResponseContent, ResponseItem};
 use super::stream_notifications::StreamNotificationBatcher;
+use super::text::format_duration;
 use crate::engine::{
     ChatModelListResponse, DiagnosticStream, EngineNotification, ItemNotification, MessagePhase,
     StreamDelta, ThreadItem,
@@ -361,12 +362,14 @@ async fn wait_for_recoverable_chat_error(
             ..
         } => {
             *transient_failure_count = 0;
-            let wait = automatic_rate_limit_wait(retry_after_seconds.unwrap_or(60));
+            let wait = automatic_rate_limit_wait(
+                retry_after_seconds.unwrap_or(DEFAULT_RETRY_AFTER_SECONDS),
+            );
             (
                 wait,
                 format!(
                     "ChatGPT usage limit reached; keeping the turn active and retrying in {}.",
-                    describe_duration(wait.as_secs())
+                    format_duration(wait.as_secs())
                 ),
             )
         }
@@ -377,7 +380,7 @@ async fn wait_for_recoverable_chat_error(
                 wait,
                 format!(
                     "Transient ChatGPT provider failure; keeping the turn active and retrying in {}: {error}",
-                    describe_duration(wait.as_secs())
+                    format_duration(wait.as_secs())
                 ),
             )
         }

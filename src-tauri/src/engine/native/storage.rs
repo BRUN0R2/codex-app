@@ -16,6 +16,7 @@ use super::context_window::ContextUsageSnapshot;
 use super::output::{OUTPUT_CHUNK_BYTES, OutputSource};
 use super::provider::ResponseItem;
 use super::terminal_output::normalize_terminal_bytes;
+use super::text::truncate_utf8;
 use crate::engine::{
     AppConfig, CompletedTurn, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
     ConversationMode, DesktopPreferences, OperationAck, OutputReadResponse, ThreadActiveFlag,
@@ -1904,17 +1905,6 @@ fn utf8_chunk_boundary(bytes: &[u8], maximum_bytes: usize) -> Result<usize, AppE
             "stored output is not valid UTF-8: {error}"
         ))),
     }
-}
-
-fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
-    if value.len() <= maximum_bytes {
-        return value.to_string();
-    }
-    let mut end = maximum_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_string()
 }
 
 fn parse_cursor(cursor: Option<&str>) -> Result<usize, AppError> {

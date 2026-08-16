@@ -34,6 +34,8 @@ pub(crate) use self::responses::ResponseStream;
 pub(crate) use self::responses::WebSearchAction;
 
 const MAX_MODELS: usize = 100;
+const MAX_RATE_LIMIT_BUCKET_ID_BYTES: usize = 128;
+const MAX_RATE_LIMIT_BUCKETS: usize = 32;
 
 #[derive(Default)]
 pub struct ChatGptCodexProvider {
@@ -169,8 +171,8 @@ impl UsagePayload {
         by_id.insert("codex".into(), primary.clone());
         for additional in self.additional_rate_limits.unwrap_or_default() {
             if additional.metered_feature.trim().is_empty()
-                || additional.metered_feature.len() > 128
-                || by_id.len() >= 32
+                || additional.metered_feature.len() > MAX_RATE_LIMIT_BUCKET_ID_BYTES
+                || by_id.len() >= MAX_RATE_LIMIT_BUCKETS
             {
                 return Err(AppError::Provider(
                     "the rate-limit response contains an invalid bucket".into(),

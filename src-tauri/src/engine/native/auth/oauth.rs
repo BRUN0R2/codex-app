@@ -14,6 +14,7 @@ use url::Url;
 use super::AuthSession;
 use super::error::AuthError;
 use super::pkce::PkceCodes;
+use super::token::MAX_PROFILE_NAME_BYTES;
 use super::token::SecretString;
 use super::token::TokenSet;
 use super::token::clean_profile_picture;
@@ -40,6 +41,7 @@ const MAX_USERINFO_RESPONSE_BYTES: usize = 32_768;
 const MAX_CHATGPT_PROFILE_RESPONSE_BYTES: usize = 1_048_576;
 const MAX_ERROR_RESPONSE_BYTES: usize = 16_384;
 const MAX_ERROR_MESSAGE_CHARS: usize = 320;
+const MAX_PROFILE_EMAIL_BYTES: usize = 320;
 
 pub(super) struct OAuthClient {
     client: Client,
@@ -323,8 +325,8 @@ struct ChatGptProfile {
 impl From<UserInfoResponse> for AccountProfile {
     fn from(response: UserInfoResponse) -> Self {
         Self {
-            email: clean_profile_text(response.email, 320),
-            name: clean_profile_text(response.name, 256),
+            email: clean_profile_text(response.email, MAX_PROFILE_EMAIL_BYTES),
+            name: clean_profile_text(response.name, MAX_PROFILE_NAME_BYTES),
             picture: clean_profile_picture(response.picture),
         }
     }
@@ -335,7 +337,7 @@ impl From<ChatGptProfileResponse> for AccountProfile {
         let profile = response.profile.unwrap_or_default();
         Self {
             email: None,
-            name: clean_profile_text(profile.display_name, 256),
+            name: clean_profile_text(profile.display_name, MAX_PROFILE_NAME_BYTES),
             picture: clean_profile_picture(profile.profile_picture_url),
         }
     }

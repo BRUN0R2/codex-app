@@ -12,6 +12,7 @@ mod provider;
 mod storage;
 mod stream_notifications;
 mod terminal_output;
+mod text;
 mod tools;
 
 use std::collections::HashMap;

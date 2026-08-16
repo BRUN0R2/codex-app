@@ -18,6 +18,9 @@ use super::oauth::TokenPatch;
 
 const ACCESS_TOKEN_REFRESH_WINDOW: Duration = Duration::minutes(5);
 const LAST_REFRESH_FALLBACK_INTERVAL: Duration = Duration::days(8);
+const MAX_ACCOUNT_ID_BYTES: usize = 256;
+pub(super) const MAX_PROFILE_NAME_BYTES: usize = 256;
+const MAX_PROFILE_PICTURE_BYTES: usize = 8_192;
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(super) struct SecretString(String);
@@ -139,7 +142,7 @@ impl AuthRecord {
             || self.tokens.access_token.is_empty()
             || self.tokens.refresh_token.is_empty()
             || self.tokens.account_id.trim().is_empty()
-            || self.tokens.account_id.len() > 256
+            || self.tokens.account_id.len() > MAX_ACCOUNT_ID_BYTES
             || self.tokens.account_id.chars().any(char::is_control)
         {
             return Err(AuthError::InvalidToken(
@@ -167,10 +170,13 @@ impl AuthRecord {
     }
 
     pub fn should_refresh(&self, now: DateTime<Utc>) -> bool {
-        if let Ok(Some(expires_at)) = parse_expiration(&self.tokens.access_token) {
-            return expires_at <= now + ACCESS_TOKEN_REFRESH_WINDOW;
+        match parse_expiration(&self.tokens.access_token) {
+            Ok(Some(expires_at)) => expires_at <= now + ACCESS_TOKEN_REFRESH_WINDOW,
+            Ok(None) => self.last_refresh < now - LAST_REFRESH_FALLBACK_INTERVAL,
+            // An unparseable access token cannot be trusted for scheduling; refresh promptly so
+            // the real failure surfaces through the refresh call itself.
+            Err(_) => true,
         }
-        self.last_refresh < now - LAST_REFRESH_FALLBACK_INTERVAL
     }
 
     pub fn same_refresh_source(&self, other: &Self) -> bool {
@@ -244,7 +250,7 @@ fn parse_account_claims(token: &SecretString) -> Result<AccountClaims, AuthError
     let claims: JwtClaims = decode_jwt_payload(token)?;
     let profile = claims.profile.unwrap_or_default();
     let email = claims.email.or(profile.email);
-    let name = clean_profile_text(claims.name.or(profile.name), 256);
+    let name = clean_profile_text(claims.name.or(profile.name), MAX_PROFILE_NAME_BYTES);
     let picture = clean_profile_picture(claims.picture.or(profile.picture));
     let (plan_type, account_id) = claims
         .auth
@@ -266,7 +272,7 @@ pub(super) fn clean_profile_text(value: Option<String>, maximum_length: usize) -
 }
 
 pub(super) fn clean_profile_picture(value: Option<String>) -> Option<String> {
-    let value = clean_profile_text(value, 8_192)?;
+    let value = clean_profile_text(value, MAX_PROFILE_PICTURE_BYTES)?;
     let url = Url::parse(&value).ok()?;
     (url.scheme() == "https" && url.username().is_empty() && url.password().is_none())
         .then_some(value)

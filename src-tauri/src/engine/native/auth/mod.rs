@@ -733,7 +733,7 @@ async fn load_cached_record(
 ) -> Result<Option<AuthRecord>, AuthError> {
     match context.storage.load().await {
         Ok(record) => Ok(record),
-        Err(AuthError::CredentialStorage(message)) if is_credential_retrieval_corrupt(&message) => {
+        Err(AuthError::CredentialsCorrupt(message)) => {
             emit_diagnostic(
                 app,
                 diagnostics,
@@ -750,9 +750,4 @@ async fn load_cached_record(
         }
         Err(error) => Err(error),
     }
-}
-
-fn is_credential_retrieval_corrupt(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    lower.contains("could not decrypt credentials") || lower.contains("excessive work parameter")
 }

@@ -17,6 +17,7 @@ use super::approval::ApprovalBroker;
 use super::output::OutputSource;
 use super::storage::NativeStorage;
 use super::terminal_output::{configure_plain_terminal, normalize_terminal_file};
+use super::text::{truncate_utf8, truncate_utf8_marked};
 use crate::engine::{
     ActivityStatus, ApprovalDecision, CommandApprovalRequest, CommandSource, FileChange,
     FileChangeKind, PermissionProfile, PlanStep, PlanStepStatus, SandboxMode, ThreadItem,
@@ -26,6 +27,7 @@ use crate::process::{headless_command, headless_shell_command};
 
 pub(super) const MAX_PROVIDER_ITEM_BYTES: usize = 2 * 1_048_576;
 const MAX_TOOL_ARGUMENT_BYTES: usize = 262_144;
+const MAX_TOOL_DESCRIPTION_BYTES: usize = 160;
 const MAX_FILE_BYTES: usize = 2 * 1_048_576;
 const MAX_READ_LINES: usize = 2_000;
 const MAX_LIST_RESULTS: usize = 500;
@@ -34,10 +36,15 @@ const MAX_SEARCH_RESULTS: usize = 200;
 const MAX_SEARCH_FILES: usize = 10_000;
 const MAX_SEARCH_DIRECTORIES: usize = 10_000;
 const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
+const MAX_SEARCH_LINE_BYTES: usize = 500;
+const MAX_EDIT_OCCURRENCES: u16 = 100;
 const MAX_COMMAND_BYTES: usize = 16_384;
+const MAX_COMMAND_REASON_BYTES: usize = 1_024;
+const MAX_COMMAND_STREAM_CHUNK_BYTES: usize = 8_192;
 const MAX_PLAN_STEPS: usize = 20;
 const MAX_PLAN_STEP_BYTES: usize = 1_024;
 const MAX_PLAN_EXPLANATION_BYTES: usize = 4_096;
+const MAX_TOOL_PATH_BYTES: usize = 4_096;
 pub(super) const MAX_DIFF_BYTES: usize = 131_072;
 const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 60 * 60;
 const MAX_COMMAND_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
@@ -219,7 +226,7 @@ impl ToolRegistry {
                         "path": { "type": "string", "description": "Workspace-relative file path." },
                         "old_text": { "type": "string", "minLength": 1 },
                         "new_text": { "type": "string" },
-                        "expected_occurrences": { "type": "integer", "minimum": 1, "maximum": 100 }
+                        "expected_occurrences": { "type": "integer", "minimum": 1, "maximum": MAX_EDIT_OCCURRENCES }
                     },
                     "required": ["path", "old_text", "new_text", "expected_occurrences"],
                     "additionalProperties": false
@@ -356,7 +363,10 @@ impl ToolRegistry {
             "exec_command" => {
                 let args: ExecCommandArgs = decode_arguments(name, arguments)?;
                 command_timeout(&args)?;
-                let description = format!("Run {}", truncate_utf8(&args.command, 160));
+                let description = format!(
+                    "Run {}",
+                    truncate_utf8(&args.command, MAX_TOOL_DESCRIPTION_BYTES)
+                );
                 (
                     "exec_command",
                     description,
@@ -602,7 +612,9 @@ impl PreparedTool {
                     .map(|output| ToolResult::StoredOutput(StoredToolOutput::Command(output)))
             }
             ToolOperation::UpdatePlan { .. } => {
-                unreachable!("update_plan must complete before filesystem tool execution")
+                return Err(AppError::Tool(
+                    "update_plan must complete before filesystem tool execution".into(),
+                ));
             }
         };
 
@@ -901,7 +913,7 @@ async fn search_text(workspace: &Path, args: &SearchTextArgs) -> Result<String, 
                     matches.push(format!(
                         "{relative}:{}:{}",
                         index + 1,
-                        truncate_utf8(line, 500)
+                        truncate_utf8(line, MAX_SEARCH_LINE_BYTES)
                     ));
                     if matches.len() >= MAX_SEARCH_RESULTS {
                         return Ok(format_search_output(
@@ -926,11 +938,13 @@ async fn search_text(workspace: &Path, args: &SearchTextArgs) -> Result<String, 
 }
 
 async fn edit_file(workspace: &Path, args: &EditFileArgs) -> Result<String, AppError> {
-    if args.old_text.is_empty() || args.expected_occurrences == 0 || args.expected_occurrences > 100
+    if args.old_text.is_empty()
+        || args.expected_occurrences == 0
+        || args.expected_occurrences > MAX_EDIT_OCCURRENCES
     {
-        return Err(AppError::Tool(
-            "edit_file requires an exact non-empty match count from 1 to 100".into(),
-        ));
+        return Err(AppError::Tool(format!(
+            "edit_file requires an exact non-empty match count from 1 to {MAX_EDIT_OCCURRENCES}"
+        )));
     }
     let path = resolve_existing_file(workspace, &args.path).await?;
     let bytes = read_file_bounded(&path).await?;
@@ -994,10 +1008,10 @@ async fn execute_command(
             "command must contain between 1 and {MAX_COMMAND_BYTES} bytes"
         )));
     }
-    if args.reason.trim().is_empty() || args.reason.len() > 1_024 {
-        return Err(AppError::Tool(
-            "command reason must contain between 1 and 1024 bytes".into(),
-        ));
+    if args.reason.trim().is_empty() || args.reason.len() > MAX_COMMAND_REASON_BYTES {
+        return Err(AppError::Tool(format!(
+            "command reason must contain between 1 and {MAX_COMMAND_REASON_BYTES} bytes"
+        )));
     }
     let command_timeout = command_timeout(args)?;
     let cwd = resolve_existing_directory(workspace, &args.cwd).await?;
@@ -1137,7 +1151,7 @@ async fn read_stream_spooled<R: AsyncRead + Unpin>(mut stream: R) -> Result<File
     let output = tempfile::tempfile()
         .map_err(|error| AppError::Tool(format!("could not create output spool: {error}")))?;
     let mut output = tokio::fs::File::from_std(output);
-    let mut buffer = [0u8; 8_192];
+    let mut buffer = [0u8; MAX_COMMAND_STREAM_CHUNK_BYTES];
     loop {
         let count = stream
             .read(&mut buffer)
@@ -1317,7 +1331,7 @@ async fn resolve_write_target(workspace: &Path, relative: &str) -> Result<PathBu
 }
 
 fn validate_relative_path(value: &str) -> Result<&Path, AppError> {
-    if value.is_empty() || value.len() > 4_096 {
+    if value.is_empty() || value.len() > MAX_TOOL_PATH_BYTES {
         return Err(AppError::Protocol(
             "workspace path is empty or too long".into(),
         ));
@@ -1568,28 +1582,18 @@ fn normalize_plan(args: UpdatePlanArgs) -> Result<(Option<String>, Vec<PlanStep>
 }
 
 fn validate_identifier(label: &str, value: &str) -> Result<(), AppError> {
-    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
-        return Err(AppError::Tool(format!("{label} is invalid")));
+    if crate::command_validation::identifier_is_valid(value) {
+        Ok(())
+    } else {
+        Err(AppError::Tool(format!("{label} is invalid")))
     }
-    Ok(())
 }
 
 fn diff_preview(old: &str, new: &str) -> String {
-    truncate_utf8(
+    truncate_utf8_marked(
         &format!("--- before\n+++ after\n-{}\n+{}", old, new),
         MAX_DIFF_BYTES,
     )
-}
-
-fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
-    if value.len() <= maximum_bytes {
-        return value.to_string();
-    }
-    let mut end = maximum_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n[truncated]", &value[..end])
 }
 
 fn format_search_output(

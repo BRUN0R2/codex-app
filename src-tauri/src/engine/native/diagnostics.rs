@@ -7,6 +7,7 @@ use chrono::Utc;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _};
 
+use super::text::truncate_utf8;
 use crate::engine::{
     DiagnosticStream, RUNTIME_DIAGNOSTIC_EVENT, RuntimeDiagnostic, RuntimeDiagnosticSubsystem,
 };
@@ -188,17 +189,6 @@ fn append_rotating(path: &Path, encoded: &[u8], maximum_bytes: u64) -> Result<()
             path.display()
         ))
     })
-}
-
-fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
-    if value.len() <= maximum_bytes {
-        return value.to_string();
-    }
-    let mut end = maximum_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_string()
 }
 
 #[cfg(test)]

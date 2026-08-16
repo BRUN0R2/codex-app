@@ -190,8 +190,9 @@ fn encrypt_file(plaintext: &[u8], passphrase: &SecretString) -> Result<Vec<u8>, 
 
 fn decrypt_file(ciphertext: &[u8], passphrase: &SecretString) -> Result<Vec<u8>, AuthError> {
     let identity = ScryptIdentity::new(passphrase.clone());
-    decrypt(&identity, ciphertext)
-        .map_err(|error| storage_error(format!("could not decrypt credentials: {error}")))
+    decrypt(&identity, ciphertext).map_err(|error| {
+        AuthError::CredentialsCorrupt(format!("could not decrypt credentials: {error}"))
+    })
 }
 
 fn write_file_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {

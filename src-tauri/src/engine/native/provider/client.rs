@@ -19,6 +19,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use super::super::text::format_duration;
 use super::models::ModelCatalog;
 use super::responses::ResponseRequest;
 use super::responses::ResponseStream;
@@ -334,7 +335,7 @@ fn decode_provider_error_body(bytes: Vec<u8>) -> DecodedProviderError {
         .filter(|seconds| *seconds > 0);
 
     let mut formatted = message;
-    if let Some(reset) = reset_seconds.map(format_reset_duration) {
+    if let Some(reset) = reset_seconds.map(format_duration) {
         formatted.push_str("; reset in approximately ");
         formatted.push_str(&reset);
     }
@@ -371,19 +372,6 @@ fn bounded_error_text(value: &str) -> String {
         }
     }
     output
-}
-
-fn format_reset_duration(seconds: u64) -> String {
-    let days = seconds / 86_400;
-    let hours = (seconds % 86_400) / 3_600;
-    let minutes = (seconds % 3_600) / 60;
-    if days > 0 {
-        format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {minutes}m")
-    } else {
-        format!("{}m", minutes.max(1))
-    }
 }
 
 async fn read_limited(response: Response, maximum_bytes: usize) -> Result<Vec<u8>, AppError> {
