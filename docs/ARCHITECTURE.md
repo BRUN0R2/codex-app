@@ -35,7 +35,9 @@ O engine nativo divide ownership assim:
   conversa do ChatGPT;
 - `provider/`: catálogo Codex, Responses, cookies restritos e stream do agente;
 - `agent.rs`: composição das instruções, rodadas e ciclo das ferramentas;
-- `tools.rs`: schemas fechados, confinamento de paths, limites e processos;
+- `tools/`: contratos e orquestração das ferramentas (`mod.rs`), operações de
+  arquivo (`fs.rs`), execução e árvore de processos (`exec.rs`) e confinamento
+  de paths no workspace (`workspace.rs`);
 - `approval.rs`: solicitações de uso único que aguardam decisão, cancelamento
   explícito ou encerramento, sem expiração arbitrária;
 - `storage.rs`: schema SQLite próprio, transações e configuração versionada;
