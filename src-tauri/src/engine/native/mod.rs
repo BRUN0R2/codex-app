@@ -17,6 +17,7 @@ mod tools;
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -40,10 +41,11 @@ use crate::engine::{
     NOTIFICATION_EVENT, OperationAck, OperationFailure, OutputReadResponse, PermissionProfile,
     RUNTIME_STATUS_EVENT, ReasoningEffort, RuntimeDiagnosticSubsystem, RuntimeState, RuntimeStatus,
     ServerResponse, ThreadArchivedNotification, ThreadCompactStartResponse,
-    ThreadDeletedNotification, ThreadForkResponse, ThreadListResponse, ThreadNotification,
-    ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse, ThreadSummary,
-    ThreadUnarchiveResponse, ThreadUnarchivedNotification, TurnCompletedNotification, TurnInput,
-    TurnNotification, TurnStartResponse, TurnStatus,
+    ThreadDeletedNotification, ThreadForkResponse, ThreadItem, ThreadListResponse,
+    ThreadNotification, ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse,
+    ThreadSummary, ThreadUnarchiveResponse, ThreadUnarchivedNotification,
+    TurnCompletedNotification, TurnInput, TurnNotification, TurnStartResponse, TurnStatus,
+    TurnSummary,
 };
 use crate::error::AppError;
 
@@ -171,6 +173,22 @@ impl NativeEngine {
             .active_turns
             .try_lock()
             .map_or(true, |active_turns| !active_turns.is_empty())
+    }
+
+    /// Runs a turn body on the shared task set and finalizes its ownership record.
+    async fn spawn_turn_task<F>(&self, app: &AppHandle, turn_id: &str, task: F)
+    where
+        F: Future<Output = Result<RunCompletion, AppError>> + Send + 'static,
+    {
+        let inner = Arc::clone(&self.inner);
+        let app_handle = app.clone();
+        let background_turn_id = turn_id.to_string();
+        self.inner.tasks.lock().await.spawn(async move {
+            let result = task.await;
+            inner
+                .finalize_turn(&app_handle, result, &background_turn_id)
+                .await;
+        });
     }
 
     pub async fn start(&self, app: &AppHandle) -> Result<EngineStartResponse, AppError> {
@@ -530,76 +548,15 @@ impl NativeEngine {
                 reasoning_effort.map(|effort| effort.as_str().to_string()),
             )
             .await?;
-        let (cancellation, receiver) = watch::channel(false);
-        let ownership_collision = {
-            let mut active_turns = self.inner.active_turns.lock().await;
-            match active_turns.entry(thread_id.clone()) {
-                Entry::Vacant(entry) => {
-                    entry.insert(ActiveTurn {
-                        turn_id: turn.id.clone(),
-                        cancellation,
-                        accepting_steers: false,
-                        steer_pending: false,
-                        pending_deletion: None,
-                        deletion_in_progress: false,
-                    });
-                    false
-                }
-                Entry::Occupied(_) => true,
-            }
-        };
-        if ownership_collision {
-            let message = "active-turn ownership collision".to_string();
-            self.inner
-                .storage
-                .complete_turn(
-                    thread_id.clone(),
-                    turn.id.clone(),
-                    TurnStatus::Failed,
-                    Some(message.clone()),
-                )
-                .await?;
-            return Err(AppError::State(message));
-        }
+        let cancellation = self
+            .inner
+            .claim_active_turn(&thread_id, &turn, false)
+            .await?;
         drop(lifecycle_guard);
 
-        if let Err(error) = self.inner.emit_notification(
-            app,
-            EngineNotification::TurnStarted(TurnNotification {
-                thread_id: thread_id.clone(),
-                turn: turn.clone(),
-            }),
-        ) {
-            return Err(self
-                .inner
-                .rollback_unspawned_turn(app, &thread_id, &turn.id, error)
-                .await);
-        }
-        let active_thread = match self
-            .inner
-            .storage
-            .read_thread_summary(thread_id.clone())
-            .await
-        {
-            Ok(thread) => thread,
-            Err(error) => {
-                return Err(self
-                    .inner
-                    .rollback_unspawned_turn(app, &thread_id, &turn.id, error)
-                    .await);
-            }
-        };
-        if let Err(error) = self.inner.emit_notification(
-            app,
-            EngineNotification::ThreadUpdated(ThreadNotification {
-                thread: active_thread,
-            }),
-        ) {
-            return Err(self
-                .inner
-                .rollback_unspawned_turn(app, &thread_id, &turn.id, error)
-                .await);
-        }
+        self.inner
+            .announce_turn_start(app, &thread_id, &turn, None)
+            .await?;
 
         let run = TurnRun {
             thread_id,
@@ -610,18 +567,14 @@ impl NativeEngine {
             config,
             reasoning_effort,
             service_tier,
-            cancellation: receiver,
+            cancellation,
         };
-        let inner = Arc::clone(&self.inner);
         let task_inner = Arc::clone(&self.inner);
         let app_handle = app.clone();
-        let background_turn_id = turn.id.clone();
-        self.inner.tasks.lock().await.spawn(async move {
-            let result = agent::run_compaction(task_inner, app_handle.clone(), run).await;
-            inner
-                .finalize_turn(&app_handle, result, &background_turn_id)
-                .await;
-        });
+        self.spawn_turn_task(app, &turn.id, async move {
+            agent::run_compaction(task_inner, app_handle, run).await
+        })
+        .await;
 
         Ok(ThreadCompactStartResponse {})
     }
@@ -678,89 +631,15 @@ impl NativeEngine {
                 prepared.preview,
             )
             .await?;
-        let (cancellation, receiver) = watch::channel(false);
-        let ownership_collision = {
-            let mut active_turns = self.inner.active_turns.lock().await;
-            match active_turns.entry(request.thread_id.clone()) {
-                Entry::Vacant(entry) => {
-                    entry.insert(ActiveTurn {
-                        turn_id: turn.id.clone(),
-                        cancellation,
-                        accepting_steers: true,
-                        steer_pending: false,
-                        pending_deletion: None,
-                        deletion_in_progress: false,
-                    });
-                    false
-                }
-                Entry::Occupied(_) => true,
-            }
-        };
-        if ownership_collision {
-            let message = "active-turn ownership collision".to_string();
-            self.inner
-                .storage
-                .complete_turn(
-                    request.thread_id.clone(),
-                    turn.id.clone(),
-                    TurnStatus::Failed,
-                    Some(message.clone()),
-                )
-                .await?;
-            return Err(AppError::State(message));
-        }
+        let cancellation = self
+            .inner
+            .claim_active_turn(&request.thread_id, &turn, true)
+            .await?;
         drop(lifecycle_guard);
 
-        if let Err(error) = self.inner.emit_notification(
-            app,
-            EngineNotification::TurnStarted(TurnNotification {
-                thread_id: request.thread_id.clone(),
-                turn: turn.clone(),
-            }),
-        ) {
-            return Err(self
-                .inner
-                .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
-                .await);
-        }
-        if let Err(error) = self.inner.emit_notification(
-            app,
-            EngineNotification::ItemCompleted(ItemNotification {
-                thread_id: request.thread_id.clone(),
-                turn_id: turn.id.clone(),
-                item: user_item,
-            }),
-        ) {
-            return Err(self
-                .inner
-                .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
-                .await);
-        }
-        let active_thread = match self
-            .inner
-            .storage
-            .read_thread_summary(request.thread_id.clone())
-            .await
-        {
-            Ok(thread) => thread,
-            Err(error) => {
-                return Err(self
-                    .inner
-                    .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
-                    .await);
-            }
-        };
-        if let Err(error) = self.inner.emit_notification(
-            app,
-            EngineNotification::ThreadUpdated(ThreadNotification {
-                thread: active_thread,
-            }),
-        ) {
-            return Err(self
-                .inner
-                .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
-                .await);
-        }
+        self.inner
+            .announce_turn_start(app, &request.thread_id, &turn, Some(user_item))
+            .await?;
 
         let run = TurnRun {
             thread_id: request.thread_id,
@@ -771,18 +650,14 @@ impl NativeEngine {
             config,
             reasoning_effort,
             service_tier,
-            cancellation: receiver,
+            cancellation,
         };
-        let inner = Arc::clone(&self.inner);
         let task_inner = Arc::clone(&self.inner);
         let app_handle = app.clone();
-        let background_turn_id = turn.id.clone();
-        self.inner.tasks.lock().await.spawn(async move {
-            let result = agent::run_turn(task_inner, app_handle.clone(), run).await;
-            inner
-                .finalize_turn(&app_handle, result, &background_turn_id)
-                .await;
-        });
+        self.spawn_turn_task(app, &turn.id, async move {
+            agent::run_turn(task_inner, app_handle, run).await
+        })
+        .await;
 
         Ok(TurnStartResponse { turn })
     }
@@ -823,89 +698,15 @@ impl NativeEngine {
                 prepared.preview,
             )
             .await?;
-        let (cancellation, receiver) = watch::channel(false);
-        let ownership_collision = {
-            let mut active_turns = self.inner.active_turns.lock().await;
-            match active_turns.entry(request.thread_id.clone()) {
-                Entry::Vacant(entry) => {
-                    entry.insert(ActiveTurn {
-                        turn_id: turn.id.clone(),
-                        cancellation,
-                        accepting_steers: false,
-                        steer_pending: false,
-                        pending_deletion: None,
-                        deletion_in_progress: false,
-                    });
-                    false
-                }
-                Entry::Occupied(_) => true,
-            }
-        };
-        if ownership_collision {
-            let message = "active-turn ownership collision".to_string();
-            self.inner
-                .storage
-                .complete_turn(
-                    request.thread_id.clone(),
-                    turn.id.clone(),
-                    TurnStatus::Failed,
-                    Some(message.clone()),
-                )
-                .await?;
-            return Err(AppError::State(message));
-        }
+        let cancellation = self
+            .inner
+            .claim_active_turn(&request.thread_id, &turn, false)
+            .await?;
         drop(lifecycle_guard);
 
-        if let Err(error) = self.inner.emit_notification(
-            app,
-            EngineNotification::TurnStarted(TurnNotification {
-                thread_id: request.thread_id.clone(),
-                turn: turn.clone(),
-            }),
-        ) {
-            return Err(self
-                .inner
-                .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
-                .await);
-        }
-        if let Err(error) = self.inner.emit_notification(
-            app,
-            EngineNotification::ItemCompleted(ItemNotification {
-                thread_id: request.thread_id.clone(),
-                turn_id: turn.id.clone(),
-                item: user_item,
-            }),
-        ) {
-            return Err(self
-                .inner
-                .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
-                .await);
-        }
-        let active_thread = match self
-            .inner
-            .storage
-            .read_thread_summary(request.thread_id.clone())
-            .await
-        {
-            Ok(thread) => thread,
-            Err(error) => {
-                return Err(self
-                    .inner
-                    .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
-                    .await);
-            }
-        };
-        if let Err(error) = self.inner.emit_notification(
-            app,
-            EngineNotification::ThreadUpdated(ThreadNotification {
-                thread: active_thread,
-            }),
-        ) {
-            return Err(self
-                .inner
-                .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
-                .await);
-        }
+        self.inner
+            .announce_turn_start(app, &request.thread_id, &turn, Some(user_item))
+            .await?;
 
         let run = chat::ChatTurnRun {
             thread_id: request.thread_id,
@@ -915,19 +716,15 @@ impl NativeEngine {
             model,
             timezone: request.timezone,
             timezone_offset_min: request.timezone_offset_min,
-            cancellation: receiver,
+            cancellation,
         };
         debug_assert_eq!(thread.mode, ConversationMode::Chat);
-        let inner = Arc::clone(&self.inner);
         let task_inner = Arc::clone(&self.inner);
         let app_handle = app.clone();
-        let background_turn_id = turn.id.clone();
-        self.inner.tasks.lock().await.spawn(async move {
-            let result = chat::run_turn(task_inner, app_handle.clone(), run).await;
-            inner
-                .finalize_turn(&app_handle, result, &background_turn_id)
-                .await;
-        });
+        self.spawn_turn_task(app, &turn.id, async move {
+            chat::run_turn(task_inner, app_handle, run).await
+        })
+        .await;
         Ok(TurnStartResponse { turn })
     }
 
@@ -1350,6 +1147,109 @@ impl NativeEngineInner {
                 DiagnosticStream::Runtime,
                 format!("could not refresh completed thread: {error}"),
             ),
+        }
+        Ok(())
+    }
+
+    /// Registers exclusive ownership of a freshly persisted turn. The caller must hold the
+    /// thread lifecycle gate across the storage write and this call, and drop it afterwards.
+    async fn claim_active_turn(
+        &self,
+        thread_id: &str,
+        turn: &TurnSummary,
+        accepting_steers: bool,
+    ) -> Result<watch::Receiver<bool>, AppError> {
+        let (cancellation, receiver) = watch::channel(false);
+        let collision = {
+            let mut active_turns = self.active_turns.lock().await;
+            match active_turns.entry(thread_id.to_string()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(ActiveTurn {
+                        turn_id: turn.id.clone(),
+                        cancellation,
+                        accepting_steers,
+                        steer_pending: false,
+                        pending_deletion: None,
+                        deletion_in_progress: false,
+                    });
+                    None
+                }
+                Entry::Occupied(_) => Some("active-turn ownership collision".to_string()),
+            }
+        };
+        match collision {
+            None => Ok(receiver),
+            Some(message) => {
+                self.storage
+                    .complete_turn(
+                        thread_id.to_string(),
+                        turn.id.clone(),
+                        TurnStatus::Failed,
+                        Some(message.clone()),
+                    )
+                    .await?;
+                Err(AppError::State(message))
+            }
+        }
+    }
+
+    /// Emits the turn-start announcement sequence and rolls the turn back on any failure.
+    async fn announce_turn_start(
+        &self,
+        app: &AppHandle,
+        thread_id: &str,
+        turn: &TurnSummary,
+        user_item: Option<ThreadItem>,
+    ) -> Result<(), AppError> {
+        let started = self.emit_notification(
+            app,
+            EngineNotification::TurnStarted(TurnNotification {
+                thread_id: thread_id.to_string(),
+                turn: turn.clone(),
+            }),
+        );
+        if let Err(error) = started {
+            return Err(self
+                .rollback_unspawned_turn(app, thread_id, &turn.id, error)
+                .await);
+        }
+        if let Some(item) = user_item {
+            let completed = self.emit_notification(
+                app,
+                EngineNotification::ItemCompleted(ItemNotification {
+                    thread_id: thread_id.to_string(),
+                    turn_id: turn.id.clone(),
+                    item,
+                }),
+            );
+            if let Err(error) = completed {
+                return Err(self
+                    .rollback_unspawned_turn(app, thread_id, &turn.id, error)
+                    .await);
+            }
+        }
+        let active_thread = match self
+            .storage
+            .read_thread_summary(thread_id.to_string())
+            .await
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                return Err(self
+                    .rollback_unspawned_turn(app, thread_id, &turn.id, error)
+                    .await);
+            }
+        };
+        let updated = self.emit_notification(
+            app,
+            EngineNotification::ThreadUpdated(ThreadNotification {
+                thread: active_thread,
+            }),
+        );
+        if let Err(error) = updated {
+            return Err(self
+                .rollback_unspawned_turn(app, thread_id, &turn.id, error)
+                .await);
         }
         Ok(())
     }
