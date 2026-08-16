@@ -4,11 +4,13 @@ import {
   ContractError,
   decodeAccountProfileResponse,
   decodeAccountReadResponse,
+  decodeApplicationPreferences,
   decodeAttachmentImageResponse,
   decodeChatModelListResponse,
   decodeEngineNotification,
   decodeEngineStartResponse,
   decodeModelListResponse,
+  decodeOutputReadResponse,
   decodeThreadCompactStartResponse,
   decodeThreadReadResponse,
 } from "./decode";
@@ -34,7 +36,57 @@ function modelFixture() {
   };
 }
 
+function configFixture(
+  permissionProfile: { readonly approvals: string; readonly sandbox: string } = {
+    sandbox: "workspace-write",
+    approvals: "on-request",
+  },
+) {
+  return {
+    config: {
+      model: null,
+      modelReasoningEffort: null,
+      serviceTier: null,
+      permissionProfile,
+      webSearch: "disabled",
+      modelVerbosity: null,
+      personality: "pragmatic",
+      developerInstructions: null,
+      desktop: {
+        uiFontSize: 15,
+        motion: "full",
+        pointerCursor: true,
+        diffDisplay: "unified",
+      },
+    },
+    version: 1,
+  };
+}
+
 describe("decodificação dos contratos nativos", () => {
+  it("valida preferências de inicialização e bandeja", () => {
+    const preferences = {
+      schemaVersion: 1,
+      startWithWindows: true,
+      startMinimized: true,
+      closeToTray: true,
+    };
+
+    expect(decodeApplicationPreferences(preferences)).toEqual(preferences);
+    expect(() =>
+      decodeApplicationPreferences({
+        ...preferences,
+        startWithWindows: false,
+      }),
+    ).toThrow(ContractError);
+    expect(() =>
+      decodeApplicationPreferences({
+        ...preferences,
+        legacy: true,
+      }),
+    ).toThrow(ContractError);
+  });
+
   it("valida a resposta usada para visualizar anexos de imagem", () => {
     expect(decodeAttachmentImageResponse({ dataUrl: "data:image/png;base64,aGVsbG8=" })).toEqual({
       dataUrl: "data:image/png;base64,aGVsbG8=",
@@ -93,8 +145,9 @@ describe("decodificação dos contratos nativos", () => {
           "explicitApprovals",
         ],
       },
-      schemaVersion: 5,
-      permissionProfile: { sandbox: "workspace-write", approvals: "on-request" },
+      schemaVersion: 8,
+      config: configFixture(),
+      diagnosticLogPath: "C:\\Users\\Bruno\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
         { sandbox: "read-only", approvals: "untrusted" },
         { sandbox: "workspace-write", approvals: "on-request" },
@@ -103,6 +156,7 @@ describe("decodificação dos contratos nativos", () => {
     });
 
     expect(decoded.engine.transport).toBe("httpsSse");
+    expect(decoded.config.version).toBe(1);
     expect(decoded.permissionProfiles).toHaveLength(3);
   });
 
@@ -118,8 +172,12 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 5,
-        permissionProfile: { sandbox: "danger-full-access", approvals: "on-request" },
+        schemaVersion: 8,
+        config: configFixture({
+          sandbox: "danger-full-access",
+          approvals: "on-request",
+        }),
+        diagnosticLogPath: "C:\\Users\\Bruno\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
         permissionProfiles: [],
       }),
     ).toThrow(ContractError);
@@ -194,8 +252,8 @@ describe("decodificação dos contratos nativos", () => {
     ).toThrow(ContractError);
   });
 
-  it("mantém saídas de ferramenta dentro do limite publicado pelo motor", () => {
-    const response = (output: string) => ({
+  it("mantém saídas grandes fora do contrato do turno e valida cada bloco paginado", () => {
+    const response = (output: unknown) => ({
       nextCursor: null,
       thread: {
         id: "thread-output-limit",
@@ -229,14 +287,56 @@ describe("decodificação dos contratos nativos", () => {
         ],
       },
     });
-    const maximumOutput = "x".repeat(1_048_576);
+    const preview = "😀".repeat((64 * 1_024) / 4);
+    const output = {
+      id: "output-large-1",
+      preview,
+      byteLength: 8 * 1_048_576,
+      nextCursor: "1",
+    };
+    const decodedItem = decodeThreadReadResponse(response(output)).thread.turns[0]?.items[0];
+    expect(decodedItem).toMatchObject({ output });
+    expect(JSON.stringify(decodedItem).length).toBeLessThan(70_000);
+    expect(() => decodeThreadReadResponse(response("x".repeat(1_048_577)))).toThrow(ContractError);
 
-    expect(
-      decodeThreadReadResponse(response(maximumOutput)).thread.turns[0]?.items[0],
-    ).toMatchObject({ output: maximumOutput });
-    expect(() => decodeThreadReadResponse(response(`${maximumOutput}x`))).toThrow(
-      "$.thread.turns[0].items[0].output: string must contain at most 1048576 UTF-8 bytes",
-    );
+    const notification = decodeEngineNotification({
+      method: "item.completed",
+      params: {
+        threadId: "thread-output-limit",
+        turnId: "turn-output-limit",
+        item: {
+          type: "toolExecution",
+          id: "tool-output-limit",
+          name: "read_file",
+          description: "Lê um arquivo",
+          status: "completed",
+          output,
+        },
+      },
+    });
+    if (
+      notification.method !== "item.completed" ||
+      notification.params.item.type !== "toolExecution" ||
+      notification.params.item.output === null
+    ) {
+      throw new Error("A referência de saída mudou de tipo.");
+    }
+    expect(notification.params.item.output).toEqual(output);
+
+    const block = decodeOutputReadResponse({
+      outputId: output.id,
+      chunk: preview,
+      byteLength: output.byteLength,
+      nextCursor: "2",
+    });
+    expect(new TextEncoder().encode(block.chunk).length).toBe(64 * 1_024);
+    expect(block.chunk).not.toContain("�");
+    expect(() =>
+      decodeOutputReadResponse({
+        ...block,
+        chunk: `${preview}x`,
+      }),
+    ).toThrow(ContractError);
   });
 
   it("aceita somente movePath em alterações de arquivo", () => {

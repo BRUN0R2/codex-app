@@ -7,6 +7,7 @@ import {
   reasoningTitle,
   thinkingPresentation,
   toolActivityTitle,
+  toolOutputText,
   turnDurationLabel,
   userMessageMarkerWidth,
 } from "./timelinePresentation";
@@ -56,7 +57,11 @@ describe("timeline presentation", () => {
     expect(commandOutputText("exit_code: 0\nstdout:\nsrc/App.tsx\nsrc/main.tsx\n\nstderr:\n")).toBe(
       "src/App.tsx\nsrc/main.tsx",
     );
+    expect(commandOutputText("exit_code: 0\nstdout:\npartial page")).toBe("partial page");
     expect(commandOutputText("raw output")).toBe("raw output");
+    expect(commandOutputText(undefined)).toBeNull();
+    expect(toolOutputText(undefined)).toBeNull();
+    expect(toolOutputText("resultado")).toBe("resultado");
   });
 
   it("keeps navigation marks equal until pointer or keyboard interaction", () => {

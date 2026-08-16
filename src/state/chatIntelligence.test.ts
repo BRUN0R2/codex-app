@@ -75,6 +75,7 @@ describe("seleção de inteligência do Chat", () => {
     expect(loadChatIntelligenceSelection()).toBeNull();
     expect(resolveChatIntelligence(options, null)).toMatchObject({
       option: { id: "thinking", thinkingEffort: "standard" },
+      source: "catalogDefault",
     });
     expect(localStorage.length).toBe(0);
   });
@@ -104,7 +105,7 @@ describe("seleção de inteligência do Chat", () => {
     expect(chatOptionLabel(pro)).toBe("GPT-5.6 Pro");
   });
 
-  it("ignora uma opção removida do catálogo atual", () => {
+  it("torna explícita uma opção removida do catálogo atual", () => {
     const current = option("current", "Atual", { isDefault: true });
 
     expect(
@@ -112,10 +113,19 @@ describe("seleção de inteligência do Chat", () => {
         version: 2,
         optionId: "removed",
       }),
-    ).toMatchObject({ option: { id: "current" } });
+    ).toMatchObject({ option: { id: "current" }, source: "selectionUnavailable" });
   });
 
-  it("descarta qualquer preferência incompatível sem manter contrato legado", () => {
+  it("distingue catálogo ainda indisponível de uma seleção removida", () => {
+    expect(
+      resolveChatIntelligence([], {
+        version: 2,
+        optionId: "saved",
+      }),
+    ).toEqual({ option: undefined, source: "catalogUnavailable" });
+  });
+
+  it("rejeita preferência incompatível sem mutação silenciosa", () => {
     localStorage.setItem(
       PROFILE_STORAGE_KEYS.chatIntelligence,
       JSON.stringify({
@@ -124,8 +134,10 @@ describe("seleção de inteligência do Chat", () => {
       }),
     );
 
-    expect(loadChatIntelligenceSelection()).toBeNull();
-    expect(localStorage.length).toBe(0);
+    expect(() => loadChatIntelligenceSelection()).toThrow(
+      "A seleção de modelo do Chat possui campos incompatíveis.",
+    );
+    expect(localStorage.length).toBe(1);
   });
 
   it("não lê nem remove a preferência do perfil anterior", () => {

@@ -23,4 +23,18 @@ async function bootstrap(mountElement: HTMLElement): Promise<void> {
   render(() => <App />, mountElement);
 }
 
-void bootstrap(root);
+function renderBootstrapFailure(mountElement: HTMLElement, reason: unknown): void {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  const panel = document.createElement("main");
+  panel.className = "bootstrap-failure";
+  const title = document.createElement("h1");
+  title.textContent = "Não foi possível iniciar o Codex App";
+  const description = document.createElement("p");
+  description.textContent = message;
+  panel.append(title, description);
+  mountElement.replaceChildren(panel);
+}
+
+void bootstrap(root).catch((reason: unknown) => {
+  renderBootstrapFailure(root, reason);
+});

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 use tauri::{AppHandle, Emitter as _};
 use tokio::sync::{Mutex, oneshot, watch};
@@ -10,8 +9,6 @@ use crate::engine::{
     SERVER_REQUEST_EVENT, ServerRequest, ServerResponse,
 };
 use crate::error::AppError;
-
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Default)]
 pub struct ApprovalBroker {
@@ -55,11 +52,10 @@ impl ApprovalBroker {
                     Err(_) => Err(AppError::State("turn cancellation channel closed while awaiting approval".into())),
                 }
             }
-            result = tokio::time::timeout(APPROVAL_TIMEOUT, receiver) => {
+            result = receiver => {
                 match result {
-                    Ok(Ok(decision)) => Ok(decision),
-                    Ok(Err(_)) => Err(AppError::State("approval request was closed without a decision".into())),
-                    Err(_) => Err(AppError::Timeout { operation: "command approval" }),
+                    Ok(decision) => Ok(decision),
+                    Err(_) => Err(AppError::State("approval request was closed without a decision".into())),
                 }
             }
         };

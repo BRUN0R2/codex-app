@@ -1,18 +1,37 @@
-import { createMemo, createSignal, Index, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 
 import type { FileChange } from "../contracts/types";
 
+import { type DiffDisplayMode, DiffView } from "./DiffView";
 import { Icon } from "./Icon";
-import { summarizeReviewChanges } from "./reviewChanges";
-import { summarizeDiff, UnifiedDiffView } from "./SplitDiffView";
+import {
+  ReviewDocumentStore,
+  type ReviewFileDocument,
+  summarizeReviewDocuments,
+} from "./reviewChanges";
 
 interface ReviewPanelProps {
   readonly changes: readonly FileChange[];
+  readonly mode: DiffDisplayMode;
   readonly onClose: () => void;
 }
 
 export function ReviewPanel(props: ReviewPanelProps) {
-  const stats = createMemo(() => summarizeReviewChanges(props.changes));
+  const documentStore = new ReviewDocumentStore();
+  const documents = createMemo(() => documentStore.project(props.changes));
+  const stats = createMemo(() => summarizeReviewDocuments(documents()));
+  const [selectedPath, setSelectedPath] = createSignal<string | null>(null);
+  const selected = createMemo<ReviewFileDocument | null>(
+    () =>
+      documents().find((entry) => entry.change.path === selectedPath()) ?? documents()[0] ?? null,
+  );
+
+  createEffect(() => {
+    const current = selected();
+    setSelectedPath((path) =>
+      current === null || path === current.change.path ? path : current.change.path,
+    );
+  });
 
   return (
     <aside aria-label="Revisão dos arquivos alterados" class="review-panel" id="turn-review-panel">
@@ -38,46 +57,62 @@ export function ReviewPanel(props: ReviewPanelProps) {
         </div>
       </div>
 
-      <div class="review-panel-files">
-        <Index each={props.changes}>
-          {(change) => <ReviewFile change={change()} defaultOpen={props.changes.length <= 25} />}
-        </Index>
+      <div class="review-panel-content">
+        <nav aria-label="Arquivos alterados" class="review-file-list">
+          <For each={documents()}>
+            {(entry) => (
+              <button
+                aria-current={selected()?.change.path === entry.change.path ? "true" : undefined}
+                class="review-file-option"
+                classList={{ selected: selected()?.change.path === entry.change.path }}
+                onClick={() => setSelectedPath(entry.change.path)}
+                title={entry.change.path}
+                type="button"
+              >
+                <span class="review-file-type">{fileType(entry.change.path)}</span>
+                <code>{entry.change.path}</code>
+                <Show when={entry.change.kind.type !== "update"}>
+                  <span class={`change-kind kind-${entry.change.kind.type}`}>
+                    {entry.change.kind.type === "add" ? "NOVO" : "EXCLUÍDO"}
+                  </span>
+                </Show>
+                <span class="review-stat additions">+{entry.document.stats.additions}</span>
+                <span class="review-stat deletions">−{entry.document.stats.deletions}</span>
+              </button>
+            )}
+          </For>
+        </nav>
+
+        <section class="review-file-stage">
+          <Show
+            when={selected()}
+            fallback={<div class="diff-empty-state">Nenhum arquivo alterado neste turno.</div>}
+          >
+            {(entry) => (
+              <>
+                <header class="review-file-header">
+                  <code title={entry().change.path}>{entry().change.path}</code>
+                  <span class="review-stat additions">+{entry().document.stats.additions}</span>
+                  <span class="review-stat deletions">−{entry().document.stats.deletions}</span>
+                </header>
+                <Show
+                  when={entry().document.unifiedRows.length > 0}
+                  fallback={
+                    <div class="diff-empty-state">O engine não forneceu um diff textual.</div>
+                  }
+                >
+                  <DiffView
+                    document={entry().document}
+                    mode={props.mode}
+                    path={entry().change.path}
+                  />
+                </Show>
+              </>
+            )}
+          </Show>
+        </section>
       </div>
     </aside>
-  );
-}
-
-function ReviewFile(props: { readonly change: FileChange; readonly defaultOpen: boolean }) {
-  const stats = createMemo(() => summarizeDiff(props.change.diff));
-  const [open, setOpen] = createSignal(props.defaultOpen && props.change.kind.type !== "delete");
-  return (
-    <details
-      class="review-file"
-      data-kind={props.change.kind.type}
-      onToggle={(event) => setOpen(event.currentTarget.open)}
-      open={open()}
-    >
-      <summary>
-        <span class="review-file-type">{fileType(props.change.path)}</span>
-        <code title={props.change.path}>{props.change.path}</code>
-        <Show when={props.change.kind.type !== "update"}>
-          <span class={`change-kind kind-${props.change.kind.type}`}>
-            {props.change.kind.type === "add" ? "NOVO" : "EXCLUÍDO"}
-          </span>
-        </Show>
-        <span class="review-stat additions">+{stats().additions}</span>
-        <span class="review-stat deletions">−{stats().deletions}</span>
-        <span aria-hidden="true" class="review-file-chevron">
-          <Icon name="chevronDown" size={12} />
-        </span>
-      </summary>
-      <Show
-        when={props.change.diff.length > 0}
-        fallback={<div class="diff-empty-state">O engine não forneceu um diff textual.</div>}
-      >
-        <UnifiedDiffView diff={props.change.diff} path={props.change.path} />
-      </Show>
-    </details>
   );
 }
 

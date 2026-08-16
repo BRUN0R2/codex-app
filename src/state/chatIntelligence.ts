@@ -11,6 +11,7 @@ export interface ChatIntelligenceSelection {
 
 export interface ResolvedChatIntelligence {
   readonly option: ChatModelOption | undefined;
+  readonly source: "catalogDefault" | "catalogUnavailable" | "explicit" | "selectionUnavailable";
 }
 
 export function loadChatIntelligenceSelection(): ChatIntelligenceSelection | null {
@@ -19,15 +20,15 @@ export function loadChatIntelligenceSelection(): ChatIntelligenceSelection | nul
     return null;
   }
   if (raw.length > MAX_STORED_VALUE_CHARACTERS) {
-    localStorage.removeItem(STORAGE_KEY);
-    return null;
+    throw new Error("A seleção de modelo do Chat excede o limite permitido.");
   }
+  let value: unknown;
   try {
-    return decodeChatIntelligenceSelection(JSON.parse(raw) as unknown);
-  } catch {
-    localStorage.removeItem(STORAGE_KEY);
-    return null;
+    value = JSON.parse(raw);
+  } catch (reason) {
+    throw new Error(`A seleção de modelo do Chat contém JSON inválido: ${describe(reason)}`);
   }
+  return decodeChatIntelligenceSelection(value);
 }
 
 export function saveChatIntelligenceSelection(selection: ChatIntelligenceSelection): void {
@@ -43,13 +44,17 @@ export function resolveChatIntelligence(
   options: readonly ChatModelOption[],
   selection: ChatIntelligenceSelection | null,
 ): ResolvedChatIntelligence {
-  const fallback = options.find((option) => option.isDefault) ?? options[0];
-  if (selection === null) {
-    return { option: fallback };
+  const catalogDefault = options.find((option) => option.isDefault) ?? options[0];
+  if (options.length === 0) {
+    return { option: undefined, source: "catalogUnavailable" };
   }
-  return {
-    option: options.find((option) => option.id === selection.optionId) ?? fallback,
-  };
+  if (selection === null) {
+    return { option: catalogDefault, source: "catalogDefault" };
+  }
+  const selected = options.find((option) => option.id === selection.optionId);
+  return selected === undefined
+    ? { option: catalogDefault, source: "selectionUnavailable" }
+    : { option: selected, source: "explicit" };
 }
 
 export function selectionFromChatOption(option: ChatModelOption): ChatIntelligenceSelection {
@@ -94,4 +99,8 @@ function optionId(value: unknown): string {
     throw new Error("A opção de modelo selecionada para o Chat é inválida.");
   }
   return value;
+}
+
+function describe(reason: unknown): string {
+  return reason instanceof Error ? reason.message : "erro desconhecido";
 }

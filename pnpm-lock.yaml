@@ -18,10 +18,10 @@ importers:
         specifier: 2.5.4
         version: 2.5.4
       dompurify:
-        specifier: ^3.4.13
+        specifier: 3.4.13
         version: 3.4.13
       marked:
-        specifier: ^18.0.9
+        specifier: 18.0.9
         version: 18.0.9
       solid-js:
         specifier: 1.9.14

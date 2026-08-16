@@ -10,7 +10,7 @@ const MAX_SSE_LINE_BYTES: usize = 1_048_576;
 const MAX_SSE_EVENT_BYTES: usize = 4 * 1_048_576;
 pub(super) const MAX_MESSAGE_TEXT_BYTES: usize = 8 * 1_048_576;
 const MAX_IDENTIFIER_BYTES: usize = 256;
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ChatMessageSnapshot {
@@ -79,7 +79,7 @@ impl ChatStream {
                 }
                 result = next_chunk => {
                     result.map_err(|_| AppError::Timeout { operation: "ChatGPT response stream" })?
-                        .map_err(|error| AppError::Provider(error.to_string()))?
+                        .map_err(|error| AppError::Transport(error.to_string()))?
                 }
             };
             match chunk {
@@ -560,10 +560,20 @@ fn decode_payload(payload: &Value, output: &mut VecDeque<ChatStreamEvent>) -> Re
         return Ok(());
     };
     if let Some(error) = object.get("error").filter(|value| !value.is_null()) {
-        return Err(AppError::Provider(format!(
-            "ChatGPT stream failed: {}",
-            provider_error_message(error)
-        )));
+        let code = error
+            .get("code")
+            .or_else(|| error.get("type"))
+            .and_then(Value::as_str);
+        let retry_after_seconds = error
+            .get("resets_in_seconds")
+            .and_then(Value::as_u64)
+            .filter(|seconds| *seconds > 0);
+        return Err(AppError::from_provider_rejection(
+            None,
+            code,
+            format!("ChatGPT stream failed: {}", provider_error_message(error)),
+            retry_after_seconds,
+        ));
     }
     let conversation_id = object
         .get("conversation_id")
@@ -732,7 +742,7 @@ fn delta_error() -> AppError {
 mod tests {
     use std::collections::VecDeque;
 
-    use super::{ChatSseParser, ChatStreamEvent};
+    use super::{ChatSseParser, ChatStreamEvent, decode_payload};
 
     #[test]
     fn decodes_v1_delta_updates_without_cloning_the_accumulated_message() {
@@ -793,5 +803,28 @@ mod tests {
             )
             .expect("standard SSE extensions should be ignored");
         assert_eq!(events.pop_front(), Some(ChatStreamEvent::Completed));
+    }
+
+    #[test]
+    fn stream_usage_limit_preserves_reset_delay() {
+        let mut events = VecDeque::new();
+        let payload = serde_json::json!({
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "limit reached",
+                "resets_in_seconds": 1800
+            }
+        });
+
+        let error = decode_payload(&payload, &mut events)
+            .expect_err("usage limit should pause the ChatGPT stream");
+        assert!(matches!(
+            error,
+            crate::error::AppError::RateLimited {
+                retry_after_seconds: Some(1_800),
+                ..
+            }
+        ));
+        assert!(events.is_empty());
     }
 }

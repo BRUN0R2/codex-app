@@ -29,11 +29,10 @@ use self::storage::CredentialStorage;
 use self::token::AuthRecord;
 use super::super::AuthLoginCompleted;
 use super::super::AuthSessionChanged;
-use super::super::DiagnosticStream;
 use super::super::EngineNotification;
 use super::super::NOTIFICATION_EVENT;
-use super::super::RUNTIME_DIAGNOSTIC_EVENT;
-use super::super::RuntimeDiagnostic;
+use super::diagnostics::RuntimeDiagnostics;
+use crate::engine::RuntimeDiagnosticSubsystem;
 use crate::error::AppError;
 
 struct AuthContext {
@@ -83,6 +82,7 @@ impl LoginCancellation {
 
 struct AuthInner {
     context: OnceCell<AuthContext>,
+    diagnostics: Arc<RuntimeDiagnostics>,
     pending_login: Mutex<Option<PendingLogin>>,
 }
 
@@ -107,16 +107,21 @@ impl AuthSession {
 
 impl Default for ChatGptAuth {
     fn default() -> Self {
-        Self {
-            inner: Arc::new(AuthInner {
-                context: OnceCell::new(),
-                pending_login: Mutex::new(None),
-            }),
-        }
+        Self::new(Arc::new(RuntimeDiagnostics::default()))
     }
 }
 
 impl ChatGptAuth {
+    pub(super) fn new(diagnostics: Arc<RuntimeDiagnostics>) -> Self {
+        Self {
+            inner: Arc::new(AuthInner {
+                context: OnceCell::new(),
+                diagnostics,
+                pending_login: Mutex::new(None),
+            }),
+        }
+    }
+
     pub async fn initialize(&self, app: &AppHandle) -> Result<(), AppError> {
         self.inner
             .context(app)
@@ -170,7 +175,7 @@ impl AuthInner {
     async fn read_account(&self, app: &AppHandle) -> Result<AccountReadResponse, AuthError> {
         let context = self.context(app).await?;
         let _operation_guard = context.operation_gate.lock().await;
-        let Some(record) = load_cached_record(app, context).await? else {
+        let Some(record) = load_cached_record(app, context, &self.diagnostics).await? else {
             return Ok(AccountReadResponse::signed_out());
         };
 
@@ -183,7 +188,9 @@ impl AuthInner {
             }
         };
         let account = match outcome.record.as_ref() {
-            Some(record) => Some(account_from_record(app, context, record).await?),
+            Some(record) => {
+                Some(account_from_record(app, context, record, &self.diagnostics).await?)
+            }
             None => None,
         };
         Ok(AccountReadResponse {
@@ -209,7 +216,7 @@ impl AuthInner {
     async fn session(&self, app: &AppHandle) -> Result<AuthSession, AuthError> {
         let context = self.context(app).await?;
         let _operation_guard = context.operation_gate.lock().await;
-        let mut record = load_cached_record(app, context)
+        let mut record = load_cached_record(app, context, &self.diagnostics)
             .await?
             .ok_or_else(|| AuthError::InvalidToken("no ChatGPT account is connected".into()))?;
         if record.should_refresh(Utc::now()) {
@@ -250,10 +257,14 @@ impl AuthInner {
             }
         };
 
-        let current = match load_cached_record(app, context).await {
+        let current = match load_cached_record(app, context, &self.diagnostics).await {
             Ok(current) => current,
             Err(error) => {
-                report_cleanup_error(app, context.oauth.revoke_patch(&patch).await);
+                report_cleanup_error(
+                    app,
+                    &self.diagnostics,
+                    context.oauth.revoke_patch(&patch).await,
+                );
                 return Err(error);
             }
         };
@@ -276,14 +287,22 @@ impl AuthInner {
                 })
             }
             Some(current) => {
-                report_cleanup_error(app, context.oauth.revoke_patch(&patch).await);
+                report_cleanup_error(
+                    app,
+                    &self.diagnostics,
+                    context.oauth.revoke_patch(&patch).await,
+                );
                 Ok(RefreshOutcome {
                     record: Some(current),
                     refresh: RefreshResult::superseded(),
                 })
             }
             None => {
-                report_cleanup_error(app, context.oauth.revoke_patch(&patch).await);
+                report_cleanup_error(
+                    app,
+                    &self.diagnostics,
+                    context.oauth.revoke_patch(&patch).await,
+                );
                 Ok(RefreshOutcome {
                     record: None,
                     refresh: RefreshResult::superseded(),
@@ -299,7 +318,10 @@ impl AuthInner {
             return Err(AuthError::LoginInProgress);
         }
         let _operation_guard = context.operation_gate.lock().await;
-        if load_cached_record(app, context).await?.is_some() {
+        if load_cached_record(app, context, &self.diagnostics)
+            .await?
+            .is_some()
+        {
             return Err(AuthError::AlreadyAuthenticated);
         }
 
@@ -353,7 +375,7 @@ impl AuthInner {
         };
         let _operation_guard = context.operation_gate.lock().await;
         if cancellation.is_cancelled() {
-            report_browser_response_error(app, callback.respond_failure().await);
+            report_browser_response_error(app, &self.diagnostics, callback.respond_failure().await);
             return Err(AuthError::LoginCancelled);
         }
         let exchange = context
@@ -363,30 +385,47 @@ impl AuthInner {
         let record = match exchange.and_then(AuthRecord::from_exchange) {
             Ok(record) => record,
             Err(error) => {
-                report_browser_response_error(app, callback.respond_failure().await);
+                report_browser_response_error(
+                    app,
+                    &self.diagnostics,
+                    callback.respond_failure().await,
+                );
                 return Err(error);
             }
         };
 
         if cancellation.is_cancelled() {
-            report_cleanup_error(app, context.oauth.revoke_tokens(record.tokens()).await);
-            report_browser_response_error(app, callback.respond_failure().await);
+            report_cleanup_error(
+                app,
+                &self.diagnostics,
+                context.oauth.revoke_tokens(record.tokens()).await,
+            );
+            report_browser_response_error(app, &self.diagnostics, callback.respond_failure().await);
             return Err(AuthError::LoginCancelled);
         }
         if let Err(error) = context.storage.save(&record).await {
-            report_cleanup_error(app, context.oauth.revoke_tokens(record.tokens()).await);
-            report_browser_response_error(app, callback.respond_failure().await);
+            report_cleanup_error(
+                app,
+                &self.diagnostics,
+                context.oauth.revoke_tokens(record.tokens()).await,
+            );
+            report_browser_response_error(app, &self.diagnostics, callback.respond_failure().await);
             return Err(error);
         }
         if cancellation.is_cancelled() {
-            report_cleanup_error(app, context.oauth.revoke_tokens(record.tokens()).await);
+            report_cleanup_error(
+                app,
+                &self.diagnostics,
+                context.oauth.revoke_tokens(record.tokens()).await,
+            );
             context.storage.delete().await?;
-            report_browser_response_error(app, callback.respond_failure().await);
+            report_browser_response_error(app, &self.diagnostics, callback.respond_failure().await);
             return Err(AuthError::LoginCancelled);
         }
         if let Err(error) = callback.respond_success().await {
             emit_diagnostic(
                 app,
+                &self.diagnostics,
                 format!("login completed, but the browser response failed: {error}"),
             );
         }
@@ -409,6 +448,7 @@ impl AuthInner {
         };
         emit_notification(
             app,
+            &self.diagnostics,
             EngineNotification::AuthLoginCompleted(AuthLoginCompleted {
                 login_id: login_id.into(),
                 success,
@@ -418,6 +458,7 @@ impl AuthInner {
         if success {
             emit_notification(
                 app,
+                &self.diagnostics,
                 EngineNotification::AuthSessionChanged(AuthSessionChanged { signed_in: true }),
             );
         }
@@ -427,7 +468,7 @@ impl AuthInner {
         self.cancel_pending_login().await;
         let context = self.context(app).await?;
         let _operation_guard = context.operation_gate.lock().await;
-        let record = load_cached_record(app, context).await?;
+        let record = load_cached_record(app, context, &self.diagnostics).await?;
 
         let (remote_revocation, remote_revocation_error) = match record.as_ref() {
             Some(record) => match context.oauth.revoke_tokens(record.tokens()).await {
@@ -439,6 +480,7 @@ impl AuthInner {
         let local_credentials_removed = context.storage.delete().await?;
         emit_notification(
             app,
+            &self.diagnostics,
             EngineNotification::AuthSessionChanged(AuthSessionChanged { signed_in: false }),
         );
         Ok(LogoutResponse {
@@ -535,6 +577,7 @@ async fn account_from_record(
     app: &AppHandle,
     context: &AuthContext,
     record: &AuthRecord,
+    diagnostics: &RuntimeDiagnostics,
 ) -> Result<Account, AuthError> {
     let claims = record.account_claims()?;
     // The official ChatGPT profile picture is fetched independently from
@@ -544,7 +587,11 @@ async fn account_from_record(
         match context.oauth.userinfo(&record.tokens().access_token).await {
             Ok(profile) => profile,
             Err(error) => {
-                emit_diagnostic(app, format!("could not read the ChatGPT profile: {error}"));
+                emit_diagnostic(
+                    app,
+                    diagnostics,
+                    format!("could not read the ChatGPT profile: {error}"),
+                );
                 AccountProfile::default()
             }
         }
@@ -633,52 +680,71 @@ pub enum CancelLoginStatus {
     NotFound,
 }
 
-fn emit_notification(app: &AppHandle, notification: EngineNotification) {
+fn emit_notification(
+    app: &AppHandle,
+    diagnostics: &RuntimeDiagnostics,
+    notification: EngineNotification,
+) {
     if let Err(error) = app.emit(NOTIFICATION_EVENT, notification) {
         emit_diagnostic(
             app,
+            diagnostics,
             format!("could not emit authentication notification: {error}"),
         );
     }
 }
 
-fn emit_diagnostic(app: &AppHandle, message: String) {
-    if let Err(error) = app.emit(
-        RUNTIME_DIAGNOSTIC_EVENT,
-        RuntimeDiagnostic {
-            stream: DiagnosticStream::Runtime,
-            message,
-        },
-    ) {
-        eprintln!("runtime diagnostic delivery failed: {error}");
+fn emit_diagnostic(app: &AppHandle, diagnostics: &RuntimeDiagnostics, message: String) {
+    diagnostics.emit(app, RuntimeDiagnosticSubsystem::Authentication, message);
+}
+
+fn report_cleanup_error(
+    app: &AppHandle,
+    diagnostics: &RuntimeDiagnostics,
+    result: Result<(), AuthError>,
+) {
+    if let Err(error) = result {
+        emit_diagnostic(
+            app,
+            diagnostics,
+            format!("OAuth credential cleanup failed: {error}"),
+        );
     }
 }
 
-fn report_cleanup_error(app: &AppHandle, result: Result<(), AuthError>) {
+fn report_browser_response_error(
+    app: &AppHandle,
+    diagnostics: &RuntimeDiagnostics,
+    result: Result<(), AuthError>,
+) {
     if let Err(error) = result {
-        emit_diagnostic(app, format!("OAuth credential cleanup failed: {error}"));
-    }
-}
-
-fn report_browser_response_error(app: &AppHandle, result: Result<(), AuthError>) {
-    if let Err(error) = result {
-        emit_diagnostic(app, format!("OAuth browser response failed: {error}"));
+        emit_diagnostic(
+            app,
+            diagnostics,
+            format!("OAuth browser response failed: {error}"),
+        );
     }
 }
 
 async fn load_cached_record(
     app: &AppHandle,
     context: &AuthContext,
+    diagnostics: &RuntimeDiagnostics,
 ) -> Result<Option<AuthRecord>, AuthError> {
     match context.storage.load().await {
         Ok(record) => Ok(record),
         Err(AuthError::CredentialStorage(message)) if is_credential_retrieval_corrupt(&message) => {
             emit_diagnostic(
                 app,
+                diagnostics,
                 format!("credential cache is corrupt and will be cleared: {message}"),
             );
             if let Err(error) = context.storage.delete().await {
-                emit_diagnostic(app, format!("could not clear corrupt credentials: {error}"));
+                emit_diagnostic(
+                    app,
+                    diagnostics,
+                    format!("could not clear corrupt credentials: {error}"),
+                );
             }
             Ok(None)
         }

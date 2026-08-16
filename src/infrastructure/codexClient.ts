@@ -6,13 +6,12 @@ import {
   decodeAccountProfileResponse,
   decodeAccountRateLimitsResponse,
   decodeAccountReadResponse,
+  decodeApplicationPreferences,
   decodeAttachment,
   decodeAttachmentImageResponse,
   decodeAttachments,
   decodeCancelLoginResponse,
   decodeChatModelListResponse,
-  decodeCommandError,
-  decodeConfigReadResponse,
   decodeConfigUpdateResponse,
   decodeEngineNotification,
   decodeEngineServerRequest,
@@ -21,6 +20,7 @@ import {
   decodeLogoutResponse,
   decodeModelListResponse,
   decodeOperationAck,
+  decodeOutputReadResponse,
   decodeRuntimeDiagnostic,
   decodeRuntimeStatus,
   decodeThreadCompactStartResponse,
@@ -36,12 +36,12 @@ import type {
   AccountProfileResponse,
   AccountRateLimitsResponse,
   AccountReadResponse,
+  ApplicationPreferences,
   ApprovalDecision,
   Attachment,
   AttachmentImageResponse,
   CancelLoginResponse,
   ChatModelListResponse,
-  ConfigReadResponse,
   ConfigUpdate,
   ConfigUpdateResponse,
   ConversationMode,
@@ -52,6 +52,7 @@ import type {
   LogoutResponse,
   ModelListResponse,
   OperationAck,
+  OutputReadResponse,
   ReasoningEffort,
   RuntimeDiagnostic,
   RuntimeStatus,
@@ -64,6 +65,8 @@ import type {
   ThreadUnarchiveResponse,
   TurnStartResponse,
 } from "../contracts/types";
+
+export { describeDiagnosticError, describeError } from "./errorDescription";
 
 const NOTIFICATION_EVENT = "engine://notification";
 const SERVER_REQUEST_EVENT = "engine://server-request";
@@ -120,6 +123,12 @@ export function startEngine(): Promise<EngineStartResponse> {
   return invokeDecoded("engine_start", decodeEngineStartResponse);
 }
 
+export function reportFrontendDiagnostic(message: string): Promise<OperationAck> {
+  return invokeDecoded("engine_runtime_diagnostic_report", decodeOperationAck, {
+    request: { message },
+  });
+}
+
 export function readAccount(): Promise<AccountReadResponse> {
   return invokeDecoded("engine_account_read", decodeAccountReadResponse);
 }
@@ -170,6 +179,12 @@ export function resumeThread(threadId: string): Promise<ThreadResumeResponse> {
 export function readThread(threadId: string, cursor: string | null): Promise<ThreadReadResponse> {
   return invokeDecoded("engine_thread_read", decodeThreadReadResponse, {
     request: { cursor, threadId },
+  });
+}
+
+export function readOutput(outputId: string, cursor: string | null): Promise<OutputReadResponse> {
+  return invokeDecoded("engine_output_read", decodeOutputReadResponse, {
+    request: { cursor, outputId },
   });
 }
 
@@ -269,8 +284,16 @@ export function interruptTurn(threadId: string, turnId: string): Promise<Operati
   });
 }
 
-export function readConfig(): Promise<ConfigReadResponse> {
-  return invokeDecoded("engine_config_read", decodeConfigReadResponse);
+export function readApplicationPreferences(): Promise<ApplicationPreferences> {
+  return invokeDecoded("application_preferences_read", decodeApplicationPreferences);
+}
+
+export function updateApplicationPreferences(
+  preferences: ApplicationPreferences,
+): Promise<ApplicationPreferences> {
+  return invokeDecoded("application_preferences_update", decodeApplicationPreferences, {
+    preferences,
+  });
 }
 
 export function updateConfig(
@@ -319,20 +342,6 @@ export function openExternalUrl(url: string): Promise<void> {
   return openUrl(url);
 }
 
-export function describeError(reason: unknown): string {
-  const commandError = decodeCommandError(reason);
-  if (commandError !== null) {
-    return commandError.message;
-  }
-  if (reason instanceof Error) {
-    return reason.message;
-  }
-  if (typeof reason === "string" && reason.length > 0) {
-    return reason;
-  }
-  return "Ocorreu um erro inesperado.";
-}
-
 async function invokeDecoded<T>(
   command: string,
   decoder: Decoder<T>,
@@ -351,10 +360,6 @@ function decodeEvent<T>(
   try {
     handler(decoder(payload));
   } catch (reason) {
-    console.error(
-      "[decode-debug] contract error",
-      JSON.stringify({ error: String(reason), payload: JSON.stringify(payload)?.slice(0, 500) }),
-    );
     handlers.onContractError(asError(reason, "Evento inválido recebido do engine."));
   }
 }

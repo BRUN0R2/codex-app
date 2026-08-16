@@ -1,25 +1,21 @@
-use std::path::Path;
-
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use crate::attachments::{AttachmentKind, inspect_path};
+use crate::command_validation::{
+    MAX_TURN_ATTACHMENTS, MAX_TURN_TEXT_BYTES, validate_diagnostic_message, validate_model_name,
+    validate_protocol_id, validate_timezone, validate_workspace,
+};
 use crate::engine::{
     AccountProfileResponse, AccountRateLimitsResponse, AccountReadResponse, CancelLoginResponse,
-    ChatModelListResponse, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
-    ConversationMode, EngineManager, EngineStartResponse, LoginResponse, LogoutResponse,
-    ModelListResponse, OperationAck, ReasoningEffort, ServerResponse, StartTurn, SteerTurn,
-    ThreadCompactStartResponse, ThreadForkResponse, ThreadListResponse, ThreadReadResponse,
-    ThreadResumeResponse, ThreadStartResponse, ThreadUnarchiveResponse, TurnInput,
-    TurnStartResponse,
+    ChatModelListResponse, ConfigUpdate, ConfigUpdateResponse, ConversationMode, EngineManager,
+    EngineStartResponse, LoginResponse, LogoutResponse, ModelListResponse, OperationAck,
+    OutputReadResponse, ReasoningEffort, RuntimeDiagnosticSubsystem, ServerResponse, StartTurn,
+    SteerTurn, ThreadCompactStartResponse, ThreadForkResponse, ThreadListResponse,
+    ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse, ThreadUnarchiveResponse,
+    TurnInput, TurnStartResponse,
 };
 use crate::error::{AppError, CommandError, CommandResult};
-
-const MAX_PROTOCOL_ID_BYTES: usize = 256;
-const MAX_MODEL_NAME_BYTES: usize = 256;
-const MAX_TIMEZONE_BYTES: usize = 128;
-const MAX_TURN_TEXT_BYTES: usize = 1_048_576;
-const MAX_TURN_ATTACHMENTS: usize = 12;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -45,6 +41,13 @@ pub struct ThreadIdRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadReadRequest {
     thread_id: String,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OutputReadRequest {
+    output_id: String,
     cursor: Option<String>,
 }
 
@@ -128,12 +131,30 @@ pub struct CancelLoginRequest {
     login_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeDiagnosticRequest {
+    message: String,
+}
+
 #[tauri::command]
 pub async fn engine_start(
     app: AppHandle,
     engine: State<'_, EngineManager>,
 ) -> CommandResult<EngineStartResponse> {
     engine.start(&app).await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn engine_runtime_diagnostic_report(
+    engine: State<'_, EngineManager>,
+    request: RuntimeDiagnosticRequest,
+) -> CommandResult<OperationAck> {
+    let message = validate_diagnostic_message(request.message)?;
+    engine
+        .persist_runtime_error(RuntimeDiagnosticSubsystem::Frontend, &message)
+        .map_err(CommandError::from)?;
+    Ok(OperationAck { applied: true })
 }
 
 #[tauri::command]
@@ -235,6 +256,18 @@ pub async fn engine_thread_read(
     validate_protocol_id("thread id", &request.thread_id)?;
     engine
         .thread_read(request.thread_id, request.cursor)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_output_read(
+    engine: State<'_, EngineManager>,
+    request: OutputReadRequest,
+) -> CommandResult<OutputReadResponse> {
+    validate_protocol_id("output id", &request.output_id)?;
+    engine
+        .output_read(request.output_id, request.cursor)
         .await
         .map_err(Into::into)
 }
@@ -435,13 +468,6 @@ async fn decode_turn_input(
 }
 
 #[tauri::command]
-pub async fn engine_config_read(
-    engine: State<'_, EngineManager>,
-) -> CommandResult<ConfigReadResponse> {
-    engine.config_read().await.map_err(Into::into)
-}
-
-#[tauri::command]
 pub async fn engine_config_update(
     engine: State<'_, EngineManager>,
     request: ConfigUpdateRequest,
@@ -478,116 +504,4 @@ pub async fn engine_server_request_respond(
         .server_request_respond(request.id, request.response)
         .await
         .map_err(Into::into)
-}
-
-async fn validate_workspace(value: &str) -> CommandResult<String> {
-    let path = Path::new(value);
-    if !path.is_absolute() {
-        return Err(AppError::FileSystem("workspace path must be absolute".into()).into());
-    }
-    let canonical = tokio::fs::canonicalize(path)
-        .await
-        .map_err(|error| CommandError::from(AppError::FileSystem(error.to_string())))?;
-    let metadata = tokio::fs::metadata(&canonical)
-        .await
-        .map_err(|error| CommandError::from(AppError::FileSystem(error.to_string())))?;
-    if !metadata.is_dir() {
-        return Err(AppError::FileSystem("workspace path is not a directory".into()).into());
-    }
-    Ok(normalize_windows_canonical_path(
-        &canonical.to_string_lossy(),
-    ))
-}
-
-fn normalize_windows_canonical_path(value: &str) -> String {
-    if let Some(path) = value.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{path}")
-    } else {
-        value.strip_prefix(r"\\?\").unwrap_or(value).to_string()
-    }
-}
-
-fn validate_protocol_id(label: &str, value: &str) -> CommandResult<()> {
-    if value.trim().is_empty()
-        || value.len() > MAX_PROTOCOL_ID_BYTES
-        || value.chars().any(char::is_control)
-    {
-        return Err(AppError::Protocol(format!(
-            "{label} must contain between 1 and {MAX_PROTOCOL_ID_BYTES} bytes without control characters"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-fn validate_model_name(model: String) -> CommandResult<String> {
-    let model = model.trim();
-    if model.is_empty() || model.len() > MAX_MODEL_NAME_BYTES || model.chars().any(char::is_control)
-    {
-        return Err(AppError::Protocol(format!(
-            "model must contain between 1 and {MAX_MODEL_NAME_BYTES} bytes"
-        ))
-        .into());
-    }
-    Ok(model.into())
-}
-
-fn validate_timezone(value: String) -> CommandResult<String> {
-    let value = value.trim().to_string();
-    if value.is_empty()
-        || value.len() > MAX_TIMEZONE_BYTES
-        || value.chars().any(|character| {
-            character.is_control()
-                || !(character.is_ascii_alphanumeric()
-                    || matches!(character, '/' | '_' | '-' | '+'))
-        })
-    {
-        return Err(AppError::Protocol("timezone is invalid".into()).into());
-    }
-    Ok(value)
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::{ThreadStartRequest, TurnServiceTierSelection};
-
-    #[test]
-    fn canonical_windows_prefix_is_not_exposed_to_the_ui() {
-        assert_eq!(
-            super::normalize_windows_canonical_path(r"\\?\C:\workspace"),
-            r"C:\workspace"
-        );
-        assert_eq!(
-            super::normalize_windows_canonical_path(r"\\?\UNC\server\share"),
-            r"\\server\share"
-        );
-    }
-
-    #[test]
-    fn turn_service_tier_selection_distinguishes_default_from_a_tier() {
-        let default: TurnServiceTierSelection =
-            serde_json::from_value(json!({ "type": "default" })).expect("default should decode");
-        let tier: TurnServiceTierSelection = serde_json::from_value(json!({
-            "type": "tier",
-            "id": "priority"
-        }))
-        .expect("tier should decode");
-
-        assert_eq!(default.into_option(), None);
-        assert_eq!(tier.into_option().as_deref(), Some("priority"));
-    }
-
-    #[test]
-    fn thread_start_request_accepts_an_explicit_projectless_target() {
-        let request: ThreadStartRequest = serde_json::from_value(json!({
-            "mode": "chat",
-            "projectPath": null
-        }))
-        .expect("projectless request should decode");
-
-        assert_eq!(request.project_path, None);
-        assert_eq!(request.mode, crate::engine::ConversationMode::Chat);
-    }
 }

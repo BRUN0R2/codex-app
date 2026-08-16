@@ -104,8 +104,8 @@ Este projeto implementa do zero:
 - UI e reducers TypeScript.
 
 Deliberadamente não foram adotados `app-server`, JSONL por `stdio`, config da
-CLI, `CODEX_HOME`, rollout files, MCP, colaboração, aliases antigos, migrações ou
-fallbacks de protocolo.
+CLI, `CODEX_HOME`, rollout files, MCP, colaboração, aliases antigos, migrações de
+formatos externos ou fallbacks de protocolo.
 
 ## Política de atualização
 
@@ -237,8 +237,8 @@ fluxo consumidor com a sessão OAuth da conta ChatGPT, sem chave da API Platform
 2. reutiliza um `oai-did` aleatório e persistente, prepara requisitos em
    `/backend-api/sentinel/chat-requirements/prepare` e resolve o proof-of-work
    quando solicitado;
-3. tenta `/backend-api/f/conversation/prepare`, tratando falha como fallback
-   permitido pelo cliente oficial;
+3. tenta `/backend-api/f/conversation/prepare`; uma falha é diagnosticada e a
+   continuidade explícita usa `client_prepare_state: "failure"` sem conduit token;
 4. transmite em `/backend-api/f/conversation`, negocia `supported_encodings:
    ["v1"]` e aplica os patches incrementais;
 5. persiste `conversation_id` e o último `parent_message_id` para continuar ou

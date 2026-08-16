@@ -14,6 +14,19 @@ function DesktopWindowChrome() {
   const appWindow = getCurrentWindow();
   let controlsReference: HTMLDivElement | undefined;
 
+  function blurFocusedWindowControl(): void {
+    const controls = controlsReference;
+    const activeElement = document.activeElement;
+
+    if (
+      controls !== undefined &&
+      activeElement instanceof HTMLElement &&
+      controls.contains(activeElement)
+    ) {
+      activeElement.blur();
+    }
+  }
+
   onMount(() => {
     let isCurrent = true;
     let unlistenFocus: (() => void) | undefined;
@@ -28,9 +41,7 @@ function DesktopWindowChrome() {
       // biome-ignore lint/complexity/useLiteralKeys: TypeScript index signature access
       controls.dataset["suppressHover"] = "true";
 
-      if (document.activeElement instanceof HTMLElement) {
-        document.activeElement.blur();
-      }
+      blurFocusedWindowControl();
 
       window.requestAnimationFrame(() => {
         window.requestAnimationFrame(() => {
@@ -68,9 +79,7 @@ function DesktopWindowChrome() {
       // biome-ignore lint/complexity/useLiteralKeys: TypeScript index signature access
       controls.dataset["suppressHover"] = "true";
 
-      if (document.activeElement instanceof HTMLElement) {
-        document.activeElement.blur();
-      }
+      blurFocusedWindowControl();
     }
 
     void action.finally(() => {

@@ -109,7 +109,7 @@ As proteções permanentes são:
 O caminho crítico local agora possui limites proporcionais ao trabalho novo,
 não ao tamanho integral da conversa:
 
-- o contrato 5 envia lotes heterogêneos de deltas: o primeiro delta de cada
+- o contrato 8 envia lotes heterogêneos de deltas: o primeiro delta de cada
   fluxo é imediato, os seguintes usam uma janela nativa de 8 ms e todo evento
   semântico força `flush`, preservando ordem e baixa TTFT;
 - o decoder ChatGPT aplica `append` diretamente, sem clonar a árvore JSON nem
@@ -127,6 +127,10 @@ não ao tamanho integral da conversa:
   viewport mais overscan;
 - o histórico usa cursor opaco, versionado e vinculado à tarefa. Limites de
   linhas/bytes pertencem à página de transporte, não ao total persistido;
+- saídas de ferramentas e comandos usam referência + prévia no turno; o texto
+  integral fica em blocos SQLite de 64 KiB e só cruza o IPC por demanda. Captura
+  de processos usa spool em disco e normalização incremental, sem acumular todo
+  o stream na memória;
 - ao chegar ao topo por uma ação do usuário, a página anterior é carregada e a
   âncora visual é mantida sem remover histórico já carregado;
 - o SQLite usa WAL e pool persistente dimensionado pela máquina; leituras podem
@@ -135,35 +139,80 @@ não ao tamanho integral da conversa:
   lê do SQLite apenas itens posteriores ao cursor e serializa requests por
   referência. Steers continuam entrando na ordem transacional do banco.
 
+#### Benchmark da conversa de referência — 16 de agosto de 2026
+
+`pnpm measure:history` reproduz 741 turnos, 15.529 itens de transcript e 231 MiB
+de texto. O contrato JSON completo mede 232,169 MiB. A consulta real pagina
+linhas de itens antes de agrupá-las em turnos; portanto o lote inicial de 64 é
+comparável ao alvo exibido na referência, e não significa 64 turnos.
+
+| Dimensão | Contrato completo | Página inicial atual | Redução |
+| --- | ---: | ---: | ---: |
+| itens materializados | 15.529 | 64 | 99,588% |
+| contrato codificado | 232,169 MiB | 0,957 MiB | 99,588% |
+| crescimento incremental de heap Node | 243,716–243,738 MiB | 1,148 MiB | 99,529% |
+| requisições para abrir | — | 1 | — |
+
+No corpus sintético, os 64 itens representam os quatro turnos mais recentes. Em
+três execuções isoladas, com três amostras completas e sete amostras da página
+por execução:
+
+| Caminho local | Completo | Página inicial | Aceleração |
+| --- | ---: | ---: | ---: |
+| validação do contrato | 32,284–34,210 ms | 0,198–0,222 ms | 148,2–163,1× |
+| `JSON.parse` + validação | 302,631–307,001 ms | 0,939–0,952 ms | 322,1–326,6× |
+
+Antes da última otimização, a validação criava um `TextEncoder` e um buffer
+proporcional para cada campo. No mesmo benchmark ela consumiu 145,866 ms no
+contrato completo e 0,678 ms na página. A medição UTF-8 atual reutiliza um buffer
+de 64 KiB com `encodeInto`, interrompe cedo quando ultrapassa o limite e reduziu
+esse custo em aproximadamente 4,3 vezes no contrato completo e 3 vezes na
+página. O caminho `JSON.parse` + validação completo caiu de 438,127 ms para
+302,631–307,001 ms.
+
+Manter 64 itens é deliberado: o caminho local já fica abaixo de 1 ms e reduzir
+para 32 economizaria frações de milissegundo, mas dobraria a chance de abrir uma
+resposta recente sem seu prompt ou atividades associadas. Esse benchmark mede
+parse, contrato e heap incremental no Node; não substitui trace de renderer,
+paint, INP, rede, modelo ou ferramentas no WebView de produção.
+
 O cenário sintético reproduzível usa 20.000 itens e 1.200 deltas destinados à
 última mensagem. Antes da alteração, a projeção integral anterior levou
-994,21 ms em uma amostra local. Em três execuções de 14 de agosto de 2026,
+994,21 ms em uma amostra local. Em três execuções de 16 de agosto de 2026,
 `pnpm measure:streaming` coletou sete amostras após duas de aquecimento por
 execução:
 
 | Caminho atual | Mediana |
 | --- | ---: |
-| 1.200 atualizações sequenciais | 18,887–19,287 ms |
-| um lote coalescido | 0,100–0,126 ms |
+| 1.200 atualizações sequenciais | 19,063–19,342 ms |
+| um lote coalescido | 0,116–0,125 ms |
 
-O lote ficou entre 150 e 193 vezes mais rápido que as atualizações sequenciais
+O lote ficou entre 154,7 e 164,3 vezes mais rápido que as atualizações sequenciais
 já otimizadas nesse cenário. Este benchmark mede somente custo local de redução
 de estado; não representa TTFT de rede, tempo do modelo ou tempo de ferramentas.
 
 O comando `pnpm measure:soak` cobre estruturas destinadas a sessões longas sem
-simular rede ou provider. Em cinco coletas de 14 de agosto de 2026, 100.000
-turnos, 10.000 medições de altura, 50.000 consultas de viewport e 5.000 blocos
-Markdown produziram; a coleta final incluiu também 50.000 projeções do overlay
-ativo:
+simular rede ou provider. Nas coletas de 16 de agosto de 2026, 100.000 turnos,
+10.000 medições de altura, 50.000 consultas de viewport e 5.000 blocos Markdown
+produziram; as três coletas incluíram também 50.000 trocas entre 12 sessões de
+timeline com 1.000 turnos cada e 20.000 atualizações de projeções estáveis:
 
 | Operação sintética | Resultado |
 | --- | ---: |
-| construção do índice de 100.000 turnos | 62,818–75,018 ms |
-| 10.000 atualizações de altura | 4,868–6,046 ms |
-| 50.000 consultas de viewport | 31,615–32,858 ms |
+| construção do índice de 100.000 turnos | 59,552–62,693 ms |
+| 10.000 atualizações de altura | 4,807–5,210 ms |
+| 50.000 consultas de viewport | 37,022–38,350 ms |
 | maior conjunto montado por viewport | 8 turnos |
-| 50.000 projeções do overlay sobre 100.000 turnos | 21,679–23,804 ms |
-| 5.000 atualizações incrementais Markdown | 1.088,267–1.116,955 ms |
+| 50.000 trocas de sessão da timeline | 306,501–655,780 ms |
+| 50.000 projeções do overlay sobre 100.000 turnos | 14,262–15,507 ms |
+| 5.000 atualizações incrementais Markdown | 1.095,358–1.115,506 ms |
+| 20.000 projeções de atividade | 133,830–137,081 ms |
+| 20.000 projeções de turno em streaming | 157,037–163,420 ms |
+
+A dispersão nas trocas de sessão vem de uma única janela cronometrada sujeita a
+coleta de lixo; mesmo o extremo corresponde a aproximadamente 13 microssegundos
+por troca. Não foi adicionado hash ou estado duplicado para otimizar esse
+microbenchmark e criar risco de invalidação incorreta.
 
 O teste nativo também persiste e percorre 1.200 turnos — acima do antigo teto
 de 1.000 — por todas as páginas, validando cardinalidade e ordem sem um limite
@@ -173,11 +222,84 @@ regressões locais reproduzíveis; o trace
 de produção com heap, nós DOM e INP continua sendo a evidência necessária para
 caracterizar uma sessão real de muitas horas.
 
+O comando `pnpm measure:diff` mede separadamente parsing, projeção split,
+highlight e consultas de viewport sem limitar o conteúdo. Em três execuções de
+16 de agosto de 2026, cada uma com cinco amostras de um diff sintético com
+150.001 linhas e 3.744.479 caracteres, os resultados foram:
+
+| Operação sintética | Resultado |
+| --- | ---: |
+| estatísticas sem materializar linhas | 30,021–30,436 ms |
+| documento unificado completo | 90,052–92,955 ms |
+| projeção split completa e lazy | 63,913–67,954 ms |
+| highlight de todo o documento | 639,852–654,429 ms |
+| highlight da janela visível | 0,379–0,462 ms |
+| linhas montadas no maior viewport | 73 |
+| 100.000 consultas de viewport | 12,083–12,499 ms |
+| redução de linhas montadas | 2.054,808 vezes |
+
+A sequência inteira continua acessível do início ao fim; a redução ocorre apenas
+na quantidade de linhas simultaneamente montadas. O canvas físico é limitado
+para evitar limites de layout do WebView, mas preserva a altura lógica e o
+mapeamento de todas as linhas. Esse benchmark roda em Node e não substitui
+medidas de paint, heap ou INP no WebView de produção.
+
 A interface preview também foi validada ao vivo em 14 de agosto de 2026 nos
 viewports solicitados de `920 × 640`, `1280 × 820` e `1920 × 1080`. Nos três
 casos não houve overflow horizontal, e timeline e compositor permaneceram
 visíveis. Escritas de layout originadas por `ResizeObserver` são coalescidas no
 próximo frame; a repetição do teste não produziu warnings ou erros no console.
+
+### Autonomia prolongada — 16 de agosto de 2026
+
+Os tetos internos que podiam encerrar ou perder trabalho prolongado foram
+removidos ou convertidos em limites de segurança configuráveis:
+
+- filas posteriores não possuem limite de quantidade, são persistidas por
+  conversa e retomadas automaticamente após reinício;
+- aprovações não expiram depois de um intervalo arbitrário;
+- falhas transitórias de boot, transporte, timeout e HTTP 5xx usam backoff
+  limitado e não possuem contador terminal enquanto o turno continuar ativo;
+- rate limits preservam o reset informado, aguardam e consultam novamente;
+- comandos usam uma hora por padrão, aceitam até sete dias por chamada e
+  continuam canceláveis;
+- streams possuem 30 minutos de inatividade semântica antes de reiniciar o ciclo
+  transitório, em vez de cinco minutos;
+- fechar a janela pelo `X` durante trabalho ativo a oculta para a bandeja; somente
+  **Sair** encerra explicitamente o processo.
+
+Isso não remove restrições externas. O aviso `usage_limit_reached` da tela de uso
+é uma cota da conta/serviço, não um teto do aplicativo. Durante essa condição o
+app pode permanecer ativo e aguardar o reset, mas não pode obrigar o provider a
+gerar respostas. Também permanecem externos: desligamento ou reinício do
+sistema, suspensão prolongada, falha permanente de autenticação/protocolo,
+indisponibilidade de rede, espaço em disco, quota do armazenamento WebView e a
+janela de contexto anunciada pelo modelo. A janela de contexto é tratada por
+compactação transacional; as demais condições produzem espera ou erro explícito,
+nunca descarte silencioso.
+
+### Validação integral — 16 de agosto de 2026
+
+`pnpm verify` concluiu sem falhas:
+
+- 41 arquivos e 192 testes frontend;
+- TypeScript estrito e build Vite de produção;
+- verificação de dependências transitivas, `cargo check`, `rustfmt` e Clippy com
+  warnings tratados como erro;
+- 165 de 165 testes Rust.
+
+O build produziu o chunk principal do app com 366,23 KiB, ou 109,39 KiB gzip; o
+chunk auxiliar ficou em 20,25 KiB, o CSS em 95,87 KiB e o worker Markdown em
+45,49 KiB.
+
+A linkedição nativa release atual não pôde ser concluída dentro desta sessão:
+quatro execuções/retomadas chegaram a 2.315 artefatos em
+`src-tauri/target/release/deps`, mas cada processo foi encerrado pelo teto externo
+de 120 segundos antes de gerar `codex-desktop-next.exe`. O perfil continua com
+`opt-level = 3`, ThinLTO e uma codegen unit; ele não foi enfraquecido para
+fabricar uma medição. Portanto as métricas de executável, startup e working set
+de 14 de agosto continuam sendo a última coleta release válida, e uma nova
+medição permanece pendente em um terminal sem esse teto.
 
 Em novas medições, “demora para responder” deve ser decomposta em pelo menos
 quatro intervalos: aceitação de `turn_start`, primeira rodada, espera de

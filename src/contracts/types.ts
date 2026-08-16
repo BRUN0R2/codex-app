@@ -42,8 +42,9 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 5;
-  readonly permissionProfile: PermissionProfile;
+  readonly schemaVersion: 8;
+  readonly diagnosticLogPath: string;
+  readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
 }
 
@@ -213,6 +214,20 @@ export interface PlanItem {
   readonly steps: readonly PlanStep[];
 }
 
+export interface ThreadOutput {
+  readonly id: string;
+  readonly preview: string;
+  readonly byteLength: number;
+  readonly nextCursor: string | null;
+}
+
+export interface OutputReadResponse {
+  readonly outputId: string;
+  readonly chunk: string;
+  readonly byteLength: number;
+  readonly nextCursor: string | null;
+}
+
 export type ThreadItem =
   | ContextUsageItem
   | PlanItem
@@ -234,7 +249,7 @@ export type ThreadItem =
       readonly processId: string | null;
       readonly source: "agent";
       readonly status: ActivityStatus;
-      readonly aggregatedOutput: string | null;
+      readonly aggregatedOutput: ThreadOutput | null;
       readonly exitCode: number | null;
       readonly durationMs: number | null;
     }
@@ -256,7 +271,7 @@ export type ThreadItem =
       readonly name: string;
       readonly description: string;
       readonly status: ActivityStatus;
-      readonly output: string | null;
+      readonly output: ThreadOutput | null;
     }
   | {
       readonly type: "userMessage";
@@ -357,6 +372,13 @@ export type Personality = "friendly" | "none" | "pragmatic";
 export type MotionPreference = "full" | "reduced";
 export type DiffDisplay = "split" | "unified";
 
+export interface ApplicationPreferences {
+  readonly schemaVersion: 1;
+  readonly startWithWindows: boolean;
+  readonly startMinimized: boolean;
+  readonly closeToTray: boolean;
+}
+
 export interface DesktopPreferences {
   readonly uiFontSize: number;
   readonly motion: MotionPreference;
@@ -384,14 +406,6 @@ export interface ConfigReadResponse {
 export type ConfigUpdate =
   | { readonly type: "desktop"; readonly value: DesktopPreferences }
   | { readonly type: "developerInstructions"; readonly value: string | null }
-  | {
-      readonly type: "modelDefaults";
-      readonly value: {
-        readonly model: string | null;
-        readonly reasoningEffort: ReasoningEffort | null;
-        readonly serviceTier: string | null;
-      };
-    }
   | { readonly type: "modelVerbosity"; readonly value: ModelVerbosity | null }
   | { readonly type: "permissionProfile"; readonly value: PermissionProfile }
   | { readonly type: "personality"; readonly value: Personality }
@@ -577,12 +591,18 @@ export interface ModelVerificationNotification {
   };
 }
 
+export type ModerationPresentation = "inline";
+
+export interface ModerationMetadata {
+  readonly presentation: ModerationPresentation;
+}
+
 export interface TurnModerationMetadataNotification {
   readonly method: "turn.moderationMetadata";
   readonly params: {
     readonly threadId: string;
     readonly turnId: string;
-    readonly metadata: unknown;
+    readonly metadata: ModerationMetadata;
   };
 }
 

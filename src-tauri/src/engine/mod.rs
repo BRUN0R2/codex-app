@@ -16,12 +16,39 @@ pub const SERVER_REQUEST_EVENT: &str = "engine://server-request";
 pub const RUNTIME_DIAGNOSTIC_EVENT: &str = "engine://runtime-diagnostic";
 pub const RUNTIME_STATUS_EVENT: &str = "engine://runtime-status";
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RuntimeDiagnosticSubsystem {
+    Authentication,
+    Frontend,
+    Menu,
+    Provider,
+    Runtime,
+    Window,
+}
+
+impl RuntimeDiagnosticSubsystem {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authentication => "authentication",
+            Self::Frontend => "frontend",
+            Self::Menu => "menu",
+            Self::Provider => "provider",
+            Self::Runtime => "runtime",
+            Self::Window => "window",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct EngineManager {
     engine: NativeEngine,
 }
 
 impl EngineManager {
+    pub fn has_active_turns(&self) -> bool {
+        self.engine.has_active_turns()
+    }
+
     pub async fn start(&self, app: &AppHandle) -> Result<EngineStartResponse, AppError> {
         self.engine.start(app).await
     }
@@ -83,6 +110,14 @@ impl EngineManager {
         cursor: Option<String>,
     ) -> Result<ThreadReadResponse, AppError> {
         self.engine.thread_read(thread_id, cursor).await
+    }
+
+    pub async fn output_read(
+        &self,
+        output_id: String,
+        cursor: Option<String>,
+    ) -> Result<OutputReadResponse, AppError> {
+        self.engine.output_read(output_id, cursor).await
     }
 
     pub async fn thread_set_name(
@@ -158,10 +193,6 @@ impl EngineManager {
         self.engine.turn_interrupt(thread_id, turn_id).await
     }
 
-    pub async fn config_read(&self) -> Result<ConfigReadResponse, AppError> {
-        self.engine.config_read().await
-    }
-
     pub async fn config_update(
         &self,
         expected_version: u64,
@@ -189,6 +220,23 @@ impl EngineManager {
         self.engine
             .server_request_respond(request_id, response)
             .await
+    }
+
+    pub(crate) fn report_runtime_error(
+        &self,
+        app: &AppHandle,
+        subsystem: RuntimeDiagnosticSubsystem,
+        message: String,
+    ) {
+        self.engine.report_runtime_error(app, subsystem, message);
+    }
+
+    pub(crate) fn persist_runtime_error(
+        &self,
+        subsystem: RuntimeDiagnosticSubsystem,
+        message: &str,
+    ) -> Result<(), AppError> {
+        self.engine.persist_runtime_error(subsystem, message)
     }
 
     pub async fn stop(&self, app: &AppHandle) {

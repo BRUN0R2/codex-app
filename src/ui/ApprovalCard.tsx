@@ -1,7 +1,7 @@
 import { createSignal, Show } from "solid-js";
 
 import type { EngineServerRequest } from "../contracts/types";
-import type { AppController } from "../state/createAppController";
+import type { AppController } from "../state/appController";
 import { Icon } from "./Icon";
 
 export function ApprovalCard(props: { readonly controller: AppController }) {

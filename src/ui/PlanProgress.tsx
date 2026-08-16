@@ -3,7 +3,7 @@ import { createMemo, For, Show } from "solid-js";
 import type { FileChange, PlanItem, PlanStepStatus } from "../contracts/types";
 
 import { Icon } from "./Icon";
-import { summarizeReviewChanges } from "./reviewChanges";
+import { ReviewStatisticsStore } from "./reviewChanges";
 
 const POPOVER_ID = "active-plan-popover";
 const REVIEW_PANEL_ID = "turn-review-panel";
@@ -16,6 +16,7 @@ interface PlanProgressProps {
 }
 
 export function PlanProgress(props: PlanProgressProps) {
+  const reviewStatistics = new ReviewStatisticsStore();
   const currentStepIndex = createMemo(() => {
     const active = props.plan.steps.findIndex((step) => step.status === "inProgress");
     if (active >= 0) {
@@ -24,7 +25,7 @@ export function PlanProgress(props: PlanProgressProps) {
     const pending = props.plan.steps.findIndex((step) => step.status === "pending");
     return pending >= 0 ? pending : Math.max(0, props.plan.steps.length - 1);
   });
-  const reviewStats = createMemo(() => summarizeReviewChanges(props.changes));
+  const reviewStats = createMemo(() => reviewStatistics.summarize(props.changes));
 
   return (
     <div class="plan-progress">

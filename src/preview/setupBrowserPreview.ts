@@ -1,4 +1,3 @@
-import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 
 import type {
@@ -14,10 +13,12 @@ import type {
   PermissionProfile,
   ProjectRecord,
   ThreadListResponse,
+  ThreadOutput,
   ThreadSummary,
   VisibleThreadItem,
 } from "../contracts/types";
 import { saveProjects } from "../state/projects";
+import { utf8ByteLength } from "../utf8";
 
 const PREVIEW_PERMISSION_PROFILE = {
   sandbox: "danger-full-access",
@@ -26,6 +27,15 @@ const PREVIEW_PERMISSION_PROFILE = {
 
 const PREVIEW_MODEL_ID = "gpt-5.6-luna";
 const PREVIEW_REASONING_EFFORT = "low";
+
+function previewOutput(id: string, preview: string): ThreadOutput {
+  return {
+    id,
+    preview,
+    byteLength: utf8ByteLength(preview),
+    nextCursor: null,
+  };
+}
 
 const PREVIEW_PROJECTS = [
   {
@@ -37,31 +47,6 @@ const PREVIEW_PROJECTS = [
     path: "D:\\ARQUIVOS IMPORTANTES\\REPOSITORIOS\\apps\\streamplay-app",
   },
 ] as const satisfies readonly ProjectRecord[];
-
-const PREVIEW_ENGINE = {
-  engine: {
-    id: "native-engine",
-    name: "NativeEngine",
-    provider: "OpenAI",
-    auth: "ChatGPT OAuth",
-    transport: "httpsSse",
-    storage: "sqlite",
-    capabilities: [
-      "chatGptOauth",
-      "explicitApprovals",
-      "localThreads",
-      "modelStreaming",
-      "nativeTools",
-    ],
-  },
-  schemaVersion: 5,
-  permissionProfile: PREVIEW_PERMISSION_PROFILE,
-  permissionProfiles: [
-    { sandbox: "read-only", approvals: "untrusted" },
-    { sandbox: "workspace-write", approvals: "on-request" },
-    PREVIEW_PERMISSION_PROFILE,
-  ],
-} as const satisfies EngineStartResponse;
 
 const PREVIEW_ACCOUNT = {
   account: {
@@ -103,6 +88,32 @@ const PREVIEW_CONFIG = {
   },
   version: 1,
 } as const satisfies ConfigReadResponse;
+
+const PREVIEW_ENGINE = {
+  engine: {
+    id: "native-engine",
+    name: "NativeEngine",
+    provider: "OpenAI",
+    auth: "ChatGPT OAuth",
+    transport: "httpsSse",
+    storage: "sqlite",
+    capabilities: [
+      "chatGptOauth",
+      "explicitApprovals",
+      "localThreads",
+      "modelStreaming",
+      "nativeTools",
+    ],
+  },
+  schemaVersion: 8,
+  config: PREVIEW_CONFIG,
+  diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
+  permissionProfiles: [
+    { sandbox: "read-only", approvals: "untrusted" },
+    { sandbox: "workspace-write", approvals: "on-request" },
+    PREVIEW_PERMISSION_PROFILE,
+  ],
+} as const satisfies EngineStartResponse;
 
 const PREVIEW_MODEL_DEFINITIONS = [
   ["gpt-5.6-sol", "5.6 Sol"],
@@ -336,8 +347,10 @@ const PREVIEW_CONTEXT_THREAD = {
           processId: null,
           source: "agent",
           status: "completed",
-          aggregatedOutput:
-            "exit_code: 0\nstdout:\nsrc/ui/WindowChrome.tsx\nsrc/ui/WeatherWidget.tsx\nsrc/ui/turnFailure.ts\nsrc/ui/timelineScroll.ts\nsrc/ui/Timeline.tsx\nsrc/ui/SettingsDialog.tsx\nsrc/ui/Composer.tsx\nsrc/ui/AppShell.tsx\nsrc/state/threadRuntime.ts\nsrc/contracts/types.ts\n\nstderr:\n",
+          aggregatedOutput: previewOutput(
+            "preview-command-output-2",
+            "exit_code: 0\nstdout:\nsrc/ui/WindowChrome.tsx\nsrc/ui/turnFailure.ts\nsrc/ui/timelineScroll.ts\nsrc/ui/Timeline.tsx\nsrc/ui/SettingsDialog.tsx\nsrc/ui/Composer.tsx\nsrc/ui/AppShell.tsx\nsrc/state/threadRuntime.ts\nsrc/contracts/types.ts\n\nstderr:\n",
+          ),
           exitCode: 0,
           durationMs: 24,
         },
@@ -485,7 +498,10 @@ const PREVIEW_CONTEXT_THREAD = {
           name: "view_image",
           description: "Visualizou uma imagem",
           status: "completed",
-          output: JSON.stringify({ image_url: PREVIEW_IMAGE_ONE }),
+          output: previewOutput(
+            "preview-image-output",
+            JSON.stringify({ image_url: PREVIEW_IMAGE_ONE }),
+          ),
         },
         {
           type: "agentMessage",
@@ -560,19 +576,14 @@ export function setupBrowserPreview(): void {
     (command, args) => {
       switch (command) {
         case "engine_start": {
-          // O boot não pode depender da entrega do evento: numa sessão WebView
-          // reutilizada (reload/HMR) o emit pode nunca resolver e prender a
-          // visualização no boot para sempre. Dispara sem aguardar e responde.
-          const status = emit("engine://runtime-status", { state: "ready", message: null });
-          status.catch(() => {});
           return PREVIEW_ENGINE;
         }
+        case "engine_runtime_diagnostic_report":
+          return { applied: true };
         case "engine_account_read":
           return PREVIEW_ACCOUNT;
         case "engine_account_profile_read":
           return PREVIEW_ACCOUNT_PROFILE;
-        case "engine_config_read":
-          return PREVIEW_CONFIG;
         case "engine_model_list":
           return PREVIEW_MODEL_CATALOG;
         case "engine_chat_model_list":

@@ -12,54 +12,47 @@ import {
 } from "solid-js";
 
 import type {
-  CodexModel,
+  AccountPlanType,
+  ApplicationPreferences,
   CreditsSnapshot,
   DesktopPreferences,
   ModelVerbosity,
   MotionPreference,
   PermissionProfile,
   Personality,
-  RateLimitWindow,
-  ReasoningEffort,
   SpendControlLimitSnapshot,
   WebSearchMode,
 } from "../contracts/types";
-import { openExternalUrl } from "../infrastructure/codexClient";
-import type { AppController } from "../state/createAppController";
+import {
+  describeError,
+  openExternalUrl,
+  readApplicationPreferences,
+  updateApplicationPreferences,
+} from "../infrastructure/codexClient";
+import { isDesktopRuntime } from "../platform/DesktopRuntime";
+import type { AppController } from "../state/appController";
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { formatShortDate } from "./dateFormat";
 import { Icon, type IconName } from "./Icon";
 import { OUTPUT_DETAIL_OPTIONS, outputDetailLabel } from "./outputDetail";
 import { threadTitle } from "./Sidebar";
+import { presentUsageLimits, type UsageLimitEntry, usagePercentLabel } from "./usagePresentation";
 
 export type SettingsPage =
   | "appearance"
   | "archived"
-  | "computerUse"
-  | "config"
-  | "connections"
   | "diagnostics"
-  | "environments"
   | "general"
-  | "git"
-  | "hooks"
-  | "import"
   | "personalization"
-  | "pets"
-  | "plugins"
   | "profile"
   | "security"
   | "shortcuts"
-  | "usage"
-  | "voice"
-  | "webBrowser"
-  | "worktrees";
+  | "usage";
 
 interface SettingsNavigationItem {
   readonly icon: IconName;
   readonly label: string;
   readonly page: SettingsPage;
-  readonly external?: boolean;
 }
 
 interface SettingsNavigationSection {
@@ -72,34 +65,18 @@ const SETTINGS_NAVIGATION: readonly SettingsNavigationSection[] = [
     label: "Pessoais",
     items: [
       { icon: "settings", label: "Geral", page: "general" },
-      { icon: "download", label: "Importar", page: "import" },
       { icon: "user", label: "Perfil", page: "profile" },
       { icon: "sun", label: "Aparência", page: "appearance" },
-      { icon: "mic", label: "Voz", page: "voice" },
-      { icon: "sliders", label: "Configuração", page: "config" },
       { icon: "sparkles", label: "Personalização", page: "personalization" },
-      { icon: "egg", label: "Pets", page: "pets" },
       { icon: "keyboard", label: "Atalhos de teclado", page: "shortcuts" },
       { icon: "creditCard", label: "Uso e faturamento", page: "usage" },
-      { external: true, icon: "externalLink", label: "Conta", page: "profile" },
     ],
   },
   {
-    label: "Integrações",
+    label: "Sistema",
     items: [
-      { icon: "puzzle", label: "Plug-ins", page: "plugins" },
-      { icon: "globe", label: "Navegador", page: "webBrowser" },
-      { icon: "wand", label: "Uso do computador", page: "computerUse" },
-    ],
-  },
-  {
-    label: "Programação",
-    items: [
-      { icon: "anchor", label: "Hooks", page: "hooks" },
-      { icon: "globe", label: "Conexões", page: "connections" },
-      { icon: "gitBranch", label: "Git", page: "git" },
-      { icon: "monitor", label: "Ambientes", page: "environments" },
-      { icon: "worktree", label: "Árvores de trabalho", page: "worktrees" },
+      { icon: "shield", label: "Segurança e permissões", page: "security" },
+      { icon: "bug", label: "Diagnósticos", page: "diagnostics" },
     ],
   },
   {
@@ -203,7 +180,6 @@ export function SettingsDialog(props: {
                   <For each={section.items}>
                     {(item) => (
                       <SettingsNavButton
-                        external={item.external}
                         icon={item.icon}
                         label={item.label}
                         page={item.page}
@@ -253,9 +229,6 @@ export function SettingsDialog(props: {
             <Match when={page() === "archived"}>
               <ArchivedChatsSettings controller={props.controller} />
             </Match>
-            <Match when={true}>
-              <GeneralSettings controller={props.controller} />
-            </Match>
           </Switch>
         </main>
       </section>
@@ -273,7 +246,6 @@ const FOCUSABLE_SELECTOR = [
 ].join(",");
 
 function SettingsNavButton(props: {
-  readonly external?: boolean | undefined;
   readonly icon: IconName;
   readonly label: string;
   readonly page: SettingsPage;
@@ -288,9 +260,6 @@ function SettingsNavButton(props: {
     >
       <Icon name={props.icon} size={16} />
       <span>{props.label}</span>
-      <Show when={props.external}>
-        <Icon name="externalLink" size={12} />
-      </Show>
     </button>
   );
 }
@@ -314,110 +283,192 @@ function SettingsHeading(props: { readonly title: string; readonly description: 
 
 function SettingsSection(props: {
   readonly allowOverflow?: boolean;
+  readonly busy?: boolean;
   readonly children: JSX.Element;
+  readonly description?: string;
   readonly title: string;
 }) {
   return (
     <section class="settings-section">
       <h3>{props.title}</h3>
-      <div class="settings-card" classList={{ "allow-overflow": props.allowOverflow }}>
+      <Show when={props.description}>
+        <p class="settings-section-description">{props.description}</p>
+      </Show>
+      <div
+        aria-busy={props.busy || undefined}
+        class="settings-card"
+        classList={{ "allow-overflow": props.allowOverflow }}
+      >
         {props.children}
       </div>
     </section>
   );
 }
 
+const DEFAULT_APPLICATION_PREFERENCES = {
+  schemaVersion: 1,
+  startWithWindows: false,
+  startMinimized: false,
+  closeToTray: false,
+} as const satisfies ApplicationPreferences;
+
+function ApplicationPreferencesSettings(props: { readonly controller: AppController }) {
+  const desktopRuntime = isDesktopRuntime();
+  const [preferences, setPreferences] = createSignal<ApplicationPreferences>(
+    DEFAULT_APPLICATION_PREFERENCES,
+  );
+  const [loaded, setLoaded] = createSignal(false);
+  const [loading, setLoading] = createSignal(desktopRuntime);
+  const [saving, setSaving] = createSignal(false);
+  const [operationError, setOperationError] = createSignal<string | null>(null);
+  let confirmedPreferences = DEFAULT_APPLICATION_PREFERENCES as ApplicationPreferences;
+  let active = true;
+
+  onMount(() => {
+    if (!desktopRuntime) {
+      return;
+    }
+    void readApplicationPreferences()
+      .then((storedPreferences) => {
+        if (!active) return;
+        confirmedPreferences = storedPreferences;
+        setPreferences(storedPreferences);
+        setLoaded(true);
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setOperationError(describeError(reason));
+        props.controller.reportError(reason);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+  });
+
+  onCleanup(() => {
+    active = false;
+  });
+
+  function save(patch: Partial<ApplicationPreferences>): void {
+    if (!loaded() || saving()) {
+      return;
+    }
+
+    const merged = { ...preferences(), ...patch };
+    const nextPreferences: ApplicationPreferences = merged.startWithWindows
+      ? merged
+      : { ...merged, startMinimized: false };
+    const previousPreferences = confirmedPreferences;
+    setOperationError(null);
+    setPreferences(nextPreferences);
+    setSaving(true);
+
+    void updateApplicationPreferences(nextPreferences)
+      .then((storedPreferences) => {
+        confirmedPreferences = storedPreferences;
+        if (active) setPreferences(storedPreferences);
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setPreferences(previousPreferences);
+        setOperationError(describeError(reason));
+        props.controller.reportError(reason);
+      })
+      .finally(() => {
+        if (active) setSaving(false);
+      });
+  }
+
+  const controlsDisabled = () => !desktopRuntime || !loaded() || loading() || saving();
+  const status = () => {
+    if (!desktopRuntime) {
+      return "Disponível apenas no aplicativo desktop.";
+    }
+    if (loading()) {
+      return "Carregando preferências do aplicativo…";
+    }
+    if (saving()) {
+      return "Salvando preferências do aplicativo…";
+    }
+    return operationError() ?? "";
+  };
+
+  return (
+    <>
+      <SettingsSection
+        busy={loading() || saving()}
+        description="Escolha como o Codex App inicia e se comporta ao fechar a janela principal."
+        title="Aplicativo"
+      >
+        <PreferenceCheckbox
+          checked={preferences().startWithWindows}
+          description="Abre o Codex App automaticamente ao entrar na sua conta do Windows."
+          disabled={controlsDisabled()}
+          label="Iniciar com o Windows"
+          onChange={(startWithWindows) => save({ startWithWindows })}
+        />
+        <PreferenceCheckbox
+          checked={preferences().startMinimized}
+          description="Quando iniciado com o Windows, mantém o Codex App na bandeja do sistema."
+          disabled={controlsDisabled() || !preferences().startWithWindows}
+          label="Iniciar minimizado"
+          onChange={(startMinimized) => save({ startMinimized })}
+        />
+        <PreferenceCheckbox
+          checked={preferences().closeToTray}
+          description="Mantém o Codex App em segundo plano quando a janela principal é fechada."
+          disabled={controlsDisabled()}
+          label="Ir para a bandeja ao fechar"
+          onChange={(closeToTray) => save({ closeToTray })}
+        />
+      </SettingsSection>
+      <Show when={status().length > 0}>
+        <p
+          aria-live="polite"
+          class="application-preferences-status"
+          classList={{ error: operationError() !== null }}
+        >
+          {status()}
+        </p>
+      </Show>
+    </>
+  );
+}
+
+function PreferenceCheckbox(props: {
+  readonly checked: boolean;
+  readonly description: string;
+  readonly disabled: boolean;
+  readonly label: string;
+  readonly onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label class="application-preference" classList={{ disabled: props.disabled }}>
+      <input
+        checked={props.checked}
+        disabled={props.disabled}
+        onChange={(event) => props.onChange(event.currentTarget.checked)}
+        type="checkbox"
+      />
+      <span class="application-preference-copy">
+        <strong>{props.label}</strong>
+        <small>{props.description}</small>
+      </span>
+    </label>
+  );
+}
+
 function GeneralSettings(props: { readonly controller: AppController }) {
   const configuration = () => props.controller.config()?.config;
-  const selectedModel = () =>
-    props.controller.models().find((model) => model.id === configuration()?.model) ??
-    props.controller.models().find((model) => model.isDefault);
 
   return (
     <div class="settings-page">
-      <SettingsHeading title="Geral" description="Padrões usados ao iniciar cada novo turno." />
-      <SettingsSection allowOverflow title="Modelo">
-        <SettingsRow label="Modelo" description="Catálogo autorizado pela conta ChatGPT.">
-          <select
-            onChange={(event) => {
-              const model = props.controller
-                .models()
-                .find((entry) => entry.id === event.currentTarget.value);
-              if (model !== undefined) {
-                saveModelDefaults(
-                  props.controller,
-                  model,
-                  model.defaultReasoningEffort,
-                  model.defaultServiceTier,
-                );
-              }
-            }}
-            value={configuration()?.model ?? selectedModel()?.id ?? ""}
-          >
-            <For each={props.controller.models()}>
-              {(model) => <option value={model.id}>{model.displayName}</option>}
-            </For>
-          </select>
-        </SettingsRow>
-        <SettingsRow
-          label="Raciocínio"
-          description="Nível padrão; só aparecem opções anunciadas pelo modelo."
-        >
-          <select
-            onChange={(event) => {
-              const value = parseReasoningEffort(
-                event.currentTarget.value,
-                selectedModel()?.supportedReasoningEfforts.map(
-                  (option) => option.reasoningEffort,
-                ) ?? [],
-              );
-              const model = selectedModel();
-              if (value !== undefined && model !== undefined) {
-                saveModelDefaults(
-                  props.controller,
-                  model,
-                  value,
-                  configuration()?.serviceTier ?? model.defaultServiceTier,
-                );
-              }
-            }}
-            value={
-              configuration()?.modelReasoningEffort ?? selectedModel()?.defaultReasoningEffort ?? ""
-            }
-          >
-            <option value="">Padrão do modelo</option>
-            <For each={selectedModel()?.supportedReasoningEfforts ?? []}>
-              {(option) => (
-                <option value={option.reasoningEffort}>
-                  {effortLabel(option.reasoningEffort)}
-                </option>
-              )}
-            </For>
-          </select>
-        </SettingsRow>
-        <Show when={(selectedModel()?.serviceTiers.length ?? 0) > 0}>
-          <SettingsRow label="Velocidade" description="Perfil de serviço anunciado pelo modelo.">
-            <select
-              onChange={(event) => {
-                const model = selectedModel();
-                if (model !== undefined) {
-                  saveModelDefaults(
-                    props.controller,
-                    model,
-                    configuration()?.modelReasoningEffort ?? model.defaultReasoningEffort,
-                    event.currentTarget.value || null,
-                  );
-                }
-              }}
-              value={configuration()?.serviceTier ?? selectedModel()?.defaultServiceTier ?? ""}
-            >
-              <option value="">Padrão do modelo</option>
-              <For each={selectedModel()?.serviceTiers ?? []}>
-                {(tier) => <option value={tier.id}>{tier.name}</option>}
-              </For>
-            </select>
-          </SettingsRow>
-        </Show>
+      <SettingsHeading
+        title="Geral"
+        description="Preferências do aplicativo e padrões usados ao iniciar novos turnos."
+      />
+      <ApplicationPreferencesSettings controller={props.controller} />
+      <SettingsSection title="Modelo">
         <SettingsRow
           label="Detalhamento da saída"
           description="Escolha o nível de detalhe que o Codex inclui nas respostas."
@@ -656,71 +707,120 @@ function ShortcutRow(props: { readonly keys: readonly string[]; readonly label: 
 }
 
 function UsageSettings(props: { readonly controller: AppController }) {
-  const snapshot = () => props.controller.rateLimits()?.rateLimits;
-  const windows = () => {
-    const current = snapshot();
-    if (current === undefined) {
-      return [];
-    }
-    const entries: { readonly label: string; readonly window: RateLimitWindow }[] = [];
-    if (current.primary !== null) {
-      entries.push({ label: "Limite de uso de 5 horas", window: current.primary });
-    }
-    if (current.secondary !== null) {
-      entries.push({ label: "Limite de uso semanal", window: current.secondary });
-    }
-    return entries;
-  };
+  const rateLimits = () => props.controller.rateLimits();
+  const snapshot = () => rateLimits()?.rateLimits;
+  onMount(() => {
+    void props.controller.refreshRateLimitsIfStale();
+  });
+  const limitGroups = () => presentUsageLimits(rateLimits());
   const credits = () => snapshot()?.credits ?? null;
   const spendControl = () => snapshot()?.individualLimit ?? null;
   return (
     <div class="settings-page">
       <SettingsHeading
-        title="Uso e faturamento"
-        description="Limites de uso e créditos da sua conta ChatGPT."
+        title="Uso e cobrança"
+        description="Consulte o plano, os créditos e todos os limites disponíveis para sua conta ChatGPT."
       />
-      <SettingsSection title="Uso">
+      <Show when={snapshot()}>
+        {(current) => (
+          <SettingsSection title="Seu plano">
+            <div class="usage-plan">
+              <span>
+                <strong>{planLabel(current().planType)}</strong>
+                <small>Plano atual</small>
+              </span>
+              <button
+                class="usage-credits-button"
+                onClick={() => void openExternalUrl("https://chatgpt.com/membership/plans")}
+                type="button"
+              >
+                Ver planos
+              </button>
+            </div>
+          </SettingsSection>
+        )}
+      </Show>
+      <Show when={credits()}>
+        {(snap) => (
+          <SettingsSection
+            description="Use créditos para continuar tarefas do Codex quando atingir um limite."
+            title="Saldo de créditos"
+          >
+            <div class="usage-credits usage-credit-balance">
+              <span>
+                <strong>{creditsLabel(snap())}</strong>
+                <small>Saldo atual</small>
+              </span>
+              <button
+                class="usage-credits-button"
+                onClick={() => void openExternalUrl("https://chatgpt.com/settings/billing")}
+                type="button"
+              >
+                Comprar créditos
+              </button>
+            </div>
+          </SettingsSection>
+        )}
+      </Show>
+      <SettingsSection busy={props.controller.rateLimitsLoading()} title="Limites gerais de uso">
         <Show
-          when={windows().length > 0 || spendControl() !== null || credits() !== null}
+          when={limitGroups().length > 0}
           fallback={
-            <div class="usage-empty">
-              <Icon name="creditCard" size={18} />
-              <strong>Detalhes de uso indisponíveis</strong>
-              <p>Atualize para consultar os limites da sua conta.</p>
+            <div
+              aria-live="polite"
+              class="usage-empty"
+              classList={{ "usage-empty-error": props.controller.rateLimitsError() !== null }}
+            >
+              <span class="usage-empty-icon">
+                <Icon
+                  name={props.controller.rateLimitsError() === null ? "creditCard" : "helpCircle"}
+                  size={18}
+                />
+              </span>
+              <div>
+                <strong>
+                  {props.controller.rateLimitsLoading()
+                    ? "Consultando detalhes de uso"
+                    : props.controller.rateLimitsError() === null
+                      ? "Detalhes de uso indisponíveis"
+                      : "Não foi possível consultar o uso"}
+                </strong>
+                <p>
+                  {props.controller.rateLimitsLoading()
+                    ? "Aguarde enquanto os limites da conta são atualizados."
+                    : (props.controller.rateLimitsError() ??
+                      "Atualize para consultar os limites da sua conta.")}
+                </p>
+              </div>
             </div>
           }
         >
-          <For each={windows()}>
-            {(entry) => (
-              <UsageMeter
-                label={entry.label}
-                remainingPercent={Math.max(0, 100 - entry.window.usedPercent)}
-                resetAt={entry.window.resetsAt}
-                usedPercent={entry.window.usedPercent}
-              />
+          <For each={limitGroups()}>
+            {(group) => (
+              <section class="usage-limit-group">
+                <Show when={group.label}>{(label) => <h4>Limites de uso do {label()}</h4>}</Show>
+                <For each={group.limits}>{(limit) => <UsageMeter limit={limit} />}</For>
+              </section>
             )}
           </For>
-          <Show when={spendControl()}>{(limit) => <SpendControlMeter limit={limit()} />}</Show>
-          <Show when={credits()}>
-            {(snap) => (
-              <div class="usage-credits">
-                <span>
-                  <strong>Créditos</strong>
-                  <small>Saldo disponível para tarefas do Codex.</small>
-                </span>
-                <code>{creditsLabel(snap())}</code>
-              </div>
-            )}
-          </Show>
         </Show>
-        <div class="usage-actions">
-          <button
-            class="usage-upgrade-button"
-            onClick={() => void openExternalUrl("https://chatgpt.com/membership/plans")}
-            type="button"
-          >
-            Fazer upgrade do plano
-          </button>
+      </SettingsSection>
+      <Show when={spendControl()}>
+        {(limit) => (
+          <SettingsSection title="Limite de gastos">
+            <SpendControlMeter limit={limit()} />
+          </SettingsSection>
+        )}
+      </Show>
+      <div class="usage-actions">
+        <button
+          class="usage-upgrade-button"
+          onClick={() => void openExternalUrl("https://chatgpt.com/membership/plans")}
+          type="button"
+        >
+          Fazer upgrade do plano
+        </button>
+        <Show when={credits() !== null}>
           <button
             class="usage-credits-button"
             onClick={() => void openExternalUrl("https://chatgpt.com/settings/billing")}
@@ -728,42 +828,54 @@ function UsageSettings(props: { readonly controller: AppController }) {
           >
             Adicionar créditos
           </button>
-          <button
-            class="usage-refresh-button"
-            onClick={() => void props.controller.refreshRateLimits()}
-            type="button"
-          >
-            <Icon name="reset" size={13} />
-            Atualizar
-          </button>
-        </div>
-      </SettingsSection>
+        </Show>
+        <button
+          class="usage-refresh-button"
+          classList={{ refreshing: props.controller.rateLimitsLoading() }}
+          disabled={props.controller.rateLimitsLoading()}
+          onClick={() => void props.controller.refreshRateLimits()}
+          type="button"
+        >
+          <Icon name="reset" size={13} />
+          {props.controller.rateLimitsLoading() ? "Atualizando..." : "Atualizar"}
+        </button>
+      </div>
     </div>
   );
 }
 
-function UsageMeter(props: {
-  readonly label: string;
-  readonly remainingPercent: number;
-  readonly resetAt: number | null;
-  readonly usedPercent: number;
-}) {
+function UsageMeter(props: { readonly limit: UsageLimitEntry }) {
+  const remaining = () => usagePercentLabel(props.limit.remainingPercent);
+  const resetLabel = () => usageResetLabel(props.limit);
   return (
     <div class="usage-meter-row">
       <span class="usage-meter-copy">
-        <strong>{props.label}</strong>
-        <small>
-          {props.remainingPercent}% restantes
-          <Show when={props.resetAt}>
-            {(resetAt) => <i> · Redefine em {formatShortDate(resetAt())}</i>}
-          </Show>
-        </small>
+        <strong>{props.limit.label}</strong>
+        <Show when={resetLabel()}>{(label) => <small>{label()}</small>}</Show>
       </span>
-      <progress class="usage-meter" max={100} value={props.usedPercent}>
-        {props.usedPercent}%
-      </progress>
+      <div class="usage-meter-status">
+        <progress
+          aria-label={`${props.limit.label}: ${remaining()} restante`}
+          class="usage-meter usage-limit-meter"
+          max={100}
+          value={props.limit.remainingPercent}
+        >
+          {remaining()}
+        </progress>
+        <strong>{remaining()} restante</strong>
+      </div>
     </div>
   );
+}
+
+function usageResetLabel(limit: UsageLimitEntry): string | null {
+  if (limit.resetAt === null) {
+    return null;
+  }
+  if (limit.windowDurationMins !== null && limit.windowDurationMins < 24 * 60) {
+    return `Redefine em ${formatShortDate(limit.resetAt)}`;
+  }
+  return `Redefinição ${formatShortDate(limit.resetAt)}`;
 }
 
 function SpendControlMeter(props: { readonly limit: SpendControlLimitSnapshot }) {
@@ -791,6 +903,39 @@ function creditsLabel(credits: CreditsSnapshot): string {
   return credits.balance ?? "—";
 }
 
+function planLabel(planType: AccountPlanType | null): string {
+  switch (planType) {
+    case "free":
+      return "Plano grátis";
+    case "go":
+      return "Plano Go";
+    case "plus":
+      return "Plano Plus";
+    case "pro":
+      return "Plano Pro";
+    case "prolite":
+      return "Plano Pro Lite";
+    case "team":
+      return "Plano Team";
+    case "business":
+      return "Plano Business";
+    case "edu":
+      return "Plano Education";
+    case "enterprise":
+      return "Plano Enterprise";
+    case "ent26":
+      return "Plano Enterprise";
+    case "enterprise_cbp_usage_based":
+      return "Plano Enterprise com uso baseado em créditos";
+    case "self_serve_business_prolite":
+      return "Plano Business Pro Lite";
+    case "self_serve_business_usage_based":
+      return "Plano Business com uso baseado em créditos";
+    case null:
+      return "Plano ChatGPT";
+  }
+}
+
 function ProfileSettings(props: { readonly controller: AppController }) {
   const account = () => props.controller.account()?.account;
   return (
@@ -816,8 +961,16 @@ function DiagnosticsSettings(props: { readonly controller: AppController }) {
     <div class="settings-page diagnostics-page">
       <SettingsHeading
         title="Diagnósticos"
-        description="Somente eventos operacionalmente úteis desta sessão."
+        description="Falhas operacionais ficam visíveis nesta sessão e persistidas em disco."
       />
+      <Show when={props.controller.engine()?.diagnosticLogPath}>
+        {(path) => (
+          <section class="diagnostics-log-location">
+            <strong>Arquivo de log</strong>
+            <code>{path()}</code>
+          </section>
+        )}
+      </Show>
       <Show
         when={props.controller.diagnostics().length > 0}
         fallback={<p class="diagnostics-empty">Nenhum diagnóstico registrado.</p>}
@@ -839,51 +992,84 @@ function DiagnosticsSettings(props: { readonly controller: AppController }) {
 }
 
 function ArchivedChatsSettings(props: { readonly controller: AppController }) {
+  onMount(() => {
+    if (!props.controller.archivedThreadsLoaded()) {
+      void props.controller.loadMoreArchivedThreads();
+    }
+  });
+
   return (
     <div class="settings-page">
       <SettingsHeading
         title="Chats arquivados"
         description="Conversas arquivadas da barra lateral. Restaure para voltar à lista ou exclua permanentemente."
       />
-      <SettingsSection title="Arquivadas">
+      <SettingsSection busy={props.controller.archivedThreadsLoading()} title="Arquivadas">
         <Show
-          when={props.controller.archivedThreads().length > 0}
-          fallback={<p class="archived-chats-empty">Nenhum chat arquivado.</p>}
+          when={props.controller.archivedThreadsLoaded()}
+          fallback={
+            <div class="archived-chats-status">
+              <p class="archived-chats-empty">
+                {props.controller.archivedThreadsLoading()
+                  ? "Carregando chats arquivados..."
+                  : "Não foi possível carregar os chats arquivados."}
+              </p>
+              <Show when={!props.controller.archivedThreadsLoading()}>
+                <button
+                  class="load-more-button"
+                  onClick={() => void props.controller.loadMoreArchivedThreads()}
+                  type="button"
+                >
+                  Tentar novamente
+                </button>
+              </Show>
+            </div>
+          }
         >
-          <For each={props.controller.archivedThreads()}>
-            {(thread) => (
-              <div class="settings-row archived-chat-row">
-                <span>
-                  <strong>{threadTitle(thread)}</strong>
-                  <small>{thread.projectPath ?? "Sem projeto"}</small>
-                </span>
-                <div class="archived-chat-actions">
-                  <button
-                    aria-label={`Restaurar ${threadTitle(thread)}`}
-                    onClick={() => void props.controller.unarchiveThread(thread.id)}
-                    title="Restaurar para a barra lateral"
-                    type="button"
-                  >
-                    <Icon name="reset" size={14} /> Restaurar
-                  </button>
-                  <button
-                    aria-label={`Excluir ${threadTitle(thread)}`}
-                    class="archived-chat-delete"
-                    onClick={() => void props.controller.deleteThread(thread.id)}
-                    title="Excluir permanentemente"
-                    type="button"
-                  >
-                    <Icon name="close" size={14} /> Excluir
-                  </button>
+          <Show
+            when={props.controller.archivedThreads().length > 0}
+            fallback={<p class="archived-chats-empty">Nenhum chat arquivado.</p>}
+          >
+            <For each={props.controller.archivedThreads()}>
+              {(thread) => (
+                <div class="settings-row archived-chat-row">
+                  <span>
+                    <strong>{threadTitle(thread)}</strong>
+                    <small>{thread.projectPath ?? "Sem projeto"}</small>
+                  </span>
+                  <div class="archived-chat-actions">
+                    <button
+                      aria-label={`Restaurar ${threadTitle(thread)}`}
+                      onClick={() => void props.controller.unarchiveThread(thread.id)}
+                      title="Restaurar para a barra lateral"
+                      type="button"
+                    >
+                      <Icon name="reset" size={14} /> Restaurar
+                    </button>
+                    <button
+                      aria-label={`Excluir ${threadTitle(thread)}`}
+                      class="archived-chat-delete"
+                      onClick={() => void props.controller.deleteThread(thread.id)}
+                      title="Excluir permanentemente"
+                      type="button"
+                    >
+                      <Icon name="close" size={14} /> Excluir
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )}
-          </For>
+              )}
+            </For>
+          </Show>
         </Show>
-        <Show when={props.controller.archivedThreadsNextCursor() !== null}>
+        <Show
+          when={
+            props.controller.archivedThreadsLoaded() &&
+            props.controller.archivedThreadsNextCursor() !== null
+          }
+        >
           <button
             class="load-more-button"
-            disabled={props.controller.pendingOperations() > 0}
+            disabled={props.controller.archivedThreadsLoading()}
             onClick={() => void props.controller.loadMoreArchivedThreads()}
             type="button"
           >
@@ -1058,26 +1244,6 @@ function SettingsRow(props: {
   );
 }
 
-function parseReasoningEffort(
-  value: string,
-  supported: readonly ReasoningEffort[],
-): ReasoningEffort | null | undefined {
-  if (value === "") return null;
-  return supported.find((effort) => effort === value);
-}
-
-function saveModelDefaults(
-  controller: AppController,
-  model: CodexModel,
-  reasoningEffort: ReasoningEffort | null,
-  serviceTier: string | null,
-): void {
-  void controller.updateSetting({
-    type: "modelDefaults",
-    value: { model: model.id, reasoningEffort, serviceTier },
-  });
-}
-
 function parseWebSearch(value: string): WebSearchMode | undefined {
   return value === "disabled" || value === "live" ? value : undefined;
 }
@@ -1115,26 +1281,5 @@ function permissionDescription(profile: PermissionProfile): string {
       return "Edita o projeto e pede aprovação para comandos.";
     case "danger-full-access":
       return "Executa comandos sem aprovação. Use conscientemente.";
-  }
-}
-
-function effortLabel(effort: ReasoningEffort): string {
-  switch (effort) {
-    case "none":
-      return "Sem raciocínio";
-    case "minimal":
-      return "Mínimo";
-    case "low":
-      return "Baixo";
-    case "medium":
-      return "Médio";
-    case "high":
-      return "Alto";
-    case "xhigh":
-      return "Extra alto";
-    case "max":
-      return "Máximo";
-    case "ultra":
-      return "Ultra";
   }
 }

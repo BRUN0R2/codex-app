@@ -8,6 +8,16 @@ export interface MeasurementChange {
   readonly index: number;
 }
 
+export interface VirtualMeasurement {
+  readonly key: string;
+  readonly size: number;
+}
+
+export interface MeasurementBatch {
+  readonly anchorDelta: number;
+  readonly changed: boolean;
+}
+
 export class VariableSizeVirtualizer {
   readonly #estimate: number;
   #keys: readonly string[] = [];
@@ -56,9 +66,9 @@ export class VariableSizeVirtualizer {
     if (index === undefined || !Number.isFinite(size) || size <= 0) {
       return null;
     }
-    const normalized = Math.max(1, size);
+    const normalized = Math.max(1, Math.round(size));
     const previous = this.#sizes[index];
-    if (previous === undefined || Math.abs(previous - normalized) < 0.5) {
+    if (previous === undefined || previous === normalized) {
       return null;
     }
     const delta = normalized - previous;
@@ -66,6 +76,39 @@ export class VariableSizeVirtualizer {
     this.#measuredByKey.set(key, normalized);
     this.#add(index, delta);
     return { delta, index };
+  }
+
+  measureBatch(
+    measurements: readonly VirtualMeasurement[],
+    anchorOffset: number,
+  ): MeasurementBatch {
+    const ordered = measurements
+      .map((measurement) => ({
+        ...measurement,
+        index: this.#indexByKey.get(measurement.key),
+      }))
+      .filter(
+        (measurement): measurement is VirtualMeasurement & { readonly index: number } =>
+          measurement.index !== undefined,
+      )
+      .sort((left, right) => left.index - right.index);
+    const safeAnchorOffset = Number.isFinite(anchorOffset) ? Math.max(0, anchorOffset) : 0;
+    let anchorDelta = 0;
+    let changed = false;
+
+    for (const measurement of ordered) {
+      const change = this.measure(measurement.key, measurement.size);
+      if (change === null) {
+        continue;
+      }
+      changed = true;
+      const previousBottom = this.offsetOf(change.index + 1) - change.delta;
+      if (previousBottom <= safeAnchorOffset + anchorDelta) {
+        anchorDelta += change.delta;
+      }
+    }
+
+    return { anchorDelta, changed };
   }
 
   offsetOf(index: number): number {

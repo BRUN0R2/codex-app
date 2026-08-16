@@ -95,19 +95,32 @@ export function fileChangeActivityTitle(
   }
 }
 
-export function commandOutputText(output: string | null): string | null {
-  if (output === null || output.length === 0) {
+export function commandOutputText(output: string | null | undefined): string | null {
+  if (typeof output !== "string" || output.length === 0) {
     return null;
   }
-  const structured =
-    /^exit_code:\s*-?\d+\r?\nstdout:\r?\n([\s\S]*?)\r?\nstderr:\r?\n([\s\S]*)$/u.exec(output);
-  if (structured === null) {
+  const header = /^exit_code:\s*-?\d+\r?\nstdout:\r?\n/u.exec(output);
+  if (header === null) {
     return output;
   }
-  const stdout = structured[1]?.trimEnd() ?? "";
-  const stderr = structured[2]?.trimEnd() ?? "";
+  const body = output.slice(header[0].length);
+  const stderrMarker = /\r?\nstderr:\r?\n/gu;
+  let marker: RegExpExecArray | null = null;
+  for (let match = stderrMarker.exec(body); match !== null; match = stderrMarker.exec(body)) {
+    marker = match;
+  }
+  if (marker === null) {
+    const partial = body.trimEnd();
+    return partial.length > 0 ? partial : null;
+  }
+  const stdout = body.slice(0, marker.index).trimEnd();
+  const stderr = body.slice(marker.index + marker[0].length).trimEnd();
   const visible = [stdout, stderr].filter(Boolean).join("\n");
   return visible.length > 0 ? visible : null;
+}
+
+export function toolOutputText(output: string | null | undefined): string | null {
+  return typeof output === "string" && output.length > 0 ? output : null;
 }
 
 export function userMessageMarkerWidth(index: number, interactionIndex: number | null): number {

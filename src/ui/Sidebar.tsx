@@ -11,7 +11,7 @@ import {
 import { Portal } from "solid-js/web";
 
 import type { ProjectRecord, ThreadSummary } from "../contracts/types";
-import type { AppController } from "../state/createAppController";
+import type { AppController } from "../state/appController";
 import { pathsEqual } from "../state/projects";
 import { threadsWithoutConfiguredProject } from "../state/sidebarThreads";
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
@@ -29,15 +29,8 @@ export interface SidebarProps {
 export function Sidebar(props: SidebarProps) {
   const [renamingId, setRenamingId] = createSignal<string | null>(null);
   const [renameValue, setRenameValue] = createSignal("");
-  const [projectsExpanded, setProjectsExpanded] = createSignal(true);
   const [pinnedExpanded, setPinnedExpanded] = createSignal(true);
   const [showAllProjects, setShowAllProjects] = createSignal(false);
-  const [projectExpansionOverrides, setProjectExpansionOverrides] = createSignal<
-    Readonly<Record<string, boolean>>
-  >({});
-  const [expandedProjectThreadLists, setExpandedProjectThreadLists] = createSignal<
-    ReadonlySet<string>
-  >(new Set());
   const [recentsExpanded, setRecentsExpanded] = createSignal(true);
   const [accountMenuOpen, setAccountMenuOpen] = createSignal(false);
   const [brandMenuOpen, setBrandMenuOpen] = createSignal(false);
@@ -173,37 +166,7 @@ export function Sidebar(props: SidebarProps) {
   }
 
   function isProjectExpanded(project: ProjectRecord): boolean {
-    if (normalizedSearchQuery().length > 0) {
-      return true;
-    }
-    const override = projectExpansionOverrides()[project.path];
-    if (override !== undefined) {
-      return override;
-    }
-    return (
-      pathsEqual(props.controller.workspace(), project.path) ||
-      pathsEqual(props.controller.currentThread()?.projectPath ?? null, project.path)
-    );
-  }
-
-  function toggleProject(project: ProjectRecord): void {
-    const nextExpanded = !isProjectExpanded(project);
-    setProjectExpansionOverrides((current) => ({
-      ...current,
-      [project.path]: nextExpanded,
-    }));
-  }
-
-  function toggleProjectThreadList(project: ProjectRecord): void {
-    setExpandedProjectThreadLists((current) => {
-      const next = new Set(current);
-      if (next.has(project.path)) {
-        next.delete(project.path);
-      } else {
-        next.add(project.path);
-      }
-      return next;
-    });
+    return normalizedSearchQuery().length > 0 || props.controller.projectExpanded(project.path);
   }
 
   return (
@@ -295,18 +258,6 @@ export function Sidebar(props: SidebarProps) {
             <span class="sidebar-row-label">Novo chat</span>
           </Show>
         </button>
-        <For each={props.controller.product() === "chatgpt" ? CHATGPT_NAV_ITEMS : CODEX_NAV_ITEMS}>
-          {(mode) => (
-            <button class="new-chat-mode-row" disabled title={mode.label} type="button">
-              <span class="sidebar-item-icon">
-                <Icon name={mode.icon} size={16} />
-              </span>
-              <Show when={!props.collapsed}>
-                <span class="sidebar-row-label">{mode.label}</span>
-              </Show>
-            </button>
-          )}
-        </For>
       </nav>
 
       <Show when={!props.collapsed && searchOpen()}>
@@ -357,13 +308,15 @@ export function Sidebar(props: SidebarProps) {
                       expanded={isProjectExpanded(project)}
                       onBeginRename={beginRename}
                       onSubmitRename={submitRename}
-                      onToggleExpanded={() => toggleProject(project)}
-                      onToggleThreadList={() => toggleProjectThreadList(project)}
+                      onToggleExpanded={() => props.controller.toggleProjectExpanded(project.path)}
+                      onToggleThreadList={() =>
+                        props.controller.toggleProjectThreadListExpanded(project.path)
+                      }
                       project={project}
                       renameValue={renameValue()}
                       renamingId={renamingId()}
                       setRenameValue={setRenameValue}
-                      threadListExpanded={expandedProjectThreadLists().has(project.path)}
+                      threadListExpanded={props.controller.projectThreadListExpanded(project.path)}
                       threads={threads()}
                     />
                   );
@@ -389,9 +342,11 @@ export function Sidebar(props: SidebarProps) {
         </Show>
         <Show when={!props.collapsed}>
           <SidebarSectionHeading
-            expanded={projectsExpanded() || normalizedSearchQuery().length > 0}
+            expanded={
+              props.controller.projectSectionExpanded() || normalizedSearchQuery().length > 0
+            }
             label="Projetos"
-            onToggle={() => setProjectsExpanded((value) => !value)}
+            onToggle={props.controller.toggleProjectSection}
           >
             <button
               aria-label="Adicionar projeto"
@@ -404,7 +359,13 @@ export function Sidebar(props: SidebarProps) {
           </SidebarSectionHeading>
         </Show>
 
-        <Show when={props.collapsed || projectsExpanded() || normalizedSearchQuery().length > 0}>
+        <Show
+          when={
+            props.collapsed ||
+            props.controller.projectSectionExpanded() ||
+            normalizedSearchQuery().length > 0
+          }
+        >
           <Show
             when={grouped().length > 0}
             fallback={
@@ -421,13 +382,19 @@ export function Sidebar(props: SidebarProps) {
                   expanded={isProjectExpanded(group.project)}
                   onBeginRename={beginRename}
                   onSubmitRename={submitRename}
-                  onToggleExpanded={() => toggleProject(group.project)}
-                  onToggleThreadList={() => toggleProjectThreadList(group.project)}
+                  onToggleExpanded={() =>
+                    props.controller.toggleProjectExpanded(group.project.path)
+                  }
+                  onToggleThreadList={() =>
+                    props.controller.toggleProjectThreadListExpanded(group.project.path)
+                  }
                   project={group.project}
                   renameValue={renameValue()}
                   renamingId={renamingId()}
                   setRenameValue={setRenameValue}
-                  threadListExpanded={expandedProjectThreadLists().has(group.project.path)}
+                  threadListExpanded={props.controller.projectThreadListExpanded(
+                    group.project.path,
+                  )}
                   threads={group.threads}
                 />
               )}
@@ -536,24 +503,13 @@ export function Sidebar(props: SidebarProps) {
             <button
               onClick={() => {
                 setAccountMenuOpen(false);
-                props.onOpenSettings("pets");
+                props.onOpenSettings("profile");
               }}
               role="menuitem"
               type="button"
             >
-              <Icon name="egg" size={15} />
-              <span>Mostrar mascote</span>
-            </button>
-            <button
-              onClick={() => {
-                setAccountMenuOpen(false);
-                props.onOpenSettings("general");
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <Icon name="send" size={15} />
-              <span>Convide um amigo</span>
+              <Icon name="user" size={15} />
+              <span>Perfil</span>
             </button>
             <button
               onClick={() => {
@@ -596,7 +552,7 @@ export function Sidebar(props: SidebarProps) {
               setAccountMenuOpen(opening);
               if (opening) {
                 void props.controller.refreshAccountProfile();
-                void props.controller.refreshRateLimits();
+                void props.controller.refreshRateLimitsIfStale();
               }
             }}
             title="Conta"
@@ -609,38 +565,11 @@ export function Sidebar(props: SidebarProps) {
               </span>
             </Show>
           </button>
-          <Show when={!props.collapsed}>
-            <div class="sidebar-footer-extras">
-              <button
-                aria-label="Ajuda"
-                class="sidebar-help-button"
-                onClick={() => props.onOpenSettings("general")}
-                title="Ajuda"
-                type="button"
-              >
-                <Icon name="helpCircle" size={16} />
-              </button>
-            </div>
-          </Show>
         </div>
       </footer>
     </aside>
   );
 }
-
-const CODEX_NAV_ITEMS: readonly { readonly icon: IconName; readonly label: string }[] = [
-  { icon: "gitPullRequest", label: "Pull requests" },
-  { icon: "monitor", label: "Sites" },
-  { icon: "calendar", label: "Agendado" },
-  { icon: "puzzle", label: "Plugins" },
-];
-
-const CHATGPT_NAV_ITEMS: readonly { readonly icon: IconName; readonly label: string }[] = [
-  { icon: "folder", label: "Projetos" },
-  { icon: "monitor", label: "Sites" },
-  { icon: "calendar", label: "Agendado" },
-  { icon: "puzzle", label: "Plugins" },
-];
 
 function SidebarSectionHeading(props: {
   readonly children?: JSX.Element;
@@ -911,7 +840,6 @@ function ThreadButton(props: ThreadButtonProps) {
             props.controller.currentThread()?.id === props.thread.id ? "page" : undefined
           }
           class="thread-main"
-          disabled={props.controller.openingThreadId() === props.thread.id}
           onClick={() => void props.controller.openThread(props.thread.id)}
           onContextMenu={(event) => {
             event.preventDefault();

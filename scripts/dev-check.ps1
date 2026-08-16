@@ -12,6 +12,8 @@ $requestedPort = $defaultPort
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot ".." )).Path
 $debugExecutablePath = Join-Path $projectRoot "src-tauri\target\debug\codex-desktop-next.exe"
 . (Join-Path $PSScriptRoot "runtime-profile.ps1")
+. (Join-Path $PSScriptRoot "project-tools.ps1")
+Enable-ProjectTools -ProjectRoot $projectRoot | Out-Null
 
 if ($env:CODEX_DESKTOP_DEV_PORT) {
   $portFromEnv = 0

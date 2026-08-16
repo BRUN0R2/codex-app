@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use futures_util::future::join_all;
@@ -12,13 +13,16 @@ use super::NativeEngineInner;
 use super::compaction::compact_context;
 use super::content_references::strip_content_reference_markers;
 use super::context_window::{ContextUsageSnapshot, evaluate_context_window, full_context_usage};
+use super::output::OutputSource;
 use super::provider::{
     ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseRequest,
     ResponseRequestSettings, SelectedModel, WebSearchAction, normalize_provider_history,
 };
 use super::storage::ProviderHistorySnapshot;
 use super::stream_notifications::StreamNotificationBatcher;
-use super::tools::{MAX_PROVIDER_ITEM_BYTES, PreparedTool, ToolExecutionContext};
+use super::tools::{
+    MAX_PROVIDER_ITEM_BYTES, PreparedTool, ToolExecutionContext, ToolExecutionResult, ToolRegistry,
+};
 use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
 use crate::engine::{
     ActivityStatus, AppConfig, ConversationMode, DiagnosticStream, ImageDetail, ItemNotification,
@@ -34,7 +38,11 @@ const MAX_IMAGE_BYTES: usize = 10 * 1_048_576;
 const MAX_RAW_INPUT_BYTES: usize = 16 * 1_048_576;
 const MAX_INSTRUCTIONS_BYTES: usize = 524_288;
 const MAX_PROVIDER_ITEM_ID_BYTES: usize = 256;
+const MAX_REJECTED_TOOL_NAME_BYTES: usize = 128;
+const MAX_REJECTED_TOOL_ERROR_BYTES: usize = 4_096;
 const MAX_PARALLEL_READ_TOOLS: usize = 8;
+const MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS: u64 = 7 * 24 * 60 * 60;
+const MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS: u64 = 60;
 
 pub(super) struct PreparedTurn {
     pub user_item: ThreadItem,
@@ -192,6 +200,7 @@ pub(super) async fn run_turn(
         .latest_context_usage(run.thread_id.clone())
         .await?;
     let mut history_requires_refresh = false;
+    let mut transient_failure_count = 0u32;
     let stream_deltas = StreamNotificationBatcher::new(
         Arc::clone(&inner),
         app.clone(),
@@ -200,7 +209,7 @@ pub(super) async fn run_turn(
     );
 
     let result = async {
-        loop {
+        'sampling: loop {
             if *run.cancellation.borrow() {
                 stream_deltas.flush().await?;
                 return Ok(RunCompletion::Interrupted);
@@ -256,6 +265,40 @@ pub(super) async fn run_turn(
                 Ok(stream) => stream,
                 Err(AppError::Cancelled(_)) => return Ok(RunCompletion::Interrupted),
                 Err(error) => {
+                    if let AppError::RateLimited {
+                        retry_after_seconds,
+                        ..
+                    } = &error
+                    {
+                        history_requires_refresh = false;
+                        if wait_for_rate_limit_reset(
+                            &inner,
+                            &app,
+                            &mut run,
+                            retry_after_seconds.unwrap_or(60),
+                        )
+                        .await
+                        {
+                            continue 'sampling;
+                        }
+                        return Ok(RunCompletion::Interrupted);
+                    }
+                    if error.is_transient() {
+                        transient_failure_count = transient_failure_count.saturating_add(1);
+                        history_requires_refresh = false;
+                        if wait_for_transient_provider_retry(
+                            &inner,
+                            &app,
+                            &mut run,
+                            &error,
+                            transient_failure_count,
+                        )
+                        .await
+                        {
+                            continue 'sampling;
+                        }
+                        return Ok(RunCompletion::Interrupted);
+                    }
                     if matches!(&error, AppError::ContextWindowExceeded(_)) {
                         persist_full_context_usage(&inner, &app, &run).await?;
                     }
@@ -270,12 +313,47 @@ pub(super) async fn run_turn(
                     Ok(Some(event)) => event,
                     Ok(None) => break,
                     Err(error) => {
+                        if let AppError::RateLimited {
+                            retry_after_seconds,
+                            ..
+                        } = &error
+                        {
+                            stream_deltas.flush().await?;
+                            if wait_for_rate_limit_reset(
+                                &inner,
+                                &app,
+                                &mut run,
+                                retry_after_seconds.unwrap_or(60),
+                            )
+                            .await
+                            {
+                                continue 'sampling;
+                            }
+                            return Ok(RunCompletion::Interrupted);
+                        }
+                        if error.is_transient() {
+                            transient_failure_count = transient_failure_count.saturating_add(1);
+                            stream_deltas.flush().await?;
+                            if wait_for_transient_provider_retry(
+                                &inner,
+                                &app,
+                                &mut run,
+                                &error,
+                                transient_failure_count,
+                            )
+                            .await
+                            {
+                                continue 'sampling;
+                            }
+                            return Ok(RunCompletion::Interrupted);
+                        }
                         if matches!(&error, AppError::ContextWindowExceeded(_)) {
                             persist_full_context_usage(&inner, &app, &run).await?;
                         }
                         return Err(error);
                     }
                 };
+                transient_failure_count = 0;
                 if !matches!(
                     &event,
                     ResponseEvent::OutputTextDelta { .. }
@@ -344,13 +422,14 @@ pub(super) async fn run_turn(
                     ResponseEvent::OutputItemDone(item) => {
                         validate_response_item(&item)?;
                         if let Some(thread_item) = visible_item(&item)? {
-                            inner
+                            let thread_item = inner
                                 .storage
                                 .append_provider_and_thread_item(
                                     run.thread_id.clone(),
                                     run.turn_id.clone(),
                                     &item,
-                                    thread_item.clone(),
+                                    thread_item,
+                                    None,
                                 )
                                 .await?;
                             emit_item_notification(
@@ -375,12 +454,13 @@ pub(super) async fn run_turn(
                                 call_id,
                             } => {
                                 let item_id = id.unwrap_or_else(|| call_id.clone());
-                                let prepared = inner.tools.prepare(item_id, &name, &arguments)?;
-                                pending_tools.push(PendingTool {
+                                pending_tools.push(PendingTool::function(
+                                    &inner.tools,
+                                    item_id,
+                                    &name,
+                                    &arguments,
                                     call_id,
-                                    output_kind: ToolOutputKind::Function,
-                                    prepared,
-                                });
+                                ));
                             }
                             ResponseItem::CustomToolCall {
                                 id,
@@ -389,13 +469,13 @@ pub(super) async fn run_turn(
                                 input,
                             } => {
                                 let item_id = id.unwrap_or_else(|| call_id.clone());
-                                let prepared =
-                                    inner.tools.prepare_custom(item_id, &name, &input)?;
-                                pending_tools.push(PendingTool {
+                                pending_tools.push(PendingTool::custom(
+                                    &inner.tools,
+                                    item_id,
+                                    &name,
+                                    &input,
                                     call_id,
-                                    output_kind: ToolOutputKind::Custom,
-                                    prepared,
-                                });
+                                ));
                             }
                             _ => {}
                         }
@@ -417,6 +497,7 @@ pub(super) async fn run_turn(
                                     usage,
                                     context_window: run.model.context_window(),
                                 },
+                                None,
                                 false,
                             )
                             .await?;
@@ -452,13 +533,13 @@ pub(super) async fn run_turn(
             let allow_parallel_reads = run.model.supports_parallel_tool_calls();
             let mut pending_tools = pending_tools.into_iter().peekable();
             while let Some(first) = pending_tools.next() {
-                let parallel_batch = allow_parallel_reads && first.prepared.is_parallel_safe();
+                let parallel_batch = allow_parallel_reads && first.is_parallel_safe();
                 let mut batch = vec![first];
                 while parallel_batch
                     && batch.len() < MAX_PARALLEL_READ_TOOLS
                     && pending_tools
                         .peek()
-                        .is_some_and(|pending| pending.prepared.is_parallel_safe())
+                        .is_some_and(PendingTool::is_parallel_safe)
                 {
                     if let Some(pending) = pending_tools.next() {
                         batch.push(pending);
@@ -469,14 +550,16 @@ pub(super) async fn run_turn(
                     if *run.cancellation.borrow() {
                         return Ok(RunCompletion::Interrupted);
                     }
-                    inner.emit_notification(
-                        &app,
-                        crate::engine::EngineNotification::ItemStarted(ItemNotification {
-                            thread_id: run.thread_id.clone(),
-                            turn_id: run.turn_id.clone(),
-                            item: pending.prepared.started_item(&run.workspace),
-                        }),
-                    )?;
+                    if let Some(item) = pending.started_item(&run.workspace) {
+                        inner.emit_notification(
+                            &app,
+                            crate::engine::EngineNotification::ItemStarted(ItemNotification {
+                                thread_id: run.thread_id.clone(),
+                                turn_id: run.turn_id.clone(),
+                                item,
+                            }),
+                        )?;
+                    }
                 }
 
                 let executions = batch.iter().map(|pending| {
@@ -488,51 +571,55 @@ pub(super) async fn run_turn(
                         thread_id: &run.thread_id,
                         turn_id: &run.turn_id,
                         approvals: &inner.approvals,
+                        storage: &inner.storage,
                     };
-                    async move { pending.prepared.execute(context, &mut cancellation).await }
+                    async move { pending.execute(context, &mut cancellation).await }
                 });
                 let results = join_all(executions).await;
+                let mut interrupted = false;
 
                 // Provider outputs remain in call order even when read-only execution overlaps.
                 for (pending, result) in batch.into_iter().zip(results) {
-                    let (provider_output, completed_item) = match result {
-                        Ok(result) => (result.provider_output, result.completed_item),
+                    let pending_name = pending.name().to_string();
+                    let result = match result {
+                        Ok(result) => result,
                         Err(AppError::Cancelled(message)) => {
                             let error = AppError::Cancelled(message);
-                            let item = pending.prepared.failed_item(&run.workspace, &error);
-                            persist_and_emit_item(
-                                &inner,
-                                &app,
-                                &run.thread_id,
-                                &run.turn_id,
-                                item,
-                                false,
-                            )
-                            .await?;
-                            return Ok(RunCompletion::Interrupted);
+                            interrupted = true;
+                            pending.failed_result(&run.workspace, &error)
                         }
                         Err(error) => {
-                            let item = pending.prepared.failed_item(&run.workspace, &error);
-                            (format!("Tool failed: {error}"), item)
+                            inner.emit_diagnostic(
+                                &app,
+                                DiagnosticStream::Runtime,
+                                format!("tool `{pending_name}` failed: {error}"),
+                            );
+                            let mut failure = pending.failed_result(&run.workspace, &error);
+                            failure.provider_output = format!("Tool failed: {error}");
+                            failure
                         }
                     };
                     let output = match pending.output_kind {
                         ToolOutputKind::Function => {
-                            ResponseItem::function_output(pending.call_id, provider_output)
+                            ResponseItem::function_output(pending.call_id, result.provider_output)
                         }
                         ToolOutputKind::Custom => {
-                            ResponseItem::custom_output(pending.call_id, provider_output)
+                            ResponseItem::custom_output(pending.call_id, result.provider_output)
                         }
                     };
-                    inner
+                    let completed_item = inner
                         .storage
                         .append_provider_and_thread_item(
                             run.thread_id.clone(),
                             run.turn_id.clone(),
                             &output,
-                            completed_item.clone(),
+                            result.completed_item,
+                            result.display_output,
                         )
                         .await?;
+                    if let Some(message) = tool_failure_diagnostic(&pending_name, &completed_item) {
+                        inner.emit_diagnostic(&app, DiagnosticStream::Runtime, message);
+                    }
                     emit_item_notification(
                         &inner,
                         &app,
@@ -542,12 +629,117 @@ pub(super) async fn run_turn(
                         false,
                     )?;
                 }
+                if interrupted {
+                    return Ok(RunCompletion::Interrupted);
+                }
             }
         }
     }
     .await;
     stream_deltas.flush().await?;
     result
+}
+
+async fn wait_for_rate_limit_reset(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    run: &mut TurnRun,
+    retry_after_seconds: u64,
+) -> bool {
+    let wait = automatic_rate_limit_wait(retry_after_seconds);
+    inner.emit_diagnostic(
+        app,
+        DiagnosticStream::Runtime,
+        format!(
+            "Provider usage limit reached; keeping the turn active and retrying in {}.",
+            describe_duration(wait.as_secs())
+        ),
+    );
+    if *run.cancellation.borrow() {
+        return false;
+    }
+
+    let sleep = tokio::time::sleep(wait);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            _ = &mut sleep => {
+                inner.emit_diagnostic(
+                    app,
+                    DiagnosticStream::Runtime,
+                    "Provider usage limit wait finished; retrying the active turn.".into(),
+                );
+                return true;
+            }
+            changed = run.cancellation.changed() => {
+                if changed.is_err() || *run.cancellation.borrow() {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+pub(super) fn automatic_rate_limit_wait(retry_after_seconds: u64) -> Duration {
+    Duration::from_secs(retry_after_seconds.clamp(1, MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS))
+}
+
+async fn wait_for_transient_provider_retry(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    run: &mut TurnRun,
+    error: &AppError,
+    failure_count: u32,
+) -> bool {
+    let wait = automatic_provider_retry_wait(failure_count);
+    inner.emit_diagnostic(
+        app,
+        DiagnosticStream::Runtime,
+        format!(
+            "Transient provider failure; keeping the turn active and retrying in {}: {error}",
+            describe_duration(wait.as_secs())
+        ),
+    );
+    if *run.cancellation.borrow() {
+        return false;
+    }
+
+    let sleep = tokio::time::sleep(wait);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            _ = &mut sleep => return true,
+            changed = run.cancellation.changed() => {
+                if changed.is_err() || *run.cancellation.borrow() {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+pub(super) fn automatic_provider_retry_wait(failure_count: u32) -> Duration {
+    let exponent = failure_count.saturating_sub(1).min(6);
+    Duration::from_secs(
+        1u64.checked_shl(exponent)
+            .unwrap_or(u64::MAX)
+            .min(MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS),
+    )
+}
+
+pub(super) fn describe_duration(seconds: u64) -> String {
+    let days = seconds / (24 * 60 * 60);
+    let hours = (seconds % (24 * 60 * 60)) / (60 * 60);
+    let minutes = (seconds % (60 * 60)) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 pub(super) async fn run_compaction(
@@ -700,6 +892,7 @@ async fn persist_full_context_usage(
             usage: full_context_usage(&context_window),
             context_window: Some(context_window),
         },
+        None,
         false,
     )
     .await
@@ -811,7 +1004,18 @@ fn record_turn_state(current: &mut Option<String>, incoming: String) -> Result<(
 struct PendingTool {
     call_id: String,
     output_kind: ToolOutputKind,
-    prepared: PreparedTool,
+    operation: PendingToolOperation,
+}
+
+enum PendingToolOperation {
+    Prepared(PreparedTool),
+    Rejected(RejectedToolCall),
+}
+
+struct RejectedToolCall {
+    item_id: String,
+    name: String,
+    error: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -820,20 +1024,162 @@ enum ToolOutputKind {
     Custom,
 }
 
+impl PendingTool {
+    fn function(
+        registry: &ToolRegistry,
+        item_id: String,
+        name: &str,
+        arguments: &str,
+        call_id: String,
+    ) -> Self {
+        Self::from_preparation(
+            item_id.clone(),
+            name,
+            call_id,
+            ToolOutputKind::Function,
+            registry.prepare(item_id, name, arguments),
+        )
+    }
+
+    fn custom(
+        registry: &ToolRegistry,
+        item_id: String,
+        name: &str,
+        input: &str,
+        call_id: String,
+    ) -> Self {
+        Self::from_preparation(
+            item_id.clone(),
+            name,
+            call_id,
+            ToolOutputKind::Custom,
+            registry.prepare_custom(item_id, name, input),
+        )
+    }
+
+    fn from_preparation(
+        item_id: String,
+        name: &str,
+        call_id: String,
+        output_kind: ToolOutputKind,
+        preparation: Result<PreparedTool, AppError>,
+    ) -> Self {
+        let operation = match preparation {
+            Ok(prepared) => PendingToolOperation::Prepared(prepared),
+            Err(error) => {
+                PendingToolOperation::Rejected(RejectedToolCall::new(item_id, name, error))
+            }
+        };
+        Self {
+            call_id,
+            output_kind,
+            operation,
+        }
+    }
+
+    fn is_parallel_safe(&self) -> bool {
+        match &self.operation {
+            PendingToolOperation::Prepared(prepared) => prepared.is_parallel_safe(),
+            PendingToolOperation::Rejected(_) => true,
+        }
+    }
+
+    fn name(&self) -> &str {
+        match &self.operation {
+            PendingToolOperation::Prepared(prepared) => prepared.name(),
+            PendingToolOperation::Rejected(rejected) => &rejected.name,
+        }
+    }
+
+    fn started_item(&self, workspace: &Path) -> Option<ThreadItem> {
+        match &self.operation {
+            PendingToolOperation::Prepared(prepared) => Some(prepared.started_item(workspace)),
+            PendingToolOperation::Rejected(_) => None,
+        }
+    }
+
+    fn failed_result(&self, workspace: &Path, error: &AppError) -> ToolExecutionResult {
+        match &self.operation {
+            PendingToolOperation::Prepared(prepared) => prepared.failed_result(workspace, error),
+            PendingToolOperation::Rejected(rejected) => rejected.failed_result(truncate_utf8(
+                &error.to_string(),
+                MAX_REJECTED_TOOL_ERROR_BYTES,
+            )),
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: ToolExecutionContext<'_>,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<ToolExecutionResult, AppError> {
+        match &self.operation {
+            PendingToolOperation::Prepared(prepared) => {
+                prepared.execute(context, cancellation).await
+            }
+            PendingToolOperation::Rejected(rejected) => Ok(rejected.result()),
+        }
+    }
+
+    #[cfg(test)]
+    fn rejected_result(&self) -> Option<ToolExecutionResult> {
+        match &self.operation {
+            PendingToolOperation::Prepared(_) => None,
+            PendingToolOperation::Rejected(rejected) => Some(rejected.result()),
+        }
+    }
+}
+
+impl RejectedToolCall {
+    fn new(item_id: String, name: &str, error: AppError) -> Self {
+        Self {
+            item_id,
+            name: truncate_utf8(name, MAX_REJECTED_TOOL_NAME_BYTES),
+            error: truncate_utf8(&error.to_string(), MAX_REJECTED_TOOL_ERROR_BYTES),
+        }
+    }
+
+    fn result(&self) -> ToolExecutionResult {
+        self.failed_result(self.error.clone())
+    }
+
+    fn failed_result(&self, error: String) -> ToolExecutionResult {
+        let display_output = OutputSource::text(error.clone());
+        ToolExecutionResult {
+            provider_output: format!("Tool failed: {error}"),
+            completed_item: self.failed_item(),
+            display_output: Some(display_output),
+        }
+    }
+
+    fn failed_item(&self) -> ThreadItem {
+        ThreadItem::ToolExecution {
+            id: self.item_id.clone(),
+            name: self.name.clone(),
+            description: format!("Rejected {} call", self.name),
+            status: ActivityStatus::Failed,
+            output: None,
+        }
+    }
+}
+
 async fn persist_and_emit_item(
     inner: &NativeEngineInner,
     app: &AppHandle,
     thread_id: &str,
     turn_id: &str,
     item: ThreadItem,
+    output: Option<OutputSource>,
     started: bool,
 ) -> Result<(), AppError> {
-    if !started {
+    let item = if started {
+        item
+    } else {
         inner
             .storage
-            .append_thread_item(turn_id.into(), item.clone())
-            .await?;
-    }
+            .append_thread_item(turn_id.into(), item, output)
+            .await?
+    };
     emit_item_notification(inner, app, thread_id, turn_id, item, started)
 }
 
@@ -1015,13 +1361,13 @@ pub(super) fn validate_response_item(item: &ResponseItem) -> Result<(), AppError
     match item {
         ResponseItem::FunctionCall { name, call_id, .. } => {
             validate_provider_id(call_id)?;
-            if name.is_empty() || name.len() > 128 {
+            if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
                 return Err(AppError::Provider("tool name is invalid".into()));
             }
         }
         ResponseItem::CustomToolCall { name, call_id, .. } => {
             validate_provider_id(call_id)?;
-            if name.is_empty() || name.len() > 128 {
+            if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
                 return Err(AppError::Provider("custom tool name is invalid".into()));
             }
         }
@@ -1088,18 +1434,90 @@ fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
     value[..end].to_string()
 }
 
+fn tool_failure_diagnostic(tool_name: &str, item: &ThreadItem) -> Option<String> {
+    match item {
+        ThreadItem::CommandExecution {
+            status: ActivityStatus::Failed,
+            exit_code,
+            ..
+        } => Some(match exit_code {
+            Some(exit_code) => format!("tool `{tool_name}` exited with code {exit_code}"),
+            None => format!("tool `{tool_name}` failed without an exit code"),
+        }),
+        ThreadItem::FileChange {
+            status: ActivityStatus::Failed,
+            ..
+        } => Some(format!(
+            "tool `{tool_name}` could not apply its file changes"
+        )),
+        ThreadItem::ToolExecution {
+            status: ActivityStatus::Failed,
+            output,
+            ..
+        } => {
+            let detail = output
+                .as_ref()
+                .map(|output| output.preview.trim())
+                .filter(|message| !message.is_empty())
+                .map(|message| truncate_utf8(message, MAX_REJECTED_TOOL_ERROR_BYTES));
+            Some(match detail {
+                Some(detail) => format!("tool `{tool_name}` failed: {detail}"),
+                None => format!("tool `{tool_name}` failed"),
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        add_input_bytes, local_tools_enabled, record_turn_state, web_search_activity_detail,
+        MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS, MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS,
+        PendingTool, add_input_bytes, automatic_provider_retry_wait, automatic_rate_limit_wait,
+        local_tools_enabled, record_turn_state, tool_failure_diagnostic, validate_response_item,
+        web_search_activity_detail,
     };
-    use crate::engine::ConversationMode;
-    use crate::engine::native::provider::WebSearchAction;
+    use crate::engine::native::provider::{ResponseItem, WebSearchAction};
+    use crate::engine::native::tools::{ToolExecutionResult, ToolRegistry};
+    use crate::engine::{ActivityStatus, ConversationMode, ThreadItem};
+
+    fn stored_tool_item(result: &ToolExecutionResult) -> ThreadItem {
+        let mut item = result.completed_item.clone();
+        if let ThreadItem::ToolExecution { output, .. } = &mut item {
+            *output = result
+                .display_output
+                .as_ref()
+                .map(|source| source.reference());
+        }
+        item
+    }
 
     #[test]
     fn combined_input_is_bounded() {
         let mut total = super::MAX_RAW_INPUT_BYTES;
         assert!(add_input_bytes(&mut total, 1).is_err());
+    }
+
+    #[test]
+    fn automatic_rate_limit_wait_is_positive_and_bounded() {
+        assert_eq!(automatic_rate_limit_wait(0).as_secs(), 1);
+        assert_eq!(automatic_rate_limit_wait(3_600).as_secs(), 3_600);
+        assert_eq!(
+            automatic_rate_limit_wait(u64::MAX).as_secs(),
+            MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS
+        );
+    }
+
+    #[test]
+    fn transient_provider_retry_uses_unbounded_attempts_with_bounded_backoff() {
+        assert_eq!(automatic_provider_retry_wait(0).as_secs(), 1);
+        assert_eq!(automatic_provider_retry_wait(1).as_secs(), 1);
+        assert_eq!(automatic_provider_retry_wait(2).as_secs(), 2);
+        assert_eq!(automatic_provider_retry_wait(6).as_secs(), 32);
+        assert_eq!(
+            automatic_provider_retry_wait(u32::MAX).as_secs(),
+            MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS
+        );
     }
 
     #[test]
@@ -1138,5 +1556,118 @@ mod tests {
             "https://developers.openai.com/codex/app/"
         );
         assert_eq!(web_search_activity_detail(None), "Pesquisa na web");
+    }
+
+    #[test]
+    fn invalid_tool_arguments_become_a_recoverable_provider_result() {
+        let arguments = serde_json::json!({
+            "explanation": null,
+            "plan": [
+                { "step": "Primeira", "status": "in_progress" },
+                { "step": "Segunda", "status": "in_progress" }
+            ]
+        })
+        .to_string();
+        let pending = PendingTool::function(
+            &ToolRegistry,
+            "item-1".into(),
+            "update_plan",
+            &arguments,
+            "call-1".into(),
+        );
+        let result = pending
+            .rejected_result()
+            .expect("invalid arguments should remain inside the tool loop");
+
+        assert!(
+            result
+                .provider_output
+                .contains("plan must not contain more than one in-progress step")
+        );
+        assert!(
+            tool_failure_diagnostic("update_plan", &stored_tool_item(&result))
+                .is_some_and(|message| message.contains("more than one in-progress step"))
+        );
+        assert!(result.display_output.as_ref().is_some_and(|output| {
+            output
+                .reference()
+                .preview
+                .contains("more than one in-progress step")
+        }));
+        match result.completed_item {
+            ThreadItem::ToolExecution {
+                id,
+                name,
+                status,
+                output,
+                ..
+            } => {
+                assert_eq!(id, "item-1");
+                assert_eq!(name, "update_plan");
+                assert!(matches!(status, ActivityStatus::Failed));
+                assert!(output.is_none());
+            }
+            item => panic!("unexpected rejected-tool item: {item:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_custom_tool_input_becomes_a_recoverable_provider_result() {
+        let pending = PendingTool::custom(
+            &ToolRegistry,
+            "patch-1".into(),
+            "apply_patch",
+            "*** Begin Patch\n*** Update File: source.txt\n@@\n*** End Patch",
+            "call-1".into(),
+        );
+        let result = pending
+            .rejected_result()
+            .expect("invalid custom input should remain inside the tool loop");
+
+        assert!(result.provider_output.contains("invalid patch"));
+        assert!(
+            tool_failure_diagnostic("apply_patch", &stored_tool_item(&result))
+                .is_some_and(|message| message.contains("invalid patch"))
+        );
+        assert!(matches!(
+            result.completed_item,
+            ThreadItem::ToolExecution {
+                name,
+                status: ActivityStatus::Failed,
+                ..
+            } if name == "apply_patch"
+        ));
+    }
+
+    #[test]
+    fn rejected_tool_result_does_not_invent_a_timeline_id() {
+        let pending = PendingTool::function(
+            &ToolRegistry,
+            String::new(),
+            "future_tool",
+            "{}",
+            "call-1".into(),
+        );
+        let result = pending
+            .rejected_result()
+            .expect("invalid tool identity should remain a rejected result");
+
+        assert!(matches!(
+            result.completed_item,
+            ThreadItem::ToolExecution { id, name, .. }
+                if id.is_empty() && name == "future_tool"
+        ));
+    }
+
+    #[test]
+    fn provider_tool_names_reject_control_characters() {
+        let item = ResponseItem::FunctionCall {
+            id: Some("item-1".into()),
+            name: "read_\nfile".into(),
+            arguments: "{}".into(),
+            call_id: "call-1".into(),
+        };
+
+        assert!(validate_response_item(&item).is_err());
     }
 }

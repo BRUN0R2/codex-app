@@ -65,6 +65,30 @@ export function resolveTimelineFollowing(input: {
   return input.userInitiated ? input.nearEnd : input.followingLatest;
 }
 
+export function shouldSynchronizeTimelineToEnd(input: {
+  readonly followingLatest: boolean;
+  readonly layoutRequested: boolean;
+  readonly recentUserIntent: boolean;
+}): boolean {
+  return input.layoutRequested && input.followingLatest && !input.recentUserIntent;
+}
+
+export function resolveTimelineRestorationTop(input: {
+  readonly followingLatest: boolean;
+  readonly maximumScroll: number;
+  readonly savedScrollTop: number;
+}): number {
+  if (!Number.isFinite(input.maximumScroll) || input.maximumScroll < 0) {
+    throw new Error("Timeline maximum scroll must be a non-negative finite number.");
+  }
+  if (!Number.isFinite(input.savedScrollTop) || input.savedScrollTop < 0) {
+    throw new Error("Timeline saved scroll position must be a non-negative finite number.");
+  }
+  return input.followingLatest
+    ? input.maximumScroll
+    : Math.min(input.maximumScroll, input.savedScrollTop);
+}
+
 export function findTimelineAnchorIndex(
   anchorCount: number,
   readAnchorTop: (index: number) => number,
@@ -87,27 +111,4 @@ export function findTimelineAnchorIndex(
     }
   }
   return activeIndex;
-}
-
-export function revealExpandedDisclosureScrollTop(input: {
-  readonly clientHeight: number;
-  readonly detailsBottom: number;
-  readonly detailsTop: number;
-  readonly scrollHeight: number;
-  readonly scrollTop: number;
-  readonly summaryBottom: number;
-  readonly viewportTop: number;
-}): number {
-  const clientHeight = Math.max(0, input.clientHeight);
-  const maximumScroll = Math.max(0, input.scrollHeight - clientHeight);
-  const currentScroll = Math.min(maximumScroll, Math.max(0, input.scrollTop));
-  const previewHeight = Math.max(120, clientHeight * 0.65);
-  const detailsHeight = Math.max(0, input.detailsBottom - input.detailsTop);
-  const fitsInsideViewport = detailsHeight <= clientHeight;
-  const desiredBottom = fitsInsideViewport
-    ? input.detailsBottom
-    : Math.min(input.detailsBottom, input.summaryBottom + previewHeight);
-  const availableBottom = input.viewportTop + clientHeight - (fitsInsideViewport ? 0 : 8);
-  const hiddenPixels = Math.max(0, desiredBottom - availableBottom);
-  return Math.min(maximumScroll, currentScroll + hiddenPixels);
 }

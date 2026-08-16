@@ -1,13 +1,5 @@
 import { confirm, open } from "@tauri-apps/plugin-dialog";
-import {
-  type Accessor,
-  batch,
-  createEffect,
-  createMemo,
-  createSignal,
-  onCleanup,
-  onMount,
-} from "solid-js";
+import { batch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type {
   AccountProfileResponse,
@@ -22,17 +14,11 @@ import type {
   CodexThread,
   ConfigReadResponse,
   ConfigUpdate,
-  ContextUsageItem,
   ConversationMode,
   EngineNotification,
   EngineServerRequest,
   EngineStartResponse,
-  ModelReroutedNotification,
-  ModelSafetyBufferingUpdatedNotification,
-  ModelVerification,
-  PlanItem,
   ProjectRecord,
-  ReasoningEffort,
   RuntimeDiagnostic,
   RuntimeStatus,
   ThreadSummary,
@@ -42,6 +28,7 @@ import {
   cancelLogin as cancelLoginCommand,
   compactThread as compactThreadCommand,
   deleteThread as deleteThreadCommand,
+  describeDiagnosticError,
   describeError,
   forkThread as forkThreadCommand,
   inspectAttachments,
@@ -54,9 +41,9 @@ import {
   openExternalUrl,
   readAccount,
   readAccountProfile,
-  readConfig,
   readRateLimits,
   readThread,
+  reportFrontendDiagnostic,
   respondToServerRequest,
   resumeThread,
   savePastedImage,
@@ -70,14 +57,24 @@ import {
   updateConfig,
 } from "../infrastructure/codexClient";
 import { createAccountProfileRefreshCoordinator } from "./accountProfileRefresh";
+import type { AppController, DiagnosticEntry, SendMessageInput } from "./appController";
 import { readLatestTurnFailure, upsertItem } from "./conversation";
 import {
+  type InitializationStage,
+  InitializationTimeoutError,
+  initializationRetryDelay,
+  isRetryableInitializationFailure,
+} from "./initializationRetry";
+import {
   appendQueuedMessage,
+  clearPersistedMessageQueues,
   deleteMessageQueue,
+  loadMessageQueues,
   type MessageQueueMap,
   type QueuedMessage,
   readQueuedMessages,
   takeQueuedMessage as reduceTakeQueuedMessage,
+  saveMessageQueue,
 } from "./messageQueue";
 import { resolveNewThreadWorkspace } from "./newThreadTarget";
 import {
@@ -97,6 +94,18 @@ import {
   saveProductFlowState,
 } from "./productFlow";
 import {
+  defaultProjectSidebarState,
+  loadProjectSidebarState,
+  type ProjectSidebarState,
+  projectExpanded as readProjectExpanded,
+  projectThreadListExpanded as readProjectThreadListExpanded,
+  removeProjectSidebarState,
+  saveProjectSidebarState,
+  toggleProjectSectionExpanded,
+  toggleProjectExpanded as toggleStoredProjectExpanded,
+  toggleProjectThreadListExpanded as toggleStoredProjectThreadListExpanded,
+} from "./projectSidebarState";
+import {
   addProject,
   loadProjects,
   pathsEqual,
@@ -114,6 +123,7 @@ import {
   type StreamDelta,
 } from "./streamDeltas";
 import { applyThreadSummary, prependThreadHistory } from "./threadHistory";
+import { cachedThreadMatchesSummary, ThreadPageCache } from "./threadPageCache";
 import {
   applyThreadRuntimeStreamDeltas,
   mergeRuntimeThreadItems,
@@ -135,103 +145,10 @@ import {
 import type { VisibleThreadTurn, VisibleTurnSequence } from "./visibleTurnSequence";
 
 const MAX_DIAGNOSTICS = 50;
-const MAX_PENDING_APPROVALS = 64;
-const BOOT_TIMEOUT_MS = 15_000;
-
-export interface DiagnosticEntry extends RuntimeDiagnostic {
-  readonly id: number;
-  readonly occurredAt: Date;
-}
-
-export interface SendMessageInput {
-  readonly text: string;
-  readonly attachments: readonly Attachment[];
-  readonly model: string | null;
-  readonly effort: ReasoningEffort | null;
-  readonly serviceTier: string | null;
-}
-
-export interface AppController {
-  readonly account: Accessor<AccountReadResponse | undefined>;
-  readonly activeTurnId: Accessor<string | null>;
-  readonly activePlan: Accessor<PlanItem | null>;
-  readonly approvals: Accessor<readonly EngineServerRequest[]>;
-  readonly archivedThreads: Accessor<readonly ThreadSummary[]>;
-  readonly archivedThreadsNextCursor: Accessor<string | null>;
-  readonly busy: Accessor<boolean>;
-  readonly config: Accessor<ConfigReadResponse | null>;
-  readonly contextUsage: Accessor<ContextUsageItem | null>;
-  readonly currentThread: Accessor<CodexThread | null>;
-  readonly hasOlderHistory: Accessor<boolean>;
-  readonly historyLoading: Accessor<boolean>;
-  readonly currentThreadTitle: Accessor<string>;
-  readonly product: Accessor<AppProduct>;
-  readonly chatGptMode: Accessor<ChatGptMode>;
-  readonly chatModels: Accessor<readonly ChatModelOption[]>;
-  readonly conversationMode: Accessor<ConversationMode>;
-  readonly diagnostics: Accessor<readonly DiagnosticEntry[]>;
-  readonly engine: Accessor<EngineStartResponse | null>;
-  readonly error: Accessor<string | null>;
-  readonly lastTurnFailure: Accessor<string | null>;
-  readonly loginPending: Accessor<boolean>;
-  readonly models: Accessor<readonly CodexModel[]>;
-  readonly modelReroute: Accessor<ModelReroutedNotification["params"] | null>;
-  readonly modelVerifications: Accessor<readonly ModelVerification[]>;
-  readonly openingThreadId: Accessor<string | null>;
-  readonly pendingOperations: Accessor<number>;
-  readonly pinnedThreadIds: Accessor<readonly string[]>;
-  readonly persistedTurns: Accessor<readonly VisibleThreadTurn[]>;
-  readonly projects: Accessor<readonly ProjectRecord[]>;
-  readonly queuedMessages: Accessor<readonly QueuedMessage[]>;
-  readonly rateLimits: Accessor<AccountRateLimitsResponse | null>;
-  readonly runtimeStatus: Accessor<RuntimeStatus>;
-  readonly signedIn: Accessor<boolean>;
-  readonly safetyBuffering: Accessor<ModelSafetyBufferingUpdatedNotification["params"] | null>;
-  readonly threads: Accessor<readonly ThreadSummary[]>;
-  readonly threadsNextCursor: Accessor<string | null>;
-  readonly turnBusy: Accessor<boolean>;
-  readonly turns: Accessor<VisibleTurnSequence>;
-  readonly workspace: Accessor<string | null>;
-  readonly archiveThread: (threadId: string) => Promise<boolean>;
-  readonly cancelLogin: () => Promise<void>;
-  readonly chooseWorkspace: () => Promise<string | null>;
-  readonly clearError: () => void;
-  readonly compactThread: (threadId: string) => Promise<boolean>;
-  readonly deleteThread: (threadId: string) => Promise<boolean>;
-  readonly deleteQueuedMessage: (messageId: string) => boolean;
-  readonly enqueueMessage: (input: SendMessageInput) => boolean;
-  readonly forkThread: (threadId: string) => Promise<boolean>;
-  readonly inspectFiles: (paths: readonly string[]) => Promise<readonly Attachment[]>;
-  readonly interrupt: () => Promise<boolean>;
-  readonly isThreadActive: (threadId: string) => boolean;
-  readonly loadMoreThreads: () => Promise<boolean>;
-  readonly loadMoreArchivedThreads: () => Promise<boolean>;
-  readonly loadOlderHistory: () => Promise<boolean>;
-  readonly login: () => Promise<boolean>;
-  readonly logout: () => Promise<boolean>;
-  readonly newThread: (workspace?: string) => boolean;
-  readonly openThread: (threadId: string) => Promise<boolean>;
-  readonly refreshAccountProfile: () => Promise<boolean>;
-  readonly refreshRateLimits: () => Promise<boolean>;
-  readonly removeProject: (path: string) => void;
-  readonly renameThread: (threadId: string, name: string) => Promise<boolean>;
-  readonly retryInitialization: () => void;
-  readonly respondToApproval: (requestId: string, decision: ApprovalDecision) => Promise<boolean>;
-  readonly saveClipboardImage: (dataBase64: string) => Promise<Attachment | null>;
-  readonly selectProject: (path: string) => boolean;
-  readonly selectProduct: (product: AppProduct) => Promise<boolean>;
-  readonly selectChatGptMode: (mode: ChatGptMode) => Promise<boolean>;
-  readonly sendMessage: (input: SendMessageInput) => Promise<boolean>;
-  readonly sendQueuedMessageNow: (messageId?: string) => Promise<boolean>;
-  readonly takeQueuedMessage: (messageId: string) => QueuedMessage | null;
-  readonly togglePinnedThread: (threadId: string) => void;
-  readonly updateProject: (
-    path: string,
-    updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
-  ) => void;
-  readonly updateSetting: (update: ConfigUpdate) => Promise<boolean>;
-  readonly unarchiveThread: (threadId: string) => Promise<boolean>;
-}
+const EVENT_SUBSCRIPTION_TIMEOUT_MS = 15_000;
+const ENGINE_START_TIMEOUT_MS = 120_000;
+const ACCOUNT_READ_TIMEOUT_MS = 45_000;
+const THREAD_PAGE_CACHE_CAPACITY = 8;
 
 export function createAppController(): AppController {
   let initialProductFlow = defaultProductFlowState();
@@ -252,15 +169,20 @@ export function createAppController(): AppController {
   const [models, setModels] = createSignal<readonly CodexModel[]>([]);
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
   const [rateLimits, setRateLimits] = createSignal<AccountRateLimitsResponse | null>(null);
+  const [rateLimitsError, setRateLimitsError] = createSignal<string | null>(null);
+  const [rateLimitsLoading, setRateLimitsLoading] = createSignal(false);
   const [threads, setThreads] = createSignal<readonly ThreadSummary[]>([]);
   const [threadsNextCursor, setThreadsNextCursor] = createSignal<string | null>(null);
   const [archivedThreads, setArchivedThreads] = createSignal<readonly ThreadSummary[]>([]);
+  const [archivedThreadsLoaded, setArchivedThreadsLoaded] = createSignal(false);
+  const [archivedThreadsLoading, setArchivedThreadsLoading] = createSignal(false);
   const [archivedThreadsNextCursor, setArchivedThreadsNextCursor] = createSignal<string | null>(
     null,
   );
   const [currentThread, setCurrentThread] = createSignal<CodexThread | null>(null);
   const [historyCursor, setHistoryCursor] = createSignal<string | null>(null);
   const [historyLoading, setHistoryLoading] = createSignal(false);
+  const threadPages = new ThreadPageCache(THREAD_PAGE_CACHE_CAPACITY);
   let initialPinnedThreadIds: readonly string[] = [];
   let pinLoadError: Error | null = null;
   try {
@@ -278,24 +200,45 @@ export function createAppController(): AppController {
     reportError,
     scheduler: createBrowserStreamDeltaScheduler(),
   });
-  const [messageQueues, setMessageQueues] = createSignal<MessageQueueMap>(new Map());
+  let initialMessageQueues: MessageQueueMap = new Map();
+  let messageQueueLoadWarnings: readonly string[] = [];
+  try {
+    const loaded = loadMessageQueues();
+    initialMessageQueues = loaded.queues;
+    messageQueueLoadWarnings = loaded.warnings;
+  } catch (reason) {
+    messageQueueLoadWarnings = [asError(reason).message];
+  }
+  const [messageQueues, setMessageQueues] = createSignal<MessageQueueMap>(initialMessageQueues);
   const [pendingApprovals, setPendingApprovals] = createSignal<readonly EngineServerRequest[]>([]);
   const [diagnostics, setDiagnostics] = createSignal<readonly DiagnosticEntry[]>([]);
   const [error, setError] = createSignal<string | null>(null);
   const [pendingOperations, setPendingOperations] = createSignal(0);
-  const [openingThreadId, setOpeningThreadId] = createSignal<string | null>(null);
+  let pendingThreadSelectionId: string | null = null;
+  let threadSelectionRevision = 0;
   const [loginPending, setLoginPending] = createSignal(false);
   const [workspace, setWorkspace] = createSignal<string | null>(null);
   let loginId: string | null = null;
   let diagnosticSequence = 0;
+  let pendingRateLimitReads = 0;
   let disposed = false;
   let unsubscribe: (() => void) | null = null;
+  let initializationRevision = 0;
+  let initializationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let configQueue: Promise<void> = Promise.resolve();
   const queuedDispatchTails = new Map<string, Promise<void>>();
   let authenticationSync: {
     readonly expectedSignedIn: boolean;
     readonly promise: Promise<void>;
   } | null = null;
+  let authenticatedStateLoaded = false;
+  let authenticatedStateRequest: Promise<void> | null = null;
+  let persistedQueuesResumed = false;
+  let modelCatalogLoaded = false;
+  let chatModelCatalogLoaded = false;
+  let modelCatalogRequest: Promise<boolean> | null = null;
+  let chatModelCatalogRequest: Promise<boolean> | null = null;
+  let modelCatalogSessionRevision = 0;
   let initialProjects: readonly ProjectRecord[] = [];
   let projectLoadError: Error | null = null;
   try {
@@ -304,6 +247,16 @@ export function createAppController(): AppController {
     projectLoadError = asError(reason);
   }
   const [projects, setProjects] = createSignal(initialProjects);
+  let initialProjectSidebarState = defaultProjectSidebarState();
+  let projectSidebarStateLoadError: Error | null = null;
+  try {
+    initialProjectSidebarState = loadProjectSidebarState();
+  } catch (reason) {
+    projectSidebarStateLoadError = asError(reason);
+  }
+  const [projectSidebarState, setProjectSidebarState] = createSignal<ProjectSidebarState>(
+    initialProjectSidebarState,
+  );
   setWorkspace(
     initialProductFlow.destinations[activeConversationMode(initialProductFlow)].workspace,
   );
@@ -325,13 +278,32 @@ export function createAppController(): AppController {
   const hasOlderHistory = createMemo(() => historyCursor() !== null);
   const rateLimitRefresh = createRateLimitRefreshCoordinator({
     getSessionKey: () => (signedIn() ? "chatgpt" : null),
-    read: readRateLimits,
-    apply: setRateLimits,
+    read: readRateLimitsWithStatus,
+    apply: (value) => {
+      setRateLimits(value);
+      setRateLimitsError(null);
+    },
     reportError: (reason) => {
+      setRateLimitsError(describeError(reason));
       addDiagnostic({ stream: "runtime", message: describeError(reason) });
     },
     host: createBrowserRateLimitRefreshHost(),
   });
+
+  async function readRateLimitsWithStatus(): Promise<AccountRateLimitsResponse> {
+    pendingRateLimitReads += 1;
+    batch(() => {
+      setRateLimitsLoading(true);
+      setRateLimitsError(null);
+    });
+    try {
+      return await readRateLimits();
+    } finally {
+      pendingRateLimitReads = Math.max(0, pendingRateLimitReads - 1);
+      setRateLimitsLoading(pendingRateLimitReads > 0);
+    }
+  }
+
   const accountProfileRefresh = createAccountProfileRefreshCoordinator({
     getSessionKey: () => (signedIn() ? "chatgpt" : null),
     read: readAccountProfile,
@@ -392,6 +364,7 @@ export function createAppController(): AppController {
     return threadId === undefined ? [] : readQueuedMessages(messageQueues(), threadId);
   });
   const busy = createMemo(() => turnBusy() || pendingOperations() > 0);
+  const projectSectionExpanded = createMemo(() => projectSidebarState().projectsExpanded);
   const currentThreadTitle = createMemo(() => {
     const thread = currentThread();
     return thread?.name ?? thread?.preview ?? "Nova tarefa";
@@ -415,6 +388,21 @@ export function createAppController(): AppController {
     document.documentElement.setAttribute("data-diff", preferences.diffDisplay);
   });
 
+  createEffect(() => {
+    const thread = currentThread();
+    const nextCursor = historyCursor();
+    if (thread !== null) {
+      threadPages.write({ thread, nextCursor });
+    }
+  });
+
+  createEffect(() => {
+    const mode = conversationMode();
+    if (signedIn()) {
+      void ensureModelsForMode(mode);
+    }
+  });
+
   onMount(() => {
     rateLimitRefresh.start();
     if (productFlowLoadError !== null) {
@@ -423,14 +411,25 @@ export function createAppController(): AppController {
     if (projectLoadError !== null) {
       reportError(projectLoadError);
     }
+    if (projectSidebarStateLoadError !== null) {
+      reportError(projectSidebarStateLoadError);
+    }
     if (pinLoadError !== null) {
       reportError(pinLoadError);
     }
-    void initialize();
+    for (const warning of messageQueueLoadWarnings) {
+      reportError(new Error(warning));
+    }
+    beginInitialization();
   });
 
   onCleanup(() => {
     disposed = true;
+    initializationRevision += 1;
+    if (initializationRetryTimer !== null) {
+      clearTimeout(initializationRetryTimer);
+      initializationRetryTimer = null;
+    }
     accountProfileRefresh.dispose();
     rateLimitRefresh.dispose();
     streamDeltas.dispose();
@@ -438,9 +437,25 @@ export function createAppController(): AppController {
     unsubscribe = null;
   });
 
-  async function initialize(): Promise<void> {
+  function beginInitialization(): void {
+    if (disposed) {
+      return;
+    }
+    if (initializationRetryTimer !== null) {
+      clearTimeout(initializationRetryTimer);
+      initializationRetryTimer = null;
+    }
+    const revision = ++initializationRevision;
+    void initialize(revision, 0);
+  }
+
+  async function initialize(revision: number, attempt: number): Promise<void> {
+    if (!isCurrentInitialization(revision)) {
+      return;
+    }
     unsubscribe?.();
     unsubscribe = null;
+    let stage: InitializationStage = "events";
     const subscription = subscribeToEvents({
       onContractError: reportError,
       onDiagnostic: addDiagnostic,
@@ -450,45 +465,102 @@ export function createAppController(): AppController {
     });
     let releaseEvents: (() => void) | null = null;
     try {
-      const release = await withBootTimeout("registrar os eventos do engine", () => subscription);
-      if (disposed) {
+      const release = await withBootTimeout(
+        "registrar os eventos do engine",
+        EVENT_SUBSCRIPTION_TIMEOUT_MS,
+        () => subscription,
+      );
+      if (!isCurrentInitialization(revision)) {
+        release();
+        releaseEvents = release;
         return;
       }
       releaseEvents = release;
       unsubscribe = release;
-      const started = await withBootTimeout("iniciar o engine", () => startEngine());
-      if (disposed) {
+      stage = "engine";
+      const started = await withBootTimeout("iniciar o engine", ENGINE_START_TIMEOUT_MS, () =>
+        startEngine(),
+      );
+      if (!isCurrentInitialization(revision)) {
         return;
       }
-      setEngine(started);
-      const currentAccount = await withBootTimeout("ler a conta conectada", () => readAccount());
-      if (disposed) {
+      batch(() => {
+        setEngine(started);
+        setConfig(started.config);
+        setRuntimeStatus({ state: "ready", message: null });
+      });
+      stage = "account";
+      const currentAccount = await withBootTimeout(
+        "ler a conta conectada",
+        ACCOUNT_READ_TIMEOUT_MS,
+        () => readAccount(),
+      );
+      if (!isCurrentInitialization(revision)) {
         return;
       }
       accountProfileRefresh.invalidateSession();
       rateLimitRefresh.invalidateSession();
+      if (accountSessionKey(account()) !== accountSessionKey(currentAccount)) {
+        invalidateAuthenticatedStateLoad();
+        invalidateModelCatalogs();
+      }
       setAccount(currentAccount);
       surfaceRefreshFailure(currentAccount);
       if (currentAccount.account !== null) {
         void accountProfileRefresh.refreshIfStale();
+        stage = "authenticatedState";
         await loadAuthenticatedState();
       }
     } catch (reason) {
+      if (!isCurrentInitialization(revision)) {
+        return;
+      }
       const message = describeError(reason);
-      batch(() => {
-        accountProfileRefresh.invalidateSession();
-        rateLimitRefresh.invalidateSession();
-        setEngine(null);
-        setAccount(undefined);
-        setRateLimits(null);
-        setError(message);
-        setRuntimeStatus({ state: "failed", message });
-      });
+      invalidateAuthenticatedStateLoad();
+      invalidateModelCatalogs();
+      accountProfileRefresh.invalidateSession();
+      rateLimitRefresh.invalidateSession();
+      if (isRetryableInitializationFailure(reason, stage)) {
+        const delay = initializationRetryDelay(attempt);
+        batch(() => {
+          setEngine(null);
+          setAccount(undefined);
+          setConfig(null);
+          setRateLimits(null);
+          setRateLimitsError(null);
+          setError(null);
+          setRuntimeStatus({
+            state: "starting",
+            message: `${message} Nova tentativa automática em ${delay / 1000}s.`,
+          });
+        });
+        initializationRetryTimer = setTimeout(() => {
+          if (!isCurrentInitialization(revision)) {
+            return;
+          }
+          initializationRetryTimer = null;
+          void initialize(revision, attempt + 1);
+        }, delay);
+      } else {
+        batch(() => {
+          setEngine(null);
+          setAccount(undefined);
+          setConfig(null);
+          setRateLimits(null);
+          setRateLimitsError(null);
+          setError(message);
+          setRuntimeStatus({ state: "failed", message });
+        });
+      }
     } finally {
       if (releaseEvents === null) {
-        void subscription.then((release) => release()).catch(() => {});
+        void subscription.then((release) => release()).catch(reportError);
       }
     }
+  }
+
+  function isCurrentInitialization(revision: number): boolean {
+    return !disposed && initializationRevision === revision;
   }
 
   function handleRuntimeStatus(status: RuntimeStatus): void {
@@ -499,68 +571,150 @@ export function createAppController(): AppController {
   }
 
   function retryInitialization(): void {
+    invalidateAuthenticatedStateLoad();
+    invalidateModelCatalogs();
     batch(() => {
       accountProfileRefresh.invalidateSession();
       rateLimitRefresh.invalidateSession();
       setEngine(null);
       setAccount(undefined);
+      setConfig(null);
       setRateLimits(null);
+      setRateLimitsError(null);
       setError(null);
       setRuntimeStatus({ state: "starting", message: null });
     });
-    void initialize();
+    beginInitialization();
   }
 
-  async function loadAuthenticatedState(): Promise<void> {
-    await Promise.all([loadLocalAuthenticatedState(), loadModelCatalog(), loadChatModelCatalog()]);
-    if (!disposed) {
-      void rateLimitRefresh.refreshIfStale();
+  function loadAuthenticatedState(): Promise<void> {
+    if (authenticatedStateLoaded) {
+      return Promise.resolve();
     }
+    if (authenticatedStateRequest !== null) {
+      return authenticatedStateRequest;
+    }
+    const sessionKey = accountSessionKey(account());
+    if (sessionKey === null) {
+      return Promise.resolve();
+    }
+    const request = loadLocalAuthenticatedState(sessionKey)
+      .then((loaded) => {
+        if (loaded) {
+          authenticatedStateLoaded = true;
+          void rateLimitRefresh.refreshIfStale();
+        }
+      })
+      .finally(() => {
+        if (authenticatedStateRequest === request) {
+          authenticatedStateRequest = null;
+        }
+      });
+    authenticatedStateRequest = request;
+    return request;
   }
 
-  async function loadLocalAuthenticatedState(): Promise<void> {
-    const [configuration, threadPage, archivedPage] = await Promise.all([
-      readConfig(),
-      listThreads(null),
-      listThreads(null, true),
-    ]);
-    if (disposed) {
-      return;
+  async function loadLocalAuthenticatedState(expectedSessionKey: string): Promise<boolean> {
+    const threadPage = await listThreads(null);
+    if (disposed || accountSessionKey(account()) !== expectedSessionKey) {
+      return false;
     }
     batch(() => {
-      setConfig(configuration);
       setThreads(threadPage.data);
       setThreadsNextCursor(threadPage.nextCursor);
-      setArchivedThreads(archivedPage.data);
-      setArchivedThreadsNextCursor(archivedPage.nextCursor);
     });
     await restoreActiveDestination(productFlow());
+    const loaded = !disposed && accountSessionKey(account()) === expectedSessionKey;
+    if (loaded) {
+      resumePersistedMessageQueues(threadPage.data);
+    }
+    return loaded;
   }
 
-  async function loadModelCatalog(): Promise<void> {
-    try {
-      const catalog = await listModels();
-      if (!disposed) {
+  function ensureModelsForMode(mode: ConversationMode): Promise<boolean> {
+    return mode === "chat" ? loadChatModelCatalog() : loadModelCatalog();
+  }
+
+  function loadModelCatalog(): Promise<boolean> {
+    if (modelCatalogLoaded) {
+      return Promise.resolve(true);
+    }
+    if (modelCatalogRequest !== null) {
+      return modelCatalogRequest;
+    }
+    const revision = modelCatalogSessionRevision;
+    const request = listModels()
+      .then((catalog) => {
+        if (disposed || revision !== modelCatalogSessionRevision || !signedIn()) {
+          return false;
+        }
+        modelCatalogLoaded = true;
         setModels(catalog.data.filter((model) => !model.hidden));
-      }
-    } catch (reason) {
-      if (!disposed) {
-        reportError(reason);
-      }
-    }
+        return true;
+      })
+      .catch((reason: unknown) => {
+        if (!disposed && revision === modelCatalogSessionRevision) {
+          reportError(reason);
+        }
+        return false;
+      })
+      .finally(() => {
+        if (modelCatalogRequest === request) {
+          modelCatalogRequest = null;
+        }
+      });
+    modelCatalogRequest = request;
+    return request;
   }
 
-  async function loadChatModelCatalog(): Promise<void> {
-    try {
-      const catalog = await listChatModels();
-      if (!disposed) {
-        setChatModels(catalog.data);
-      }
-    } catch (reason) {
-      if (!disposed) {
-        reportError(reason);
-      }
+  function loadChatModelCatalog(): Promise<boolean> {
+    if (chatModelCatalogLoaded) {
+      return Promise.resolve(true);
     }
+    if (chatModelCatalogRequest !== null) {
+      return chatModelCatalogRequest;
+    }
+    const revision = modelCatalogSessionRevision;
+    const request = listChatModels()
+      .then((catalog) => {
+        if (disposed || revision !== modelCatalogSessionRevision || !signedIn()) {
+          return false;
+        }
+        chatModelCatalogLoaded = true;
+        setChatModels(catalog.data);
+        return true;
+      })
+      .catch((reason: unknown) => {
+        if (!disposed && revision === modelCatalogSessionRevision) {
+          reportError(reason);
+        }
+        return false;
+      })
+      .finally(() => {
+        if (chatModelCatalogRequest === request) {
+          chatModelCatalogRequest = null;
+        }
+      });
+    chatModelCatalogRequest = request;
+    return request;
+  }
+
+  function invalidateModelCatalogs(): void {
+    modelCatalogSessionRevision += 1;
+    modelCatalogLoaded = false;
+    chatModelCatalogLoaded = false;
+    modelCatalogRequest = null;
+    chatModelCatalogRequest = null;
+    batch(() => {
+      setModels([]);
+      setChatModels([]);
+    });
+  }
+
+  function invalidateAuthenticatedStateLoad(): void {
+    authenticatedStateLoaded = false;
+    authenticatedStateRequest = null;
+    persistedQueuesResumed = false;
   }
 
   function handleNotification(notification: EngineNotification): void {
@@ -598,6 +752,9 @@ export function createAppController(): AppController {
       case "thread.created":
       case "thread.updated":
         mergeThread(notification.params.thread);
+        updateCachedThread(notification.params.thread.id, (thread) =>
+          applyThreadSummary(thread, notification.params.thread),
+        );
         setCurrentThread((current) =>
           current?.id === notification.params.thread.id
             ? applyThreadSummary(current, notification.params.thread)
@@ -613,7 +770,7 @@ export function createAppController(): AppController {
         }
         {
           const archived = threads().find((thread) => thread.id === notification.params.threadId);
-          if (archived !== undefined) {
+          if (archived !== undefined && archivedThreadsLoaded()) {
             setArchivedThreads((current) => mergeThreadPages(current, [archived]));
           }
         }
@@ -623,6 +780,7 @@ export function createAppController(): AppController {
         if (currentThread()?.id === notification.params.threadId) {
           clearCurrentThread();
         }
+        threadPages.delete(notification.params.threadId);
         deleteThreadRuntime(notification.params.threadId);
         deleteQueuedMessages(notification.params.threadId);
         setPendingApprovals((current) =>
@@ -639,6 +797,9 @@ export function createAppController(): AppController {
         return;
       case "turn.started":
         streamDeltas.releaseThread(notification.params.threadId);
+        updateCachedThread(notification.params.threadId, (thread) =>
+          applyTurnStarted(thread, notification.params.turn),
+        );
         setThreads((current) =>
           current.map((thread) =>
             thread.id === notification.params.threadId
@@ -666,6 +827,9 @@ export function createAppController(): AppController {
           streamDeltas.releaseThread(notification.params.threadId);
           let completedActiveTurn = false;
           batch(() => {
+            updateCachedThread(notification.params.threadId, (thread) =>
+              applyTurnCompletion(thread, notification.params.turn),
+            );
             setThreads((current) =>
               current.map((thread) =>
                 thread.id === notification.params.threadId
@@ -702,7 +866,7 @@ export function createAppController(): AppController {
               void scheduleQueuedMessage(notification.params.threadId);
             });
           }
-          void rateLimitRefresh.refresh();
+          void rateLimitRefresh.refreshIfStale();
         }
         return;
       case "model.rerouted":
@@ -733,6 +897,9 @@ export function createAppController(): AppController {
       case "item.completed":
         if (notification.method === "item.completed") {
           streamDeltas.releaseItem(notification.params.threadId, notification.params.item.id);
+          updateCachedThread(notification.params.threadId, (thread) =>
+            applyTurnItem(thread, notification.params.turnId, notification.params.item),
+          );
           setCurrentThread((current) =>
             current?.id === notification.params.threadId
               ? applyTurnItem(current, notification.params.turnId, notification.params.item)
@@ -761,9 +928,6 @@ export function createAppController(): AppController {
       if (current.some((entry) => entry.id === request.id)) {
         throw new Error(`A aprovação ${request.id} foi recebida duas vezes.`);
       }
-      if (current.length >= MAX_PENDING_APPROVALS) {
-        throw new Error(`O limite de ${MAX_PENDING_APPROVALS} aprovações pendentes foi excedido.`);
-      }
       return [...current, request];
     });
   }
@@ -774,12 +938,16 @@ export function createAppController(): AppController {
       return activeSync.promise;
     }
 
-    const predecessor = activeSync?.promise.catch(() => undefined) ?? Promise.resolve();
+    const predecessor = activeSync?.promise ?? Promise.resolve();
     const promise = predecessor
       .then(async () => {
         const currentAccount = await readAccount();
         accountProfileRefresh.invalidateSession();
         rateLimitRefresh.invalidateSession();
+        if (accountSessionKey(account()) !== accountSessionKey(currentAccount)) {
+          invalidateAuthenticatedStateLoad();
+          invalidateModelCatalogs();
+        }
         setAccount(currentAccount);
         surfaceRefreshFailure(currentAccount);
         if ((currentAccount.account !== null) !== expectedSignedIn) {
@@ -790,12 +958,13 @@ export function createAppController(): AppController {
         if (expectedSignedIn) {
           void accountProfileRefresh.refreshIfStale();
         }
-        if (expectedSignedIn && config() === null) {
+        if (expectedSignedIn && !authenticatedStateLoaded) {
           await loadAuthenticatedState();
         } else if (expectedSignedIn) {
           void rateLimitRefresh.refreshIfStale();
         } else {
           setRateLimits(null);
+          setRateLimitsError(null);
         }
       })
       .catch(reportError)
@@ -860,24 +1029,32 @@ export function createAppController(): AppController {
       const response = await withPending(() => logoutCommand());
       accountProfileRefresh.invalidateSession();
       rateLimitRefresh.invalidateSession();
+      invalidateAuthenticatedStateLoad();
+      invalidateModelCatalogs();
+      try {
+        clearPersistedMessageQueues();
+      } catch (reason) {
+        reportError(reason);
+      }
       batch(() => {
         setAccount({
           account: null,
           requiresOpenaiAuth: true,
           refresh: { status: "notRequired", error: null },
         });
-        setConfig(null);
-        setChatModels([]);
-        setModels([]);
         setRateLimits(null);
+        setRateLimitsError(null);
         setThreads([]);
         setThreadsNextCursor(null);
         setArchivedThreads([]);
+        setArchivedThreadsLoaded(false);
+        setArchivedThreadsLoading(false);
         setArchivedThreadsNextCursor(null);
         setThreadRuntime(new Map());
         setMessageQueues(new Map());
         setPendingApprovals([]);
         clearCurrentThread();
+        threadPages.clear();
       });
       if (response.remoteRevocation === "failed") {
         setError(
@@ -986,13 +1163,27 @@ export function createAppController(): AppController {
       clearCurrentThread();
       setWorkspace(mode === "chat" ? null : destination.workspace);
     });
-    if (destination.threadId === null) {
+    const threadId = destination.threadId;
+    if (threadId === null) {
       return true;
     }
+    const selectionRevision = beginThreadSelection(threadId);
     try {
-      const response = await withPending(() => resumeThread(destination.threadId as string));
-      if (conversationMode() !== mode) {
+      const cached = readCurrentCachedThreadPage(threadId);
+      if (cached !== null) {
+        if (cached.thread.mode !== mode) {
+          throw new Error("A conversa armazenada pertence a outro modo do aplicativo.");
+        }
+        if (!selectThreadProject(cached.thread)) {
+          return false;
+        }
+        activateThreadPage(cached.thread, cached.nextCursor);
+        rememberDestination(mode, cached.thread.id, cached.thread.projectPath);
         return true;
+      }
+      const response = await withPending(() => resumeThread(threadId));
+      if (!isCurrentThreadSelection(selectionRevision) || conversationMode() !== mode) {
+        return false;
       }
       if (response.thread.mode !== mode) {
         throw new Error("A conversa restaurada pertence a outro modo do aplicativo.");
@@ -1000,20 +1191,19 @@ export function createAppController(): AppController {
       if (!selectThreadProject(response.thread)) {
         return false;
       }
-      batch(() => {
-        synchronizeThreadRuntime(response.thread);
-        setCurrentThread(response.thread);
-        setHistoryCursor(response.nextCursor);
-      });
+      activateThreadPage(response.thread, response.nextCursor);
       mergeThread(response.thread);
       rememberDestination(mode, response.thread.id, response.thread.projectPath);
       return true;
     } catch (reason) {
-      if (conversationMode() === mode) {
-        rememberDestination(mode, null, destination.workspace);
-        reportError(reason);
+      if (!isCurrentThreadSelection(selectionRevision)) {
+        return false;
       }
+      rememberDestination(mode, null, destination.workspace);
+      reportError(reason);
       return false;
+    } finally {
+      finishThreadSelection(selectionRevision);
     }
   }
 
@@ -1074,7 +1264,51 @@ export function createAppController(): AppController {
       setProjects(next);
     } catch (reason) {
       reportError(reason);
+      return;
     }
+
+    const nextProjectSidebarState = removeProjectSidebarState(projectSidebarState(), path);
+    if (nextProjectSidebarState === projectSidebarState()) {
+      return;
+    }
+    try {
+      saveProjectSidebarState(nextProjectSidebarState);
+      setProjectSidebarState(nextProjectSidebarState);
+    } catch (reason) {
+      reportError(reason);
+    }
+  }
+
+  function commitProjectSidebarState(next: ProjectSidebarState): void {
+    if (next === projectSidebarState()) {
+      return;
+    }
+    try {
+      saveProjectSidebarState(next);
+      setProjectSidebarState(next);
+    } catch (reason) {
+      reportError(reason);
+    }
+  }
+
+  function projectExpanded(path: string): boolean {
+    return readProjectExpanded(projectSidebarState(), path);
+  }
+
+  function projectThreadListExpanded(path: string): boolean {
+    return readProjectThreadListExpanded(projectSidebarState(), path);
+  }
+
+  function toggleProjectExpanded(path: string): void {
+    commitProjectSidebarState(toggleStoredProjectExpanded(projectSidebarState(), path));
+  }
+
+  function toggleProjectSection(): void {
+    commitProjectSidebarState(toggleProjectSectionExpanded(projectSidebarState()));
+  }
+
+  function toggleProjectThreadListExpanded(path: string): void {
+    commitProjectSidebarState(toggleStoredProjectThreadListExpanded(projectSidebarState(), path));
   }
 
   function togglePinnedThread(threadId: string): void {
@@ -1161,12 +1395,8 @@ export function createAppController(): AppController {
       if (!selectThreadProject(response.thread)) {
         return null;
       }
-      batch(() => {
-        mergeThread(response.thread);
-        setCurrentThread(response.thread);
-        setHistoryCursor(response.nextCursor);
-        synchronizeThreadRuntime(response.thread);
-      });
+      mergeThread(response.thread);
+      activateThreadPage(response.thread, response.nextCursor);
       rememberDestination(mode, response.thread.id, response.thread.projectPath);
       return response.thread;
     } catch (reason) {
@@ -1176,9 +1406,31 @@ export function createAppController(): AppController {
   }
 
   async function openThread(threadId: string): Promise<boolean> {
-    setOpeningThreadId(threadId);
+    if (pendingThreadSelectionId === threadId) {
+      return false;
+    }
+    if (currentThread()?.id === threadId) {
+      invalidateThreadSelection();
+      return true;
+    }
+    const selectionRevision = beginThreadSelection(threadId);
     try {
+      const cached = readCurrentCachedThreadPage(threadId);
+      if (cached !== null) {
+        if (!alignProductFlowToThread(cached.thread.mode)) {
+          throw new Error("A conversa selecionada pertence a outro produto do aplicativo.");
+        }
+        if (!selectThreadProject(cached.thread)) {
+          return false;
+        }
+        activateThreadPage(cached.thread, cached.nextCursor);
+        rememberDestination(cached.thread.mode, cached.thread.id, cached.thread.projectPath);
+        return true;
+      }
       const response = await resumeThread(threadId);
+      if (!isCurrentThreadSelection(selectionRevision)) {
+        return false;
+      }
       if (!pathsEqual(response.cwd, response.thread.cwd)) {
         throw new Error("O engine retomou a tarefa em um diretório inconsistente.");
       }
@@ -1188,19 +1440,18 @@ export function createAppController(): AppController {
       if (!selectThreadProject(response.thread)) {
         return false;
       }
-      batch(() => {
-        synchronizeThreadRuntime(response.thread);
-        setCurrentThread(response.thread);
-        setHistoryCursor(response.nextCursor);
-      });
+      activateThreadPage(response.thread, response.nextCursor);
       mergeThread(response.thread);
       rememberDestination(response.thread.mode, response.thread.id, response.thread.projectPath);
       return true;
     } catch (reason) {
+      if (!isCurrentThreadSelection(selectionRevision)) {
+        return false;
+      }
       reportError(reason);
       return false;
     } finally {
-      setOpeningThreadId(null);
+      finishThreadSelection(selectionRevision);
     }
   }
 
@@ -1231,6 +1482,7 @@ export function createAppController(): AppController {
   async function unarchiveThread(threadId: string): Promise<boolean> {
     try {
       const response = await withPending(() => unarchiveThreadCommand(threadId));
+      threadPages.write({ thread: response.thread, nextCursor: response.nextCursor });
       mergeThread(response.thread);
       return true;
     } catch (reason) {
@@ -1289,12 +1541,8 @@ export function createAppController(): AppController {
       if (!selectThreadProject(response.thread)) {
         return false;
       }
-      batch(() => {
-        mergeThread(response.thread);
-        synchronizeThreadRuntime(response.thread);
-        setCurrentThread(response.thread);
-        setHistoryCursor(response.nextCursor);
-      });
+      mergeThread(response.thread);
+      activateThreadPage(response.thread, response.nextCursor);
       rememberDestination(response.thread.mode, response.thread.id, response.thread.projectPath);
       return true;
     } catch (reason) {
@@ -1322,20 +1570,33 @@ export function createAppController(): AppController {
   }
 
   async function loadMoreArchivedThreads(): Promise<boolean> {
-    const cursor = archivedThreadsNextCursor();
-    if (cursor === null) {
+    if (archivedThreadsLoading()) {
       return false;
     }
+    const firstPage = !archivedThreadsLoaded();
+    const cursor = firstPage ? null : archivedThreadsNextCursor();
+    if (!firstPage && cursor === null) {
+      return false;
+    }
+    setArchivedThreadsLoading(true);
     try {
-      const page = await withPending(() => listThreads(cursor, true));
+      const page = await listThreads(cursor, true);
+      if (disposed) {
+        return false;
+      }
       batch(() => {
-        setArchivedThreads((current) => mergeThreadPages(current, page.data));
+        setArchivedThreads((current) =>
+          firstPage ? page.data : mergeThreadPages(current, page.data),
+        );
+        setArchivedThreadsLoaded(true);
         setArchivedThreadsNextCursor(page.nextCursor);
       });
       return true;
     } catch (reason) {
       reportError(reason);
       return false;
+    } finally {
+      setArchivedThreadsLoading(false);
     }
   }
 
@@ -1438,7 +1699,9 @@ export function createAppController(): AppController {
       serviceTier: input.serviceTier,
     };
     try {
-      setMessageQueues((current) => appendQueuedMessage(current, thread.id, message));
+      const next = appendQueuedMessage(messageQueues(), thread.id, message);
+      saveMessageQueue(thread.id, readQueuedMessages(next, thread.id));
+      setMessageQueues(next);
       return true;
     } catch (reason) {
       reportError(reason);
@@ -1451,13 +1714,18 @@ export function createAppController(): AppController {
     if (threadId === undefined) {
       return null;
     }
-    let taken: QueuedMessage | null = null;
-    setMessageQueues((current) => {
-      const result = reduceTakeQueuedMessage(current, threadId, messageId);
-      taken = result.message;
-      return result.queues;
-    });
-    return taken;
+    try {
+      const result = reduceTakeQueuedMessage(messageQueues(), threadId, messageId);
+      if (result.message === null) {
+        return null;
+      }
+      saveMessageQueue(threadId, readQueuedMessages(result.queues, threadId));
+      setMessageQueues(result.queues);
+      return result.message;
+    } catch (reason) {
+      reportError(reason);
+      return null;
+    }
   }
 
   function deleteQueuedMessage(messageId: string): boolean {
@@ -1519,7 +1787,7 @@ export function createAppController(): AppController {
           attachments: message.attachments.map((attachment) => ({ path: attachment.path })),
         });
       }
-      setMessageQueues((current) => reduceTakeQueuedMessage(current, threadId, message.id).queues);
+      removeDispatchedQueuedMessage(threadId, message.id);
       return true;
     } catch (reason) {
       reportError(reason);
@@ -1567,7 +1835,7 @@ export function createAppController(): AppController {
       setConfig(response);
       succeeded = true;
     });
-    configQueue = operation.catch(() => undefined);
+    configQueue = settledQueueTail(operation);
     setPendingOperations((count) => count + 1);
     try {
       await operation;
@@ -1630,6 +1898,7 @@ export function createAppController(): AppController {
       setPendingApprovals((current) =>
         current.filter((request) => request.params.threadId !== threadId),
       );
+      threadPages.delete(threadId);
       removePinnedThread(threadId);
     });
     if (selected?.id === threadId) {
@@ -1638,7 +1907,69 @@ export function createAppController(): AppController {
   }
 
   function deleteQueuedMessages(threadId: string): void {
-    setMessageQueues((current) => deleteMessageQueue(current, threadId));
+    const current = messageQueues();
+    const next = deleteMessageQueue(current, threadId);
+    if (next === current) {
+      return;
+    }
+    try {
+      saveMessageQueue(threadId, []);
+    } catch (reason) {
+      reportError(reason);
+    }
+    setMessageQueues(next);
+  }
+
+  function removeDispatchedQueuedMessage(threadId: string, messageId: string): void {
+    const result = reduceTakeQueuedMessage(messageQueues(), threadId, messageId);
+    if (result.message === null) {
+      return;
+    }
+    try {
+      saveMessageQueue(threadId, readQueuedMessages(result.queues, threadId));
+    } catch (reason) {
+      reportError(reason);
+    }
+    setMessageQueues(result.queues);
+  }
+
+  function resumePersistedMessageQueues(availableThreads: readonly ThreadSummary[]): void {
+    if (persistedQueuesResumed || messageQueues().size === 0) {
+      return;
+    }
+    persistedQueuesResumed = true;
+    const knownActiveThreads = new Set(
+      availableThreads
+        .filter((thread) => thread.status.type === "active")
+        .map((thread) => thread.id),
+    );
+    for (const [threadId, messages] of messageQueues()) {
+      if (messages.length === 0) {
+        continue;
+      }
+      if (knownActiveThreads.has(threadId)) {
+        void hydrateActiveQueuedThread(threadId);
+        continue;
+      }
+      queueMicrotask(() => {
+        void scheduleQueuedMessage(threadId);
+      });
+    }
+  }
+
+  async function hydrateActiveQueuedThread(threadId: string): Promise<void> {
+    try {
+      const page = await readThread(threadId, null);
+      if (disposed || readQueuedMessages(messageQueues(), threadId).length === 0) {
+        return;
+      }
+      synchronizeThreadRuntime(page.thread);
+      if (page.thread.status.type !== "active") {
+        void scheduleQueuedMessage(threadId);
+      }
+    } catch (reason) {
+      reportError(reason);
+    }
   }
 
   function mergeThread(thread: ThreadSummary): void {
@@ -1651,11 +1982,79 @@ export function createAppController(): AppController {
     });
   }
 
+  function activateThreadPage(thread: CodexThread, nextCursor: string | null): void {
+    threadPages.write({ thread, nextCursor });
+    batch(() => {
+      synchronizeThreadRuntime(thread);
+      setCurrentThread(thread);
+      setHistoryCursor(nextCursor);
+    });
+  }
+
+  function readCurrentCachedThreadPage(threadId: string) {
+    const cached = threadPages.read(threadId);
+    if (cached === null) {
+      return null;
+    }
+    const summary = [...threads(), ...archivedThreads()].find((thread) => thread.id === threadId);
+    return summary !== undefined && cachedThreadMatchesSummary(cached, summary) ? cached : null;
+  }
+
+  function updateCachedThread(
+    threadId: string,
+    update: (thread: CodexThread) => CodexThread,
+  ): void {
+    try {
+      threadPages.update(threadId, (page) => ({
+        ...page,
+        thread: update(page.thread),
+      }));
+    } catch (reason) {
+      threadPages.delete(threadId);
+      if (currentThread()?.id === threadId) {
+        throw reason;
+      }
+    }
+  }
+
+  function beginThreadSelection(threadId: string): number {
+    threadSelectionRevision += 1;
+    pendingThreadSelectionId = threadId;
+    return threadSelectionRevision;
+  }
+
+  function isCurrentThreadSelection(revision: number): boolean {
+    return revision === threadSelectionRevision;
+  }
+
+  function finishThreadSelection(revision: number): void {
+    if (isCurrentThreadSelection(revision)) {
+      pendingThreadSelectionId = null;
+    }
+  }
+
+  function invalidateThreadSelection(): void {
+    threadSelectionRevision += 1;
+    pendingThreadSelectionId = null;
+  }
+
   function clearCurrentThread(): void {
+    const thread = currentThread();
+    if (thread !== null) {
+      threadPages.write({ thread, nextCursor: historyCursor() });
+    }
+    invalidateThreadSelection();
     batch(() => {
       setCurrentThread(null);
       setHistoryCursor(null);
     });
+  }
+
+  function accountSessionKey(value: AccountReadResponse | undefined): string | null {
+    const currentAccount = value?.account;
+    return currentAccount === null || currentAccount === undefined
+      ? null
+      : (currentAccount.email ?? "chatgpt");
   }
 
   function surfaceRefreshFailure(value: AccountReadResponse): void {
@@ -1676,8 +2075,17 @@ export function createAppController(): AppController {
 
   function reportError(reason: unknown): void {
     const message = describeError(reason);
+    const diagnostic = describeDiagnosticError(reason);
     setError(message);
-    addDiagnostic({ stream: "runtime", message });
+    addDiagnostic({ stream: "runtime", message: diagnostic });
+    if (engine() !== null) {
+      void reportFrontendDiagnostic(diagnostic).catch((persistenceFailure: unknown) => {
+        addDiagnostic({
+          stream: "runtime",
+          message: `Falha ao persistir diagnóstico do frontend: ${describeError(persistenceFailure)}`,
+        });
+      });
+    }
   }
 
   async function withPending<T>(operation: () => Promise<T>): Promise<T> {
@@ -1706,6 +2114,8 @@ export function createAppController(): AppController {
     activeTurnId,
     approvals,
     archivedThreads: visibleArchivedThreads,
+    archivedThreadsLoaded,
+    archivedThreadsLoading,
     archivedThreadsNextCursor,
     busy,
     config,
@@ -1726,13 +2136,15 @@ export function createAppController(): AppController {
     models,
     modelReroute,
     modelVerifications,
-    openingThreadId,
     pendingOperations,
     pinnedThreadIds,
     persistedTurns,
+    projectSectionExpanded,
     projects,
     queuedMessages,
     rateLimits,
+    rateLimitsError,
+    rateLimitsLoading,
     runtimeStatus,
     signedIn,
     safetyBuffering,
@@ -1748,10 +2160,13 @@ export function createAppController(): AppController {
     compactThread,
     deleteThread,
     deleteQueuedMessage,
+    ensureModelsForMode,
     enqueueMessage,
     forkThread,
     inspectFiles,
     interrupt,
+    projectExpanded,
+    projectThreadListExpanded,
     isThreadActive,
     loadMoreThreads,
     loadMoreArchivedThreads,
@@ -1762,6 +2177,8 @@ export function createAppController(): AppController {
     openThread,
     refreshAccountProfile: accountProfileRefresh.refreshIfStale,
     refreshRateLimits,
+    refreshRateLimitsIfStale: rateLimitRefresh.refreshIfStale,
+    reportError,
     removeProject: removeProjectFromSidebar,
     renameThread,
     retryInitialization,
@@ -1774,6 +2191,9 @@ export function createAppController(): AppController {
     sendQueuedMessageNow,
     takeQueuedMessage,
     togglePinnedThread,
+    toggleProjectExpanded,
+    toggleProjectSection,
+    toggleProjectThreadListExpanded,
     updateProject,
     updateSetting,
     unarchiveThread,
@@ -1819,16 +2239,20 @@ function streamDeltasFromNotification(notification: StreamNotification): readonl
   });
 }
 
-function withBootTimeout<T>(label: string, operation: () => Promise<T>): Promise<T> {
+function withBootTimeout<T>(
+  label: string,
+  timeoutMs: number,
+  operation: () => Promise<T>,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       reject(
-        new Error(
-          `O engine não respondeu em ${BOOT_TIMEOUT_MS / 1000} segundos ao ${label}. Tente novamente.`,
+        new InitializationTimeoutError(
+          `O engine não respondeu em ${timeoutMs / 1000} segundos ao ${label}. Tente novamente.`,
         ),
       );
-    }, BOOT_TIMEOUT_MS);
+    }, timeoutMs);
   });
   return Promise.race([operation(), timeout]).finally(() => clearTimeout(timer));
 }
@@ -1850,4 +2274,11 @@ function assertNever(value: never): never {
 
 function asError(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(describeError(reason));
+}
+
+function settledQueueTail(operation: Promise<unknown>): Promise<void> {
+  return operation.then(
+    () => undefined,
+    () => undefined,
+  );
 }

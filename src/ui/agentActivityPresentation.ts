@@ -39,6 +39,39 @@ const EXPLORATION_TOOLS = new Set(["code_search", "list_files", "read_file", "se
 const COMMAND_TOOLS = new Set(["run_shell", "shell"]);
 const WEB_TOOLS = new Set(["web_fetch", "web_search"]);
 
+export class AgentActivityProjectionStore {
+  #units: readonly AgentActivityRenderUnit[] = [];
+  #unitsByIdentity = new Map<string, AgentActivityRenderUnit>();
+
+  project(items: readonly VisibleThreadItem[]): readonly AgentActivityRenderUnit[] {
+    const projected = splitAgentActivityUnits(items);
+    const nextByIdentity = new Map<string, AgentActivityRenderUnit>();
+    const units = projected.map((unit) => {
+      const identity = agentActivityRenderUnitIdentity(unit);
+      if (nextByIdentity.has(identity)) {
+        throw new Error(
+          `A projeção de atividade produziu a chave duplicada ${JSON.stringify(identity)}.`,
+        );
+      }
+      const previous = this.#unitsByIdentity.get(identity);
+      const stable =
+        previous !== undefined && sameAgentActivityRenderUnit(previous, unit) ? previous : unit;
+      nextByIdentity.set(identity, stable);
+      return stable;
+    });
+    if (sameReferences(this.#units, units)) {
+      return this.#units;
+    }
+    this.#units = units;
+    this.#unitsByIdentity = nextByIdentity;
+    return units;
+  }
+}
+
+export function agentActivityRenderUnitIdentity(unit: AgentActivityRenderUnit): string {
+  return `${unit.kind}:${unit.key}`;
+}
+
 export function splitAgentActivityUnits(
   items: readonly VisibleThreadItem[],
 ): readonly AgentActivityRenderUnit[] {
@@ -216,11 +249,31 @@ export function webSearchActivityTitle(
   return `${base} por ${detail}`;
 }
 
-function isGroupableActivityItem(item: VisibleThreadItem): item is AgentActivityItem {
-  if (item.type === "commandExecution" || item.type === "fileChange") {
-    return true;
+function sameAgentActivityRenderUnit(
+  left: AgentActivityRenderUnit,
+  right: AgentActivityRenderUnit,
+): boolean {
+  if (left.kind !== right.kind || left.key !== right.key) {
+    return false;
   }
-  return item.type === "toolExecution" && !item.name.toLowerCase().includes("image");
+  if (left.kind === "item" && right.kind === "item") {
+    return left.item === right.item;
+  }
+  return (
+    left.kind === "activityGroup" &&
+    right.kind === "activityGroup" &&
+    sameReferences(left.items, right.items)
+  );
+}
+
+function sameReferences<T>(left: readonly T[], right: readonly T[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function isGroupableActivityItem(item: VisibleThreadItem): item is AgentActivityItem {
+  return (
+    item.type === "commandExecution" || item.type === "fileChange" || item.type === "toolExecution"
+  );
 }
 
 function activeFileChangeLabel(

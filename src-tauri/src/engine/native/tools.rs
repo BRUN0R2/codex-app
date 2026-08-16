@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -6,20 +7,22 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tauri::AppHandle;
-use tokio::io::{AsyncRead, AsyncReadExt as _};
-use tokio::process::Command;
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::watch;
 
 use super::apply_patch::parser::{ParsedPatch, parse_patch};
 use super::apply_patch::plan::{prepare_patch, preview_changes};
 use super::apply_patch::transaction::{PatchOutcome, commit_patch};
 use super::approval::ApprovalBroker;
+use super::output::OutputSource;
+use super::storage::NativeStorage;
+use super::terminal_output::{configure_plain_terminal, normalize_terminal_file};
 use crate::engine::{
     ActivityStatus, ApprovalDecision, CommandApprovalRequest, CommandSource, FileChange,
     FileChangeKind, PermissionProfile, PlanStep, PlanStepStatus, SandboxMode, ThreadItem,
 };
 use crate::error::AppError;
-use crate::process::background_command;
+use crate::process::{headless_command, headless_shell_command};
 
 pub(super) const MAX_PROVIDER_ITEM_BYTES: usize = 2 * 1_048_576;
 const MAX_TOOL_ARGUMENT_BYTES: usize = 262_144;
@@ -32,13 +35,12 @@ const MAX_SEARCH_FILES: usize = 10_000;
 const MAX_SEARCH_DIRECTORIES: usize = 10_000;
 const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 const MAX_COMMAND_BYTES: usize = 16_384;
-const MAX_COMMAND_OUTPUT_BYTES: usize = 1_048_576;
-const MAX_TOOL_OUTPUT_BYTES: usize = 1_048_576;
 const MAX_PLAN_STEPS: usize = 20;
 const MAX_PLAN_STEP_BYTES: usize = 1_024;
 const MAX_PLAN_EXPLANATION_BYTES: usize = 4_096;
 pub(super) const MAX_DIFF_BYTES: usize = 131_072;
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 60 * 60;
+const MAX_COMMAND_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Default)]
@@ -60,6 +62,7 @@ enum ToolOperation {
     SearchText(SearchTextArgs),
     EditFile(EditFileArgs),
     WriteFile(WriteFileArgs),
+    ReadOutput(ReadOutputArgs),
     ExecCommand(ExecCommandArgs),
     UpdatePlan {
         explanation: Option<String>,
@@ -71,6 +74,7 @@ enum ToolOperation {
 pub struct ToolExecutionResult {
     pub provider_output: String,
     pub completed_item: ThreadItem,
+    pub display_output: Option<OutputSource>,
 }
 
 pub struct ToolExecutionContext<'a> {
@@ -80,6 +84,7 @@ pub struct ToolExecutionContext<'a> {
     pub thread_id: &'a str,
     pub turn_id: &'a str,
     pub approvals: &'a ApprovalBroker,
+    pub storage: &'a NativeStorage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +133,15 @@ struct ExecCommandArgs {
     command: String,
     cwd: String,
     reason: String,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadOutputArgs {
+    output_id: String,
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,15 +241,34 @@ impl ToolRegistry {
             ),
             function_tool(
                 "exec_command",
-                "Run one bounded non-interactive PowerShell command in the workspace. Workspace-write mode asks the user first.",
+                "Run one non-interactive PowerShell command in the workspace. Output is spooled outside the conversation contract and remains available through read_output. Detached processes and external windows are unsupported; child processes remain headless and joined to the command lifetime. Workspace-write mode asks the user first.",
                 json!({
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "minLength": 1 },
                         "cwd": { "type": "string", "description": "Workspace-relative working directory, or . for the root." },
-                        "reason": { "type": "string", "minLength": 1, "description": "A concise user-facing reason." }
+                        "reason": { "type": "string", "minLength": 1, "description": "A concise user-facing reason." },
+                        "timeout_seconds": {
+                            "type": ["integer", "null"],
+                            "minimum": 1,
+                            "maximum": MAX_COMMAND_TIMEOUT_SECONDS,
+                            "description": "Command lifetime in seconds. Use null for the one-hour default; it can be extended to seven days for long-running work."
+                        }
                     },
-                    "required": ["command", "cwd", "reason"],
+                    "required": ["command", "cwd", "reason", "timeout_seconds"],
+                    "additionalProperties": false
+                }),
+            ),
+            function_tool(
+                "read_output",
+                "Read one UTF-8 chunk from a previously stored tool or command output. Start with a null cursor and follow next_cursor until it is null.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "output_id": { "type": "string", "minLength": 1 },
+                        "cursor": { "type": ["string", "null"] }
+                    },
+                    "required": ["output_id", "cursor"],
                     "additionalProperties": false
                 }),
             ),
@@ -322,12 +355,18 @@ impl ToolRegistry {
             }
             "exec_command" => {
                 let args: ExecCommandArgs = decode_arguments(name, arguments)?;
+                command_timeout(&args)?;
                 let description = format!("Run {}", truncate_utf8(&args.command, 160));
                 (
                     "exec_command",
                     description,
                     ToolOperation::ExecCommand(args),
                 )
+            }
+            "read_output" => {
+                let args: ReadOutputArgs = decode_arguments(name, arguments)?;
+                let description = format!("Read stored output {}", args.output_id);
+                ("read_output", description, ToolOperation::ReadOutput(args))
             }
             "update_plan" => {
                 let args: UpdatePlanArgs = decode_arguments(name, arguments)?;
@@ -378,10 +417,17 @@ impl ToolRegistry {
 }
 
 impl PreparedTool {
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
     pub fn is_parallel_safe(&self) -> bool {
         matches!(
             &self.operation,
-            ToolOperation::ReadFile(_) | ToolOperation::ListFiles(_) | ToolOperation::SearchText(_)
+            ToolOperation::ReadFile(_)
+                | ToolOperation::ListFiles(_)
+                | ToolOperation::SearchText(_)
+                | ToolOperation::ReadOutput(_)
         )
     }
 
@@ -440,14 +486,9 @@ impl PreparedTool {
         }
     }
 
-    pub fn failed_item(&self, workspace: &Path, error: &AppError) -> ThreadItem {
-        self.finish_item(
-            workspace,
-            ActivityStatus::Failed,
-            Some(error.to_string()),
-            None,
-            None,
-        )
+    pub fn failed_result(&self, workspace: &Path, error: &AppError) -> ToolExecutionResult {
+        let message = error.to_string();
+        self.result_with_output(workspace, ActivityStatus::Failed, message, None, None)
     }
 
     pub async fn execute(
@@ -463,6 +504,7 @@ impl PreparedTool {
                     explanation: explanation.clone(),
                     steps: steps.clone(),
                 },
+                display_output: None,
             });
         }
         let workspace = canonical_workspace(context.workspace).await?;
@@ -476,22 +518,42 @@ impl PreparedTool {
             )
             .await
             .map(ToolResult::Patch),
-            ToolOperation::ReadFile(args) => {
-                read_file(&workspace, args).await.map(ToolResult::Text)
-            }
-            ToolOperation::ListFiles(args) => {
-                list_files(&workspace, args).await.map(ToolResult::Text)
-            }
-            ToolOperation::SearchText(args) => {
-                search_text(&workspace, args).await.map(ToolResult::Text)
-            }
+            ToolOperation::ReadFile(args) => read_file(&workspace, args)
+                .await
+                .map(|output| ToolResult::StoredOutput(StoredToolOutput::Text(output))),
+            ToolOperation::ListFiles(args) => list_files(&workspace, args)
+                .await
+                .map(|output| ToolResult::StoredOutput(StoredToolOutput::Text(output))),
+            ToolOperation::SearchText(args) => search_text(&workspace, args)
+                .await
+                .map(|output| ToolResult::StoredOutput(StoredToolOutput::Text(output))),
+            ToolOperation::ReadOutput(args) => context
+                .storage
+                .read_output_for_thread(
+                    context.thread_id.to_string(),
+                    args.output_id.clone(),
+                    args.cursor.clone(),
+                )
+                .await
+                .map(|response| {
+                    ToolResult::StoredOutput(StoredToolOutput::OutputPage(format!(
+                        "output_id: {}\nnext_cursor: {}\nchunk:\n{}",
+                        response.output_id,
+                        response.next_cursor.as_deref().unwrap_or("null"),
+                        response.chunk
+                    )))
+                }),
             ToolOperation::EditFile(args) => {
                 require_workspace_write(context.permissions)?;
-                edit_file(&workspace, args).await.map(ToolResult::Text)
+                edit_file(&workspace, args)
+                    .await
+                    .map(ToolResult::MutationConfirmation)
             }
             ToolOperation::WriteFile(args) => {
                 require_workspace_write(context.permissions)?;
-                write_file(&workspace, args).await.map(ToolResult::Text)
+                write_file(&workspace, args)
+                    .await
+                    .map(ToolResult::MutationConfirmation)
             }
             ToolOperation::ExecCommand(args) => {
                 if context.permissions.sandbox == SandboxMode::ReadOnly {
@@ -520,16 +582,13 @@ impl PreparedTool {
                         ApprovalDecision::Accept => {}
                         ApprovalDecision::Decline => {
                             let output = "The user declined this command.".to_string();
-                            return Ok(ToolExecutionResult {
-                                provider_output: output.clone(),
-                                completed_item: self.finish_item(
-                                    &workspace,
-                                    ActivityStatus::Declined,
-                                    Some(output),
-                                    None,
-                                    Some(elapsed_millis(started_at)?),
-                                ),
-                            });
+                            return Ok(self.result_with_output(
+                                &workspace,
+                                ActivityStatus::Declined,
+                                output,
+                                None,
+                                Some(elapsed_millis(started_at)?),
+                            ));
                         }
                         ApprovalDecision::Cancel => {
                             return Err(AppError::Cancelled(
@@ -540,7 +599,7 @@ impl PreparedTool {
                 }
                 execute_command(&workspace, args, cancellation)
                     .await
-                    .map(ToolResult::Command)
+                    .map(|output| ToolResult::StoredOutput(StoredToolOutput::Command(output)))
             }
             ToolOperation::UpdatePlan { .. } => {
                 unreachable!("update_plan must complete before filesystem tool execution")
@@ -548,45 +607,66 @@ impl PreparedTool {
         };
 
         match execution {
-            Ok(ToolResult::Patch(outcome)) => {
-                if outcome.output.len() > MAX_TOOL_OUTPUT_BYTES {
-                    return Err(AppError::Tool(format!(
-                        "tool output exceeds {MAX_TOOL_OUTPUT_BYTES} bytes"
-                    )));
-                }
-                Ok(ToolExecutionResult {
-                    provider_output: outcome.output,
-                    completed_item: ThreadItem::FileChange {
-                        id: self.item_id.clone(),
-                        changes: outcome.changes,
-                        status: ActivityStatus::Completed,
-                    },
-                })
+            Ok(ToolResult::Patch(outcome)) => Ok(ToolExecutionResult {
+                provider_output: outcome.output,
+                completed_item: ThreadItem::FileChange {
+                    id: self.item_id.clone(),
+                    changes: outcome.changes,
+                    status: ActivityStatus::Completed,
+                },
+                display_output: None,
+            }),
+            Ok(ToolResult::MutationConfirmation(provider_output)) => {
+                self.complete_mutation_confirmation(&workspace, started_at, provider_output)
             }
-            Ok(result) => {
-                let (provider_output, exit_code) = result.into_output()?;
-                let duration = elapsed_millis(started_at)?;
-                let completed_item = self.finish_item(
-                    &workspace,
-                    ActivityStatus::Completed,
-                    Some(provider_output.clone()),
-                    exit_code,
-                    Some(duration),
-                );
-                Ok(ToolExecutionResult {
-                    provider_output,
-                    completed_item,
-                })
+            Ok(ToolResult::StoredOutput(output)) => {
+                self.complete_stored_output(&workspace, started_at, output)
+                    .await
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn complete_mutation_confirmation(
+        &self,
+        workspace: &Path,
+        started_at: Instant,
+        provider_output: String,
+    ) -> Result<ToolExecutionResult, AppError> {
+        let duration = elapsed_millis(started_at)?;
+        Ok(ToolExecutionResult {
+            provider_output,
+            completed_item: self.finish_item(
+                workspace,
+                ActivityStatus::Completed,
+                None,
+                Some(duration),
+            ),
+            display_output: None,
+        })
+    }
+
+    async fn complete_stored_output(
+        &self,
+        workspace: &Path,
+        started_at: Instant,
+        output: StoredToolOutput,
+    ) -> Result<ToolExecutionResult, AppError> {
+        let (output, provider_output, exit_code) = output.into_output().await?;
+        let duration = elapsed_millis(started_at)?;
+        let status = activity_status_for_exit_code(exit_code);
+        let completed_item = self.finish_item(workspace, status, exit_code, Some(duration));
+        Ok(ToolExecutionResult {
+            provider_output,
+            completed_item,
+            display_output: Some(output),
+        })
     }
 
     fn finish_item(
         &self,
         workspace: &Path,
         status: ActivityStatus,
-        output: Option<String>,
         exit_code: Option<i32>,
         duration_ms: Option<u64>,
     ) -> ThreadItem {
@@ -603,7 +683,7 @@ impl PreparedTool {
                 process_id: None,
                 source: CommandSource::Agent,
                 status,
-                aggregated_output: output,
+                aggregated_output: None,
                 exit_code,
                 duration_ms,
             },
@@ -639,41 +719,79 @@ impl PreparedTool {
                 name: self.name.into(),
                 description: self.description.clone(),
                 status,
-                output,
+                output: None,
             },
         }
+    }
+
+    fn result_with_output(
+        &self,
+        workspace: &Path,
+        status: ActivityStatus,
+        output: String,
+        exit_code: Option<i32>,
+        duration_ms: Option<u64>,
+    ) -> ToolExecutionResult {
+        let display_output = self
+            .can_own_stored_output()
+            .then(|| OutputSource::text(output.clone()));
+        ToolExecutionResult {
+            provider_output: display_output
+                .as_ref()
+                .map_or_else(|| output.clone(), OutputSource::provider_output),
+            completed_item: self.finish_item(workspace, status, exit_code, duration_ms),
+            display_output,
+        }
+    }
+
+    fn can_own_stored_output(&self) -> bool {
+        matches!(
+            &self.operation,
+            ToolOperation::ReadFile(_)
+                | ToolOperation::ListFiles(_)
+                | ToolOperation::SearchText(_)
+                | ToolOperation::ReadOutput(_)
+                | ToolOperation::ExecCommand(_)
+        )
     }
 }
 
 enum ToolResult {
-    Text(String),
-    Command(CommandOutput),
+    StoredOutput(StoredToolOutput),
+    MutationConfirmation(String),
     Patch(PatchOutcome),
 }
 
-impl ToolResult {
-    fn into_output(self) -> Result<(String, Option<i32>), AppError> {
-        let (output, exit_code) = match self {
-            Self::Text(output) => (output, None),
+enum StoredToolOutput {
+    Text(String),
+    OutputPage(String),
+    Command(CommandOutput),
+}
+
+impl StoredToolOutput {
+    async fn into_output(self) -> Result<(OutputSource, String, Option<i32>), AppError> {
+        match self {
+            Self::Text(output) => {
+                let source = OutputSource::text(output);
+                let provider_output = source.provider_output();
+                Ok((source, provider_output, None))
+            }
+            Self::OutputPage(output) => {
+                let provider_output = output.clone();
+                Ok((OutputSource::text(output), provider_output, None))
+            }
             Self::Command(output) => {
-                let text = format!(
-                    "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
-                    output.exit_code, output.stdout, output.stderr
-                );
-                (text, Some(output.exit_code))
+                let exit_code = output.exit_code;
+                let source = tokio::task::spawn_blocking(move || {
+                    OutputSource::command(exit_code, output.stdout, output.stderr)
+                })
+                .await
+                .map_err(|error| AppError::Tool(format!("output spool task failed: {error}")))?
+                .map_err(|error| AppError::Tool(format!("could not assemble output: {error}")))?;
+                let provider_output = source.provider_output();
+                Ok((source, provider_output, Some(exit_code)))
             }
-            Self::Patch(_) => {
-                return Err(AppError::State(
-                    "patch result escaped its dedicated completion path".into(),
-                ));
-            }
-        };
-        if output.len() > MAX_TOOL_OUTPUT_BYTES {
-            return Err(AppError::Tool(format!(
-                "tool output exceeds {MAX_TOOL_OUTPUT_BYTES} bytes"
-            )));
         }
-        Ok((output, exit_code))
     }
 }
 
@@ -690,8 +808,8 @@ async fn execute_patch_operation(
 
 struct CommandOutput {
     exit_code: i32,
-    stdout: String,
-    stderr: String,
+    stdout: File,
+    stderr: File,
 }
 
 async fn read_file(workspace: &Path, args: &ReadFileArgs) -> Result<String, AppError> {
@@ -881,8 +999,10 @@ async fn execute_command(
             "command reason must contain between 1 and 1024 bytes".into(),
         ));
     }
+    let command_timeout = command_timeout(args)?;
     let cwd = resolve_existing_directory(workspace, &args.cwd).await?;
-    let mut command = shell_command(&args.command);
+    let mut command = headless_shell_command(&args.command);
+    configure_plain_terminal(&mut command);
     let mut child = command
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -899,11 +1019,13 @@ async fn execute_command(
         .stderr
         .take()
         .ok_or_else(|| AppError::Tool("command stderr pipe was not created".into()))?;
-    let mut stdout_task = tokio::spawn(read_stream_bounded(stdout, MAX_COMMAND_OUTPUT_BYTES / 2));
-    let mut stderr_task = tokio::spawn(read_stream_bounded(stderr, MAX_COMMAND_OUTPUT_BYTES / 2));
+    let mut stdout_task = tokio::spawn(read_stream_spooled(stdout));
+    let mut stderr_task = tokio::spawn(read_stream_spooled(stderr));
     let mut stdout_output = None;
     let mut stderr_output = None;
-    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    let deadline = Instant::now()
+        .checked_add(command_timeout)
+        .ok_or_else(|| AppError::Tool("command timeout could not be represented".into()))?;
 
     let status = loop {
         if *cancellation.borrow() {
@@ -978,32 +1100,43 @@ async fn execute_command(
         .ok_or_else(|| AppError::Tool("command ended without an exit code".into()))?;
     Ok(CommandOutput {
         exit_code,
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout,
+        stderr,
     })
 }
 
+fn command_timeout(args: &ExecCommandArgs) -> Result<Duration, AppError> {
+    let timeout_seconds = args
+        .timeout_seconds
+        .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECONDS);
+    if timeout_seconds == 0 || timeout_seconds > MAX_COMMAND_TIMEOUT_SECONDS {
+        return Err(AppError::Tool(format!(
+            "command timeout must contain between 1 and {MAX_COMMAND_TIMEOUT_SECONDS} seconds"
+        )));
+    }
+    Ok(Duration::from_secs(timeout_seconds))
+}
+
 async fn finish_capture_ref(
-    task: &mut tokio::task::JoinHandle<Result<Vec<u8>, AppError>>,
+    task: &mut tokio::task::JoinHandle<Result<File, AppError>>,
     label: &str,
-) -> Result<Vec<u8>, AppError> {
+) -> Result<File, AppError> {
     task.await
         .map_err(|error| AppError::Tool(format!("{label} reader failed: {error}")))?
 }
 
 async fn finish_capture(
-    task: tokio::task::JoinHandle<Result<Vec<u8>, AppError>>,
+    task: tokio::task::JoinHandle<Result<File, AppError>>,
     label: &str,
-) -> Result<Vec<u8>, AppError> {
+) -> Result<File, AppError> {
     task.await
         .map_err(|error| AppError::Tool(format!("{label} reader failed: {error}")))?
 }
 
-async fn read_stream_bounded<R: AsyncRead + Unpin>(
-    mut stream: R,
-    maximum_bytes: usize,
-) -> Result<Vec<u8>, AppError> {
-    let mut output = Vec::new();
+async fn read_stream_spooled<R: AsyncRead + Unpin>(mut stream: R) -> Result<File, AppError> {
+    let output = tempfile::tempfile()
+        .map_err(|error| AppError::Tool(format!("could not create output spool: {error}")))?;
+    let mut output = tokio::fs::File::from_std(output);
     let mut buffer = [0u8; 8_192];
     loop {
         let count = stream
@@ -1011,15 +1144,22 @@ async fn read_stream_bounded<R: AsyncRead + Unpin>(
             .await
             .map_err(|error| AppError::Tool(format!("could not read process output: {error}")))?;
         if count == 0 {
-            return Ok(output);
+            break;
         }
-        if output.len().saturating_add(count) > maximum_bytes {
-            return Err(AppError::Tool(format!(
-                "command output exceeds {maximum_bytes} bytes per stream"
-            )));
-        }
-        output.extend_from_slice(&buffer[..count]);
+        output
+            .write_all(&buffer[..count])
+            .await
+            .map_err(|error| AppError::Tool(format!("could not spool process output: {error}")))?;
     }
+    output
+        .flush()
+        .await
+        .map_err(|error| AppError::Tool(format!("could not flush process output: {error}")))?;
+    let raw = output.into_std().await;
+    tokio::task::spawn_blocking(move || normalize_terminal_file(raw))
+        .await
+        .map_err(|error| AppError::Tool(format!("terminal normalization task failed: {error}")))?
+        .map_err(|error| AppError::Tool(format!("could not normalize process output: {error}")))
 }
 
 #[cfg(windows)]
@@ -1029,7 +1169,7 @@ async fn terminate_child(child: &mut tokio::process::Child) -> Result<(), AppErr
             AppError::Tool(format!("could not inspect command process: {error}"))
         });
     };
-    let mut taskkill = background_command("taskkill.exe");
+    let mut taskkill = headless_command("taskkill.exe");
     taskkill
         .args(["/PID", &process_id.to_string(), "/T", "/F"])
         .kill_on_drop(true);
@@ -1103,26 +1243,6 @@ async fn terminate_child(child: &mut tokio::process::Child) -> Result<(), AppErr
         .kill()
         .await
         .map_err(|error| AppError::Tool(format!("could not terminate command process: {error}")))
-}
-
-#[cfg(windows)]
-fn shell_command(command: &str) -> Command {
-    let mut process = background_command("powershell.exe");
-    process.args([
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        command,
-    ]);
-    process
-}
-
-#[cfg(not(windows))]
-fn shell_command(command: &str) -> Command {
-    let mut process = background_command("sh");
-    process.args(["-lc", command]);
-    process
 }
 
 async fn canonical_workspace(workspace: &Path) -> Result<PathBuf, AppError> {
@@ -1499,27 +1619,78 @@ fn elapsed_millis(started_at: Instant) -> Result<u64, AppError> {
         .map_err(|error| AppError::Tool(format!("duration overflow: {error}")))
 }
 
+fn activity_status_for_exit_code(exit_code: Option<i32>) -> ActivityStatus {
+    if exit_code.is_some_and(|code| code != 0) {
+        ActivityStatus::Failed
+    } else {
+        ActivityStatus::Completed
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    use serde_json::Value;
     use tempfile::TempDir;
     use tokio::sync::watch;
 
     use crate::engine::{ActivityStatus, PermissionProfile, PlanStepStatus, ThreadItem};
+    use crate::error::AppError;
 
     use super::{
-        MAX_TOOL_OUTPUT_BYTES, SearchTextArgs, ToolOperation, ToolRegistry, ToolResult,
-        atomic_write, execute_patch_operation, resolve_write_target, search_text,
+        MAX_COMMAND_TIMEOUT_SECONDS, SearchTextArgs, StoredToolOutput, ToolOperation, ToolRegistry,
+        activity_status_for_exit_code, atomic_write, execute_patch_operation, resolve_write_target,
+        search_text,
     };
 
     #[test]
-    fn rejects_tool_output_before_it_can_cross_the_native_contract() {
-        let output = "x".repeat(MAX_TOOL_OUTPUT_BYTES + 1);
+    fn command_exit_code_controls_the_visual_activity_status() {
+        assert!(matches!(
+            activity_status_for_exit_code(Some(1)),
+            ActivityStatus::Failed
+        ));
+        assert!(matches!(
+            activity_status_for_exit_code(Some(0)),
+            ActivityStatus::Completed
+        ));
+        assert!(matches!(
+            activity_status_for_exit_code(None),
+            ActivityStatus::Completed
+        ));
+    }
 
-        let error = ToolResult::Text(output)
+    #[tokio::test(flavor = "current_thread")]
+    async fn externalizes_tool_output_instead_of_rejecting_it() {
+        let output = "x".repeat(2 * 1_048_576);
+
+        let (source, provider_output, exit_code) = StoredToolOutput::Text(output.clone())
             .into_output()
-            .expect_err("oversized tool output must fail before persistence or notification");
+            .await
+            .expect("large tool output should remain available as a resource");
 
-        assert!(matches!(error, crate::error::AppError::Tool(_)));
+        assert_eq!(source.reference().byte_length, output.len() as u64);
+        assert!(provider_output.contains(&source.reference().id));
+        assert_eq!(exit_code, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn returns_a_requested_output_page_directly_to_the_provider() {
+        let output_page = format!(
+            "output_id: output-1\nnext_cursor: 2\nchunk:\n{}",
+            "x".repeat(64 * 1_024)
+        );
+
+        let (source, provider_output, exit_code) =
+            StoredToolOutput::OutputPage(output_page.clone())
+                .into_output()
+                .await
+                .expect("an output page should remain directly readable");
+
+        assert_eq!(provider_output, output_page);
+        assert!(source.reference().next_cursor.is_some());
+        assert_eq!(exit_code, None);
     }
 
     #[test]
@@ -1587,6 +1758,195 @@ mod tests {
         assert!(read.is_parallel_safe());
         assert!(search.is_parallel_safe());
         assert!(!command.is_parallel_safe());
+    }
+
+    #[test]
+    fn command_timeout_can_cover_long_running_autonomous_work() {
+        let registry = ToolRegistry;
+        let extended = format!(
+            r#"{{"command":"Get-Date","cwd":".","reason":"test","timeout_seconds":{MAX_COMMAND_TIMEOUT_SECONDS}}}"#
+        );
+        registry
+            .prepare("command-long".into(), "exec_command", &extended)
+            .expect("the seven-day command timeout should prepare");
+
+        let excessive = format!(
+            r#"{{"command":"Get-Date","cwd":".","reason":"test","timeout_seconds":{}}}"#,
+            MAX_COMMAND_TIMEOUT_SECONDS + 1
+        );
+        assert!(
+            registry
+                .prepare("command-too-long".into(), "exec_command", &excessive)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn exec_command_timeout_schema_is_required_and_nullable() {
+        let definition = ToolRegistry
+            .definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "exec_command")
+            .expect("exec_command should be advertised");
+        let parameters = &definition["parameters"];
+
+        assert_eq!(
+            parameters["required"],
+            serde_json::json!(["command", "cwd", "reason", "timeout_seconds"])
+        );
+        assert_eq!(
+            parameters["properties"]["timeout_seconds"]["type"],
+            serde_json::json!(["integer", "null"])
+        );
+
+        ToolRegistry
+            .prepare(
+                "command-default-timeout".into(),
+                "exec_command",
+                r#"{"command":"Get-Date","cwd":".","reason":"test","timeout_seconds":null}"#,
+            )
+            .expect("a null timeout should use the default");
+    }
+
+    #[test]
+    fn strict_function_schemas_require_every_declared_property() {
+        for definition in ToolRegistry
+            .definitions()
+            .into_iter()
+            .filter(|tool| tool["type"] == "function")
+        {
+            let name = definition["name"]
+                .as_str()
+                .expect("function tools should have names");
+            assert_eq!(definition["strict"], true, "{name} must use strict mode");
+            assert_strict_object_schema(&definition["parameters"], name);
+        }
+    }
+
+    fn assert_strict_object_schema(schema: &Value, context: &str) {
+        let Some(schema) = schema.as_object() else {
+            return;
+        };
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            assert_eq!(
+                schema.get("additionalProperties"),
+                Some(&Value::Bool(false)),
+                "{context} must reject undeclared properties"
+            );
+            let required = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("{context} must declare required properties"));
+            let required_names = required
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{context}.required must contain strings"))
+                })
+                .collect::<BTreeSet<_>>();
+            let property_names = properties
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                required_names, property_names,
+                "{context}.required must contain every declared property"
+            );
+
+            for (name, property) in properties {
+                assert_strict_object_schema(property, &format!("{context}.{name}"));
+            }
+        }
+        if let Some(items) = schema.get("items") {
+            assert_strict_object_schema(items, &format!("{context}[]"));
+        }
+        for keyword in ["allOf", "anyOf", "oneOf"] {
+            if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
+                for (index, branch) in branches.iter().enumerate() {
+                    assert_strict_object_schema(branch, &format!("{context}.{keyword}[{index}]"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_file_mutations_preserve_the_error_without_storing_output() {
+        let registry = ToolRegistry;
+        let patch = registry
+            .prepare_custom(
+                "patch-failure".into(),
+                "apply_patch",
+                "*** Begin Patch\n*** Add File: new.txt\n+content\n*** End Patch",
+            )
+            .expect("patch should prepare");
+        let edit = registry
+            .prepare(
+                "edit-failure".into(),
+                "edit_file",
+                r#"{"path":"source.txt","old_text":"old","new_text":"new","expected_occurrences":1}"#,
+            )
+            .expect("edit should prepare");
+        let write = registry
+            .prepare(
+                "write-failure".into(),
+                "write_file",
+                r#"{"path":"source.txt","content":"new","overwrite":true}"#,
+            )
+            .expect("write should prepare");
+        let error = AppError::FileSystem("the target is unavailable".into());
+
+        for prepared in [patch, edit, write] {
+            let result = prepared.failed_result(Path::new("C:\\workspace"), &error);
+            assert!(result.display_output.is_none());
+            assert!(result.provider_output.contains("target is unavailable"));
+            assert!(matches!(
+                result.completed_item,
+                ThreadItem::FileChange {
+                    status: ActivityStatus::Failed,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn successful_file_mutations_do_not_create_stored_output_resources() {
+        let registry = ToolRegistry;
+        let edit = registry
+            .prepare(
+                "edit-success".into(),
+                "edit_file",
+                r#"{"path":"source.txt","old_text":"old","new_text":"new","expected_occurrences":1}"#,
+            )
+            .expect("edit should prepare");
+        let write = registry
+            .prepare(
+                "write-success".into(),
+                "write_file",
+                r#"{"path":"source.txt","content":"new","overwrite":true}"#,
+            )
+            .expect("write should prepare");
+
+        for prepared in [edit, write] {
+            let result = prepared
+                .complete_mutation_confirmation(
+                    Path::new("C:\\workspace"),
+                    std::time::Instant::now(),
+                    "File changed.".into(),
+                )
+                .expect("mutation confirmation should complete");
+
+            assert_eq!(result.provider_output, "File changed.");
+            assert!(result.display_output.is_none());
+            assert!(matches!(
+                result.completed_item,
+                ThreadItem::FileChange {
+                    status: ActivityStatus::Completed,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

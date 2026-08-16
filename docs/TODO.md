@@ -5,7 +5,17 @@
   decisão de aprovação ao vivo em uma tarefa descartável já autorizada. Não
   acionar a interrupção enquanto vigorar a instrução de não usar **Stop**.
 - [ ] Após reiniciar o Codex para carregar o MCP `chrome-devtools`, capturar um
-  trace de uma conversa de estresse no build de produção e registrar Long Tasks,
-  heap, quantidade de nós DOM, INP e estabilidade do scroll em `PERFORMANCE.md`.
+  trace de uma conversa de estresse no build de produção. Intercalar steers,
+  expandir trabalho longo, percorrer histórico virtualizado e abrir saída shell
+  extensa. Abrir uma revisão grande, alternar entre unified e split e percorrer
+  início, meio e fim do diff. Registrar Long Tasks, heap, nós DOM, INP,
+  estabilidade do scroll, containment da viewport e nitidez em
+  `PERFORMANCE.md`.
+- [ ] Em um terminal sem limite de 120 segundos por processo, concluir
+  `pnpm release:build` e executar `pnpm measure:release`; registrar startup,
+  working set e memória privada do executável atualizado em `PERFORMANCE.md`.
+  Em 16 de agosto de 2026, quatro execuções/retomadas acumularam 2.315 artefatos
+  release, mas a etapa final com ThinLTO/codegen-unit único foi encerrada pelo
+  teto do executor antes da linkedição e não produziu um executável mensurável.
 - [ ] Inserir os quatro secrets reais de publicação descritos em
   `docs/RELEASE.md` quando o certificado do distribuidor estiver disponível.

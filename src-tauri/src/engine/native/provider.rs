@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use tauri::AppHandle;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use self::client::ProviderClient;
 use self::models::ModelCatalog;
@@ -39,6 +39,7 @@ const MAX_MODELS: usize = 100;
 pub struct ChatGptCodexProvider {
     client: ProviderClient,
     catalog: RwLock<Option<Arc<ModelCatalog>>>,
+    refresh_gate: Mutex<()>,
 }
 
 impl ChatGptCodexProvider {
@@ -51,7 +52,7 @@ impl ChatGptCodexProvider {
         app: &AppHandle,
         auth: &ChatGptAuth,
     ) -> Result<ModelListResponse, AppError> {
-        let catalog = self.refresh_catalog(app, auth).await?;
+        let catalog = self.catalog(app, auth).await?;
         Ok(ModelListResponse {
             data: catalog
                 .models()
@@ -67,10 +68,7 @@ impl ChatGptCodexProvider {
         auth: &ChatGptAuth,
         requested: Option<&str>,
     ) -> Result<SelectedModel, AppError> {
-        let catalog = match self.catalog.read().await.clone() {
-            Some(catalog) => catalog,
-            None => self.refresh_catalog(app, auth).await?,
-        };
+        let catalog = self.catalog(app, auth).await?;
         catalog.select(requested)
     }
 
@@ -103,14 +101,22 @@ impl ChatGptCodexProvider {
     }
 
     pub async fn clear_session_state(&self) {
+        let _refresh_guard = self.refresh_gate.lock().await;
         *self.catalog.write().await = None;
     }
 
-    async fn refresh_catalog(
+    async fn catalog(
         &self,
         app: &AppHandle,
         auth: &ChatGptAuth,
     ) -> Result<Arc<ModelCatalog>, AppError> {
+        if let Some(catalog) = self.catalog.read().await.clone() {
+            return Ok(catalog);
+        }
+        let _refresh_guard = self.refresh_gate.lock().await;
+        if let Some(catalog) = self.catalog.read().await.clone() {
+            return Ok(catalog);
+        }
         let session = auth.session(app).await?;
         let catalog = Arc::new(self.client.fetch_models(&session, MAX_MODELS).await?);
         *self.catalog.write().await = Some(Arc::clone(&catalog));
@@ -133,7 +139,7 @@ impl UsagePayload {
         let plan_type = Some(self.plan_type.into_domain());
         let reached = self
             .rate_limit_reached_type
-            .map(|value| value.kind.into_domain());
+            .map(|value| value.value.into_domain());
         let primary = RateLimitSnapshot {
             limit_id: Some("codex".into()),
             limit_name: None,
@@ -294,7 +300,8 @@ impl SpendLimitWire {
 
 #[derive(Debug, Deserialize)]
 struct RateLimitReachedWire {
-    kind: RateLimitReachedKindWire,
+    #[serde(rename = "type")]
+    value: RateLimitReachedKindWire,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -368,10 +375,33 @@ impl AccountPlanTypeWire {
 #[cfg(test)]
 mod tests {
     use super::UsagePayload;
+    use crate::engine::contracts::RateLimitReachedType;
 
     #[test]
     fn rejects_unknown_plan_values_instead_of_falling_back() {
         let result = serde_json::from_str::<UsagePayload>(r#"{"plan_type":"future"}"#);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn decodes_rate_limit_reached_type_from_the_server_type_field() {
+        let payload = serde_json::from_str::<UsagePayload>(
+            r#"{
+                "plan_type": "pro",
+                "rate_limit_reached_type": {
+                    "type": "workspace_member_usage_limit_reached"
+                }
+            }"#,
+        )
+        .expect("the usage payload should decode");
+
+        let response = payload
+            .into_domain()
+            .expect("the decoded usage payload should be valid");
+
+        assert!(matches!(
+            response.rate_limits.rate_limit_reached_type,
+            Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached)
+        ));
     }
 }

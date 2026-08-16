@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use reqwest::Method;
 use reqwest::Response;
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{
+    ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER, USER_AGENT,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -15,8 +17,9 @@ use tokio::sync::watch;
 use super::integrity::{IntegrityHeaders, IntegrityRequirements, requirements_key};
 use super::models::ModelsWire;
 use super::stream::ChatStream;
-use crate::engine::ChatThinkingEffort;
 use crate::engine::native::auth::AuthSession;
+use crate::engine::native::diagnostics::RuntimeDiagnostics;
+use crate::engine::{ChatThinkingEffort, RuntimeDiagnosticSubsystem};
 use crate::error::AppError;
 
 const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
@@ -74,12 +77,14 @@ impl ChatClient {
         .map_err(|_| AppError::Timeout {
             operation: "ChatGPT model catalog",
         })?
-        .map_err(|error| AppError::Provider(error.to_string()))?;
+        .map_err(|error| AppError::Transport(error.to_string()))?;
         decode_json(response, "ChatGPT model catalog", 4 * 1_048_576).await
     }
 
     pub async fn start_conversation(
         &self,
+        app: &AppHandle,
+        diagnostics: &RuntimeDiagnostics,
         session: &AuthSession,
         mut request: ChatConversationRequest,
         cancellation: &mut watch::Receiver<bool>,
@@ -92,7 +97,19 @@ impl ChatClient {
         let integrity = self.prepare_integrity(session).await?;
         let mut prepare_request = request.clone();
         prepare_request.client_prepare_state = Some("sent");
-        let prepare = self.prepare_conversation(session, &prepare_request).await;
+        let prepare = match self.prepare_conversation(session, &prepare_request).await {
+            Ok(prepare) => Some(prepare),
+            Err(error) => {
+                diagnostics.emit(
+                    app,
+                    RuntimeDiagnosticSubsystem::Provider,
+                    format!(
+                        "optional ChatGPT conversation preparation failed; continuing without a conduit token: {error}"
+                    ),
+                );
+                None
+            }
+        };
         request.client_prepare_state = Some(if prepare.is_some() {
             "success"
         } else {
@@ -128,7 +145,7 @@ impl ChatClient {
             }
             result = send => result
                 .map_err(|_| AppError::Timeout { operation: "ChatGPT response connection" })?
-                .map_err(|error| AppError::Provider(error.to_string()))?,
+                .map_err(|error| AppError::Transport(error.to_string()))?,
         };
         if !response.status().is_success() {
             return Err(response_error(response).await);
@@ -150,7 +167,7 @@ impl ChatClient {
         .map_err(|_| AppError::Timeout {
             operation: "ChatGPT integrity preparation",
         })?
-        .map_err(|error| AppError::Provider(error.to_string()))?;
+        .map_err(|error| AppError::Transport(error.to_string()))?;
         let requirements: IntegrityRequirements =
             decode_json(response, "ChatGPT integrity preparation", 1_048_576).await?;
         tokio::task::spawn_blocking(move || requirements.solve())
@@ -164,21 +181,20 @@ impl ChatClient {
         &self,
         session: &AuthSession,
         request: &ChatConversationRequest,
-    ) -> Option<PrepareResponse> {
+    ) -> Result<PrepareResponse, AppError> {
         let builder = self
-            .authorized(Method::POST, PREPARE_URL, session)
-            .ok()?
+            .authorized(Method::POST, PREPARE_URL, session)?
             .header(ACCEPT, "application/json")
             .header(CONTENT_TYPE, "application/json")
             .header("x-conduit-token", "no-token")
             .json(request);
         let response = tokio::time::timeout(REQUEST_TIMEOUT, builder.send())
             .await
-            .ok()?
-            .ok()?;
-        decode_json(response, "ChatGPT conversation preparation", 1_048_576)
-            .await
-            .ok()
+            .map_err(|_| AppError::Timeout {
+                operation: "ChatGPT conversation preparation",
+            })?
+            .map_err(|error| AppError::Transport(error.to_string()))?;
+        decode_json(response, "ChatGPT conversation preparation", 1_048_576).await
     }
 
     fn authorized(
@@ -441,15 +457,40 @@ async fn decode_json<T: DeserializeOwned>(
 
 async fn response_error(response: Response) -> AppError {
     let status = response.status().as_u16();
-    let message = match read_limited(response, MAX_ERROR_BYTES).await {
-        Ok(bytes) if bytes.is_empty() => "the provider returned an empty error body".into(),
-        Ok(bytes) => decode_error_message(&bytes),
-        Err(error) => format!("the provider error body could not be read: {error}"),
+    let retry_after_header = response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0);
+    let decoded = match read_limited(response, MAX_ERROR_BYTES).await {
+        Ok(bytes) if bytes.is_empty() => DecodedChatError {
+            code: None,
+            message: "the provider returned an empty error body".into(),
+            retry_after_seconds: None,
+        },
+        Ok(bytes) => decode_error(&bytes),
+        Err(error) => DecodedChatError {
+            code: None,
+            message: format!("the provider error body could not be read: {error}"),
+            retry_after_seconds: None,
+        },
     };
-    AppError::ProviderHttp { status, message }
+    AppError::from_provider_rejection(
+        Some(status),
+        decoded.code.as_deref(),
+        decoded.message,
+        decoded.retry_after_seconds.or(retry_after_header),
+    )
 }
 
-fn decode_error_message(bytes: &[u8]) -> String {
+struct DecodedChatError {
+    code: Option<String>,
+    message: String,
+    retry_after_seconds: Option<u64>,
+}
+
+fn decode_error(bytes: &[u8]) -> DecodedChatError {
     let body = String::from_utf8_lossy(bytes);
     let value = serde_json::from_slice::<Value>(bytes).ok();
     let error = value
@@ -459,7 +500,24 @@ fn decode_error_message(bytes: &[u8]) -> String {
         .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
         .unwrap_or(body.trim());
-    bounded_error_text(message)
+    let code = error
+        .and_then(|error| {
+            error
+                .get("code")
+                .or_else(|| error.get("type"))
+                .and_then(Value::as_str)
+        })
+        .map(bounded_error_text)
+        .filter(|code| !code.is_empty());
+    let retry_after_seconds = error
+        .and_then(|error| error.get("resets_in_seconds"))
+        .and_then(Value::as_u64)
+        .filter(|seconds| *seconds > 0);
+    DecodedChatError {
+        code,
+        message: bounded_error_text(message),
+        retry_after_seconds,
+    }
 }
 
 fn bounded_error_text(value: &str) -> String {
@@ -495,7 +553,7 @@ async fn read_limited(response: Response, maximum_bytes: usize) -> Result<Vec<u8
     let mut output = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| AppError::Provider(error.to_string()))?;
+        let chunk = chunk.map_err(|error| AppError::Transport(error.to_string()))?;
         if output.len().saturating_add(chunk.len()) > maximum_bytes {
             return Err(AppError::Provider(format!(
                 "provider response exceeds {maximum_bytes} bytes"
@@ -508,8 +566,9 @@ async fn read_limited(response: Response, maximum_bytes: usize) -> Result<Vec<u8
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatConversationRequest, validate_device_id};
+    use super::{ChatConversationRequest, decode_error, validate_device_id};
     use crate::engine::ChatThinkingEffort;
+    use crate::error::AppError;
 
     #[test]
     fn consumer_request_uses_thinking_effort_and_never_reasoning_mode() {
@@ -540,5 +599,27 @@ mod tests {
             "018f22ec-a65c-7b33-98b1-3f66dc79dfef"
         );
         assert!(validate_device_id("not-a-device-id").is_err());
+    }
+
+    #[test]
+    fn usage_limit_error_preserves_code_and_reset_delay() {
+        let decoded = decode_error(
+            br#"{"error":{"type":"usage_limit_reached","message":"limit reached","resets_in_seconds":7200}}"#,
+        );
+
+        assert_eq!(decoded.code.as_deref(), Some("usage_limit_reached"));
+        assert_eq!(decoded.retry_after_seconds, Some(7_200));
+        assert!(matches!(
+            AppError::from_provider_rejection(
+                Some(429),
+                decoded.code.as_deref(),
+                decoded.message,
+                decoded.retry_after_seconds,
+            ),
+            AppError::RateLimited {
+                retry_after_seconds: Some(7_200),
+                ..
+            }
+        ));
     }
 }

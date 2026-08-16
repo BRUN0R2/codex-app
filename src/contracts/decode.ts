@@ -1,3 +1,4 @@
+import { exceedsUtf8ByteLength, utf8ByteLength } from "../utf8";
 import type {
   AccountPlanType,
   AccountProfileResponse,
@@ -5,6 +6,7 @@ import type {
   AccountReadResponse,
   ActivityStatus,
   AppConfig,
+  ApplicationPreferences,
   ApprovalPolicy,
   Attachment,
   AttachmentImageResponse,
@@ -36,8 +38,10 @@ import type {
   ModelListResponse,
   ModelServiceTier,
   ModelVerbosity,
+  ModerationMetadata,
   MotionPreference,
   OperationAck,
+  OutputReadResponse,
   PermissionProfile,
   Personality,
   PlanStepStatus,
@@ -55,6 +59,7 @@ import type {
   ThreadForkResponse,
   ThreadItem,
   ThreadListResponse,
+  ThreadOutput,
   ThreadReadResponse,
   ThreadResumeResponse,
   ThreadStartResponse,
@@ -72,8 +77,8 @@ import type {
 type UnknownRecord = Record<string, unknown>;
 
 const MAX_STRING_BYTES = 4 * 1_048_576;
-const MAX_TOOL_OUTPUT_BYTES = 1_048_576;
 const MAX_COLLECTION_LENGTH = 10_000;
+const MAX_OUTPUT_CHUNK_BYTES = 64 * 1_024;
 
 const RUNTIME_STATES = ["failed", "ready", "starting", "stopped"] as const;
 const CONVERSATION_MODES = ["chat", "work", "codex"] as const;
@@ -143,6 +148,7 @@ const RATE_LIMIT_REACHED_TYPES = [
 ] as const;
 const MODEL_REROUTE_REASONS = ["highRiskCyberActivity"] as const;
 const MODEL_VERIFICATIONS = ["trustedAccessForCyber"] as const;
+const MODERATION_PRESENTATIONS = ["inline"] as const;
 
 export class ContractError extends Error {
   public readonly path: string;
@@ -156,8 +162,9 @@ export class ContractError extends Error {
 
 export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
   const object = exactRecord(value, "$", [
+    "config",
+    "diagnosticLogPath",
     "engine",
-    "permissionProfile",
     "permissionProfiles",
     "schemaVersion",
   ]);
@@ -170,8 +177,10 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [5] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [8] as const);
   return {
+    config: decodeConfigReadResponse(object.config),
+    diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
     engine: {
       id: text(engine.id, "$.engine.id"),
       name: text(engine.name, "$.engine.name"),
@@ -184,7 +193,6 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
       ),
     },
     schemaVersion,
-    permissionProfile: decodePermissionProfile(object.permissionProfile, "$.permissionProfile"),
     permissionProfiles: array(
       object.permissionProfiles,
       "$.permissionProfiles",
@@ -364,6 +372,51 @@ export function decodeOperationAck(value: unknown): OperationAck {
   return { applied: literal(object.applied, "$.applied", [true] as const) };
 }
 
+export function decodeOutputReadResponse(value: unknown): OutputReadResponse {
+  const object = exactRecord(value, "$", ["byteLength", "chunk", "nextCursor", "outputId"]);
+  const byteLength = integer(object.byteLength, "$.byteLength", 0, Number.MAX_SAFE_INTEGER);
+  const chunk = text(object.chunk, "$.chunk", MAX_OUTPUT_CHUNK_BYTES, true);
+  const chunkBytes = utf8ByteLength(chunk);
+  if (chunkBytes > byteLength) {
+    throw new ContractError("$.chunk", "chunk cannot be larger than its output resource");
+  }
+  if (byteLength === 0 && chunk.length > 0) {
+    throw new ContractError("$.chunk", "an empty output resource cannot contain text");
+  }
+  const nextCursor = nullableText(object.nextCursor, "$.nextCursor", 20);
+  if (nextCursor !== null && !/^\d+$/u.test(nextCursor)) {
+    throw new ContractError("$.nextCursor", "expected a numeric output cursor");
+  }
+  return {
+    outputId: identifier(object.outputId, "$.outputId"),
+    chunk,
+    byteLength,
+    nextCursor,
+  };
+}
+
+export function decodeApplicationPreferences(value: unknown): ApplicationPreferences {
+  const object = exactRecord(value, "$", [
+    "closeToTray",
+    "schemaVersion",
+    "startMinimized",
+    "startWithWindows",
+  ]);
+  const preferences: ApplicationPreferences = {
+    schemaVersion: literal(object.schemaVersion, "$.schemaVersion", [1] as const),
+    startWithWindows: booleanValue(object.startWithWindows, "$.startWithWindows"),
+    startMinimized: booleanValue(object.startMinimized, "$.startMinimized"),
+    closeToTray: booleanValue(object.closeToTray, "$.closeToTray"),
+  };
+  if (preferences.startMinimized && !preferences.startWithWindows) {
+    throw new ContractError(
+      "$.startMinimized",
+      "starting minimized requires Windows startup to be enabled",
+    );
+  }
+  return preferences;
+}
+
 export function decodeConfigReadResponse(value: unknown): ConfigReadResponse {
   const object = exactRecord(value, "$", ["config", "version"]);
   return {
@@ -513,7 +566,7 @@ export function decodeEngineNotification(value: unknown): EngineNotification {
         params: {
           threadId: identifier(params.threadId, "$.params.threadId"),
           turnId: identifier(params.turnId, "$.params.turnId"),
-          metadata: boundedJsonValue(params.metadata, "$.params.metadata"),
+          metadata: decodeModerationMetadata(params.metadata, "$.params.metadata"),
         },
       };
     }
@@ -1040,11 +1093,7 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
         processId: nullableText(item.processId, `${path}.processId`),
         source: literal(item.source, `${path}.source`, ["agent"] as const),
         status: literal(item.status, `${path}.status`, ACTIVITY_STATUSES),
-        aggregatedOutput: nullableText(
-          item.aggregatedOutput,
-          `${path}.aggregatedOutput`,
-          MAX_TOOL_OUTPUT_BYTES,
-        ),
+        aggregatedOutput: nullableThreadOutput(item.aggregatedOutput, `${path}.aggregatedOutput`),
         exitCode:
           item.exitCode === null
             ? null
@@ -1079,7 +1128,7 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
         name: identifier(item.name, `${path}.name`),
         description: text(item.description, `${path}.description`, 4_096),
         status: literal(item.status, `${path}.status`, ACTIVITY_STATUSES),
-        output: nullableText(item.output, `${path}.output`, MAX_TOOL_OUTPUT_BYTES),
+        output: nullableThreadOutput(item.output, `${path}.output`),
       };
     }
     default:
@@ -1251,6 +1300,13 @@ function decodeDesktopPreferences(value: unknown, path: string): DesktopPreferen
   };
 }
 
+function decodeModerationMetadata(value: unknown, path: string): ModerationMetadata {
+  const object = exactRecord(value, path, ["presentation"]);
+  return {
+    presentation: literal(object.presentation, `${path}.presentation`, MODERATION_PRESENTATIONS),
+  };
+}
+
 function decodeRateLimitSnapshot(value: unknown, path: string): RateLimitSnapshot {
   const object = exactRecord(value, path, [
     "credits",
@@ -1390,43 +1446,6 @@ function exactRecord<const Keys extends readonly string[]>(
   return object as Record<Keys[number], unknown>;
 }
 
-function boundedJsonValue(value: unknown, path: string, depth = 0): unknown {
-  if (depth > 32) {
-    throw new ContractError(path, "JSON nesting exceeds 32 levels");
-  }
-  if (value === null || typeof value === "boolean") {
-    return value;
-  }
-  if (typeof value === "string") {
-    return text(value, path, 1_048_576, true);
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new ContractError(path, "expected a finite JSON number");
-    }
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return array(
-      value,
-      path,
-      (entry, entryPath) => boundedJsonValue(entry, entryPath, depth + 1),
-      MAX_COLLECTION_LENGTH,
-    );
-  }
-  const object = record(value, path);
-  const entries = Object.entries(object);
-  if (entries.length > MAX_COLLECTION_LENGTH) {
-    throw new ContractError(path, `object exceeds ${MAX_COLLECTION_LENGTH} entries`);
-  }
-  return Object.fromEntries(
-    entries.map(([key, entry]) => [
-      text(key, `${path} key`, 1_024),
-      boundedJsonValue(entry, `${path}.${key}`, depth + 1),
-    ]),
-  );
-}
-
 function field(object: UnknownRecord, key: string): unknown {
   return object[key];
 }
@@ -1480,10 +1499,7 @@ function text(
   if (typeof value !== "string") {
     throw new ContractError(path, "expected a string");
   }
-  if (
-    (!allowEmpty && value.length === 0) ||
-    new TextEncoder().encode(value).length > maximumBytes
-  ) {
+  if ((!allowEmpty && value.length === 0) || exceedsUtf8ByteLength(value, maximumBytes)) {
     throw new ContractError(path, `string must contain at most ${maximumBytes} UTF-8 bytes`);
   }
   return value;
@@ -1503,6 +1519,37 @@ function nullableText(
   maximumBytes = MAX_STRING_BYTES,
 ): string | null {
   return value === null ? null : text(value, path, maximumBytes);
+}
+
+function nullableThreadOutput(value: unknown, path: string): ThreadOutput | null {
+  if (value === null) {
+    return null;
+  }
+  const object = exactRecord(value, path, ["byteLength", "id", "nextCursor", "preview"]);
+  const preview = text(object.preview, `${path}.preview`, MAX_OUTPUT_CHUNK_BYTES, true);
+  const previewBytes = utf8ByteLength(preview);
+  const byteLength = integer(
+    object.byteLength,
+    `${path}.byteLength`,
+    previewBytes,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (byteLength <= MAX_OUTPUT_CHUNK_BYTES && previewBytes !== byteLength) {
+    throw new ContractError(path, "small output resources must include their complete preview");
+  }
+  const nextCursor = nullableText(object.nextCursor, `${path}.nextCursor`, 20);
+  if (nextCursor !== null && !/^\d+$/u.test(nextCursor)) {
+    throw new ContractError(`${path}.nextCursor`, "expected a numeric output cursor");
+  }
+  if ((previewBytes === byteLength) !== (nextCursor === null)) {
+    throw new ContractError(path, "output preview and continuation cursor are inconsistent");
+  }
+  return {
+    id: identifier(object.id, `${path}.id`),
+    preview,
+    byteLength,
+    nextCursor,
+  };
 }
 
 function urlText(value: unknown, path: string, protocols: readonly string[]): string {

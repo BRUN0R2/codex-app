@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import type { FileChange, VisibleThreadItem } from "../contracts/types";
 import {
   type AgentActivityItem,
+  AgentActivityProjectionStore,
   activeAgentActivity,
+  agentActivityRenderUnitIdentity,
   agentActivitySummaryLabel,
   shouldRenderAgentActivityGroup,
   splitAgentActivityUnits,
@@ -46,21 +48,21 @@ describe("agent activity presentation", () => {
     );
   });
 
-  it("groups only meaningful activity runs and keeps image results standalone", () => {
-    const image = tool("image-1", "view_image");
+  it("groups every typed activity without name-based presentation exceptions", () => {
     const units = splitAgentActivityUnits([
       command("command-1"),
       webSearch("search-1"),
-      image,
+      tool("image-1", "view_image"),
       command("command-2"),
     ]);
 
-    expect(units.map(({ kind }) => kind)).toEqual(["activityGroup", "item", "activityGroup"]);
+    expect(units.map(({ kind }) => kind)).toEqual(["activityGroup"]);
     expect(units[0]?.kind === "activityGroup" ? units[0].items.map(({ id }) => id) : []).toEqual([
       "command-1",
       "search-1",
+      "image-1",
+      "command-2",
     ]);
-    expect(units[1]).toEqual({ kind: "item", key: "image-1", item: image });
   });
 
   it("keeps reasoning out of the rendered trace without splitting adjacent activity", () => {
@@ -98,6 +100,39 @@ describe("agent activity presentation", () => {
     expect(initial[0]?.key).toBe("activity:command-1");
     expect(withCommand[0]?.key).toBe(initial[0]?.key);
     expect(withFileChange[0]?.key).toBe(initial[0]?.key);
+  });
+
+  it("preserves projected objects when reasoning changes without changing activity", () => {
+    const store = new AgentActivityProjectionStore();
+    const firstCommand = command("command-1");
+    const secondCommand = command("command-2");
+    const initial = store.project([firstCommand, secondCommand]);
+    const withReasoning = store.project([
+      firstCommand,
+      {
+        type: "reasoning",
+        id: "reasoning-1",
+        summary: ["Atualizando análise"],
+        content: [],
+      },
+      secondCommand,
+    ]);
+
+    expect(withReasoning).toBe(initial);
+    expect(withReasoning[0]).toBe(initial[0]);
+  });
+
+  it("keeps semantic identity while replacing only a changed activity unit", () => {
+    const store = new AgentActivityProjectionStore();
+    const firstCommand = command("command-1");
+    const initial = store.project([firstCommand]);
+    const completed = store.project([{ ...firstCommand, durationMs: 20 }]);
+
+    expect(completed).not.toBe(initial);
+    expect(completed[0]).not.toBe(initial[0]);
+    expect(completed[0] === undefined ? null : agentActivityRenderUnitIdentity(completed[0])).toBe(
+      initial[0] === undefined ? null : agentActivityRenderUnitIdentity(initial[0]),
+    );
   });
 
   it("only keeps a lone completed row grouped while it owns the current activity heading", () => {

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { parseSplitDiff, parseUnifiedDiff, summarizeDiff } from "./SplitDiffView";
+import {
+  createDiffDocument,
+  monospaceColumnCount,
+  parseSplitDiff,
+  parseUnifiedDiff,
+  summarizeDiff,
+} from "./diffDocument";
 
-describe("SplitDiffView", () => {
+describe("diff document", () => {
   it("parses headers, removals, additions and context lines correctly", () => {
     const diff =
       "--- before\n+++ after\n@@ -4,2 +4,2 @@ header\n-old line\n+new line\n context line";
@@ -41,5 +47,29 @@ describe("SplitDiffView", () => {
     const diff = "--- a/file.ts\n+++ b/file.ts\n@@ -1,2 +1,3 @@\n-old\n+new\n+extra\n context";
 
     expect(summarizeDiff(diff)).toEqual({ additions: 2, deletions: 1 });
+  });
+
+  it("builds the split projection lazily and reuses its immutable result", () => {
+    const document = createDiffDocument("@@ -1 +1 @@\n-before\n+after");
+    const first = document.splitProjection();
+
+    expect(document.splitProjection()).toBe(first);
+    expect(first.rows).toHaveLength(2);
+  });
+
+  it("measures tab-expanded monospace columns deterministically", () => {
+    expect(monospaceColumnCount("a\tb")).toBe(5);
+  });
+
+  it("parses a large diff without dropping any visible line", () => {
+    const lineCount = 50_000;
+    const diff = `@@ -1,${lineCount} +1,${lineCount} @@\n${Array.from(
+      { length: lineCount },
+      (_, index) => ` line ${index}`,
+    ).join("\n")}`;
+    const document = createDiffDocument(diff);
+
+    expect(document.unifiedRows).toHaveLength(lineCount + 1);
+    expect(document.stats).toEqual({ additions: 0, deletions: 0 });
   });
 });

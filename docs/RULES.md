@@ -90,7 +90,18 @@ historico.
 * Credenciais pertencem ao diretorio e ao cofre privados deste aplicativo;
   nunca devem ser importadas da CLI, copiadas, expostas ou reinterpretadas pela
   interface.
-* Nao criar adaptadores, aliases, migracoes ou caminhos de retrocompatibilidade.
+* Nao criar adaptadores, aliases ou caminhos de retrocompatibilidade para a CLI,
+  protocolos, contratos ou formatos externos obsoletos.
+* Migracoes internas do schema e dos dados persistidos pelo proprio aplicativo
+  sao permitidas quando necessarias para preservar dados existentes ou evoluir o
+  produto. Toda migracao interna deve:
+  * possuir versao explicita e escopo delimitado;
+  * validar a identidade e o schema do banco antes de executar;
+  * ser atomica e transacional, sem deixar estado parcial em caso de falha;
+  * preservar a integridade dos dados ou interromper a operacao de forma visivel;
+  * possuir testes de sucesso, falha e integridade dos dados;
+  * permanecer restrita ao dominio interno, sem importar formatos externos ou
+    criar uma camada geral de compatibilidade.
 
 Qualquer tecnologia nova deve ter motivo claro, escopo isolado e custo de
 manutencao proporcional ao beneficio.

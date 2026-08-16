@@ -6,7 +6,8 @@ import {
   hasRecentTimelineUserScrollIntent,
   isTimelineNearEnd,
   resolveTimelineFollowing,
-  revealExpandedDisclosureScrollTop,
+  resolveTimelineRestorationTop,
+  shouldSynchronizeTimelineToEnd,
 } from "./timelineScroll";
 
 describe("timeline scroll metrics", () => {
@@ -61,6 +62,47 @@ describe("timeline scroll metrics", () => {
     expect(hasRecentTimelineUserScrollIntent(Number.NEGATIVE_INFINITY, 1_000)).toBe(false);
   });
 
+  it("never lets a layout frame fight recent user scroll intent", () => {
+    expect(
+      shouldSynchronizeTimelineToEnd({
+        followingLatest: true,
+        layoutRequested: true,
+        recentUserIntent: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldSynchronizeTimelineToEnd({
+        followingLatest: true,
+        layoutRequested: true,
+        recentUserIntent: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("restores either the saved viewport or the exact end deterministically", () => {
+    expect(
+      resolveTimelineRestorationTop({
+        followingLatest: false,
+        maximumScroll: 1_000,
+        savedScrollTop: 320,
+      }),
+    ).toBe(320);
+    expect(
+      resolveTimelineRestorationTop({
+        followingLatest: false,
+        maximumScroll: 200,
+        savedScrollTop: 320,
+      }),
+    ).toBe(200);
+    expect(
+      resolveTimelineRestorationTop({
+        followingLatest: true,
+        maximumScroll: 1_000,
+        savedScrollTop: 320,
+      }),
+    ).toBe(1_000);
+  });
+
   it("finds the active message with logarithmic ordered anchor reads", () => {
     const anchorTops = [80, 260, 480, 720, 980, 1_260, 1_580, 1_920];
     let reads = 0;
@@ -80,45 +122,5 @@ describe("timeline scroll metrics", () => {
 
   it("keeps the first message active before its anchor reaches the viewport", () => {
     expect(findTimelineAnchorIndex(3, (index) => [100, 200, 300][index] ?? 0, 20)).toBe(0);
-  });
-
-  it("makes newly expanded details reachable inside the bounded activity viewport", () => {
-    expect(
-      revealExpandedDisclosureScrollTop({
-        clientHeight: 224,
-        detailsBottom: 480,
-        detailsTop: 160,
-        scrollHeight: 620,
-        scrollTop: 120,
-        summaryBottom: 250,
-        viewportTop: 40,
-      }),
-    ).toBeCloseTo(259.6);
-
-    expect(
-      revealExpandedDisclosureScrollTop({
-        clientHeight: 224,
-        detailsBottom: 220,
-        detailsTop: 80,
-        scrollHeight: 620,
-        scrollTop: 120,
-        summaryBottom: 100,
-        viewportTop: 40,
-      }),
-    ).toBe(120);
-  });
-
-  it("revela o painel inteiro quando ele cabe na viewport limitada", () => {
-    expect(
-      revealExpandedDisclosureScrollTop({
-        clientHeight: 224,
-        detailsBottom: 505,
-        detailsTop: 294,
-        scrollHeight: 524,
-        scrollTop: 188,
-        summaryBottom: 320,
-        viewportTop: 248,
-      }),
-    ).toBe(221);
   });
 });

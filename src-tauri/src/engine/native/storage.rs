@@ -1,3 +1,4 @@
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -6,16 +7,20 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 use tauri::{AppHandle, Manager as _};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use super::context_window::ContextUsageSnapshot;
+use super::output::{OUTPUT_CHUNK_BYTES, OutputSource};
 use super::provider::ResponseItem;
+use super::terminal_output::normalize_terminal_bytes;
 use crate::engine::{
     AppConfig, CompletedTurn, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
-    ConversationMode, DesktopPreferences, OperationAck, ThreadActiveFlag, ThreadItem,
-    ThreadListResponse, ThreadStatus, ThreadSummary, TurnStatus, TurnSummary,
+    ConversationMode, DesktopPreferences, OperationAck, OutputReadResponse, ThreadActiveFlag,
+    ThreadItem, ThreadListResponse, ThreadOutput, ThreadStatus, ThreadSummary, TurnStatus,
+    TurnSummary,
 };
 use crate::error::AppError;
 
@@ -27,15 +32,15 @@ mod history;
 use self::history::{StoredThreadPage, parse_history_cursor, read_thread_page as load_thread_page};
 
 const DATABASE_FILE_NAME: &str = "native-state-profile-v2.sqlite3";
-const DATABASE_SCHEMA_VERSION: i64 = 1;
+const DATABASE_SCHEMA_VERSION: i64 = 2;
 const DATABASE_APPLICATION_ID: i64 = 1_128_552_527;
-const DATABASE_TABLES: &str =
-    "app_config,chat_conversations,provider_items,thread_items,threads,turns";
+const DATABASE_TABLES: &str = "app_config,chat_conversations,output_chunks,output_resources,provider_items,thread_items,threads,turns";
 const THREAD_COLUMNS: &str = "id,cwd,name,preview,archived,created_at,updated_at,project_path,mode";
 const TURN_COLUMNS: &str =
     "id,thread_id,owner_id,status,model,reasoning_effort,error,created_at,updated_at";
 const THREAD_PAGE_SIZE: usize = 50;
 const MAX_CURSOR_BYTES: usize = 20;
+const MAX_OUTPUT_CURSOR_BYTES: usize = 20;
 const MAX_ITEM_BYTES: usize = 2 * 1_048_576;
 const MAX_HISTORY_BYTES: usize = 32 * 1_048_576;
 const MAX_HISTORY_ITEMS: usize = 20_000;
@@ -154,7 +159,13 @@ impl NativeStorage {
             if version == 0 && application_id == 0 {
                 initialize_database(&mut connection)?;
             } else {
-                validate_database(&connection, version, application_id)?;
+                if application_id == DATABASE_APPLICATION_ID && version == 1 {
+                    migrate_database_v1_to_v2(&mut connection)?;
+                }
+                let migrated_version: i64 = connection
+                    .query_row("PRAGMA user_version", [], |row| row.get(0))
+                    .map_err(storage_error)?;
+                validate_database(&connection, migrated_version, application_id)?;
             }
 
             let transaction = connection
@@ -281,6 +292,93 @@ impl NativeStorage {
         run_blocking(move || {
             let connection = pool.get().map_err(pool_error)?;
             load_thread_page(&connection, &thread_id, cursor.as_ref())
+        })
+        .await
+    }
+
+    pub async fn read_output(
+        &self,
+        output_id: String,
+        cursor: Option<String>,
+    ) -> Result<OutputReadResponse, AppError> {
+        self.read_output_scoped(None, output_id, cursor).await
+    }
+
+    pub(super) async fn read_output_for_thread(
+        &self,
+        thread_id: String,
+        output_id: String,
+        cursor: Option<String>,
+    ) -> Result<OutputReadResponse, AppError> {
+        self.read_output_scoped(Some(thread_id), output_id, cursor)
+            .await
+    }
+
+    async fn read_output_scoped(
+        &self,
+        thread_id: Option<String>,
+        output_id: String,
+        cursor: Option<String>,
+    ) -> Result<OutputReadResponse, AppError> {
+        validate_text("output id", &output_id, MAX_IDENTIFIER_BYTES)?;
+        if output_id.chars().any(char::is_control) {
+            return Err(AppError::Protocol(
+                "output id contains control characters".into(),
+            ));
+        }
+        let sequence = parse_output_cursor(cursor.as_deref())?;
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let sequence_sql = i64::try_from(sequence).map_err(|error| {
+                AppError::Protocol(format!("output cursor is too large: {error}"))
+            })?;
+            let metadata = connection
+                .query_row(
+                    "SELECT output_resources.byte_length
+                     FROM output_resources
+                     JOIN turns ON turns.id = output_resources.turn_id
+                     WHERE output_resources.id = ?1
+                       AND (?2 IS NULL OR turns.thread_id = ?2)",
+                    params![output_id, thread_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(storage_error)?
+                .ok_or_else(|| AppError::State("stored output does not exist".into()))?;
+            let byte_length = u64::try_from(metadata)
+                .map_err(|error| AppError::Storage(format!("invalid output size: {error}")))?;
+            let chunk = connection
+                .query_row(
+                    "SELECT content FROM output_chunks
+                     WHERE output_id = ?1 AND sequence = ?2",
+                    params![output_id, sequence_sql],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(storage_error)?
+                .ok_or_else(|| {
+                    AppError::Protocol("output cursor is outside the resource".into())
+                })?;
+            let next_sequence = sequence_sql
+                .checked_add(1)
+                .ok_or_else(|| AppError::Storage("output sequence overflowed".into()))?;
+            let has_more: bool = connection
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM output_chunks
+                         WHERE output_id = ?1 AND sequence = ?2
+                     )",
+                    params![output_id, next_sequence],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            Ok(OutputReadResponse {
+                output_id,
+                chunk,
+                byte_length,
+                next_cursor: has_more.then(|| next_sequence.to_string()),
+            })
         })
         .await
     }
@@ -532,16 +630,7 @@ impl NativeStorage {
                         ],
                     )
                     .map_err(storage_error)?;
-                transaction
-                    .execute(
-                        "INSERT INTO thread_items (turn_id, item_id, payload)
-                         SELECT ?1, item_id, payload
-                         FROM thread_items
-                         WHERE turn_id = ?2
-                         ORDER BY sequence",
-                        params![fork_turn_id, source_turn_id],
-                    )
-                    .map_err(storage_error)?;
+                copy_thread_items_for_fork(&transaction, &source_turn_id, &fork_turn_id)?;
             }
             transaction
                 .execute(
@@ -872,20 +961,27 @@ impl NativeStorage {
     pub async fn append_thread_item(
         &self,
         turn_id: String,
-        item: ThreadItem,
-    ) -> Result<(), AppError> {
+        mut item: ThreadItem,
+        output: Option<OutputSource>,
+    ) -> Result<ThreadItem, AppError> {
         let item_id = item.id().to_string();
+        prepare_thread_item_output(&mut item, output.as_ref())?;
         let payload = encode_bounded(&item, MAX_ITEM_BYTES, "thread item")?;
         let pool = self.pool().await?;
         run_blocking(move || {
-            let connection = pool.get().map_err(pool_error)?;
-            connection
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            transaction
                 .execute(
                     "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
-                    params![turn_id, item_id, payload],
+                    params![&turn_id, &item_id, payload],
                 )
                 .map_err(storage_error)?;
-            Ok(())
+            if let Some(output) = output {
+                persist_output_source(&transaction, &turn_id, &item_id, output)?;
+            }
+            transaction.commit().map_err(storage_error)?;
+            Ok(item)
         })
         .await
     }
@@ -974,9 +1070,11 @@ impl NativeStorage {
         thread_id: String,
         turn_id: String,
         provider_item: &ResponseItem,
-        thread_item: ThreadItem,
-    ) -> Result<(), AppError> {
+        mut thread_item: ThreadItem,
+        output: Option<OutputSource>,
+    ) -> Result<ThreadItem, AppError> {
         let item_id = thread_item.id().to_string();
+        prepare_thread_item_output(&mut thread_item, output.as_ref())?;
         let provider_payload = encode_bounded(provider_item, MAX_ITEM_BYTES, "provider item")?;
         let thread_payload = encode_bounded(&thread_item, MAX_ITEM_BYTES, "thread item")?;
         let pool = self.pool().await?;
@@ -986,16 +1084,20 @@ impl NativeStorage {
             transaction
                 .execute(
                     "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
-                    params![thread_id, provider_payload],
+                    params![&thread_id, provider_payload],
                 )
                 .map_err(storage_error)?;
             transaction
                 .execute(
                     "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
-                    params![turn_id, item_id, thread_payload],
+                    params![&turn_id, &item_id, thread_payload],
                 )
                 .map_err(storage_error)?;
-            transaction.commit().map_err(storage_error)
+            if let Some(output) = output {
+                persist_output_source(&transaction, &turn_id, &item_id, output)?;
+            }
+            transaction.commit().map_err(storage_error)?;
+            Ok(thread_item)
         })
         .await
     }
@@ -1608,6 +1710,202 @@ fn validate_user_item(item: &ThreadItem) -> Result<(), AppError> {
     Ok(())
 }
 
+fn copy_thread_items_for_fork(
+    transaction: &Transaction<'_>,
+    source_turn_id: &str,
+    fork_turn_id: &str,
+) -> Result<(), AppError> {
+    let rows = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT item_id, payload FROM thread_items
+                 WHERE turn_id = ?1 ORDER BY sequence",
+            )
+            .map_err(storage_error)?;
+        statement
+            .query_map([source_turn_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_error)?
+    };
+
+    for (item_id, payload) in rows {
+        let mut item: ThreadItem = decode_bounded(&payload, MAX_ITEM_BYTES, "forked thread item")?;
+        let copied_output = thread_item_output_mut(&mut item)
+            .and_then(Option::as_mut)
+            .map(|reference| {
+                let source_id = reference.id.clone();
+                reference.id = Uuid::now_v7().to_string();
+                (source_id, reference.clone())
+            });
+        let payload = encode_bounded(&item, MAX_ITEM_BYTES, "forked thread item")?;
+        transaction
+            .execute(
+                "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
+                params![fork_turn_id, item_id, payload],
+            )
+            .map_err(storage_error)?;
+
+        let Some((source_output_id, target)) = copied_output else {
+            continue;
+        };
+        let byte_length = i64::try_from(target.byte_length)
+            .map_err(|error| AppError::Storage(format!("output size overflow: {error}")))?;
+        let changed = transaction
+            .execute(
+                "INSERT INTO output_resources (id, turn_id, item_id, byte_length)
+                 SELECT ?1, ?2, ?3, byte_length
+                 FROM output_resources
+                 WHERE id = ?4 AND turn_id = ?5 AND item_id = ?3 AND byte_length = ?6",
+                params![
+                    target.id,
+                    fork_turn_id,
+                    item_id,
+                    source_output_id,
+                    source_turn_id,
+                    byte_length
+                ],
+            )
+            .map_err(storage_error)?;
+        require_changed(changed, "forked output resource")?;
+        transaction
+            .execute(
+                "INSERT INTO output_chunks (output_id, sequence, content)
+                 SELECT ?1, sequence, content FROM output_chunks
+                 WHERE output_id = ?2 ORDER BY sequence",
+                params![target.id, source_output_id],
+            )
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+fn thread_item_output_mut(item: &mut ThreadItem) -> Option<&mut Option<ThreadOutput>> {
+    match item {
+        ThreadItem::CommandExecution {
+            aggregated_output, ..
+        } => Some(aggregated_output),
+        ThreadItem::ToolExecution { output, .. } => Some(output),
+        _ => None,
+    }
+}
+
+fn prepare_thread_item_output(
+    item: &mut ThreadItem,
+    output: Option<&OutputSource>,
+) -> Result<(), AppError> {
+    let target = thread_item_output_mut(item);
+    match (target, output) {
+        (Some(target), Some(output)) if target.is_none() => {
+            *target = Some(output.reference());
+            Ok(())
+        }
+        (Some(_), Some(_)) => Err(AppError::State(
+            "thread item already contains an output reference".into(),
+        )),
+        (Some(target), None) if target.is_none() => Ok(()),
+        (Some(_), None) => Err(AppError::State(
+            "thread item output reference has no stored source".into(),
+        )),
+        (None, Some(_)) => Err(AppError::State(
+            "this thread item type cannot own stored output".into(),
+        )),
+        (None, None) => Ok(()),
+    }
+}
+
+fn persist_output_source(
+    transaction: &Transaction<'_>,
+    turn_id: &str,
+    item_id: &str,
+    source: OutputSource,
+) -> Result<(), AppError> {
+    let reference = source.reference();
+    let byte_length = i64::try_from(reference.byte_length)
+        .map_err(|error| AppError::Storage(format!("output size overflow: {error}")))?;
+    transaction
+        .execute(
+            "INSERT INTO output_resources (id, turn_id, item_id, byte_length)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![reference.id, turn_id, item_id, byte_length],
+        )
+        .map_err(storage_error)?;
+
+    let mut reader = source
+        .into_reader()
+        .map_err(|error| AppError::Storage(format!("could not open output source: {error}")))?;
+    let mut pending = Vec::with_capacity(OUTPUT_CHUNK_BYTES + 4);
+    let mut buffer = [0u8; OUTPUT_CHUNK_BYTES];
+    let mut sequence = 0i64;
+    let mut total_bytes = 0u64;
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| AppError::Storage(format!("could not read output source: {error}")))?;
+        if count == 0 {
+            if !pending.is_empty() || sequence == 0 {
+                let content = std::str::from_utf8(&pending).map_err(|error| {
+                    AppError::Storage(format!("stored output is not valid UTF-8: {error}"))
+                })?;
+                insert_output_chunk(transaction, &reference.id, sequence, content)?;
+            }
+            break;
+        }
+        total_bytes = total_bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| AppError::Storage("output byte count overflowed".into()))?;
+        pending.extend_from_slice(&buffer[..count]);
+        while pending.len() >= OUTPUT_CHUNK_BYTES {
+            let split = utf8_chunk_boundary(&pending, OUTPUT_CHUNK_BYTES)?;
+            let content = std::str::from_utf8(&pending[..split]).map_err(|error| {
+                AppError::Storage(format!("stored output is not valid UTF-8: {error}"))
+            })?;
+            insert_output_chunk(transaction, &reference.id, sequence, content)?;
+            sequence = sequence
+                .checked_add(1)
+                .ok_or_else(|| AppError::Storage("output chunk sequence overflowed".into()))?;
+            pending.drain(..split);
+        }
+    }
+    if total_bytes != reference.byte_length {
+        return Err(AppError::Storage(format!(
+            "output source changed size from {} to {total_bytes} bytes",
+            reference.byte_length
+        )));
+    }
+    Ok(())
+}
+
+fn insert_output_chunk(
+    transaction: &Transaction<'_>,
+    output_id: &str,
+    sequence: i64,
+    content: &str,
+) -> Result<(), AppError> {
+    transaction
+        .execute(
+            "INSERT INTO output_chunks (output_id, sequence, content) VALUES (?1, ?2, ?3)",
+            params![output_id, sequence, content],
+        )
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn utf8_chunk_boundary(bytes: &[u8], maximum_bytes: usize) -> Result<usize, AppError> {
+    let end = bytes.len().min(maximum_bytes);
+    match std::str::from_utf8(&bytes[..end]) {
+        Ok(_) => Ok(end),
+        Err(error) if error.error_len().is_none() && error.valid_up_to() > 0 => {
+            Ok(error.valid_up_to())
+        }
+        Err(error) => Err(AppError::Storage(format!(
+            "stored output is not valid UTF-8: {error}"
+        ))),
+    }
+}
+
 fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
     if value.len() <= maximum_bytes {
         return value.to_string();
@@ -1632,6 +1930,21 @@ fn parse_cursor(cursor: Option<&str>) -> Result<usize, AppError> {
     cursor
         .parse()
         .map_err(|_| AppError::Protocol("thread cursor is outside the supported range".into()))
+}
+
+fn parse_output_cursor(cursor: Option<&str>) -> Result<usize, AppError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    if cursor.is_empty()
+        || cursor.len() > MAX_OUTPUT_CURSOR_BYTES
+        || !cursor.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(AppError::Protocol("output cursor is invalid".into()));
+    }
+    cursor
+        .parse()
+        .map_err(|_| AppError::Protocol("output cursor is outside the supported range".into()))
 }
 
 fn status_name(status: TurnStatus) -> &'static str {
@@ -1745,6 +2058,23 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
                  UNIQUE(turn_id, item_id)
              );
              CREATE INDEX thread_items_turn_sequence ON thread_items(turn_id, sequence);
+             CREATE TABLE output_resources (
+                 id TEXT PRIMARY KEY,
+                 turn_id TEXT NOT NULL,
+                 item_id TEXT NOT NULL,
+                 byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
+                 FOREIGN KEY (turn_id, item_id)
+                     REFERENCES thread_items(turn_id, item_id) ON DELETE CASCADE,
+                 UNIQUE(turn_id, item_id)
+             );
+             CREATE INDEX output_resources_turn_item
+                 ON output_resources(turn_id, item_id);
+             CREATE TABLE output_chunks (
+                 output_id TEXT NOT NULL REFERENCES output_resources(id) ON DELETE CASCADE,
+                 sequence INTEGER NOT NULL CHECK (sequence >= 0),
+                 content TEXT NOT NULL,
+                 PRIMARY KEY (output_id, sequence)
+             );
              CREATE TABLE provider_items (
                  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
@@ -1774,6 +2104,102 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
     transaction
         .pragma_update(None, "application_id", DATABASE_APPLICATION_ID)
         .map_err(storage_error)?;
+    transaction
+        .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_database_v1_to_v2(connection: &mut Connection) -> Result<(), AppError> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE output_resources (
+                 id TEXT PRIMARY KEY,
+                 turn_id TEXT NOT NULL,
+                 item_id TEXT NOT NULL,
+                 byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
+                 FOREIGN KEY (turn_id, item_id)
+                     REFERENCES thread_items(turn_id, item_id) ON DELETE CASCADE,
+                 UNIQUE(turn_id, item_id)
+             );
+             CREATE INDEX output_resources_turn_item
+                 ON output_resources(turn_id, item_id);
+             CREATE TABLE output_chunks (
+                 output_id TEXT NOT NULL REFERENCES output_resources(id) ON DELETE CASCADE,
+                 sequence INTEGER NOT NULL CHECK (sequence >= 0),
+                 content TEXT NOT NULL,
+                 PRIMARY KEY (output_id, sequence)
+             );",
+        )
+        .map_err(storage_error)?;
+
+    let rows = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT sequence, turn_id, item_id, payload
+                 FROM thread_items
+                 ORDER BY sequence",
+            )
+            .map_err(storage_error)?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_error)?
+    };
+
+    for (sequence, turn_id, item_id, payload) in rows {
+        let mut item: Value = decode_bounded(&payload, MAX_ITEM_BYTES, "legacy thread item")?;
+        let object = item.as_object_mut().ok_or_else(|| {
+            AppError::Storage(format!("legacy thread item {sequence} is not an object"))
+        })?;
+        let item_type = object.get("type").and_then(Value::as_str).ok_or_else(|| {
+            AppError::Storage(format!("legacy thread item {sequence} has no type"))
+        })?;
+        let field = match item_type {
+            "commandExecution" => "aggregatedOutput",
+            "toolExecution" => "output",
+            _ => continue,
+        };
+        let Some(value) = object.get(field) else {
+            return Err(AppError::Storage(format!(
+                "legacy thread item {sequence} has no {field} field"
+            )));
+        };
+        if value.is_null() {
+            continue;
+        }
+        let output = value.as_str().ok_or_else(|| {
+            AppError::Storage(format!(
+                "legacy thread item {sequence} contains a non-text {field} field"
+            ))
+        })?;
+        let output = if item_type == "commandExecution" {
+            normalize_terminal_bytes(output.as_bytes())
+        } else {
+            output.to_string()
+        };
+        let source = OutputSource::text(output);
+        let reference = source.reference();
+        object.insert(field.into(), json!(reference));
+        let migrated_payload = encode_bounded(&item, MAX_ITEM_BYTES, "migrated thread item")?;
+        transaction
+            .execute(
+                "UPDATE thread_items SET payload = ?1 WHERE sequence = ?2",
+                params![migrated_payload, sequence],
+            )
+            .map_err(storage_error)?;
+        persist_output_source(&transaction, &turn_id, &item_id, source)?;
+    }
+
     transaction
         .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
         .map_err(storage_error)?;
@@ -1939,11 +2365,39 @@ mod tests {
         DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, NativeStorage, encode_bounded,
         initialize_database,
     };
+    use crate::engine::native::output::OutputSource;
     use crate::engine::native::provider::{ResponseContent, ResponseItem};
     use crate::engine::{
-        ConfigUpdate, ConversationMode, ModelVerbosity, ThreadItem, TokenUsage, TurnStatus,
-        UserContent,
+        ActivityStatus, ConfigUpdate, ConversationMode, ModelVerbosity, ThreadItem, ThreadOutput,
+        TokenUsage, TurnStatus, UserContent,
     };
+
+    async fn read_complete_output(storage: &NativeStorage, output_id: &str) -> String {
+        let mut content = String::new();
+        let mut cursor = None;
+        loop {
+            let page = storage
+                .read_output(output_id.to_string(), cursor)
+                .await
+                .expect("stored output page should load");
+            assert_eq!(page.output_id, output_id);
+            content.push_str(&page.chunk);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                return content;
+            }
+        }
+    }
+
+    fn tool_output(item: &ThreadItem) -> &ThreadOutput {
+        match item {
+            ThreadItem::ToolExecution {
+                output: Some(output),
+                ..
+            } => output,
+            item => panic!("expected a tool output reference, received {item:?}"),
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn initializes_the_native_schema_directly() {
@@ -2060,12 +2514,24 @@ mod tests {
 
         let mut cursor = None;
         let mut turn_ids = Vec::new();
+        let mut page_index = 0usize;
         loop {
             let page = storage
                 .read_thread_page(thread.id.clone(), cursor)
                 .await
                 .expect("history page should load");
-            assert!(page.thread.turns.len() <= super::history::THREAD_HISTORY_PAGE_ROWS);
+            let maximum_page_rows = if page_index == 0 {
+                super::history::INITIAL_THREAD_HISTORY_PAGE_ROWS
+            } else {
+                super::history::OLDER_THREAD_HISTORY_PAGE_ROWS
+            };
+            assert!(page.thread.turns.len() <= maximum_page_rows);
+            if page_index == 0 {
+                assert_eq!(
+                    page.thread.turns.len(),
+                    super::history::INITIAL_THREAD_HISTORY_PAGE_ROWS
+                );
+            }
             let mut page_ids = page
                 .thread
                 .turns
@@ -2075,10 +2541,12 @@ mod tests {
             page_ids.extend(turn_ids);
             turn_ids = page_ids;
             cursor = page.next_cursor;
+            page_index += 1;
             if cursor.is_none() {
                 break;
             }
         }
+        assert_eq!(page_index, 6);
         assert_eq!(turn_ids.len(), TURN_COUNT);
         assert_eq!(turn_ids.first().map(String::as_str), Some("turn-0000"));
         assert_eq!(turn_ids.last().map(String::as_str), Some("turn-1199"));
@@ -2241,7 +2709,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn rejects_an_incomplete_profile_database_without_hidden_migration() {
+    async fn rejects_an_incomplete_current_schema_without_repairing_it() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let database_path = directory.path().join("schema-one.sqlite3");
         let mut connection = Connection::open(&database_path).expect("database should open");
@@ -2278,6 +2746,94 @@ mod tests {
             .expect("schema version should be readable");
         assert!(!table_exists);
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn migrates_legacy_inline_outputs_to_chunked_resources_transactionally() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("legacy-output.sqlite3");
+        let legacy_output = "😀".repeat(300_000);
+        let mut connection = Connection::open(&database_path).expect("database should open");
+        initialize_database(&mut connection).expect("current fixture should initialize");
+        connection
+            .execute(
+                "INSERT INTO threads
+                     (id, cwd, name, preview, archived, created_at, updated_at, project_path, mode)
+                 VALUES ('legacy-thread', 'C:\\workspace', NULL, 'legacy', 0, 1, 1,
+                         'C:\\workspace', 'codex')",
+                [],
+            )
+            .expect("legacy thread should persist");
+        connection
+            .execute(
+                "INSERT INTO turns
+                     (id, thread_id, owner_id, status, model, reasoning_effort, error,
+                      created_at, updated_at)
+                 VALUES ('legacy-turn', 'legacy-thread', 'legacy-owner', 'completed',
+                         'gpt-test', NULL, NULL, 1, 1)",
+                [],
+            )
+            .expect("legacy turn should persist");
+        let payload = serde_json::json!({
+            "type": "toolExecution",
+            "id": "legacy-tool",
+            "name": "read_file",
+            "description": "Legacy output",
+            "status": "completed",
+            "output": &legacy_output,
+        })
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO thread_items (turn_id, item_id, payload)
+                 VALUES ('legacy-turn', 'legacy-tool', ?1)",
+                [payload],
+            )
+            .expect("legacy item should persist");
+        connection
+            .execute_batch(
+                "DROP TABLE output_chunks;
+                 DROP TABLE output_resources;
+                 PRAGMA user_version = 1;",
+            )
+            .expect("fixture should become schema one");
+        drop(connection);
+
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(database_path.clone())
+            .await
+            .expect("legacy profile should migrate");
+        let thread = storage
+            .read_thread("legacy-thread".into())
+            .await
+            .expect("migrated thread should load");
+        let item = thread
+            .turns
+            .first()
+            .and_then(|turn| turn.items.first())
+            .expect("migrated output item should exist");
+        let output = tool_output(item);
+        assert_eq!(output.byte_length, legacy_output.len() as u64);
+        assert!(output.preview.len() <= super::OUTPUT_CHUNK_BYTES);
+        assert_eq!(
+            read_complete_output(&storage, &output.id).await,
+            legacy_output
+        );
+
+        let connection = Connection::open(database_path).expect("database should reopen");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version should load");
+        let inline_payload_bytes: i64 = connection
+            .query_row(
+                "SELECT length(payload) FROM thread_items WHERE item_id = 'legacy-tool'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migrated payload size should load");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+        assert!(inline_payload_bytes < 70_000);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2420,6 +2976,7 @@ mod tests {
                     },
                     context_window: None,
                 },
+                None,
             )
             .await
             .expect("usage should persist");
@@ -2459,6 +3016,7 @@ mod tests {
                 ThreadItem::ContextCompaction {
                     id: "compaction-1".into(),
                 },
+                None,
             )
             .await
             .expect("compaction marker should persist");
@@ -2580,6 +3138,7 @@ mod tests {
                 ThreadItem::ContextCompaction {
                     id: "duplicate-compaction".into(),
                 },
+                None,
             )
             .await
             .expect("duplicate fixture should persist");
@@ -2772,6 +3331,105 @@ mod tests {
             .expect("the owning active turn should authorize deletion");
         assert!(response.applied);
         assert!(storage.read_thread(thread.id.clone()).await.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stores_large_outputs_in_pages_and_forks_them_independently() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("large-output.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let source = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("source thread should persist");
+        let turn = storage
+            .begin_turn(
+                source.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "large-output-user".into(),
+                    content: vec![UserContent::Text {
+                        text: "produce a large output".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "produce a large output".into(),
+                }]),
+                "produce a large output".into(),
+            )
+            .await
+            .expect("turn should begin");
+        let content = format!("{}{}", "x".repeat(1_100_000), "😀".repeat(300_000));
+        let stored_item = storage
+            .append_thread_item(
+                turn.id.clone(),
+                ThreadItem::ToolExecution {
+                    id: "large-output-tool".into(),
+                    name: "read_file".into(),
+                    description: "Large UTF-8 output".into(),
+                    status: ActivityStatus::Completed,
+                    output: None,
+                },
+                Some(OutputSource::text(content.clone())),
+            )
+            .await
+            .expect("large output should persist");
+        let output = tool_output(&stored_item).clone();
+        assert!(output.byte_length > 1_048_576);
+        assert!(output.preview.len() <= super::OUTPUT_CHUNK_BYTES);
+
+        let first_page = storage
+            .read_output(output.id.clone(), None)
+            .await
+            .expect("first output page should load");
+        assert_eq!(first_page.chunk, output.preview);
+        assert_eq!(first_page.byte_length, output.byte_length);
+        assert!(first_page.next_cursor.is_some());
+        assert_eq!(read_complete_output(&storage, &output.id).await, content);
+
+        storage
+            .complete_turn(source.id.clone(), turn.id, TurnStatus::Completed, None)
+            .await
+            .expect("source turn should complete");
+        let fork = storage
+            .fork_thread(source.id.clone())
+            .await
+            .expect("thread with output should fork");
+        let fork_output = fork
+            .turns
+            .first()
+            .and_then(|turn| {
+                turn.items
+                    .iter()
+                    .find(|item| item.id() == "large-output-tool")
+            })
+            .map(tool_output)
+            .expect("forked output should exist")
+            .clone();
+        assert_ne!(fork_output.id, output.id);
+        assert_eq!(fork_output.byte_length, output.byte_length);
+        assert_eq!(
+            read_complete_output(&storage, &fork_output.id).await,
+            content
+        );
+
+        storage
+            .delete_thread(source.id.clone())
+            .await
+            .expect("source thread should delete");
+        assert!(storage.read_output(output.id, None).await.is_err());
+        assert_eq!(
+            read_complete_output(&storage, &fork_output.id).await,
+            content
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -8,6 +8,7 @@ import type {
   PermissionProfile,
   ReasoningEffort,
 } from "../contracts/types";
+import type { AppController } from "../state/appController";
 import {
   type ChatIntelligenceSelection,
   chatOptionLabel,
@@ -17,7 +18,6 @@ import {
   saveChatIntelligenceSelection,
   selectionFromChatOption,
 } from "../state/chatIntelligence";
-import type { AppController } from "../state/createAppController";
 import {
   loadQueueingEnabled,
   type QueuedMessage,
@@ -43,11 +43,17 @@ type ModelMenuSection = "effort" | "model" | "serviceTier";
 
 export function Composer(props: ComposerProps) {
   let initialChatSelection: ChatIntelligenceSelection | null = null;
-  let initialChatSelectionError: string | null = null;
+  let initialQueueingEnabled = true;
+  let initialPreferenceError: string | null = null;
   try {
     initialChatSelection = loadChatIntelligenceSelection();
   } catch (reason) {
-    initialChatSelectionError = errorMessage(reason);
+    initialPreferenceError = errorMessage(reason);
+  }
+  try {
+    initialQueueingEnabled = loadQueueingEnabled();
+  } catch (reason) {
+    initialPreferenceError = errorMessage(reason);
   }
   const mode = () => props.controller.conversationMode();
   const [text, setText] = createSignal("");
@@ -59,10 +65,8 @@ export function Composer(props: ComposerProps) {
     initialChatSelection,
   );
   const [sending, setSending] = createSignal(false);
-  const [queueingEnabled, setQueueingEnabled] = createSignal(loadQueueingEnabled());
-  const [attachmentError, setAttachmentError] = createSignal<string | null>(
-    initialChatSelectionError,
-  );
+  const [queueingEnabled, setQueueingEnabled] = createSignal(initialQueueingEnabled);
+  const [attachmentError, setAttachmentError] = createSignal<string | null>(initialPreferenceError);
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [modelMenuSection, setModelMenuSection] = createSignal<ModelMenuSection | null>(null);
   const [permissionMenuOpen, setPermissionMenuOpen] = createSignal(false);
@@ -90,6 +94,18 @@ export function Composer(props: ComposerProps) {
   const canSend = createMemo(
     () => !sending() && (text().trim().length > 0 || attachments().length > 0),
   );
+
+  createEffect(() => {
+    if (chatIntelligence().source !== "selectionUnavailable") {
+      return;
+    }
+    try {
+      clearChatIntelligenceSelection();
+      setChatSelection(null);
+    } catch (reason) {
+      setAttachmentError(errorMessage(reason));
+    }
+  });
 
   createEffect(() => {
     const configured = props.controller.config()?.config;

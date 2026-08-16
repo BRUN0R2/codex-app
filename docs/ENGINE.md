@@ -8,7 +8,7 @@ O único backend é `NativeEngine`:
 - provider: `ChatGPT Codex`;
 - autenticação: `ChatGPT OAuth`;
 - armazenamento: `sqlite`;
-- schema IPC: versão `4`.
+- schema IPC: versão `8`.
 
 Não existe variável de ambiente para trocar backend nem execução de binário
 externo. A CLI aberta é uma referência de estudo, não uma integração.
@@ -18,13 +18,15 @@ externo. A CLI aberta é uma referência de estudo, não uma integração.
 | Área | Comandos |
 | --- | --- |
 | lifecycle | `engine_start` |
+| diagnóstico | `engine_runtime_diagnostic_report` |
 | conta | `engine_account_read`, `engine_account_profile_read`, `engine_account_rate_limits_read`, `engine_login_chatgpt`, `engine_login_cancel`, `engine_logout` |
 | tarefas | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive`, `engine_thread_unarchive`, `engine_thread_delete`, `engine_thread_fork`, `engine_thread_compact_start` |
+| saídas | `engine_output_read` |
 | turnos | `engine_turn_start`, `engine_turn_steer`, `engine_turn_interrupt` |
 | projeto | `workspace_repository_read` |
-| configuração | `engine_config_read`, `engine_config_update`, `engine_model_list` |
+| configuração | `engine_config_read`, `engine_config_update`, `engine_model_list`, `engine_chat_model_list` |
 | aprovação | `engine_server_request_respond` |
-| anexos | `attachment_inspect`, `attachment_save_pasted_image` |
+| anexos | `attachment_inspect`, `attachment_read_image`, `attachment_save_pasted_image` |
 
 Cada comando tem request e response próprios. Não há método genérico que aceite
 nome de RPC ou JSON arbitrário.
@@ -66,16 +68,25 @@ registra um único solicitante, cancela o turno, impede nova aquisição do mesm
 da conclusão falhar, a exclusão exige a identidade exata do turno que ainda está
 ativo; nenhum estado informado pela interface autoriza esse caminho.
 
-## Boot com limite de tempo
+## Boot resiliente
 
-O boot nunca fica preso para sempre. No Rust, cada operação do cofre de
+No Rust, cada operação do cofre de
 credenciais (Credential Manager do Windows e decrypt scrypt/age) tem limite de
 10 segundos no `spawn_blocking`; estouro vira erro tratável de storage, sem
-apagar credenciais. No frontend, `engine_start`, `engine_account_read` e o
-registro de eventos têm limite de 15 segundos; o estouro marca o runtime como
-`failed` e a tela de erro oferece nova tentativa, que reexecuta a inicialização
-inteira. Eventos de status atrasados são ignorados após uma falha, para que um
-`ready` tardio não troque o erro por um boot fantasma.
+apagar credenciais. No frontend, o registro de eventos tem limite de 15 segundos,
+`engine_start` tem 120 segundos e `engine_account_read` tem 45 segundos. Falhas
+transitórias são repetidas indefinidamente com backoff de 1 a 60 segundos,
+inclusive sem intervenção do usuário; a tela continua oferecendo uma tentativa
+manual imediata. Erros permanentes de contrato e storage param com causa
+explícita. Eventos e respostas atrasados usam uma revisão de inicialização e não
+podem trocar o estado de uma tentativa mais nova.
+
+Uma resposta bem-sucedida de `engine_start` é a confirmação autoritativa de
+`ready` e inclui `diagnosticLogPath` e a configuração versionada. O frontend não
+depende de uma segunda entrega assíncrona nem de um `engine_config_read` separado
+para concluir o boot. Erros de interface posteriores usam
+`engine_runtime_diagnostic_report`, cujo payload é fechado e limitado, para
+persistir a mesma causa no log nativo.
 
 ## Providers
 
@@ -91,6 +102,11 @@ Para Chat consumidor:
 - conversa e deltas `v1` em `/backend-api/f/conversation`;
 - seleção por preset do catálogo, resolvido em `model` e `thinking_effort`.
 
+A preparação consumer continua opcional conforme o protocolo, mas sua falha não
+é silenciosa: o cliente produz um `Result`, grava um diagnóstico persistente do
+subsistema provider e só então continua com `client_prepare_state: "failure"` e
+sem conduit token.
+
 Para Work local e Codex:
 
 - catálogo em `https://chatgpt.com/backend-api/codex/models`;
@@ -105,10 +121,11 @@ boot e fica válida por seis horas. Respostas de uma sessão substituída são
 descartadas; URL ausente ou imagem que falha mantém as iniciais. A ausência de
 foto no token OIDC não aciona `userinfo` nem atrasa a inicialização.
 
-O uso segue uma política separada: revalidação a cada minuto somente com a
-janela visível, ao recuperar foco, ao abrir o menu se o valor estiver obsoleto e
-depois da conclusão de um turno. Há uma única chamada em voo por revisão de
-sessão, e respostas de conta antiga nunca atualizam a interface.
+O uso segue uma política separada e não possui polling permanente: o valor fica
+válido por cinco minutos e é revalidado, quando obsoleto, ao recuperar foco ou
+visibilidade, ao abrir a tela e depois da conclusão de um turno. Há uma única
+chamada em voo por revisão de sessão, e respostas de conta antiga nunca
+atualizam a interface.
 
 Headers de conta e sessão são montados somente no Rust. Tokens, cookies e
 respostas brutas não são expostos ao frontend. O parser consumer negocia e
@@ -127,6 +144,14 @@ deadline de stream é calculado para o próximo evento semântico e não é rein
 por heartbeats. Quando uma rodada devolve chamadas consecutivas de ferramentas
 somente leitura, o agente pode executar até oito em paralelo e persiste os
 resultados na ordem original; qualquer ferramenta mutável cria uma barreira.
+
+Uma requisição HTTP transitória possui tentativas rápidas locais com backoff
+exponencial; se ainda falhar, o loop do turno continua retomando transporte,
+timeouts e HTTP 5xx com espera limitada a 60 segundos entre ciclos. Um rate limit
+preserva `Retry-After` ou `resets_in_seconds`, aguarda até sete dias por ciclo e
+consulta novamente; a ausência de delay usa 60 segundos. Não existe contador
+local que encerre um turno apenas por repetição. Cancelamento continua imediato,
+e erro de protocolo/SSE malformado continua terminal.
 
 Envelopes privados de referência de conteúdo (`U+E200 … U+E201`) pertencem ao
 protocolo do provider e nunca ao texto apresentado. A projeção persistida da
@@ -170,14 +195,44 @@ recuperação e atomicidade pertencem integralmente ao Rust.
 | Ferramenta | Somente leitura | Projeto | Acesso total |
 | --- | ---: | ---: | ---: |
 | `read_file`, `list_files`, `search_text` | sim | sim | sim |
+| `read_output` | sim | sim | sim |
 | `edit_file`, `write_file` | não | sim | sim |
 | `apply_patch` | não | sim | sim |
 | `exec_command` | não | aprovação | sem aprovação |
 
 Todos os paths de ferramenta são relativos ao workspace. Escritas são atômicas,
-arquivos são UTF-8 e comandos são não interativos, limitados a 120 segundos e a
-1 MiB de saída agregada. Recusa de comando retorna um resultado tipado ao modelo;
+arquivos são UTF-8 e comandos são não interativos. Cada chamada pode declarar
+`timeout_seconds`; o padrão é uma hora e o máximo é sete dias, sempre
+cancelável.
+`stdout` e `stderr` são drenados concorrentemente para arquivos temporários,
+normalizados em streaming e persistidos em blocos UTF-8 de 64 KiB, sem corte de
+tamanho agregado imposto pelo aplicativo. O item do turno contém somente ID,
+prévia, tamanho total e cursor; UI e agente continuam por `engine_output_read` e
+`read_output`. Recusa de comando retorna um resultado tipado ao modelo;
 cancelamento interrompe o turno.
+
+Erros de validação ou execução de uma ferramenta pertencem à chamada, não ao
+turno inteiro. Um plano com mais de uma etapa `in_progress`, um patch malformado
+ou um comando com exit code diferente de zero gera item `failed`, saída tipada
+para o provider e diagnóstico operacional; o agente pode corrigir a entrada na
+rodada seguinte. Cancelamento explícito continua sendo terminal.
+
+Processos recebem `NO_COLOR=1`, `CLICOLOR=0`, `FORCE_COLOR=0` e `TERM=dumb`. No
+Windows, todo processo iniciado pelo engine usa `CREATE_NO_WINDOW`; o PowerShell
+também configura entrada, saída e `$OutputEncoding` como UTF-8 sem BOM. A sessão
+define `Start-Process` como oculta e bloqueante por padrão, portanto validações
+que criam um processo filho não abrem um console separado nem escapam do
+lifetime limitado do comando. Processos destacados e janelas externas não fazem
+parte do contrato de `exec_command`. Mesmo quando uma ferramenta ignora o modo
+sem cor, o engine remove sequências ANSI e normaliza controles de terminal antes
+de persistir ou publicar a saída.
+
+A fila de mensagens posteriores não possui limite local de quantidade. Ela é
+persistida por conversa em schema versionado antes de aceitar o enqueue,
+restaurada após reinício e despachada automaticamente quando o turno fica ocioso.
+Uma entrada corrompida não impede a recuperação das demais filas. O limite de
+quota do armazenamento do WebView permanece uma restrição externa e produz erro
+visível; não causa descarte silencioso.
 
 `apply_patch` é uma ferramenta freeform do Responses, anunciada com gramática
 Lark fechada e respondida por `custom_tool_call_output`; ela não passa por shell,

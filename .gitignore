@@ -1,4 +1,5 @@
 /.reference/
+/.tools/
 /node_modules/
 /dist/
 /src-tauri/gen/
@@ -13,3 +14,4 @@
 *.log
 .DS_Store
 Thumbs.db
+/.freebuff/

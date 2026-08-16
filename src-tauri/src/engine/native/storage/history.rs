@@ -10,7 +10,8 @@ use super::{
 use crate::engine::{CodexThread, ThreadTurn, TurnStatus};
 use crate::error::AppError;
 
-pub(super) const THREAD_HISTORY_PAGE_ROWS: usize = 200;
+pub(super) const INITIAL_THREAD_HISTORY_PAGE_ROWS: usize = 64;
+pub(super) const OLDER_THREAD_HISTORY_PAGE_ROWS: usize = 256;
 const THREAD_HISTORY_PAGE_BYTES: usize = 4 * 1_048_576;
 const MAX_HISTORY_CURSOR_BYTES: usize = 1_024;
 const HISTORY_CURSOR_VERSION: u8 = 1;
@@ -107,7 +108,12 @@ pub(super) fn read_thread_page(
     cursor: Option<&ThreadHistoryCursor>,
 ) -> Result<StoredThreadPage, AppError> {
     let header = read_thread_header(connection, thread_id)?;
-    let requested = THREAD_HISTORY_PAGE_ROWS + 1;
+    let page_rows = if cursor.is_none() {
+        INITIAL_THREAD_HISTORY_PAGE_ROWS
+    } else {
+        OLDER_THREAD_HISTORY_PAGE_ROWS
+    };
+    let requested = page_rows + 1;
     let requested_sql =
         i64::try_from(requested).map_err(|error| AppError::Storage(error.to_string()))?;
     let cursor_created_at = cursor.map(|value| value.created_at);
@@ -160,34 +166,34 @@ pub(super) fn read_thread_page(
         .collect::<Result<Vec<_>, _>>()
         .map_err(storage_error)?;
 
-    let mut page_rows = Vec::with_capacity(rows.len().min(THREAD_HISTORY_PAGE_ROWS));
+    let mut selected_rows = Vec::with_capacity(rows.len().min(page_rows));
     let mut encoded_bytes = 0usize;
-    let mut has_more = rows.len() > THREAD_HISTORY_PAGE_ROWS;
-    for row in rows.into_iter().take(THREAD_HISTORY_PAGE_ROWS) {
+    let mut has_more = rows.len() > page_rows;
+    for row in rows.into_iter().take(page_rows) {
         let row_bytes = row.payload.as_ref().map_or(0, String::len);
         let next_bytes = encoded_bytes
             .checked_add(row_bytes)
             .ok_or_else(|| AppError::Storage("thread history page size overflowed".into()))?;
-        if !page_rows.is_empty() && next_bytes > THREAD_HISTORY_PAGE_BYTES {
+        if !selected_rows.is_empty() && next_bytes > THREAD_HISTORY_PAGE_BYTES {
             has_more = true;
             break;
         }
         encoded_bytes = next_bytes;
-        page_rows.push(row);
+        selected_rows.push(row);
     }
 
     let next_cursor = if has_more {
-        page_rows
+        selected_rows
             .last()
             .map(|row| encode_history_cursor(&row.cursor(thread_id)))
             .transpose()?
     } else {
         None
     };
-    page_rows.reverse();
+    selected_rows.reverse();
 
     let mut turns: Vec<ThreadTurn> = Vec::new();
-    for row in page_rows {
+    for row in selected_rows {
         if turns.last().is_none_or(|turn| turn.id != row.turn_id) {
             let status = parse_status(&row.status)?;
             if (status == TurnStatus::Failed) != row.error.is_some() {

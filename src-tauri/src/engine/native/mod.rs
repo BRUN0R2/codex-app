@@ -6,9 +6,12 @@ mod chat;
 mod compaction;
 mod content_references;
 mod context_window;
+mod diagnostics;
+mod output;
 mod provider;
 mod storage;
 mod stream_notifications;
+mod terminal_output;
 mod tools;
 
 use std::collections::HashMap;
@@ -25,24 +28,25 @@ use self::agent::{RunCompletion, TurnRun};
 use self::approval::ApprovalBroker;
 use self::auth::ChatGptAuth;
 use self::chat::ChatGptConsumerProvider;
+use self::diagnostics::RuntimeDiagnostics;
 use self::provider::ChatGptCodexProvider;
 use self::storage::NativeStorage;
 use self::tools::ToolRegistry;
 use crate::engine::{
-    AccountRateLimitsResponse, ChatModelListResponse, ConfigReadResponse, ConfigUpdate,
-    ConfigUpdateResponse, ConversationMode, DiagnosticStream, EngineCapability, EngineDescriptor,
-    EngineNotification, EngineStartResponse, EngineStorage, EngineTransport, ItemNotification,
-    ModelListResponse, NOTIFICATION_EVENT, OperationAck, OperationFailure, PermissionProfile,
-    RUNTIME_DIAGNOSTIC_EVENT, RUNTIME_STATUS_EVENT, ReasoningEffort, RuntimeDiagnostic,
-    RuntimeState, RuntimeStatus, ServerResponse, ThreadArchivedNotification,
-    ThreadCompactStartResponse, ThreadDeletedNotification, ThreadForkResponse, ThreadListResponse,
-    ThreadNotification, ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse,
-    ThreadSummary, ThreadUnarchiveResponse, ThreadUnarchivedNotification,
-    TurnCompletedNotification, TurnInput, TurnNotification, TurnStartResponse, TurnStatus,
+    AccountRateLimitsResponse, ChatModelListResponse, ConfigUpdate, ConfigUpdateResponse,
+    ConversationMode, DiagnosticStream, EngineCapability, EngineDescriptor, EngineNotification,
+    EngineStartResponse, EngineStorage, EngineTransport, ItemNotification, ModelListResponse,
+    NOTIFICATION_EVENT, OperationAck, OperationFailure, OutputReadResponse, PermissionProfile,
+    RUNTIME_STATUS_EVENT, ReasoningEffort, RuntimeDiagnosticSubsystem, RuntimeState, RuntimeStatus,
+    ServerResponse, ThreadArchivedNotification, ThreadCompactStartResponse,
+    ThreadDeletedNotification, ThreadForkResponse, ThreadListResponse, ThreadNotification,
+    ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse, ThreadSummary,
+    ThreadUnarchiveResponse, ThreadUnarchivedNotification, TurnCompletedNotification, TurnInput,
+    TurnNotification, TurnStartResponse, TurnStatus,
 };
 use crate::error::AppError;
 
-const CONTRACT_SCHEMA_VERSION: u32 = 5;
+const CONTRACT_SCHEMA_VERSION: u32 = 8;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -123,6 +127,7 @@ pub(super) struct NativeEngineInner {
     storage: NativeStorage,
     tools: ToolRegistry,
     approvals: ApprovalBroker,
+    diagnostics: Arc<RuntimeDiagnostics>,
     active_turns: Mutex<HashMap<String, ActiveTurn>>,
     thread_lifecycle_gate: Mutex<()>,
     tasks: Mutex<JoinSet<()>>,
@@ -136,14 +141,21 @@ pub struct NativeEngine {
 
 impl Default for NativeEngine {
     fn default() -> Self {
+        Self::new(Arc::new(RuntimeDiagnostics::default()))
+    }
+}
+
+impl NativeEngine {
+    fn new(diagnostics: Arc<RuntimeDiagnostics>) -> Self {
         Self {
             inner: Arc::new(NativeEngineInner {
-                auth: ChatGptAuth::default(),
+                auth: ChatGptAuth::new(Arc::clone(&diagnostics)),
                 chat: ChatGptConsumerProvider::default(),
                 provider: ChatGptCodexProvider::default(),
                 storage: NativeStorage::default(),
                 tools: ToolRegistry,
                 approvals: ApprovalBroker::default(),
+                diagnostics,
                 active_turns: Mutex::new(HashMap::new()),
                 thread_lifecycle_gate: Mutex::new(()),
                 tasks: Mutex::new(JoinSet::new()),
@@ -152,24 +164,46 @@ impl Default for NativeEngine {
             }),
         }
     }
-}
 
-impl NativeEngine {
+    pub fn has_active_turns(&self) -> bool {
+        self.inner
+            .active_turns
+            .try_lock()
+            .map_or(true, |active_turns| !active_turns.is_empty())
+    }
+
     pub async fn start(&self, app: &AppHandle) -> Result<EngineStartResponse, AppError> {
+        let diagnostic_log_path = self.inner.diagnostics.initialize(app)?;
         self.inner.emit_status(app, RuntimeState::Starting, None)?;
         let _start_guard = self.inner.start_gate.lock().await;
         if !self.inner.started.load(Ordering::Acquire) {
             let result = async {
-                self.inner.storage.initialize(app).await?;
-                self.inner.auth.initialize(app).await?;
-                self.inner.chat.initialize(app).await?;
-                self.inner.provider.initialize().await?;
+                tokio::try_join!(
+                    self.inner.storage.initialize(app),
+                    self.inner.auth.initialize(app),
+                    self.inner.chat.initialize(app),
+                    self.inner.provider.initialize(),
+                )?;
                 Ok::<(), AppError>(())
             }
             .await;
             if let Err(error) = result {
-                self.inner
-                    .emit_status(app, RuntimeState::Failed, Some(error.to_string()))?;
+                let message = error.to_string();
+                self.inner.emit_diagnostic(
+                    app,
+                    DiagnosticStream::Runtime,
+                    format!("engine startup failed: {message}"),
+                );
+                if let Err(status_error) =
+                    self.inner
+                        .emit_status(app, RuntimeState::Failed, Some(message))
+                {
+                    self.inner.emit_diagnostic(
+                        app,
+                        DiagnosticStream::Runtime,
+                        status_error.to_string(),
+                    );
+                }
                 return Err(error);
             }
             self.inner.started.store(true, Ordering::Release);
@@ -179,7 +213,8 @@ impl NativeEngine {
         Ok(EngineStartResponse {
             engine: descriptor(),
             schema_version: CONTRACT_SCHEMA_VERSION,
-            permission_profile: config.config.permission_profile,
+            diagnostic_log_path,
+            config,
             permission_profiles: vec![
                 PermissionProfile::read_only(),
                 PermissionProfile::workspace_write(),
@@ -309,6 +344,15 @@ impl NativeEngine {
             thread: page.thread,
             next_cursor: page.next_cursor,
         })
+    }
+
+    pub async fn output_read(
+        &self,
+        output_id: String,
+        cursor: Option<String>,
+    ) -> Result<OutputReadResponse, AppError> {
+        self.ensure_started()?;
+        self.inner.storage.read_output(output_id, cursor).await
     }
 
     pub async fn thread_set_name(
@@ -444,7 +488,7 @@ impl NativeEngine {
         thread_id: String,
     ) -> Result<ThreadCompactStartResponse, AppError> {
         self.ensure_started()?;
-        self.reap_finished_tasks().await;
+        self.reap_finished_tasks(app).await;
         let thread = self
             .inner
             .storage
@@ -587,7 +631,7 @@ impl NativeEngine {
         request: StartTurn,
     ) -> Result<TurnStartResponse, AppError> {
         self.ensure_started()?;
-        self.reap_finished_tasks().await;
+        self.reap_finished_tasks(app).await;
         let thread = self
             .inner
             .storage
@@ -991,11 +1035,6 @@ impl NativeEngine {
         Ok(OperationAck { applied: true })
     }
 
-    pub async fn config_read(&self) -> Result<ConfigReadResponse, AppError> {
-        self.ensure_started()?;
-        self.inner.storage.read_config().await
-    }
-
     pub async fn config_update(
         &self,
         expected_version: u64,
@@ -1030,6 +1069,23 @@ impl NativeEngine {
         self.inner.approvals.respond(request_id, response).await
     }
 
+    pub fn report_runtime_error(
+        &self,
+        app: &AppHandle,
+        subsystem: RuntimeDiagnosticSubsystem,
+        message: String,
+    ) {
+        self.inner.diagnostics.emit(app, subsystem, message);
+    }
+
+    pub fn persist_runtime_error(
+        &self,
+        subsystem: RuntimeDiagnosticSubsystem,
+        message: &str,
+    ) -> Result<(), AppError> {
+        self.inner.diagnostics.record_error(subsystem, message)
+    }
+
     pub async fn stop(&self, app: &AppHandle) {
         let _lifecycle_guard = self.inner.start_gate.lock().await;
         if !self.inner.started.swap(false, Ordering::AcqRel) {
@@ -1050,10 +1106,16 @@ impl NativeEngine {
         self.inner.auth.stop().await;
 
         let mut tasks = self.inner.tasks.lock().await;
+        let diagnostics = Arc::clone(&self.inner.diagnostics);
+        let app_handle = app.clone();
         let drain = async {
             while let Some(result) = tasks.join_next().await {
                 if let Err(error) = result {
-                    eprintln!("native turn task failed during shutdown: {error}");
+                    diagnostics.emit(
+                        &app_handle,
+                        RuntimeDiagnosticSubsystem::Runtime,
+                        format!("native turn task failed during shutdown: {error}"),
+                    );
                 }
             }
         };
@@ -1063,7 +1125,11 @@ impl NativeEngine {
                 if let Err(error) = result
                     && !error.is_cancelled()
                 {
-                    eprintln!("native turn task failed after forced shutdown: {error}");
+                    self.inner.diagnostics.emit(
+                        app,
+                        RuntimeDiagnosticSubsystem::Runtime,
+                        format!("native turn task failed after forced shutdown: {error}"),
+                    );
                 }
             }
         }
@@ -1081,11 +1147,15 @@ impl NativeEngine {
         }
     }
 
-    async fn reap_finished_tasks(&self) {
+    async fn reap_finished_tasks(&self, app: &AppHandle) {
         let mut tasks = self.inner.tasks.lock().await;
         while let Some(result) = tasks.try_join_next() {
             if let Err(error) = result {
-                eprintln!("native turn task failed: {error}");
+                self.inner.diagnostics.emit(
+                    app,
+                    RuntimeDiagnosticSubsystem::Runtime,
+                    format!("native turn task failed: {error}"),
+                );
             }
         }
     }
@@ -1112,12 +1182,10 @@ impl NativeEngineInner {
     }
 
     fn emit_diagnostic(&self, app: &AppHandle, stream: DiagnosticStream, message: String) {
-        if let Err(error) = app.emit(
-            RUNTIME_DIAGNOSTIC_EVENT,
-            RuntimeDiagnostic { stream, message },
-        ) {
-            eprintln!("runtime diagnostic delivery failed: {error}");
-        }
+        let subsystem = match stream {
+            DiagnosticStream::Runtime => RuntimeDiagnosticSubsystem::Runtime,
+        };
+        self.diagnostics.emit(app, subsystem, message);
     }
 
     pub(super) async fn should_continue_turn(
@@ -1162,9 +1230,15 @@ impl NativeEngineInner {
             Ok(RunCompletion::Completed) => (TurnStatus::Completed, None),
             Ok(RunCompletion::Interrupted) => (TurnStatus::Interrupted, None),
             Err(error) => {
+                let message = error.to_string();
+                self.emit_diagnostic(
+                    app,
+                    DiagnosticStream::Runtime,
+                    format!("turn `{turn_id}` failed: {message}"),
+                );
                 let failure = OperationFailure {
                     code: error.public_code(),
-                    message: error.to_string(),
+                    message,
                 };
                 (TurnStatus::Failed, Some(failure))
             }
@@ -1330,7 +1404,7 @@ fn descriptor() -> EngineDescriptor {
 mod tests {
     use tokio::sync::watch;
 
-    use super::ActiveTurn;
+    use super::{ActiveTurn, NativeEngine};
     use crate::engine::OperationAck;
 
     fn active_turn() -> ActiveTurn {
@@ -1343,6 +1417,11 @@ mod tests {
             pending_deletion: None,
             deletion_in_progress: false,
         }
+    }
+
+    #[test]
+    fn a_fresh_engine_does_not_block_normal_window_close() {
+        assert!(!NativeEngine::default().has_active_turns());
     }
 
     #[test]

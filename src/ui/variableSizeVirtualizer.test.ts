@@ -20,4 +20,41 @@ describe("variable-size timeline virtualizer", () => {
     expect(virtualizer.offsetOf(3)).toBe(450);
     expect(virtualizer.totalSize()).toBe(550);
   });
+
+  it("normalizes fractional DOM measurements to stable whole-pixel offsets", () => {
+    const virtualizer = new VariableSizeVirtualizer(100);
+    virtualizer.setKeys(["a", "b"]);
+
+    expect(virtualizer.measure("a", 100.49)).toBeNull();
+    expect(virtualizer.measure("a", 100.51)).toEqual({ index: 0, delta: 1 });
+    expect(virtualizer.measure("a", 100.52)).toBeNull();
+    expect(virtualizer.offsetOf(1)).toBe(101);
+    expect(Number.isInteger(virtualizer.totalSize())).toBe(true);
+  });
+
+  it("batches measurements into one deterministic anchor correction", () => {
+    const virtualizer = new VariableSizeVirtualizer(100);
+    virtualizer.setKeys(["a", "b", "c", "d"]);
+
+    expect(
+      virtualizer.measureBatch(
+        [
+          { key: "c", size: 160 },
+          { key: "a", size: 130 },
+          { key: "b", size: 80 },
+        ],
+        250,
+      ),
+    ).toEqual({ anchorDelta: 10, changed: true });
+    expect(virtualizer.offsetOf(3)).toBe(370);
+    expect(
+      virtualizer.measureBatch(
+        [
+          { key: "a", size: 130.1 },
+          { key: "b", size: 80.2 },
+        ],
+        260,
+      ),
+    ).toEqual({ anchorDelta: 0, changed: false });
+  });
 });

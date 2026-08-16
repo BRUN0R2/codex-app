@@ -10,7 +10,6 @@ use crate::error::AppError;
 
 const REQUIREMENTS_PREFIX: &str = "gAAAAAC";
 const PROOF_PREFIX: &str = "gAAAAAB";
-const FALLBACK_PREFIX: &str = "wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D";
 const MAX_PROOF_ATTEMPTS: u64 = 500_000;
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
@@ -76,7 +75,7 @@ impl IntegrityRequirements {
                     })?;
                 Some(format!(
                     "{PROOF_PREFIX}{}",
-                    solve_proof_of_work(&seed, &difficulty)
+                    solve_proof_of_work(&seed, &difficulty)?
                 ))
             }
             _ => None,
@@ -100,24 +99,24 @@ pub(super) fn requirements_key() -> Result<String, AppError> {
     ))
 }
 
-fn solve_proof_of_work(seed: &str, difficulty: &str) -> String {
+fn solve_proof_of_work(seed: &str, difficulty: &str) -> Result<String, AppError> {
     let started = Instant::now();
     let mut fingerprint = fingerprint();
     for nonce in 0..MAX_PROOF_ATTEMPTS {
         fingerprint[3] = json!(nonce);
         fingerprint[9] = json!(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
-        let Ok(encoded) = encode_fingerprint(&fingerprint) else {
-            return fallback("encoding");
-        };
+        let encoded = encode_fingerprint(&fingerprint)?;
         let hash = sentinel_hash(&format!("{seed}{encoded}"));
         if hash
             .get(..difficulty.len())
             .is_some_and(|prefix| prefix <= difficulty)
         {
-            return format!("{encoded}~S");
+            return Ok(format!("{encoded}~S"));
         }
     }
-    fallback("e")
+    Err(AppError::Provider(format!(
+        "ChatGPT proof of work exceeded {MAX_PROOF_ATTEMPTS} attempts"
+    )))
 }
 
 fn fingerprint() -> Vec<Value> {
@@ -156,12 +155,6 @@ fn encode_fingerprint(fingerprint: &[Value]) -> Result<String, AppError> {
         AppError::Provider(format!("could not encode ChatGPT integrity state: {error}"))
     })?;
     Ok(BASE64_STANDARD.encode(bytes))
-}
-
-fn fallback(reason: &str) -> String {
-    let encoded = BASE64_STANDARD
-        .encode(serde_json::to_vec(reason).unwrap_or_else(|_| b"\"integrity\"".to_vec()));
-    format!("{FALLBACK_PREFIX}{encoded}")
 }
 
 fn sentinel_hash(value: &str) -> String {

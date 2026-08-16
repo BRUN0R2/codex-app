@@ -5,6 +5,7 @@ import { AppShell } from "./ui/AppShell";
 import { CodexGlyph } from "./ui/CodexGlyph";
 import { ImageViewerProvider } from "./ui/ImageViewer";
 import { LoginScreen } from "./ui/LoginScreen";
+import { ApplicationRenderFailure } from "./ui/RenderFailure";
 
 export default function App() {
   const controller = createAppController();
@@ -49,13 +50,11 @@ export default function App() {
       <Match when={controller.signedIn()}>
         <ErrorBoundary
           fallback={(error) => (
-            <main class="boot-screen error-state">
-              <div class="boot-card">
-                <p class="eyebrow">Falha de renderização</p>
-                <h1>O shell do aplicativo falhou</h1>
-                <p>{String(error)}</p>
-              </div>
-            </main>
+            <ApplicationRenderFailure
+              error={error}
+              onReport={controller.reportError}
+              onReload={() => window.location.reload()}
+            />
           )}
         >
           <ImageViewerProvider>

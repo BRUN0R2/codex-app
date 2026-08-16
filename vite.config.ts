@@ -14,7 +14,11 @@ const devPort =
     : 1420;
 
 export default defineConfig({
-  plugins: [solid()],
+  // The application controller owns long-lived signals, native subscriptions, and
+  // async coordinators. Component-level HMR can preserve that controller while
+  // replacing consumers with a newer interface, producing a mixed runtime graph.
+  // A full reload keeps the controller and every UI consumer on the same revision.
+  plugins: [solid({ hot: false })],
   clearScreen: false,
   server: {
     host: "127.0.0.1",

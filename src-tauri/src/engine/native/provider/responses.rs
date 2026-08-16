@@ -10,6 +10,7 @@ use tokio::time::Instant;
 use crate::engine::ImageDetail;
 use crate::engine::ModelVerbosity;
 use crate::engine::ModelVerification;
+use crate::engine::ModerationMetadata;
 use crate::engine::ReasoningEffort;
 use crate::engine::TokenUsage;
 use crate::error::AppError;
@@ -21,7 +22,7 @@ const MAX_HEADER_VALUE_BYTES: usize = 4_096;
 const MAX_METADATA_LIST_ITEMS: usize = 64;
 const MAX_METADATA_STRING_BYTES: usize = 1_024;
 const MAX_USAGE_TOKENS: u64 = 1_000_000_000;
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ResponseRequest<'a> {
@@ -359,7 +360,7 @@ pub enum ResponseEvent {
     ServerModel(String),
     TurnState(String),
     ModelVerifications(Vec<ModelVerification>),
-    TurnModerationMetadata(Value),
+    TurnModerationMetadata(ModerationMetadata),
     SafetyBuffering(SafetyBuffering),
     OutputItemDone(ResponseItem),
     Completed(Option<TokenUsage>),
@@ -431,7 +432,7 @@ impl ResponseStream {
                 }
                 result = next_chunk => {
                     result.map_err(|_| AppError::Timeout { operation: "response stream" })?
-                        .map_err(|error| AppError::Provider(error.to_string()))?
+                        .map_err(|error| AppError::Transport(error.to_string()))?
                 }
             };
             match chunk {
@@ -609,6 +610,8 @@ struct ResponseErrorWire {
     kind: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    resets_in_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -676,14 +679,43 @@ fn decode_event(
                 "provider returned an incomplete response: {reason}"
             )));
         }
-        // The stream is extensible: transport heartbeats and response lifecycle
-        // events without application output must not terminate an active turn.
-        _ => None,
+        kind if is_non_output_event(kind) => None,
+        kind => {
+            return Err(AppError::Provider(format!(
+                "unsupported response stream event `{kind}`"
+            )));
+        }
     };
     if let Some(event) = decoded {
         output.push_back(event);
     }
     Ok(())
+}
+
+fn is_non_output_event(kind: &str) -> bool {
+    matches!(
+        kind,
+        "keepalive"
+            | "response.content_part.added"
+            | "response.content_part.done"
+            | "response.created"
+            | "response.custom_tool_call_input.delta"
+            | "response.custom_tool_call_input.done"
+            | "response.function_call_arguments.delta"
+            | "response.function_call_arguments.done"
+            | "response.in_progress"
+            | "response.metadata"
+            | "response.output_text.annotation.added"
+            | "response.output_text.done"
+            | "response.queued"
+            | "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_part.done"
+            | "response.reasoning_summary_text.done"
+            | "response.reasoning_text.done"
+            | "response.web_search_call.completed"
+            | "response.web_search_call.in_progress"
+            | "response.web_search_call.searching"
+    )
 }
 
 fn emit_metadata_events(
@@ -737,7 +769,9 @@ fn emit_metadata_events(
             .as_ref()
             .and_then(|metadata| metadata.get("openai_chatgpt_moderation_metadata"))
         {
-            output.push_back(ResponseEvent::TurnModerationMetadata(metadata.clone()));
+            output.push_back(ResponseEvent::TurnModerationMetadata(
+                decode_moderation_metadata(metadata)?,
+            ));
         }
     }
 
@@ -749,24 +783,40 @@ fn emit_metadata_events(
     Ok(())
 }
 
+fn decode_moderation_metadata(value: &Value) -> Result<ModerationMetadata, AppError> {
+    serde_json::from_value(value.clone()).map_err(|error| {
+        AppError::Provider(format!("invalid ChatGPT moderation metadata: {error}"))
+    })
+}
+
 fn decode_model_verifications(value: &Value) -> Result<Vec<ModelVerification>, AppError> {
-    let Some(values) = value.as_array() else {
-        return Ok(Vec::new());
-    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| AppError::Provider("model verification metadata is not an array".into()))?;
     if values.len() > MAX_METADATA_LIST_ITEMS {
         return Err(AppError::Provider(format!(
             "model verification list exceeds {MAX_METADATA_LIST_ITEMS} entries"
         )));
     }
     let mut decoded = Vec::new();
-    for value in values {
-        let Some(value) = value.as_str() else {
-            continue;
-        };
-        if value == "trusted_access_for_cyber"
-            && !decoded.contains(&ModelVerification::TrustedAccessForCyber)
-        {
-            decoded.push(ModelVerification::TrustedAccessForCyber);
+    for (index, value) in values.iter().enumerate() {
+        let value = value.as_str().ok_or_else(|| {
+            AppError::Provider(format!(
+                "model verification metadata entry {} is not text",
+                index + 1
+            ))
+        })?;
+        match value {
+            "trusted_access_for_cyber" => {
+                if !decoded.contains(&ModelVerification::TrustedAccessForCyber) {
+                    decoded.push(ModelVerification::TrustedAccessForCyber);
+                }
+            }
+            value => {
+                return Err(AppError::Provider(format!(
+                    "unsupported model verification `{value}`"
+                )));
+            }
         }
     }
     Ok(decoded)
@@ -926,22 +976,32 @@ fn stream_failure(event: StreamEventWire) -> AppError {
     let error = event
         .error
         .or_else(|| event.response.and_then(|response| response.error));
-    let (code, message) = error.map_or_else(
-        || (None, "response stream failed without a message".into()),
+    let (code, message, retry_after_seconds) = error.map_or_else(
+        || {
+            (
+                None,
+                "response stream failed without a message".into(),
+                None,
+            )
+        },
         |error| {
             let code = error.code.or(error.kind);
             let message = error
                 .message
                 .filter(|message| !message.trim().is_empty())
                 .unwrap_or_else(|| "response stream failed without a message".into());
-            (code, message)
+            (
+                code,
+                message,
+                error.resets_in_seconds.filter(|seconds| *seconds > 0),
+            )
         },
     );
     let message = match code.as_deref() {
         Some(code) => format!("{code}: {message}"),
         None => message,
     };
-    AppError::from_provider_rejection(None, code.as_deref(), message)
+    AppError::from_provider_rejection(None, code.as_deref(), message, retry_after_seconds)
 }
 
 #[cfg(test)]
@@ -1007,6 +1067,29 @@ mod tests {
         assert!(matches!(
             error,
             crate::error::AppError::ContextWindowExceeded(_)
+        ));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn preserves_usage_limit_reset_delay_from_sse() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+        let error = parser
+            .push(
+                br#"data: {"type":"response.failed","response":{"error":{"type":"usage_limit_reached","message":"limit reached","resets_in_seconds":3600}}}
+
+"#,
+                &mut events,
+            )
+            .expect_err("usage limit should pause the stream");
+
+        assert!(matches!(
+            error,
+            crate::error::AppError::RateLimited {
+                retry_after_seconds: Some(3_600),
+                ..
+            }
         ));
         assert!(events.is_empty());
     }
@@ -1079,8 +1162,28 @@ mod tests {
         assert!(matches!(
             events.pop_front(),
             Some(ResponseEvent::TurnModerationMetadata(metadata))
-                if metadata["presentation"] == "inline"
+                if matches!(
+                    metadata.presentation,
+                    crate::engine::ModerationPresentation::Inline
+                )
         ));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn rejects_unknown_model_verification_metadata() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+        let error = parser
+            .push(
+                br#"data: {"type":"response.metadata","metadata":{"openai_verification_recommendation":["future_verification"]}}
+
+"#,
+                &mut events,
+            )
+            .expect_err("unknown verification metadata must fail explicitly");
+
+        assert!(error.to_string().contains("future_verification"));
         assert!(events.is_empty());
     }
 
@@ -1246,15 +1349,16 @@ mod tests {
     }
 
     #[test]
-    fn ignores_unhandled_event_discriminators() {
+    fn rejects_unknown_event_discriminators() {
         let mut parser = SseParser::default();
         let mut events = VecDeque::new();
 
-        parser
+        let error = parser
             .push(b"data: {\"type\":\"response.future\"}\n\n", &mut events)
-            .expect("unhandled response events should not terminate the stream");
+            .expect_err("unknown response events must fail explicitly");
 
         assert!(events.is_empty());
+        assert!(error.to_string().contains("response.future"));
     }
 
     #[test]

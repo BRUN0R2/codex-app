@@ -1,6 +1,6 @@
 import { Show } from "solid-js";
 
-import type { AppController } from "../state/createAppController";
+import type { AppController } from "../state/appController";
 import { CodexGlyph } from "./CodexGlyph";
 import { Icon } from "./Icon";
 

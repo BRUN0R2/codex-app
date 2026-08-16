@@ -1,6 +1,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { presentAssistantText } from "./contentReferenceMarkers";
+import { frontendFailureMessage, useFrontendFailureReporter } from "./frontendFailure";
 import { useImageViewer } from "./ImageViewer";
 import { resolveImageSource } from "./imageSource";
 import { renderMarkdown } from "./markdownRenderer";
@@ -30,6 +31,7 @@ export function Markdown(props: MarkdownProps) {
   });
   const markdownRenderer = createMarkdownStreamRenderer(renderMarkdown);
   const viewer = useImageViewer();
+  const reportFailure = useFrontendFailureReporter();
 
   function renderPresentedText(source: string, streaming: boolean): void {
     if (element === undefined) {
@@ -53,7 +55,9 @@ export function Markdown(props: MarkdownProps) {
             return;
           }
           pendingMarkdownRender = undefined;
-          console.error("Failed to render Markdown off the UI thread", reason);
+          reportFailure(
+            frontendFailureMessage("Falha ao renderizar Markdown em segundo plano", reason),
+          );
           applyRenderUpdate(markdownRenderer.render(source, false));
         });
       return;
@@ -117,7 +121,7 @@ export function Markdown(props: MarkdownProps) {
     const url = safeExternalUrl(href);
     if (url !== null) {
       void openUrl(url).catch((error: unknown) => {
-        console.error("Failed to open external Markdown link", error);
+        reportFailure(frontendFailureMessage("Falha ao abrir o link externo", error));
       });
     }
   }
@@ -168,9 +172,12 @@ export function Markdown(props: MarkdownProps) {
             image.classList.remove("image-load-failed");
           }
         })
-        .catch(() => {
+        .catch((reason: unknown) => {
           if (image.isConnected && image.getAttribute("data-image-source") === source) {
             image.classList.add("image-load-failed");
+            reportFailure(
+              frontendFailureMessage(`Falha ao carregar a imagem \`${source}\``, reason),
+            );
           }
         })
         .finally(() => {

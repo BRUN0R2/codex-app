@@ -7,8 +7,15 @@ pub enum AppError {
     Auth(String),
     #[error("provider request failed: {0}")]
     Provider(String),
+    #[error("provider connection failed: {0}")]
+    Transport(String),
     #[error("provider returned HTTP {status}: {message}")]
     ProviderHttp { status: u16, message: String },
+    #[error("provider rate limit reached: {message}")]
+    RateLimited {
+        message: String,
+        retry_after_seconds: Option<u64>,
+    },
     #[error("model context window exceeded: {0}")]
     ContextWindowExceeded(String),
     #[error("{operation} exceeded its time limit")]
@@ -36,7 +43,9 @@ impl AppError {
         match self {
             Self::Auth(_) => "authFailed",
             Self::Provider(_) => "providerFailed",
+            Self::Transport(_) => "providerUnavailable",
             Self::ProviderHttp { .. } => "providerHttpError",
+            Self::RateLimited { .. } => "rateLimited",
             Self::ContextWindowExceeded(_) => "contextWindowExceeded",
             Self::Timeout { .. } => "operationTimeout",
             Self::Storage(_) => "storageFailed",
@@ -54,6 +63,8 @@ impl AppError {
         matches!(
             self,
             Self::Provider(_)
+                | Self::Transport(_)
+                | Self::RateLimited { .. }
                 | Self::ProviderHttp {
                     status: 500..=599,
                     ..
@@ -70,14 +81,42 @@ impl AppError {
         status: Option<u16>,
         code: Option<&str>,
         message: String,
+        retry_after_seconds: Option<u64>,
     ) -> Self {
         if code == Some("context_length_exceeded") {
             Self::ContextWindowExceeded(message)
+        } else if status == Some(429)
+            || matches!(
+                code,
+                Some(
+                    "insufficient_quota"
+                        | "rate_limit_exceeded"
+                        | "rate_limit_reached"
+                        | "usage_limit_reached"
+                )
+            )
+        {
+            Self::RateLimited {
+                message,
+                retry_after_seconds,
+            }
         } else if let Some(status) = status {
             Self::ProviderHttp { status, message }
         } else {
             Self::Provider(message)
         }
+    }
+
+    pub(crate) const fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::Transport(_)
+                | Self::ProviderHttp {
+                    status: 500..=599,
+                    ..
+                }
+                | Self::Timeout { .. }
+        )
     }
 }
 
@@ -111,10 +150,51 @@ mod tests {
             None,
             Some("context_length_exceeded"),
             "request is too large".into(),
+            None,
         );
         let public = CommandError::from(error);
 
         assert_eq!(public.code, "contextWindowExceeded");
         assert!(!public.retryable);
+    }
+
+    #[test]
+    fn usage_limit_is_retryable_and_preserves_the_reset_delay() {
+        let error = AppError::from_provider_rejection(
+            Some(429),
+            Some("usage_limit_reached"),
+            "usage limit reached".into(),
+            Some(3_600),
+        );
+        assert!(matches!(
+            &error,
+            AppError::RateLimited {
+                retry_after_seconds: Some(3_600),
+                ..
+            }
+        ));
+        let public = CommandError::from(error);
+        assert_eq!(public.code, "rateLimited");
+        assert!(public.retryable);
+    }
+
+    #[test]
+    fn only_recoverable_transport_failures_are_transient() {
+        assert!(AppError::Transport("connection reset".into()).is_transient());
+        assert!(
+            AppError::ProviderHttp {
+                status: 503,
+                message: "unavailable".into(),
+            }
+            .is_transient()
+        );
+        assert!(!AppError::Provider("invalid SSE event".into()).is_transient());
+        assert!(
+            !AppError::ProviderHttp {
+                status: 400,
+                message: "bad request".into(),
+            }
+            .is_transient()
+        );
     }
 }

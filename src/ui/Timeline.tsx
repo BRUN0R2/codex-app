@@ -1,42 +1,64 @@
 import {
-  createContext,
   createEffect,
   createMemo,
   createSignal,
+  ErrorBoundary,
   For,
-  Index,
   Match,
   onCleanup,
   onMount,
   Show,
   Switch,
-  useContext,
 } from "solid-js";
 
-import type { FileChange, ThreadItem, UserContent, VisibleThreadItem } from "../contracts/types";
-import type { AppController } from "../state/createAppController";
+import type { FileChange, ThreadItem, VisibleThreadItem } from "../contracts/types";
+import type { AppController } from "../state/appController";
 import { projectName } from "../state/projects";
 import type { VisibleThreadTurn } from "../state/visibleTurnSequence";
 import { fileName, toolIconName, toolLabel } from "./activityLabels";
 import {
   type AgentActivityItem,
   type AgentActivityKind,
+  AgentActivityProjectionStore,
   type AgentActivityRenderUnit,
   activeAgentActivity,
+  agentActivityRenderUnitIdentity,
   agentActivitySummaryLabel,
   shouldRenderAgentActivityGroup,
-  splitAgentActivityUnits,
   summarizeAgentActivity,
   webSearchActivityTitle,
 } from "./agentActivityPresentation";
 import { CodexGlyph } from "./CodexGlyph";
 import { presentAssistantText } from "./contentReferenceMarkers";
+import { DiffView } from "./DiffView";
+import { createDiffDocument, summarizeDiff } from "./diffDocument";
+import { observeElementResize } from "./elementResize";
+import { FrontendFailureContext, useFrontendFailureReporter } from "./frontendFailure";
 import { Icon, type IconName } from "./Icon";
-import { ImagePreview } from "./ImagePreview";
-import { extractToolImageSource } from "./imageSource";
-import { Markdown } from "./Markdown";
-import { SplitDiffView, summarizeDiff, UnifiedDiffView } from "./SplitDiffView";
-import { createTimelineDisclosureStore, type TimelineDisclosureStore } from "./timelineDisclosure";
+import { TimelineTurnRenderFailure } from "./RenderFailure";
+import { ThreadOutputView } from "./ThreadOutputView";
+import {
+  AgentMessage,
+  blockPreview,
+  CommentaryMessage,
+  inlinePreview,
+  UserMessage,
+  userMessageCopyText,
+} from "./TimelineMessages";
+import { createTimelineDisclosureStore } from "./timelineDisclosure";
+import {
+  handleTimelineDetailsToggle,
+  type TimelineDisclosureBinding,
+  TimelineDisclosureContext,
+  type TimelineDisclosureContextValue,
+  timelineDisclosureNamespacePrefix,
+  useTimelineDisclosure,
+} from "./timelineDisclosureContext";
+import {
+  timelineFileChangeIdentity,
+  timelineItemIdentity,
+  timelineItemRenderIdentity,
+} from "./timelineIdentity";
 import {
   commandActivityTitle,
   commandOutputText,
@@ -44,6 +66,7 @@ import {
   reasoningTitle,
   thinkingPresentation,
   toolActivityTitle,
+  toolOutputText,
   turnDurationLabel,
 } from "./timelinePresentation";
 import {
@@ -52,10 +75,19 @@ import {
   hasRecentTimelineUserScrollIntent,
   isTimelineNearEnd,
   resolveTimelineFollowing,
-  revealExpandedDisclosureScrollTop,
+  resolveTimelineRestorationTop,
   type ScrollbarMetrics,
+  shouldSynchronizeTimelineToEnd,
 } from "./timelineScroll";
+import { TimelineThreadSessionStore } from "./timelineSession";
 import { presentTurnFailure } from "./turnFailure";
+import {
+  asTurnMessageBlock,
+  asTurnWorkBlock,
+  type TurnPresentationBlock,
+  TurnPresentationStore,
+  type TurnWorkItem,
+} from "./turnPresentation";
 import { type UserMessageEntry, UserMessageNavigator } from "./UserMessageNavigator";
 import { VariableSizeVirtualizer } from "./variableSizeVirtualizer";
 
@@ -97,93 +129,13 @@ const STARTER_SUGGESTIONS: readonly StarterSuggestion[] = [
   },
 ];
 
-const USER_MESSAGE_COLLAPSED_LINES = 20;
 const TIMELINE_ESTIMATED_TURN_HEIGHT = 498;
 const TIMELINE_VIRTUAL_OVERSCAN_PX = 900;
 const TIMELINE_HISTORY_LOAD_THRESHOLD_PX = 640;
+const TIMELINE_SESSION_CACHE_CAPACITY: number = 16;
 
 interface TimelineUserMessageEntry extends UserMessageEntry {
   readonly turnIndex: number;
-}
-
-interface TimelineDisclosureBinding {
-  readonly clear: (keys: readonly string[], prefixes?: readonly string[]) => void;
-  readonly isOpen: () => boolean;
-  readonly setOpen: (open: boolean) => void;
-  readonly toggle: () => void;
-}
-
-const TimelineDisclosureContext = createContext<TimelineDisclosureStore>();
-
-function useTimelineDisclosure(
-  key: () => string,
-  initialOpen: () => boolean = () => false,
-): TimelineDisclosureBinding {
-  const disclosures = useContext(TimelineDisclosureContext);
-  if (disclosures === undefined) {
-    throw new Error("O estado visual da timeline não foi inicializado.");
-  }
-
-  let activeKey = key();
-  createEffect(() => {
-    const nextKey = key();
-    if (nextKey !== activeKey) {
-      disclosures.clear([activeKey]);
-      activeKey = nextKey;
-    }
-  });
-  onCleanup(() => disclosures.clear([activeKey]));
-
-  const isOpen = () => disclosures.read(key(), initialOpen());
-  const setOpen = (open: boolean) => disclosures.write(key(), open);
-
-  return {
-    clear: disclosures.clear,
-    isOpen,
-    setOpen,
-    toggle: () => setOpen(!isOpen()),
-  };
-}
-
-function disclosurePhase(status: AgentActivityItem["status"]): "running" | "settled" {
-  return status === "inProgress" ? "running" : "settled";
-}
-
-function handleDetailsToggle(
-  event: ToggleEvent & { readonly currentTarget: HTMLDetailsElement },
-  disclosure: TimelineDisclosureBinding,
-): void {
-  const details = event.currentTarget;
-  disclosure.setOpen(details.open);
-  if (!details.open) {
-    return;
-  }
-  requestAnimationFrame(() => revealExpandedDetails(details));
-}
-
-function revealExpandedDetails(details: HTMLDetailsElement): void {
-  if (!details.isConnected || !details.open) {
-    return;
-  }
-  const viewport = details.closest<HTMLElement>(".agent-activity-viewport");
-  const summary = details.querySelector<HTMLElement>(":scope > summary");
-  if (viewport === null || summary === null) {
-    return;
-  }
-  const viewportBounds = viewport.getBoundingClientRect();
-  const detailsBounds = details.getBoundingClientRect();
-  const targetScrollTop = revealExpandedDisclosureScrollTop({
-    clientHeight: viewport.clientHeight,
-    detailsBottom: detailsBounds.bottom,
-    detailsTop: detailsBounds.top,
-    scrollHeight: viewport.scrollHeight,
-    scrollTop: viewport.scrollTop,
-    summaryBottom: summary.getBoundingClientRect().bottom,
-    viewportTop: viewportBounds.top,
-  });
-  if (targetScrollTop > viewport.scrollTop) {
-    viewport.scrollTop = targetScrollTop;
-  }
 }
 
 export function Timeline(props: {
@@ -197,8 +149,15 @@ export function Timeline(props: {
   let scrollbarThumbElement: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let animationFrame: number | undefined;
+  let pendingLayoutSynchronization = false;
+  let pendingUserScrollMeasurement = false;
   let historyRevealFrame: number | undefined;
+  let timelineRestorationFrame: number | undefined;
+  let virtualMeasurementFrame: number | undefined;
   let lastUserScrollIntentAt = Number.NEGATIVE_INFINITY;
+  let smoothScrollTarget: number | null = null;
+  let activeTimelineThreadId: string | null = null;
+  let timelineTransitionRevision = 0;
   let observedActiveTurnId: string | null | undefined;
   let observedThreadId: string | null | undefined;
   let dragState:
@@ -208,7 +167,11 @@ export function Timeline(props: {
   const [showScrollToEnd, setShowScrollToEnd] = createSignal(false);
   const [activeUserMessageIndex, setActiveUserMessageIndex] = createSignal(0);
   const [clock, setClock] = createSignal(Date.now());
-  const virtualizer = new VariableSizeVirtualizer(TIMELINE_ESTIMATED_TURN_HEIGHT);
+  const timelineSessions = new TimelineThreadSessionStore(
+    () => new VariableSizeVirtualizer(TIMELINE_ESTIMATED_TURN_HEIGHT),
+    TIMELINE_SESSION_CACHE_CAPACITY,
+  );
+  let virtualizer = new VariableSizeVirtualizer(TIMELINE_ESTIMATED_TURN_HEIGHT);
   const [virtualRevision, setVirtualRevision] = createSignal(0);
   const [virtualViewport, setVirtualViewport] = createSignal({ offset: 0, size: 1 });
   const [scrollbar, setScrollbar] = createSignal<ScrollbarMetrics>({
@@ -218,6 +181,12 @@ export function Timeline(props: {
     thumbTop: 0,
   });
   const disclosures = createTimelineDisclosureStore();
+  const disclosureContext: TimelineDisclosureContextValue = {
+    keyPrefix: () => timelineDisclosureNamespacePrefix(props.controller.currentThread()?.id ?? ""),
+    store: disclosures,
+  };
+  const reportFrontendFailure = (reason: unknown) => props.controller.reportError(reason);
+  const pendingVirtualMeasurements = new Map<string, number>();
   const virtualRange = createMemo(() => {
     virtualRevision();
     const viewport = virtualViewport();
@@ -227,6 +196,10 @@ export function Timeline(props: {
     const range = virtualRange();
     return props.controller.turns().slice(range.start, range.end);
   });
+  const virtualTurnIds = createMemo(() => virtualTurns().map((turn) => turn.id));
+  const virtualTurnsById = createMemo(
+    () => new Map(virtualTurns().map((turn) => [turn.id, turn] as const)),
+  );
   const virtualTotalSize = createMemo(() => {
     virtualRevision();
     return virtualizer.totalSize();
@@ -285,7 +258,7 @@ export function Timeline(props: {
     }
     const previousScrollHeight = scrollElement.scrollHeight;
     const previousScrollTop = scrollElement.scrollTop;
-    setFollowingLatest(false);
+    setActiveTimelineFollowing(false);
     const loaded = await props.controller.loadOlderHistory();
     if (!loaded || props.controller.currentThread()?.id !== threadId) {
       return;
@@ -298,9 +271,10 @@ export function Timeline(props: {
       if (scrollElement === undefined || props.controller.currentThread()?.id !== threadId) {
         return;
       }
-      scrollElement.scrollTop =
-        previousScrollTop + Math.max(0, scrollElement.scrollHeight - previousScrollHeight);
-      measureScroll(false);
+      scrollTimelineTo(
+        previousScrollTop + Math.max(0, scrollElement.scrollHeight - previousScrollHeight),
+      );
+      scheduleTimelineFrame(false, false);
     });
   }
 
@@ -308,9 +282,145 @@ export function Timeline(props: {
     if (scrollElement === undefined || virtualListElement === undefined) {
       return;
     }
-    setVirtualViewport({
+    const nextViewport = {
       offset: Math.max(0, scrollElement.scrollTop - virtualListElement.offsetTop),
       size: Math.max(1, scrollElement.clientHeight),
+    };
+    setVirtualViewport((current) => {
+      return current.offset === nextViewport.offset && current.size === nextViewport.size
+        ? current
+        : nextViewport;
+    });
+  }
+
+  function scrollTimelineTo(top: number, behavior: ScrollBehavior = "auto"): void {
+    if (scrollElement === undefined) {
+      return;
+    }
+    const maximumScroll = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+    const target = Math.min(maximumScroll, Math.max(0, top));
+    if (behavior === "auto") {
+      // Direct assignments have no animation lifecycle to consume. Keeping a target here
+      // makes a later real user scroll look programmatic and re-enables auto-follow.
+      smoothScrollTarget = null;
+      scrollElement.scrollTop = target;
+      return;
+    }
+    if (Math.abs(scrollElement.scrollTop - target) <= 1) {
+      smoothScrollTarget = null;
+      return;
+    }
+    smoothScrollTarget = target;
+    scrollElement.scrollTo({ behavior, top: target });
+  }
+
+  function consumeSmoothScroll(): boolean {
+    if (scrollElement === undefined || smoothScrollTarget === null) {
+      return false;
+    }
+    if (Math.abs(scrollElement.scrollTop - smoothScrollTarget) <= 1) {
+      smoothScrollTarget = null;
+    }
+    return true;
+  }
+
+  function saveActiveTimelineViewport(nextFollowingLatest = followingLatest()): void {
+    if (activeTimelineThreadId === null || scrollElement === undefined) {
+      return;
+    }
+    timelineSessions.save(activeTimelineThreadId, {
+      followingLatest: nextFollowingLatest,
+      scrollTop: Math.max(0, scrollElement.scrollTop),
+    });
+  }
+
+  function setActiveTimelineFollowing(nextFollowingLatest: boolean): void {
+    setFollowingLatest(nextFollowingLatest);
+    saveActiveTimelineViewport(nextFollowingLatest);
+  }
+
+  function cancelPendingTimelineWork(): number {
+    timelineTransitionRevision += 1;
+    if (animationFrame !== undefined) {
+      cancelAnimationFrame(animationFrame);
+      animationFrame = undefined;
+    }
+    if (historyRevealFrame !== undefined) {
+      cancelAnimationFrame(historyRevealFrame);
+      historyRevealFrame = undefined;
+    }
+    if (timelineRestorationFrame !== undefined) {
+      cancelAnimationFrame(timelineRestorationFrame);
+      timelineRestorationFrame = undefined;
+    }
+    if (virtualMeasurementFrame !== undefined) {
+      cancelAnimationFrame(virtualMeasurementFrame);
+      virtualMeasurementFrame = undefined;
+    }
+    pendingLayoutSynchronization = false;
+    pendingUserScrollMeasurement = false;
+    pendingVirtualMeasurements.clear();
+    smoothScrollTarget = null;
+    lastUserScrollIntentAt = Number.NEGATIVE_INFINITY;
+    if (
+      dragState !== undefined &&
+      scrollbarThumbElement?.hasPointerCapture(dragState.pointerId) === true
+    ) {
+      scrollbarThumbElement.releasePointerCapture(dragState.pointerId);
+    }
+    dragState = undefined;
+    return timelineTransitionRevision;
+  }
+
+  function activateTimelineThread(threadId: string | null, keys: readonly string[]): void {
+    saveActiveTimelineViewport();
+    const transitionRevision = cancelPendingTimelineWork();
+    activeTimelineThreadId = threadId;
+    setActiveUserMessageIndex(0);
+    setShowScrollToEnd(false);
+    setScrollbar({
+      maximumScroll: 0,
+      scrollable: false,
+      thumbHeight: 0,
+      thumbTop: 0,
+    });
+
+    const viewportSize = Math.max(1, scrollElement?.clientHeight ?? 1);
+    const session = threadId === null ? null : timelineSessions.activate(threadId, keys);
+    virtualizer =
+      session?.virtualizer ?? new VariableSizeVirtualizer(TIMELINE_ESTIMATED_TURN_HEIGHT);
+    const following = session?.followingLatest ?? true;
+    const savedScrollTop = session?.scrollTop ?? 0;
+    const initialMaximumScroll = Math.max(0, virtualizer.totalSize() - viewportSize);
+    const initialScrollTop = resolveTimelineRestorationTop({
+      followingLatest: following,
+      maximumScroll: initialMaximumScroll,
+      savedScrollTop,
+    });
+    setFollowingLatest(following);
+    setVirtualViewport({ offset: initialScrollTop, size: viewportSize });
+    setVirtualRevision((revision) => revision + 1);
+
+    timelineRestorationFrame = requestAnimationFrame(() => {
+      timelineRestorationFrame = undefined;
+      if (
+        timelineTransitionRevision !== transitionRevision ||
+        (props.controller.currentThread()?.id ?? null) !== threadId ||
+        scrollElement === undefined
+      ) {
+        return;
+      }
+      const maximumScroll = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+      scrollTimelineTo(
+        resolveTimelineRestorationTop({
+          followingLatest: following,
+          maximumScroll,
+          savedScrollTop,
+        }),
+      );
+      pendingLayoutSynchronization = false;
+      pendingUserScrollMeasurement = false;
+      measureScroll(false);
     });
   }
 
@@ -324,20 +434,29 @@ export function Timeline(props: {
   }
 
   function measureVirtualTurn(key: string, size: number): void {
-    const change = virtualizer.measure(key, size);
-    if (change === null) {
+    pendingVirtualMeasurements.set(key, size);
+    if (virtualMeasurementFrame !== undefined) {
       return;
     }
-    const previousBottom = virtualizer.offsetOf(change.index + 1) - change.delta;
-    if (
-      scrollElement !== undefined &&
-      !followingLatest() &&
-      previousBottom <= virtualViewport().offset
-    ) {
-      scrollElement.scrollTop += change.delta;
-    }
-    setVirtualRevision((revision) => revision + 1);
-    synchronizeScroll();
+    virtualMeasurementFrame = requestAnimationFrame(() => {
+      virtualMeasurementFrame = undefined;
+      const measurements = [...pendingVirtualMeasurements].map(
+        ([measurementKey, measuredSize]) => ({
+          key: measurementKey,
+          size: measuredSize,
+        }),
+      );
+      pendingVirtualMeasurements.clear();
+      const batch = virtualizer.measureBatch(measurements, virtualViewport().offset);
+      if (!batch.changed) {
+        return;
+      }
+      if (scrollElement !== undefined && !followingLatest() && batch.anchorDelta !== 0) {
+        scrollTimelineTo(scrollElement.scrollTop + batch.anchorDelta);
+      }
+      setVirtualRevision((revision) => revision + 1);
+      synchronizeScroll();
+    });
   }
 
   function measureScroll(userInitiated: boolean): void {
@@ -346,13 +465,14 @@ export function Timeline(props: {
     }
     updateVirtualViewport();
     const trackHeight = scrollbarTrackElement?.clientHeight ?? 0;
-    setScrollbar(
-      calculateTimelineScrollbar({
-        clientHeight: scrollElement.clientHeight,
-        scrollHeight: scrollElement.scrollHeight,
-        scrollTop: scrollElement.scrollTop,
-        trackHeight,
-      }),
+    const nextScrollbar = calculateTimelineScrollbar({
+      clientHeight: scrollElement.clientHeight,
+      scrollHeight: scrollElement.scrollHeight,
+      scrollTop: scrollElement.scrollTop,
+      trackHeight,
+    });
+    setScrollbar((current) =>
+      sameScrollbarMetrics(current, nextScrollbar) ? current : nextScrollbar,
     );
     const isNearEnd = isTimelineNearEnd({
       clientHeight: scrollElement.clientHeight,
@@ -360,13 +480,12 @@ export function Timeline(props: {
       scrollTop: scrollElement.scrollTop,
     });
     setShowScrollToEnd(!isNearEnd);
-    setFollowingLatest((current) =>
-      resolveTimelineFollowing({
-        followingLatest: current,
-        nearEnd: isNearEnd,
-        userInitiated,
-      }),
-    );
+    const nextFollowingLatest = resolveTimelineFollowing({
+      followingLatest: followingLatest(),
+      nearEnd: isNearEnd,
+      userInitiated,
+    });
+    setActiveTimelineFollowing(nextFollowingLatest);
     measureActiveUserMessage();
     if (
       userInitiated &&
@@ -379,7 +498,31 @@ export function Timeline(props: {
   }
 
   function markUserScrollIntent(): void {
+    smoothScrollTarget = null;
     lastUserScrollIntentAt = performance.now();
+  }
+
+  function targetsNestedScrollableContent(target: EventTarget | null): boolean {
+    if (!(target instanceof Element) || scrollElement === undefined) {
+      return false;
+    }
+    for (
+      let element: Element | null = target;
+      element !== null && element !== scrollElement;
+      element = element.parentElement
+    ) {
+      const style = window.getComputedStyle(element);
+      const vertical =
+        element.scrollHeight > element.clientHeight + 1 &&
+        (style.overflowY === "auto" || style.overflowY === "scroll");
+      const horizontal =
+        element.scrollWidth > element.clientWidth + 1 &&
+        (style.overflowX === "auto" || style.overflowX === "scroll");
+      if (vertical || horizontal) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function handleTimelineKeyDown(event: KeyboardEvent): void {
@@ -400,42 +543,81 @@ export function Timeline(props: {
   }
 
   function handleTimelinePointerDown(event: PointerEvent): void {
-    if (event.pointerType === "touch" || event.button === 1) {
-      markUserScrollIntent();
+    if (
+      !event.isPrimary ||
+      (event.pointerType === "mouse" && event.button !== 0 && event.button !== 1)
+    ) {
+      return;
+    }
+    markUserScrollIntent();
+    if (targetsNestedScrollableContent(event.target)) {
+      setActiveTimelineFollowing(false);
+    }
+  }
+
+  function handleTimelineWheel(event: WheelEvent): void {
+    markUserScrollIntent();
+    if (targetsNestedScrollableContent(event.target)) {
+      setActiveTimelineFollowing(false);
+    }
+  }
+
+  function handleTimelineFocusIn(event: FocusEvent): void {
+    if (targetsNestedScrollableContent(event.target)) {
+      setActiveTimelineFollowing(false);
     }
   }
 
   function handleTimelineClick(event: MouseEvent): void {
     const target = event.target instanceof Element ? event.target : null;
     if (target?.closest("[data-timeline-disclosure]")) {
-      setFollowingLatest(false);
+      setActiveTimelineFollowing(false);
     }
   }
 
-  function synchronizeScroll(): void {
-    if (animationFrame !== undefined) {
-      cancelAnimationFrame(animationFrame);
+  function scheduleTimelineFrame(userInitiated: boolean, synchronizeLayout: boolean): void {
+    pendingUserScrollMeasurement ||= userInitiated;
+    pendingLayoutSynchronization ||= synchronizeLayout;
+    if (timelineRestorationFrame !== undefined || animationFrame !== undefined) {
+      return;
     }
     animationFrame = requestAnimationFrame(() => {
       animationFrame = undefined;
+      const shouldSynchronizeLayout = pendingLayoutSynchronization;
+      const shouldMeasureAsUserScroll = pendingUserScrollMeasurement;
+      pendingLayoutSynchronization = false;
+      pendingUserScrollMeasurement = false;
       if (scrollElement === undefined) {
         return;
       }
-      if (followingLatest()) {
-        scrollElement.scrollTop = scrollElement.scrollHeight;
+      if (
+        shouldSynchronizeTimelineToEnd({
+          followingLatest: followingLatest(),
+          layoutRequested: shouldSynchronizeLayout,
+          recentUserIntent: hasRecentTimelineUserScrollIntent(
+            lastUserScrollIntentAt,
+            performance.now(),
+          ),
+        })
+      ) {
+        scrollTimelineTo(scrollElement.scrollHeight);
       }
-      measureScroll(false);
+      measureScroll(shouldMeasureAsUserScroll);
     });
+  }
+
+  function synchronizeScroll(): void {
+    scheduleTimelineFrame(false, true);
   }
 
   function scrollToEnd(behavior: ScrollBehavior = "auto"): void {
     if (scrollElement === undefined) {
       return;
     }
-    setFollowingLatest(true);
-    scrollElement.scrollTo({ behavior, top: scrollElement.scrollHeight });
+    setActiveTimelineFollowing(true);
+    scrollTimelineTo(scrollElement.scrollHeight, behavior);
     if (behavior === "auto") {
-      measureScroll(false);
+      scheduleTimelineFrame(false, false);
     }
   }
 
@@ -447,17 +629,18 @@ export function Timeline(props: {
     if (target === undefined) {
       return;
     }
-    setFollowingLatest(false);
-    scrollElement.scrollTo({
-      behavior: "smooth",
-      top: Math.max(0, virtualListElement.offsetTop + virtualizer.offsetOf(target.turnIndex) - 32),
-    });
+    setActiveTimelineFollowing(false);
+    scrollTimelineTo(
+      Math.max(0, virtualListElement.offsetTop + virtualizer.offsetOf(target.turnIndex) - 32),
+      "smooth",
+    );
   }
 
   function setScrollTopFromThumb(thumbTop: number, userInitiated: boolean): void {
     if (scrollElement === undefined || scrollbarTrackElement === undefined) {
       return;
     }
+    smoothScrollTarget = null;
     const metrics = scrollbar();
     const maximumThumbTop = Math.max(0, scrollbarTrackElement.clientHeight - metrics.thumbHeight);
     scrollElement.scrollTop =
@@ -465,7 +648,7 @@ export function Timeline(props: {
         ? 0
         : (Math.min(maximumThumbTop, Math.max(0, thumbTop)) / maximumThumbTop) *
           metrics.maximumScroll;
-    measureScroll(userInitiated);
+    scheduleTimelineFrame(userInitiated, false);
   }
 
   function handleScrollbarTrackPointerDown(event: PointerEvent): void {
@@ -551,7 +734,7 @@ export function Timeline(props: {
     }
     markUserScrollIntent();
     event.preventDefault();
-    measureScroll(true);
+    scheduleTimelineFrame(true, false);
   }
 
   function scrollTimelineBy(delta: number): void {
@@ -560,15 +743,22 @@ export function Timeline(props: {
     }
     markUserScrollIntent();
     scrollElement.scrollBy({ top: delta });
-    measureScroll(true);
+    scheduleTimelineFrame(true, false);
   }
 
   createEffect(() => {
-    const threadId = props.controller.currentThread()?.id ?? "";
-    const keys = props.controller.persistedTurns().map((turn) => `${threadId}\u0000${turn.id}`);
+    const threadId = props.controller.currentThread()?.id ?? null;
+    const keys =
+      threadId === null
+        ? []
+        : props.controller.persistedTurns().map((turn) => `${threadId}\u0000${turn.id}`);
+    if (activeTimelineThreadId !== threadId) {
+      activateTimelineThread(threadId, keys);
+      return;
+    }
     if (virtualizer.setKeys(keys)) {
       setVirtualRevision((revision) => revision + 1);
-      queueMicrotask(updateVirtualViewport);
+      scheduleTimelineFrame(false, false);
     }
   });
 
@@ -577,7 +767,11 @@ export function Timeline(props: {
       return;
     }
     const handleScroll = () =>
-      measureScroll(hasRecentTimelineUserScrollIntent(lastUserScrollIntentAt, performance.now()));
+      scheduleTimelineFrame(
+        !consumeSmoothScroll() &&
+          hasRecentTimelineUserScrollIntent(lastUserScrollIntentAt, performance.now()),
+        false,
+      );
     scrollElement.addEventListener("scroll", handleScroll, { passive: true });
     resizeObserver = new ResizeObserver(synchronizeScroll);
     resizeObserver.observe(scrollElement);
@@ -592,6 +786,7 @@ export function Timeline(props: {
   });
 
   onCleanup(() => {
+    saveActiveTimelineViewport();
     resizeObserver?.disconnect();
     if (animationFrame !== undefined) {
       cancelAnimationFrame(animationFrame);
@@ -599,171 +794,184 @@ export function Timeline(props: {
     if (historyRevealFrame !== undefined) {
       cancelAnimationFrame(historyRevealFrame);
     }
+    if (timelineRestorationFrame !== undefined) {
+      cancelAnimationFrame(timelineRestorationFrame);
+    }
+    if (virtualMeasurementFrame !== undefined) {
+      cancelAnimationFrame(virtualMeasurementFrame);
+    }
+    pendingVirtualMeasurements.clear();
   });
 
   createEffect(() => {
     props.controller.turns();
     const threadId = props.controller.currentThread()?.id ?? null;
     const activeTurnId = props.controller.activeTurnId();
-    const threadChanged = observedThreadId !== threadId;
-    const turnStarted = activeTurnId !== null && observedActiveTurnId !== activeTurnId;
+    const turnStarted =
+      observedThreadId === threadId &&
+      activeTurnId !== null &&
+      observedActiveTurnId !== activeTurnId;
     observedThreadId = threadId;
     observedActiveTurnId = activeTurnId;
-    if (threadChanged || turnStarted) {
-      setFollowingLatest(true);
+    if (turnStarted) {
+      setActiveTimelineFollowing(true);
     }
     synchronizeScroll();
   });
 
   return (
-    <TimelineDisclosureContext.Provider value={disclosures}>
-      <div class="timeline-frame">
-        <UserMessageNavigator
-          activeIndex={activeUserMessageIndex()}
-          messages={userMessages()}
-          onSelect={scrollToUserMessage}
-        />
-        <section
-          aria-label="Conversa"
-          class="timeline"
-          id="conversation-timeline"
-          onClick={handleTimelineClick}
-          onKeyDown={handleTimelineKeyDown}
-          onPointerDown={handleTimelinePointerDown}
-          onWheel={markUserScrollIntent}
-          ref={scrollElement}
-          // biome-ignore lint/a11y/noNoninteractiveTabindex: the official desktop keeps the scroll viewport keyboard-focusable for Home, End, PageUp, and PageDown.
-          tabIndex={0}
-        >
-          <div class="timeline-inner" ref={contentElement}>
-            <Show
-              keyed
-              when={props.controller.currentThread()?.id}
-              fallback={
-                <EmptyConversation
-                  mode={props.controller.conversationMode()}
-                  onSelectSuggestion={props.onSelectSuggestion}
-                  workspace={props.controller.workspace()}
-                />
-              }
-            >
-              {(_threadId) => (
-                <Show
-                  when={props.controller.turns().length > 0}
-                  fallback={
-                    <EmptyConversation
-                      mode={props.controller.conversationMode()}
-                      onSelectSuggestion={props.onSelectSuggestion}
-                      workspace={props.controller.workspace()}
-                    />
-                  }
-                >
-                  <Show when={props.controller.hasOlderHistory()}>
-                    <button
-                      class="timeline-history-button"
-                      disabled={props.controller.historyLoading()}
-                      onClick={() => void revealOlderTurns()}
-                      type="button"
-                    >
-                      {props.controller.historyLoading()
-                        ? "Carregando histórico…"
-                        : "Carregar turnos anteriores"}
-                    </button>
-                  </Show>
-                  <div
-                    class="timeline-virtual-list"
-                    ref={virtualListElement}
-                    style={{ height: `${virtualTotalSize()}px` }}
+    <FrontendFailureContext.Provider value={reportFrontendFailure}>
+      <TimelineDisclosureContext.Provider value={disclosureContext}>
+        <div class="timeline-frame">
+          <UserMessageNavigator
+            activeIndex={activeUserMessageIndex()}
+            messages={userMessages()}
+            onSelect={scrollToUserMessage}
+          />
+          <section
+            aria-label="Conversa"
+            class="timeline"
+            id="conversation-timeline"
+            onClick={handleTimelineClick}
+            onFocusIn={handleTimelineFocusIn}
+            onKeyDown={handleTimelineKeyDown}
+            onPointerDown={handleTimelinePointerDown}
+            onWheel={handleTimelineWheel}
+            ref={scrollElement}
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: the official desktop keeps the scroll viewport keyboard-focusable for Home, End, PageUp, and PageDown.
+            tabIndex={0}
+          >
+            <div class="timeline-inner" ref={contentElement}>
+              <Show
+                keyed
+                when={props.controller.currentThread()?.id}
+                fallback={
+                  <EmptyConversation
+                    mode={props.controller.conversationMode()}
+                    onSelectSuggestion={props.onSelectSuggestion}
+                    workspace={props.controller.workspace()}
+                  />
+                }
+              >
+                {(_threadId) => (
+                  <Show
+                    when={props.controller.turns().length > 0}
+                    fallback={
+                      <EmptyConversation
+                        mode={props.controller.conversationMode()}
+                        onSelectSuggestion={props.onSelectSuggestion}
+                        workspace={props.controller.workspace()}
+                      />
+                    }
                   >
-                    <Index each={virtualTurns()}>
-                      {(turn, relativeIndex) => (
-                        <VirtualConversationTurn
-                          clock={clock()}
-                          diffDisplay={props.controller.config()?.config.desktop.diffDisplay}
-                          measurementKey={virtualTurnKey(turn().id)}
-                          onMeasure={measureVirtualTurn}
-                          top={virtualOffset(virtualRange().start + relativeIndex)}
-                          turn={turn()}
-                        />
-                      )}
-                    </Index>
-                  </div>
-                </Show>
-              )}
-            </Show>
-          </div>
-        </section>
-        <div
-          aria-hidden={!scrollbar().scrollable}
-          class="timeline-scrollbar"
-          classList={{ "is-hidden": !scrollbar().scrollable }}
-        >
-          <button
-            aria-controls="conversation-timeline"
-            aria-label="Rolar conversa para cima"
-            class="timeline-scrollbar-arrow up"
-            disabled={!scrollbar().scrollable || scrollbar().thumbTop <= 0.5}
-            onClick={() => scrollTimelineBy(-64)}
-            title="Rolar para cima"
-            type="button"
-          >
-            <span aria-hidden="true" class="timeline-scrollbar-arrow-glyph" />
-          </button>
+                    <Show when={props.controller.hasOlderHistory()}>
+                      <button
+                        class="timeline-history-button"
+                        disabled={props.controller.historyLoading()}
+                        onClick={() => void revealOlderTurns()}
+                        type="button"
+                      >
+                        {props.controller.historyLoading()
+                          ? "Carregando histórico…"
+                          : "Carregar turnos anteriores"}
+                      </button>
+                    </Show>
+                    <div
+                      class="timeline-virtual-list"
+                      ref={virtualListElement}
+                      style={{ height: `${virtualTotalSize()}px` }}
+                    >
+                      <For each={virtualTurnIds()}>
+                        {(turnId, relativeIndex) => (
+                          <VirtualConversationTurn
+                            clock={clock()}
+                            diffDisplay={props.controller.config()?.config.desktop.diffDisplay}
+                            measurementKey={virtualTurnKey(turnId)}
+                            onMeasure={measureVirtualTurn}
+                            top={virtualOffset(virtualRange().start + relativeIndex())}
+                            turn={() => readVirtualTurn(virtualTurnsById(), turnId)}
+                            turnId={turnId}
+                          />
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                )}
+              </Show>
+            </div>
+          </section>
           <div
-            aria-controls="conversation-timeline"
-            aria-label="Posição na conversa"
-            aria-orientation="vertical"
-            aria-valuemax={Math.round(scrollbar().maximumScroll)}
-            aria-valuemin={0}
-            aria-valuenow={Math.round(scrollElement?.scrollTop ?? 0)}
-            class="timeline-scrollbar-track"
-            onKeyDown={handleScrollbarKeyDown}
-            onPointerDown={handleScrollbarTrackPointerDown}
-            ref={scrollbarTrackElement}
-            role="scrollbar"
-            tabIndex={scrollbar().scrollable ? 0 : -1}
+            aria-hidden={!scrollbar().scrollable}
+            class="timeline-scrollbar"
+            classList={{ "is-hidden": !scrollbar().scrollable }}
           >
+            <button
+              aria-controls="conversation-timeline"
+              aria-label="Rolar conversa para cima"
+              class="timeline-scrollbar-arrow up"
+              disabled={!scrollbar().scrollable || scrollbar().thumbTop <= 0.5}
+              onClick={() => scrollTimelineBy(-64)}
+              title="Rolar para cima"
+              type="button"
+            >
+              <span aria-hidden="true" class="timeline-scrollbar-arrow-glyph" />
+            </button>
             <div
-              class="timeline-scrollbar-thumb"
-              onPointerDown={handleScrollbarThumbPointerDown}
-              onPointerMove={handleScrollbarThumbPointerMove}
-              onPointerUp={handleScrollbarThumbPointerUp}
-              ref={scrollbarThumbElement}
-              style={{
-                height: `${scrollbar().thumbHeight}px`,
-                transform: `translateY(${scrollbar().thumbTop}px)`,
-              }}
-            />
+              aria-controls="conversation-timeline"
+              aria-label="Posição na conversa"
+              aria-orientation="vertical"
+              aria-valuemax={Math.round(scrollbar().maximumScroll)}
+              aria-valuemin={0}
+              aria-valuenow={Math.round(scrollElement?.scrollTop ?? 0)}
+              class="timeline-scrollbar-track"
+              onKeyDown={handleScrollbarKeyDown}
+              onPointerDown={handleScrollbarTrackPointerDown}
+              ref={scrollbarTrackElement}
+              role="scrollbar"
+              tabIndex={scrollbar().scrollable ? 0 : -1}
+            >
+              <div
+                class="timeline-scrollbar-thumb"
+                onPointerDown={handleScrollbarThumbPointerDown}
+                onPointerMove={handleScrollbarThumbPointerMove}
+                onPointerUp={handleScrollbarThumbPointerUp}
+                ref={scrollbarThumbElement}
+                style={{
+                  height: `${scrollbar().thumbHeight}px`,
+                  transform: `translateY(${scrollbar().thumbTop}px)`,
+                }}
+              />
+            </div>
+            <button
+              aria-controls="conversation-timeline"
+              aria-label="Rolar conversa para baixo"
+              class="timeline-scrollbar-arrow down"
+              disabled={
+                !scrollbar().scrollable ||
+                scrollbar().thumbTop + scrollbar().thumbHeight >=
+                  (scrollbarTrackElement?.clientHeight ?? 0) - 0.5
+              }
+              onClick={() => scrollTimelineBy(64)}
+              title="Rolar para baixo"
+              type="button"
+            >
+              <span aria-hidden="true" class="timeline-scrollbar-arrow-glyph" />
+            </button>
           </div>
-          <button
-            aria-controls="conversation-timeline"
-            aria-label="Rolar conversa para baixo"
-            class="timeline-scrollbar-arrow down"
-            disabled={
-              !scrollbar().scrollable ||
-              scrollbar().thumbTop + scrollbar().thumbHeight >=
-                (scrollbarTrackElement?.clientHeight ?? 0) - 0.5
-            }
-            onClick={() => scrollTimelineBy(64)}
-            title="Rolar para baixo"
-            type="button"
-          >
-            <span aria-hidden="true" class="timeline-scrollbar-arrow-glyph" />
-          </button>
+          <Show when={showScrollToEnd()}>
+            <button
+              aria-label="Ir para o fim da conversa"
+              class="scroll-to-end-button"
+              onClick={() => scrollToEnd("smooth")}
+              title="Ir para o fim da conversa"
+              type="button"
+            >
+              <Icon name="chevronDown" size={16} />
+            </button>
+          </Show>
         </div>
-        <Show when={showScrollToEnd()}>
-          <button
-            aria-label="Ir para o fim da conversa"
-            class="scroll-to-end-button"
-            onClick={() => scrollToEnd("smooth")}
-            title="Ir para o fim da conversa"
-            type="button"
-          >
-            <Icon name="chevronDown" size={16} />
-          </button>
-        </Show>
-      </div>
-    </TimelineDisclosureContext.Provider>
+      </TimelineDisclosureContext.Provider>
+    </FrontendFailureContext.Provider>
   );
 }
 
@@ -773,11 +981,14 @@ function VirtualConversationTurn(props: {
   readonly measurementKey: string;
   readonly onMeasure: (key: string, size: number) => void;
   readonly top: number;
-  readonly turn: VisibleThreadTurn;
+  readonly turn: () => VisibleThreadTurn;
+  readonly turnId: string;
 }) {
   let element: HTMLDivElement | undefined;
-  let observer: ResizeObserver | undefined;
+  let releaseResizeObservation: (() => void) | undefined;
   let measurementFrame: number | undefined;
+  const reportFailure = useFrontendFailureReporter();
+  const turn = createMemo(props.turn);
 
   function measure(): void {
     if (element !== undefined) {
@@ -796,9 +1007,8 @@ function VirtualConversationTurn(props: {
   }
 
   onMount(() => {
-    observer = new ResizeObserver(scheduleMeasurement);
     if (element !== undefined) {
-      observer.observe(element);
+      releaseResizeObservation = observeElementResize(element, scheduleMeasurement);
       scheduleMeasurement();
     }
   });
@@ -807,19 +1017,26 @@ function VirtualConversationTurn(props: {
     scheduleMeasurement();
   });
   onCleanup(() => {
-    observer?.disconnect();
+    releaseResizeObservation?.();
     if (measurementFrame !== undefined) {
       cancelAnimationFrame(measurementFrame);
     }
   });
 
   return (
-    <div
-      class="timeline-virtual-item"
-      ref={element}
-      style={{ transform: `translate3d(0, ${props.top}px, 0)` }}
-    >
-      <ConversationTurn clock={props.clock} diffDisplay={props.diffDisplay} turn={props.turn} />
+    <div class="timeline-virtual-item" ref={element} style={{ top: `${Math.round(props.top)}px` }}>
+      <ErrorBoundary
+        fallback={(error, reset) => (
+          <TimelineTurnRenderFailure
+            error={error}
+            onReport={reportFailure}
+            onReset={reset}
+            turnId={props.turnId}
+          />
+        )}
+      >
+        <ConversationTurn clock={props.clock} diffDisplay={props.diffDisplay} turn={turn()} />
+      </ErrorBoundary>
     </div>
   );
 }
@@ -834,48 +1051,25 @@ function ConversationTurn(props: {
     () => props.turn.status === "inProgress",
   );
   const failure = () => (props.turn.error === null ? null : presentTurnFailure(props.turn.error));
-
-  const userMessages = createMemo(() =>
-    props.turn.items.filter((item) => item.type === "userMessage"),
+  const presentationStore = new TurnPresentationStore();
+  const presentation = createMemo(() => presentationStore.project(props.turn.items));
+  const presentationBlockKeys = createMemo(() => presentation().blocks.map((block) => block.key));
+  const presentationBlocksByKey = createMemo(
+    () => new Map(presentation().blocks.map((block) => [block.key, block] as const)),
   );
-
-  const nonUserItems = createMemo(() =>
-    props.turn.items.filter((item) => item.type !== "userMessage" && item.type !== "plan"),
-  );
-
-  const finalAgentMessageIndex = createMemo(() => {
-    const items = nonUserItems();
-    for (let i = items.length - 1; i >= 0; i--) {
-      const item = items[i];
-      if (item?.type === "agentMessage" && item.phase !== "commentary") {
-        return i;
-      }
-    }
-    return -1;
+  const activeWorkBlockIndex = createMemo(() => {
+    const current = presentation();
+    return current.lastWorkBlockIndex === current.blocks.length - 1
+      ? current.lastWorkBlockIndex
+      : null;
   });
-
-  const workItems = createMemo(() => {
-    const items = nonUserItems();
-    const finalIdx = finalAgentMessageIndex();
-    if (finalIdx === -1) {
-      return items;
-    }
-    return items.slice(0, finalIdx);
+  const activeWorkOwnsHeadline = createMemo(() => {
+    const index = activeWorkBlockIndex();
+    const block = index === null ? undefined : presentation().blocks[index];
+    return block?.kind === "work" && block.items.some((item) => item.type !== "reasoning");
   });
-
-  const finalAgentMessage = createMemo(() => {
-    const items = nonUserItems();
-    const finalIdx = finalAgentMessageIndex();
-    if (finalIdx === -1) {
-      return null;
-    }
-    const item = items[finalIdx];
-    return item ?? null;
-  });
-
-  const workUnits = createMemo(() => splitAgentActivityUnits(workItems()));
   const latestReasoningHeading = createMemo(() => {
-    const items = workItems();
+    const items = props.turn.items;
     for (let index = items.length - 1; index >= 0; index -= 1) {
       const item = items[index];
       if (
@@ -888,13 +1082,19 @@ function ConversationTurn(props: {
     return null;
   });
   const activeThinkingPresentation = createMemo(() => {
-    const latestUnit = workUnits().at(-1);
+    const current = presentation();
     return thinkingPresentation(
       props.turn.status,
-      finalAgentMessage() !== null,
-      latestUnit !== undefined && workUnitOwnsActiveHeadline(latestUnit),
+      current.trailingAgentMessageBlockIndex === current.blocks.length - 1,
+      activeWorkOwnsHeadline(),
     );
   });
+  const needsTrailingThinking = createMemo(
+    () =>
+      props.turn.status === "inProgress" &&
+      activeWorkBlockIndex() === null &&
+      presentation().trailingAgentMessageBlockIndex === null,
+  );
 
   function turnLabel(): string {
     const end =
@@ -907,77 +1107,39 @@ function ConversationTurn(props: {
 
   return (
     <section class="conversation-turn" data-status={props.turn.status}>
-      <Index each={userMessages()}>
-        {(item) => <TimelineItem diffDisplay={props.diffDisplay} item={item()} />}
-      </Index>
-
-      <Show when={workItems().length > 0 || props.turn.status === "inProgress"}>
-        <div class="turn-header-wrapper">
-          <Show
-            when={props.turn.status === "inProgress"}
-            fallback={
-              <button
-                aria-expanded={disclosure.isOpen()}
-                aria-label={`${disclosure.isOpen() ? "Ocultar" : "Mostrar"} trabalho do agente`}
-                class="turn-header-button"
-                data-timeline-disclosure=""
-                onClick={disclosure.toggle}
-                type="button"
-              >
-                <span class="turn-duration-label">{turnLabel()}</span>
-                <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-              </button>
+      <For each={presentationBlockKeys()}>
+        {(blockKey, index) => (
+          <TurnPresentationBlockView
+            activeThinkingPresentation={
+              activeWorkBlockIndex() === index() ? activeThinkingPresentation() : "none"
             }
-          >
-            <div aria-atomic="true" aria-live="polite" class="turn-active-status" role="status">
-              <span class="turn-duration-label">{turnLabel()}</span>
-            </div>
-          </Show>
-          <div class="turn-header-line" />
-        </div>
-
-        <Show when={props.turn.status === "inProgress" || disclosure.isOpen()}>
-          <Show when={workItems().length > 0 || activeThinkingPresentation() === "standalone"}>
-            <div class="turn-body">
-              <Index each={workUnits()}>
-                {(unit, index) => (
-                  <WorkTimelineUnit
-                    diffDisplay={props.diffDisplay}
-                    isCurrent={
-                      index === workUnits().length - 1 &&
-                      activeThinkingPresentation() === "activity"
-                    }
-                    reasoningHeading={latestReasoningHeading()}
-                    unit={unit()}
-                  />
-                )}
-              </Index>
-              <Show
-                when={
-                  activeThinkingPresentation() === "standalone"
-                    ? (latestReasoningHeading() ?? "Pensando")
-                    : null
-                }
-              >
-                {(heading) => (
-                  <section class="thinking-activity-status" role="status">
-                    <ActivityHeadline active text={heading()} />
-                  </section>
-                )}
-              </Show>
-            </div>
-          </Show>
-        </Show>
-      </Show>
-
-      <Show when={finalAgentMessage()}>
-        {(msg) => (
-          <TimelineItem
-            active={props.turn.status === "inProgress"}
+            block={() =>
+              readTimelineValue(presentationBlocksByKey(), blockKey, "bloco projetado do turno")
+            }
+            blockIndex={index()}
             diffDisplay={props.diffDisplay}
-            item={msg()}
+            disclosure={disclosure}
+            firstWorkBlockIndex={presentation().firstWorkBlockIndex}
+            reasoningHeading={latestReasoningHeading()}
+            status={props.turn.status}
+            trailingAgentMessageBlockIndex={presentation().trailingAgentMessageBlockIndex}
+            turnLabel={turnLabel()}
           />
         )}
+      </For>
+
+      <Show when={needsTrailingThinking()}>
+        <Show when={presentation().firstWorkBlockIndex === null}>
+          <TurnHeader disclosure={disclosure} label={turnLabel()} status={props.turn.status} />
+        </Show>
+        <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
+          <TurnWorkBlock
+            activeThinkingPresentation="standalone"
+            diffDisplay={props.diffDisplay}
+            items={[]}
+            reasoningHeading={latestReasoningHeading()}
+          />
+        </TimelineDisclosureContext.Provider>
       </Show>
 
       <Show when={failure()}>
@@ -995,25 +1157,159 @@ function ConversationTurn(props: {
   );
 }
 
+function TurnPresentationBlockView(props: {
+  readonly activeThinkingPresentation: "activity" | "none" | "standalone";
+  readonly block: () => TurnPresentationBlock;
+  readonly blockIndex: number;
+  readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly disclosure: TimelineDisclosureBinding;
+  readonly firstWorkBlockIndex: number | null;
+  readonly reasoningHeading: string | null;
+  readonly status: VisibleThreadTurn["status"];
+  readonly trailingAgentMessageBlockIndex: number | null;
+  readonly turnLabel: string;
+}) {
+  const block = createMemo(props.block);
+
+  return (
+    <Switch>
+      <Match when={asTurnMessageBlock(block())}>
+        {(messageBlock) => (
+          <TimelineItem
+            active={
+              props.status === "inProgress" &&
+              props.trailingAgentMessageBlockIndex === props.blockIndex
+            }
+            diffDisplay={props.diffDisplay}
+            item={messageBlock().item}
+          />
+        )}
+      </Match>
+      <Match when={asTurnWorkBlock(block())}>
+        {(workBlock) => (
+          <>
+            <Show when={props.firstWorkBlockIndex === props.blockIndex}>
+              <TurnHeader
+                disclosure={props.disclosure}
+                label={props.turnLabel}
+                status={props.status}
+              />
+            </Show>
+            <Show when={props.status === "inProgress" || props.disclosure.isOpen()}>
+              <TimelineDisclosureContext.Provider value={props.disclosure.descendantContext}>
+                <TurnWorkBlock
+                  activeThinkingPresentation={props.activeThinkingPresentation}
+                  diffDisplay={props.diffDisplay}
+                  items={workBlock().items}
+                  reasoningHeading={props.reasoningHeading}
+                />
+              </TimelineDisclosureContext.Provider>
+            </Show>
+          </>
+        )}
+      </Match>
+    </Switch>
+  );
+}
+
+function TurnHeader(props: {
+  readonly disclosure: TimelineDisclosureBinding;
+  readonly label: string;
+  readonly status: VisibleThreadTurn["status"];
+}) {
+  return (
+    <div class="turn-header-wrapper">
+      <Show
+        when={props.status === "inProgress"}
+        fallback={
+          <button
+            aria-expanded={props.disclosure.isOpen()}
+            aria-label={`${props.disclosure.isOpen() ? "Ocultar" : "Mostrar"} trabalho do agente`}
+            class="turn-header-button"
+            data-timeline-disclosure=""
+            onClick={props.disclosure.toggle}
+            type="button"
+          >
+            <span class="turn-duration-label">{props.label}</span>
+            <Icon name={props.disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+          </button>
+        }
+      >
+        <div aria-atomic="true" aria-live="polite" class="turn-active-status" role="status">
+          <span class="turn-duration-label">{props.label}</span>
+        </div>
+      </Show>
+      <div class="turn-header-line" />
+    </div>
+  );
+}
+
+function TurnWorkBlock(props: {
+  readonly activeThinkingPresentation: "activity" | "none" | "standalone";
+  readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly items: readonly TurnWorkItem[];
+  readonly reasoningHeading: string | null;
+}) {
+  const projectionStore = new AgentActivityProjectionStore();
+  const workUnits = createMemo(() => projectionStore.project(props.items));
+  const workUnitIdentities = createMemo(() => workUnits().map(agentActivityRenderUnitIdentity));
+  const workUnitsByIdentity = createMemo(
+    () =>
+      new Map(workUnits().map((unit) => [agentActivityRenderUnitIdentity(unit), unit] as const)),
+  );
+
+  return (
+    <Show when={workUnits().length > 0 || props.activeThinkingPresentation === "standalone"}>
+      <div class="turn-body">
+        <For each={workUnitIdentities()}>
+          {(unitIdentity, index) => (
+            <WorkTimelineUnit
+              diffDisplay={props.diffDisplay}
+              isCurrent={
+                index() === workUnits().length - 1 &&
+                props.activeThinkingPresentation === "activity"
+              }
+              reasoningHeading={props.reasoningHeading}
+              unit={() =>
+                readTimelineValue(
+                  workUnitsByIdentity(),
+                  unitIdentity,
+                  "unidade de atividade do agente",
+                )
+              }
+            />
+          )}
+        </For>
+        <Show
+          when={
+            props.activeThinkingPresentation === "standalone"
+              ? (props.reasoningHeading ?? "Pensando")
+              : null
+          }
+        >
+          {(heading) => (
+            <section class="thinking-activity-status" role="status">
+              <ActivityHeadline active text={heading()} />
+            </section>
+          )}
+        </Show>
+      </div>
+    </Show>
+  );
+}
+
 function WorkTimelineUnit(props: {
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly isCurrent: boolean;
   readonly reasoningHeading: string | null;
-  readonly unit: AgentActivityRenderUnit;
+  readonly unit: () => AgentActivityRenderUnit;
 }) {
+  const unit = createMemo(props.unit);
+
   return (
-    <Show
-      when={props.unit.kind === "activityGroup" ? props.unit : null}
-      fallback={
-        <Show when={props.unit.kind === "item" ? props.unit.item : null}>
-          {(item) => (
-            <TimelineItem active={props.isCurrent} diffDisplay={props.diffDisplay} item={item()} />
-          )}
-        </Show>
-      }
-    >
-      {(group) => {
-        return (
+    <Switch>
+      <Match when={asAgentActivityGroup(unit())}>
+        {(group) => (
           <AgentActivityGroup
             diffDisplay={props.diffDisplay}
             disclosureKey={group().key}
@@ -1021,26 +1317,31 @@ function WorkTimelineUnit(props: {
             items={group().items}
             reasoningHeading={props.reasoningHeading}
           />
-        );
-      }}
-    </Show>
+        )}
+      </Match>
+      <Match when={asAgentActivityItem(unit())}>
+        {(itemUnit) => (
+          <TimelineItem
+            active={props.isCurrent}
+            diffDisplay={props.diffDisplay}
+            item={itemUnit().item}
+          />
+        )}
+      </Match>
+    </Switch>
   );
 }
 
-function workUnitOwnsActiveHeadline(unit: AgentActivityRenderUnit): boolean {
-  if (unit.kind === "activityGroup") {
-    return true;
-  }
-  const item = unit.item;
-  if (item.type === "contextCompaction") {
-    return true;
-  }
-  return (
-    (item.type === "commandExecution" ||
-      item.type === "fileChange" ||
-      item.type === "toolExecution") &&
-    item.status === "inProgress"
-  );
+function asAgentActivityGroup(
+  unit: AgentActivityRenderUnit,
+): Extract<AgentActivityRenderUnit, { readonly kind: "activityGroup" }> | null {
+  return unit.kind === "activityGroup" ? unit : null;
+}
+
+function asAgentActivityItem(
+  unit: AgentActivityRenderUnit,
+): Extract<AgentActivityRenderUnit, { readonly kind: "item" }> | null {
+  return unit.kind === "item" ? unit : null;
 }
 
 function AgentActivityGroup(props: {
@@ -1051,6 +1352,10 @@ function AgentActivityGroup(props: {
   readonly reasoningHeading: string | null;
 }) {
   const disclosure = useTimelineDisclosure(() => props.disclosureKey);
+  const itemIdentities = createMemo(() => props.items.map(timelineItemIdentity));
+  const itemsByIdentity = createMemo(() =>
+    indexTimelineValues(props.items, timelineItemIdentity, "itens do grupo de atividade"),
+  );
   const summaries = createMemo(() => summarizeAgentActivity(props.items));
   const activeActivity = createMemo(() => activeAgentActivity(props.items));
   const title = createMemo(() => {
@@ -1074,7 +1379,7 @@ function AgentActivityGroup(props: {
     >
       <details
         class="activity-card agent-activity-group"
-        onToggle={(event) => handleDetailsToggle(event, disclosure)}
+        onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
         open={disclosure.isOpen()}
       >
         <summary class="activity-summary agent-activity-summary" data-timeline-disclosure="">
@@ -1091,15 +1396,25 @@ function AgentActivityGroup(props: {
           </span>
         </summary>
         <Show when={disclosure.isOpen()}>
-          <div class="agent-activity-viewport">
-            <div class="agent-activity-list">
-              <Index each={props.items}>
-                {(item) => (
-                  <TimelineItem diffDisplay={props.diffDisplay} item={item()} variant="grouped" />
-                )}
-              </Index>
+          <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
+            <div class="agent-activity-viewport">
+              <div class="agent-activity-list">
+                <For each={itemIdentities()}>
+                  {(itemIdentity) => (
+                    <TimelineItem
+                      diffDisplay={props.diffDisplay}
+                      item={readTimelineValue(
+                        itemsByIdentity(),
+                        itemIdentity,
+                        "item do grupo de atividade",
+                      )}
+                      variant="grouped"
+                    />
+                  )}
+                </For>
+              </div>
             </div>
-          </div>
+          </TimelineDisclosureContext.Provider>
         </Show>
       </details>
     </Show>
@@ -1169,12 +1484,29 @@ function EmptyConversation(props: {
   );
 }
 
-function TimelineItem(props: {
+interface TimelineItemProps {
   readonly active?: boolean | undefined;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly item: VisibleThreadItem;
   readonly variant?: "default" | "grouped" | undefined;
-}) {
+}
+
+function TimelineItem(props: TimelineItemProps) {
+  return (
+    <Show keyed when={timelineItemRenderIdentity(props.item)}>
+      {(_identity) => (
+        <TimelineItemContent
+          active={props.active}
+          diffDisplay={props.diffDisplay}
+          item={props.item}
+          variant={props.variant}
+        />
+      )}
+    </Show>
+  );
+}
+
+function TimelineItemContent(props: TimelineItemProps) {
   switch (props.item.type) {
     case "userMessage":
       return <UserMessage item={props.item} />;
@@ -1219,231 +1551,6 @@ function ContextCompaction(props: {
   );
 }
 
-function UserMessage(props: { readonly item: Extract<ThreadItem, { type: "userMessage" }> }) {
-  let bubble: HTMLDivElement | undefined;
-  let resizeObserver: ResizeObserver | undefined;
-  let measurementFrame: number | undefined;
-  const disclosure = useTimelineDisclosure(() => `user-message:${props.item.id}`);
-  const [collapsible, setCollapsible] = createSignal(false);
-  const imageContent = createMemo(() =>
-    props.item.content.filter(
-      (content): content is Extract<UserContent, { type: "localImage" }> =>
-        content.type === "localImage",
-    ),
-  );
-  const bubbleContent = createMemo(() =>
-    props.item.content.filter((content) => content.type !== "localImage"),
-  );
-
-  function measure(): void {
-    if (bubble === undefined || disclosure.isOpen()) {
-      return;
-    }
-    setCollapsible(bubble.scrollHeight > bubble.clientHeight + 1);
-  }
-
-  function scheduleMeasurement(): void {
-    if (measurementFrame !== undefined) {
-      return;
-    }
-    measurementFrame = requestAnimationFrame(() => {
-      measurementFrame = undefined;
-      measure();
-    });
-  }
-
-  onMount(() => {
-    resizeObserver = new ResizeObserver(scheduleMeasurement);
-    if (bubble !== undefined) {
-      resizeObserver.observe(bubble);
-    }
-    scheduleMeasurement();
-  });
-  onCleanup(() => {
-    resizeObserver?.disconnect();
-    if (measurementFrame !== undefined) {
-      cancelAnimationFrame(measurementFrame);
-    }
-  });
-
-  return (
-    <article class="message-row user-message-row" id={userMessageAnchor(props.item.id)}>
-      <div class="message-content">
-        <span class="visually-hidden">Você disse:</span>
-        <Show when={imageContent().length > 0}>
-          <div class="message-image-grid user-message-images">
-            <For each={imageContent()}>
-              {(content) => (
-                <ImagePreview
-                  alt={imageContentName(content.path)}
-                  class="message-image-preview"
-                  name={imageContentName(content.path)}
-                  source={content.path}
-                />
-              )}
-            </For>
-          </div>
-        </Show>
-        <Show when={bubbleContent().length > 0}>
-          <div
-            class="user-message-bubble"
-            classList={{
-              clamped: !disclosure.isOpen(),
-              collapsed: collapsible() && !disclosure.isOpen(),
-            }}
-            ref={bubble}
-            style={{ "--collapsed-lines": USER_MESSAGE_COLLAPSED_LINES }}
-          >
-            <For each={bubbleContent()}>{(content) => <UserContentPart content={content} />}</For>
-          </div>
-        </Show>
-        <Show when={collapsible()}>
-          <button
-            aria-expanded={disclosure.isOpen()}
-            class="user-message-expand"
-            data-timeline-disclosure=""
-            onClick={disclosure.toggle}
-            type="button"
-          >
-            {disclosure.isOpen() ? "Mostrar menos" : "Mostrar mais"}
-          </button>
-        </Show>
-        <div class="message-actions user-message-actions">
-          <CopyMessageButton text={userMessageCopyText(props.item.content)} />
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function UserContentPart(props: { readonly content: UserContent }) {
-  switch (props.content.type) {
-    case "text":
-      return <p class="message-text">{props.content.text}</p>;
-    case "localImage":
-      return null;
-    case "mention":
-      return (
-        <div class="attachment-line">
-          <Icon name="file" size={15} /> {props.content.name}
-        </div>
-      );
-  }
-}
-
-function CommentaryMessage(props: {
-  readonly item: Extract<ThreadItem, { type: "agentMessage" }>;
-  readonly streaming: boolean;
-}) {
-  const disclosure = useTimelineDisclosure(() => `commentary:${props.item.id}`);
-  const content = () => presentAssistantText(props.item.text).trim();
-  const title = () => reasoningTitle([], [content()]);
-  const hasDetails = () => content().includes("\n") || content() !== title();
-
-  return (
-    <Show when={content()}>
-      {(visibleContent) => (
-        <Show
-          when={hasDetails()}
-          fallback={
-            <section class="activity-card commentary-card">
-              <p class="commentary-message-text">{visibleContent()}</p>
-            </section>
-          }
-        >
-          <details
-            class="activity-card commentary-card"
-            onToggle={(event) => disclosure.setOpen(event.currentTarget.open)}
-            open={disclosure.isOpen()}
-          >
-            <summary class="activity-summary" data-timeline-disclosure="">
-              <ActivityHeadline text={title()} />
-              <span class="activity-chevron">
-                <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-              </span>
-            </summary>
-            <div class="commentary-content">
-              <Markdown streaming={props.streaming} text={props.item.text} />
-            </div>
-          </details>
-        </Show>
-      )}
-    </Show>
-  );
-}
-
-function AgentMessage(props: {
-  readonly item: Extract<ThreadItem, { type: "agentMessage" }>;
-  readonly streaming: boolean;
-}) {
-  const content = () => presentAssistantText(props.item.text);
-  const visibleContent = () => content().trim().length > 0;
-  return (
-    <Show when={visibleContent()}>
-      <article class="message-row agent-message-row">
-        <div class="message-content">
-          <span class="visually-hidden">Codex disse:</span>
-          <Markdown
-            class="agent-message-markdown"
-            streaming={props.streaming}
-            text={props.item.text}
-          />
-          <div class="message-actions">
-            <CopyMessageButton text={content()} />
-          </div>
-        </div>
-      </article>
-    </Show>
-  );
-}
-
-function CopyMessageButton(props: { readonly text: string }) {
-  const [state, setState] = createSignal<"copied" | "failed" | "idle">("idle");
-  let resetTimer: number | undefined;
-
-  onCleanup(() => window.clearTimeout(resetTimer));
-
-  async function copy(): Promise<void> {
-    window.clearTimeout(resetTimer);
-    try {
-      if (navigator.clipboard === undefined) {
-        throw new Error("Clipboard API unavailable");
-      }
-      await navigator.clipboard.writeText(props.text);
-      setState("copied");
-    } catch {
-      setState("failed");
-    }
-    resetTimer = window.setTimeout(() => setState("idle"), 2_000);
-  }
-
-  const label = () => {
-    switch (state()) {
-      case "copied":
-        return "Copiado";
-      case "failed":
-        return "Falha ao copiar";
-      case "idle":
-        return "Copiar";
-    }
-  };
-
-  return (
-    <button
-      aria-label={label()}
-      aria-live="polite"
-      class="message-copy-button"
-      disabled={props.text.length === 0}
-      onClick={() => void copy()}
-      title={label()}
-      type="button"
-    >
-      <Icon name={state() === "copied" ? "check" : "copy"} size={14} />
-      <span class="visually-hidden">{label()}</span>
-    </button>
-  );
-}
-
 function ActivityHeadline(props: {
   readonly active?: boolean | undefined;
   readonly class?: string;
@@ -1454,12 +1561,7 @@ function ActivityHeadline(props: {
       class={props.class ?? "activity-title"}
       classList={{ "is-running": props.active === true }}
     >
-      <span class="activity-title-base">{props.text}</span>
-      <Show when={props.active === true}>
-        <span aria-hidden="true" class="activity-title-sweep">
-          <span class="activity-title-highlight">{props.text}</span>
-        </span>
-      </Show>
+      {props.text}
     </span>
   );
 }
@@ -1468,22 +1570,20 @@ function CommandItem(props: {
   readonly item: Extract<ThreadItem, { type: "commandExecution" }>;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
-  const disclosure = useTimelineDisclosure(
-    () => `command:${props.item.id}:${disclosurePhase(props.item.status)}`,
-  );
+  const disclosure = useTimelineDisclosure(() => `command:${props.item.id}`);
   const title = () =>
     commandActivityTitle(
       props.item.command,
       props.item.status,
       props.variant === "grouped" ? false : disclosure.isOpen(),
     );
-  const output = () => commandOutputText(props.item.aggregatedOutput);
+  const output = () => props.item.aggregatedOutput;
 
   return (
     <details
       class="activity-card command-activity-card"
       classList={{ "grouped-activity-item": props.variant === "grouped" }}
-      onToggle={(event) => handleDetailsToggle(event, disclosure)}
+      onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
       open={disclosure.isOpen()}
     >
       <summary class="activity-summary" data-timeline-disclosure="">
@@ -1503,7 +1603,9 @@ function CommandItem(props: {
               <span class="prompt-symbol">$</span> {props.item.command}
             </div>
             <Show when={output()}>
-              {(visibleOutput) => <pre class="command-card-output">{visibleOutput()}</pre>}
+              {(visibleOutput) => (
+                <ThreadOutputView format={commandOutputText} output={visibleOutput()} />
+              )}
             </Show>
           </div>
           <Show when={props.item.status === "failed" || props.item.status === "declined"}>
@@ -1524,23 +1626,16 @@ function ToolItem(props: {
   readonly item: Extract<ThreadItem, { type: "toolExecution" }>;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
-  const disclosure = useTimelineDisclosure(
-    () => `tool:${props.item.id}:${disclosurePhase(props.item.status)}`,
-  );
+  const disclosure = useTimelineDisclosure(() => `tool:${props.item.id}`);
   const description = () => props.item.description || toolLabel(props.item.name);
-  const imageSource = () => extractToolImageSource(props.item.name, props.item.output);
   const isWebSearch = () => props.item.name === "web_search" || props.item.name === "web_fetch";
+  const output = () => props.item.output;
   const hasDetails = () =>
-    imageSource() !== null ||
-    (props.item.output !== null && props.item.output.length > 0) ||
-    props.item.status === "failed" ||
-    props.item.status === "declined";
+    output() !== null || props.item.status === "failed" || props.item.status === "declined";
   const title = () =>
     isWebSearch()
       ? webSearchActivityTitle(description(), props.item.status)
-      : imageSource() === null
-        ? toolActivityTitle(description(), props.item.status, disclosure.isOpen())
-        : description();
+      : toolActivityTitle(description(), props.item.status, disclosure.isOpen());
 
   const headline = () => (
     <>
@@ -1565,11 +1660,8 @@ function ToolItem(props: {
     >
       <details
         class="activity-card tool-activity-card"
-        classList={{
-          "grouped-activity-item": props.variant === "grouped",
-          "image-tool-activity": imageSource() !== null,
-        }}
-        onToggle={(event) => handleDetailsToggle(event, disclosure)}
+        classList={{ "grouped-activity-item": props.variant === "grouped" }}
+        onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
         open={disclosure.isOpen()}
       >
         <summary class="activity-summary" data-timeline-disclosure="">
@@ -1580,27 +1672,11 @@ function ToolItem(props: {
         </summary>
         <Show when={disclosure.isOpen()}>
           <div class="command-card-inner">
-            <Show when={imageSource() === null}>
-              <div class="command-card-header">{toolLabel(props.item.name)}</div>
-            </Show>
-            <Show
-              when={imageSource()}
-              fallback={
-                <Show when={props.item.output !== null && props.item.output.length > 0}>
-                  <div class="command-card-scroll">
-                    <pre class="command-card-output">{props.item.output}</pre>
-                  </div>
-                </Show>
-              }
-            >
-              {(source) => (
-                <div class="tool-image-result">
-                  <ImagePreview
-                    alt={description()}
-                    class="tool-image-preview"
-                    name={description()}
-                    source={source()}
-                  />
+            <div class="command-card-header">{toolLabel(props.item.name)}</div>
+            <Show when={output()}>
+              {(visibleOutput) => (
+                <div class="command-card-scroll">
+                  <ThreadOutputView format={toolOutputText} output={visibleOutput()} />
                 </div>
               )}
             </Show>
@@ -1624,10 +1700,13 @@ function FileChangeItem(props: {
   readonly item: Extract<ThreadItem, { type: "fileChange" }>;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
-  const disclosure = useTimelineDisclosure(
-    () => `file-change:${props.item.id}:${disclosurePhase(props.item.status)}`,
-  );
+  const disclosure = useTimelineDisclosure(() => `file-change:${props.item.id}`);
   const title = () => fileChangeActivityTitle(props.item.changes);
+  const changeEntries = createMemo(() => createTimelineFileChangeEntries(props.item.changes));
+  const changeIdentities = createMemo(() => changeEntries().map((entry) => entry.identity));
+  const changesByIdentity = createMemo(
+    () => new Map(changeEntries().map((entry) => [entry.identity, entry.change] as const)),
+  );
 
   return (
     <Show
@@ -1636,7 +1715,7 @@ function FileChangeItem(props: {
         <details
           class="activity-card file-change-card"
           classList={{ "grouped-activity-item": props.variant === "grouped" }}
-          onToggle={(event) => handleDetailsToggle(event, disclosure)}
+          onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
           open={disclosure.isOpen()}
         >
           <summary class="activity-summary" data-timeline-disclosure="">
@@ -1649,19 +1728,24 @@ function FileChangeItem(props: {
             </span>
           </summary>
           <Show when={disclosure.isOpen()}>
-            <div class="file-change-list">
-              <Index each={props.item.changes}>
-                {(change, index) => (
-                  <Change
-                    change={change()}
-                    diffDisplay={props.diffDisplay}
-                    disclosureKey={`change:${props.item.id}:${index}`}
-                    status={props.item.status}
-                    variant={props.variant}
-                  />
-                )}
-              </Index>
-            </div>
+            <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
+              <div class="file-change-list">
+                <For each={changeIdentities()}>
+                  {(changeIdentity) => (
+                    <Change
+                      change={readTimelineValue(
+                        changesByIdentity(),
+                        changeIdentity,
+                        "alteração de arquivo",
+                      )}
+                      diffDisplay={props.diffDisplay}
+                      disclosureKey={`change:${props.item.id}:${changeIdentity}`}
+                      variant={props.variant}
+                    />
+                  )}
+                </For>
+              </div>
+            </TimelineDisclosureContext.Provider>
           </Show>
         </details>
       }
@@ -1669,8 +1753,10 @@ function FileChangeItem(props: {
       <Change
         change={props.item.changes[0] as FileChange}
         diffDisplay={props.diffDisplay}
-        disclosureKey={`change:${props.item.id}:0`}
-        status={props.item.status}
+        disclosureKey={`change:${props.item.id}:${timelineFileChangeIdentity(
+          props.item.changes[0] as FileChange,
+          0,
+        )}`}
         variant="grouped"
       />
     </Show>
@@ -1681,51 +1767,20 @@ function Change(props: {
   readonly change: FileChange;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly disclosureKey: string;
-  readonly status: Extract<ThreadItem, { type: "fileChange" }>["status"];
   readonly variant?: "default" | "grouped" | undefined;
 }) {
-  const disclosure = useTimelineDisclosure(
-    () => `${props.disclosureKey}:${disclosurePhase(props.status)}`,
-  );
-  const stats = createMemo(() => summarizeDiff(props.change.diff));
-  const [copyState, setCopyState] = createSignal<"copied" | "failed" | "idle">("idle");
-  let resetTimer: number | undefined;
-
-  onCleanup(() => window.clearTimeout(resetTimer));
-
-  async function copyDiff(event: MouseEvent): Promise<void> {
-    event.preventDefault();
-    event.stopPropagation();
-    window.clearTimeout(resetTimer);
-    try {
-      if (navigator.clipboard === undefined) {
-        throw new Error("Clipboard API unavailable");
-      }
-      await navigator.clipboard.writeText(props.change.diff);
-      setCopyState("copied");
-    } catch {
-      setCopyState("failed");
-    }
-    resetTimer = window.setTimeout(() => setCopyState("idle"), 2_000);
-  }
-
-  const copyLabel = () => {
-    switch (copyState()) {
-      case "copied":
-        return "Diff copiado";
-      case "failed":
-        return "Falha ao copiar o diff";
-      case "idle":
-        return "Copiar diff";
-    }
-  };
+  const disclosure = useTimelineDisclosure(() => props.disclosureKey);
+  const diff = createMemo(() => props.change.diff);
+  const kind = createMemo(() => props.change.kind.type);
+  const path = createMemo(() => props.change.path);
+  const stats = createMemo(() => summarizeDiff(diff()));
 
   return (
     <details
       class="diff-block"
       classList={{ "grouped-diff-block": props.variant === "grouped" }}
-      data-kind={props.change.kind.type}
-      onToggle={(event) => handleDetailsToggle(event, disclosure)}
+      data-kind={kind()}
+      onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
       open={disclosure.isOpen()}
     >
       <summary data-timeline-disclosure="">
@@ -1733,13 +1788,13 @@ function Change(props: {
           <span class="activity-icon">
             <Icon name="edit" size={13} />
           </span>
-          <span class="grouped-change-action">{groupedChangeAction(props.change)}</span>
+          <span class="grouped-change-action">{groupedChangeAction(kind())}</span>
         </Show>
         <span class="diff-file-identity">
-          <code title={props.change.path}>{fileName(props.change.path)}</code>
-          <Show when={props.variant !== "grouped" && props.change.kind.type !== "update"}>
-            <span class={`change-kind kind-${props.change.kind.type}`}>
-              {props.change.kind.type === "add" ? "NOVO" : "EXCLUÍDO"}
+          <code title={path()}>{fileName(path())}</code>
+          <Show when={props.variant !== "grouped" && kind() !== "update"}>
+            <span class={`change-kind kind-${kind()}`}>
+              {kind() === "add" ? "NOVO" : "EXCLUÍDO"}
             </span>
           </Show>
         </span>
@@ -1749,40 +1804,33 @@ function Change(props: {
         <span class="diff-stat deletions" title={`${stats().deletions} linhas removidas`}>
           −{stats().deletions}
         </span>
-        <span class="diff-file-actions">
-          <span aria-hidden="true" class="diff-file-chevron">
-            <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-          </span>
-          <button
-            aria-label={copyLabel()}
-            class="diff-copy-button"
-            onClick={(event) => void copyDiff(event)}
-            title={copyLabel()}
-            type="button"
-          >
-            <Icon name={copyState() === "copied" ? "check" : "copy"} size={13} />
-          </button>
+        <span aria-hidden="true" class="diff-file-chevron">
+          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
         </span>
       </summary>
       <Show when={disclosure.isOpen()}>
         <Show
-          when={props.change.diff.trim().length > 0}
+          when={diff().trim().length > 0}
           fallback={<div class="diff-empty-state">Nenhuma diferença textual disponível.</div>}
         >
-          <Show
-            when={props.diffDisplay === "split"}
-            fallback={<UnifiedDiffView diff={props.change.diff} path={props.change.path} />}
-          >
-            <SplitDiffView diff={props.change.diff} path={props.change.path} />
-          </Show>
+          <ExpandedChangeDiff diff={diff()} mode={props.diffDisplay ?? "unified"} path={path()} />
         </Show>
       </Show>
     </details>
   );
 }
 
-function groupedChangeAction(change: FileChange): string {
-  switch (change.kind.type) {
+function ExpandedChangeDiff(props: {
+  readonly diff: string;
+  readonly mode: "split" | "unified";
+  readonly path: string;
+}) {
+  const document = createMemo(() => createDiffDocument(props.diff));
+  return <DiffView document={document()} mode={props.mode} path={props.path} />;
+}
+
+function groupedChangeAction(kind: FileChange["kind"]["type"]): string {
+  switch (kind) {
     case "add":
       return "Criado";
     case "delete":
@@ -1790,48 +1838,6 @@ function groupedChangeAction(change: FileChange): string {
     case "update":
       return "Edição";
   }
-}
-
-function userMessageCopyText(content: readonly UserContent[]): string {
-  return content.map(userContentPartCopyText).join("\n");
-}
-
-function inlinePreview(text: string, maximumLength: number): string {
-  const normalized = text.replace(/\s+/gu, " ").trim() || "Mensagem sem texto";
-  return normalized.length <= maximumLength
-    ? normalized
-    : `${normalized.slice(0, maximumLength - 1)}…`;
-}
-
-function blockPreview(text: string, maximumLength: number): string {
-  const normalized = text
-    .replace(/\r\n?/gu, "\n")
-    .replace(/[^\S\r\n]+/gu, " ")
-    .replace(/\n{3,}/gu, "\n\n")
-    .trim();
-  return normalized.length <= maximumLength
-    ? normalized
-    : `${normalized.slice(0, maximumLength - 1)}…`;
-}
-
-function userMessageAnchor(id: string): string {
-  return `user-message-${id}`;
-}
-
-function userContentPartCopyText(part: UserContent): string {
-  switch (part.type) {
-    case "text":
-      return part.text;
-    case "localImage":
-      return `Imagem: ${imageContentName(part.path)}`;
-    case "mention":
-      return part.name;
-  }
-}
-
-function imageContentName(path: string): string {
-  const name = fileName(path);
-  return name.length <= 160 ? name : "Imagem anexada";
 }
 
 function formatElapsedSeconds(seconds: number): string {
@@ -1849,4 +1855,66 @@ function formatElapsedSeconds(seconds: number): string {
   const hours = Math.floor(seconds / 3_600);
   const minutes = Math.floor((seconds % 3_600) / 60);
   return minutes === 0 ? `${hours} h` : `${hours} h ${minutes} min`;
+}
+
+function sameScrollbarMetrics(left: ScrollbarMetrics, right: ScrollbarMetrics): boolean {
+  return (
+    left.maximumScroll === right.maximumScroll &&
+    left.scrollable === right.scrollable &&
+    left.thumbHeight === right.thumbHeight &&
+    left.thumbTop === right.thumbTop
+  );
+}
+
+function createTimelineFileChangeEntries(
+  changes: readonly FileChange[],
+): readonly { readonly change: FileChange; readonly identity: string }[] {
+  const occurrencesByPath = new Map<string, number>();
+  return changes.map((change) => {
+    const occurrence = occurrencesByPath.get(change.path) ?? 0;
+    occurrencesByPath.set(change.path, occurrence + 1);
+    return {
+      change,
+      identity: timelineFileChangeIdentity(change, occurrence),
+    };
+  });
+}
+
+function indexTimelineValues<T>(
+  values: readonly T[],
+  identity: (value: T) => string,
+  description: string,
+): ReadonlyMap<string, T> {
+  const indexed = new Map<string, T>();
+  for (const value of values) {
+    const key = identity(value);
+    if (indexed.has(key)) {
+      throw new Error(`${description} contêm a identidade duplicada ${JSON.stringify(key)}.`);
+    }
+    indexed.set(key, value);
+  }
+  return indexed;
+}
+
+function readTimelineValue<T>(
+  values: ReadonlyMap<string, T>,
+  identity: string,
+  description: string,
+): T {
+  const value = values.get(identity);
+  if (value === undefined) {
+    throw new Error(`${description} ${JSON.stringify(identity)} não está disponível.`);
+  }
+  return value;
+}
+
+function readVirtualTurn(
+  turnsById: ReadonlyMap<string, VisibleThreadTurn>,
+  turnId: string,
+): VisibleThreadTurn {
+  const turn = turnsById.get(turnId);
+  if (turn === undefined) {
+    throw new Error(`O turno virtual ${turnId} não está disponível na janela atual.`);
+  }
+  return turn;
 }

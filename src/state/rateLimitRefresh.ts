@@ -1,10 +1,8 @@
-export const RATE_LIMIT_REFRESH_INTERVAL_MS = 60_000;
+export const RATE_LIMIT_STALE_TIME_MS = 5 * 60_000;
 
 export interface RateLimitRefreshHost {
   readonly now: () => number;
   readonly isVisible: () => boolean;
-  readonly setInterval: (callback: () => void, intervalMs: number) => number;
-  readonly clearInterval: (intervalId: number) => void;
   readonly addFocusListener: (listener: () => void) => () => void;
   readonly addVisibilityListener: (listener: () => void) => () => void;
 }
@@ -31,7 +29,6 @@ export function createRateLimitRefreshCoordinator<T>(
   let disposed = false;
   let started = false;
   let sessionRevision = 0;
-  let intervalId: number | null = null;
   let removeFocusListener: (() => void) | null = null;
   let removeVisibilityListener: (() => void) | null = null;
   let lastSuccessfulRequest: { readonly key: string; readonly completedAt: number } | null = null;
@@ -54,7 +51,7 @@ export function createRateLimitRefreshCoordinator<T>(
       !force &&
       completed?.key === requestKey &&
       elapsed >= 0 &&
-      elapsed < RATE_LIMIT_REFRESH_INTERVAL_MS
+      elapsed < RATE_LIMIT_STALE_TIME_MS
     ) {
       return Promise.resolve(true);
     }
@@ -102,7 +99,6 @@ export function createRateLimitRefreshCoordinator<T>(
       started = true;
       removeFocusListener = options.host.addFocusListener(refreshWhenVisible);
       removeVisibilityListener = options.host.addVisibilityListener(refreshWhenVisible);
-      intervalId = options.host.setInterval(refreshWhenVisible, RATE_LIMIT_REFRESH_INTERVAL_MS);
     },
     refresh: () => run(true),
     refreshIfStale: () => run(false),
@@ -115,10 +111,6 @@ export function createRateLimitRefreshCoordinator<T>(
         return;
       }
       disposed = true;
-      if (intervalId !== null) {
-        options.host.clearInterval(intervalId);
-        intervalId = null;
-      }
       removeFocusListener?.();
       removeVisibilityListener?.();
       removeFocusListener = null;
@@ -131,8 +123,6 @@ export function createBrowserRateLimitRefreshHost(): RateLimitRefreshHost {
   return {
     now: Date.now,
     isVisible: () => document.visibilityState === "visible",
-    setInterval: (callback, intervalMs) => window.setInterval(callback, intervalMs),
-    clearInterval: (intervalId) => window.clearInterval(intervalId),
     addFocusListener(listener) {
       window.addEventListener("focus", listener);
       return () => window.removeEventListener("focus", listener);

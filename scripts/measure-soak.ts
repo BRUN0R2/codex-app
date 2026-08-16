@@ -1,7 +1,11 @@
 import { performance } from "node:perf_hooks";
 
+import type { VisibleThreadItem } from "../src/contracts/types.ts";
 import { overlayVisibleTurn } from "../src/state/visibleTurnSequence.ts";
+import { AgentActivityProjectionStore } from "../src/ui/agentActivityPresentation.ts";
 import { createMarkdownStreamRenderer } from "../src/ui/markdownStreamRenderer.ts";
+import { TimelineThreadSessionStore } from "../src/ui/timelineSession.ts";
+import { TurnPresentationStore } from "../src/ui/turnPresentation.ts";
 import { VariableSizeVirtualizer } from "../src/ui/variableSizeVirtualizer.ts";
 
 const TURN_COUNT = 100_000;
@@ -9,6 +13,11 @@ const RANGE_QUERY_COUNT = 50_000;
 const MEASUREMENT_COUNT = 10_000;
 const OVERLAY_PROJECTION_COUNT = 50_000;
 const MARKDOWN_BLOCK_COUNT = 5_000;
+const TIMELINE_SESSION_COUNT = 12;
+const TIMELINE_SESSION_SWITCH_COUNT = 50_000;
+const TIMELINE_SESSION_TURN_COUNT = 1_000;
+const PROJECTION_ACTIVITY_COUNT = 240;
+const PROJECTION_UPDATE_COUNT = 20_000;
 const ESTIMATED_TURN_HEIGHT = 498;
 
 const keys = Array.from({ length: TURN_COUNT }, (_, index) => `turn-${index}`);
@@ -32,6 +41,48 @@ const rangeQueryMilliseconds = duration(() => {
     const range = virtualizer.range(offset, 900, 900);
     maximumRenderedTurns = Math.max(maximumRenderedTurns, range.end - range.start);
     rangeChecksum += range.start + range.end;
+  }
+});
+
+const timelineSessions = new TimelineThreadSessionStore(
+  () => new VariableSizeVirtualizer(ESTIMATED_TURN_HEIGHT),
+  16,
+);
+const timelineSessionKeys = Array.from({ length: TIMELINE_SESSION_COUNT }, (_, sessionIndex) =>
+  Array.from(
+    { length: TIMELINE_SESSION_TURN_COUNT },
+    (_, turnIndex) => `thread-${sessionIndex}\u0000turn-${turnIndex}`,
+  ),
+);
+for (let sessionIndex = 0; sessionIndex < TIMELINE_SESSION_COUNT; sessionIndex += 1) {
+  const threadId = `thread-${sessionIndex}`;
+  const sessionKeys = timelineSessionKeys[sessionIndex];
+  if (sessionKeys === undefined) {
+    throw new Error("Timeline session benchmark could not resolve its keys.");
+  }
+  const session = timelineSessions.activate(threadId, sessionKeys);
+  const firstKey = sessionKeys[0];
+  if (firstKey === undefined) {
+    throw new Error("Timeline session benchmark requires at least one turn.");
+  }
+  session.virtualizer.measure(firstKey, 600 + sessionIndex);
+  timelineSessions.save(threadId, {
+    followingLatest: sessionIndex % 2 === 0,
+    scrollTop: sessionIndex * 1_000,
+  });
+}
+let timelineSessionChecksum = 0;
+const timelineSessionSwitchMilliseconds = duration(() => {
+  for (let switchIndex = 0; switchIndex < TIMELINE_SESSION_SWITCH_COUNT; switchIndex += 1) {
+    const sessionIndex = switchIndex % TIMELINE_SESSION_COUNT;
+    const threadId = `thread-${sessionIndex}`;
+    const sessionKeys = timelineSessionKeys[sessionIndex];
+    if (sessionKeys === undefined) {
+      throw new Error("Timeline session switch lost its key set.");
+    }
+    const session = timelineSessions.activate(threadId, sessionKeys);
+    timelineSessionChecksum +=
+      session.virtualizer.offsetOf(1) + session.scrollTop + Number(session.followingLatest);
   }
 });
 
@@ -75,11 +126,87 @@ const markdownMilliseconds = duration(() => {
   }
 });
 
+const projectionActivities = Array.from(
+  { length: PROJECTION_ACTIVITY_COUNT },
+  (_, index): Extract<VisibleThreadItem, { type: "commandExecution" }> => ({
+    type: "commandExecution",
+    id: `projection-command-${index}`,
+    command: `command ${index}`,
+    cwd: ".",
+    processId: null,
+    source: "agent",
+    status: "completed",
+    aggregatedOutput: null,
+    exitCode: 0,
+    durationMs: index,
+  }),
+);
+const projectionPrefix = projectionActivities.slice(0, PROJECTION_ACTIVITY_COUNT / 2);
+const projectionSuffix = projectionActivities.slice(PROJECTION_ACTIVITY_COUNT / 2);
+const activityProjectionStore = new AgentActivityProjectionStore();
+const initialActivityProjection = activityProjectionStore.project(projectionActivities);
+let activityProjectionChecksum = 0;
+const activityProjectionMilliseconds = duration(() => {
+  for (let index = 0; index < PROJECTION_UPDATE_COUNT; index += 1) {
+    const projected = activityProjectionStore.project([
+      ...projectionPrefix,
+      {
+        type: "reasoning",
+        id: "projection-reasoning",
+        summary: [`Análise ${index}`],
+        content: [],
+      },
+      ...projectionSuffix,
+    ]);
+    if (projected !== initialActivityProjection) {
+      throw new Error("Reasoning-only updates replaced an unchanged activity projection.");
+    }
+    activityProjectionChecksum += projected.length;
+  }
+});
+
+const projectionUser: Extract<VisibleThreadItem, { type: "userMessage" }> = {
+  type: "userMessage",
+  id: "projection-user",
+  content: [{ type: "text", text: "Execute a tarefa" }],
+};
+const projectionAnswer: Extract<VisibleThreadItem, { type: "agentMessage" }> = {
+  type: "agentMessage",
+  id: "projection-answer",
+  text: "a",
+  phase: "finalAnswer",
+};
+const turnProjectionStore = new TurnPresentationStore();
+const initialTurnProjection = turnProjectionStore.project([
+  projectionUser,
+  ...projectionActivities,
+  projectionAnswer,
+]);
+const stableUserBlock = initialTurnProjection.blocks[0];
+const stableWorkBlock = initialTurnProjection.blocks[1];
+let turnProjectionChecksum = 0;
+const turnProjectionMilliseconds = duration(() => {
+  for (let index = 0; index < PROJECTION_UPDATE_COUNT; index += 1) {
+    const projected = turnProjectionStore.project([
+      projectionUser,
+      ...projectionActivities,
+      { ...projectionAnswer, text: `Resposta parcial ${index}` },
+    ]);
+    if (projected.blocks[0] !== stableUserBlock || projected.blocks[1] !== stableWorkBlock) {
+      throw new Error("Streaming replaced an unchanged turn presentation block.");
+    }
+    turnProjectionChecksum += projected.blocks.length;
+  }
+});
+
 if (
   maximumRenderedTurns > 16 ||
   rangeChecksum <= 0 ||
+  timelineSessionChecksum <= 0 ||
   overlayChecksum !== OVERLAY_PROJECTION_COUNT * 8 ||
-  committedCharacters <= 0
+  committedCharacters <= 0 ||
+  activityProjectionChecksum !== PROJECTION_UPDATE_COUNT ||
+  turnProjectionChecksum !== PROJECTION_UPDATE_COUNT * 3
 ) {
   throw new Error("Soak benchmark violated a virtualization or streaming invariant.");
 }
@@ -94,10 +221,16 @@ process.stdout.write(
       virtualizerBuildMs: roundMilliseconds(buildMilliseconds),
       virtualizerMeasurementsMs: roundMilliseconds(measurementMilliseconds),
       virtualizerQueriesMs: roundMilliseconds(rangeQueryMilliseconds),
+      timelineSessionSwitches: TIMELINE_SESSION_SWITCH_COUNT,
+      timelineSessionSwitchMs: roundMilliseconds(timelineSessionSwitchMilliseconds),
       overlayProjections: OVERLAY_PROJECTION_COUNT,
       overlayProjectionMs: roundMilliseconds(overlayProjectionMilliseconds),
       markdownBlocks: MARKDOWN_BLOCK_COUNT,
       incrementalMarkdownMs: roundMilliseconds(markdownMilliseconds),
+      projectionActivities: PROJECTION_ACTIVITY_COUNT,
+      projectionUpdates: PROJECTION_UPDATE_COUNT,
+      activityProjectionMs: roundMilliseconds(activityProjectionMilliseconds),
+      turnProjectionMs: roundMilliseconds(turnProjectionMilliseconds),
     },
     null,
     2,

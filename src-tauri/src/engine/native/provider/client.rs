@@ -12,6 +12,7 @@ use reqwest::header::ACCEPT;
 use reqwest::header::AUTHORIZATION;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderValue;
+use reqwest::header::RETRY_AFTER;
 use reqwest::header::USER_AGENT;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -31,7 +32,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_BYTES: usize = 65_536;
 const MAX_PUBLIC_ERROR_CHARACTERS: usize = 2_000;
-const MAX_REQUEST_ATTEMPTS: usize = 3;
+const MAX_REQUEST_ATTEMPTS: usize = 8;
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const ORIGINATOR: &str = "codex_desktop_next";
 
 #[derive(Default)]
@@ -86,7 +88,7 @@ impl ProviderClient {
                     }
                     continue;
                 }
-                Ok(Err(error)) => return Err(AppError::Provider(error.to_string())),
+                Ok(Err(error)) => return Err(AppError::Transport(error.to_string())),
                 Err(_) => {
                     last_error = Some(format!("{operation} timed out"));
                     if attempt + 1 < MAX_REQUEST_ATTEMPTS {
@@ -102,7 +104,7 @@ impl ProviderClient {
             }
             return decode_json(response, operation, maximum_bytes).await;
         }
-        Err(AppError::Provider(last_error.unwrap_or_else(|| {
+        Err(AppError::Transport(last_error.unwrap_or_else(|| {
             format!("{operation} failed without a diagnostic")
         })))
     }
@@ -151,7 +153,7 @@ impl ProviderClient {
                         }
                         continue;
                     }
-                    Ok(Err(error)) => return Err(AppError::Provider(error.to_string())),
+                    Ok(Err(error)) => return Err(AppError::Transport(error.to_string())),
                     Err(_) if attempt + 1 < MAX_REQUEST_ATTEMPTS => {
                         if retry_delay_or_cancel(attempt, cancellation).await {
                             return Err(AppError::Cancelled("response retry was cancelled".into()));
@@ -171,7 +173,7 @@ impl ProviderClient {
             }
             return open_response_stream(response).await;
         }
-        Err(AppError::Provider(
+        Err(AppError::Transport(
             "response connection exhausted its retry budget".into(),
         ))
     }
@@ -250,24 +252,38 @@ async fn decode_json<T: DeserializeOwned>(
 
 async fn response_error(response: Response) -> AppError {
     let status = response.status().as_u16();
+    let retry_after_header = response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0);
     let decoded = match read_limited(response, MAX_ERROR_BYTES).await {
         Ok(bytes) if bytes.is_empty() => DecodedProviderError {
             code: None,
             message: "the provider returned an empty error body".into(),
+            retry_after_seconds: None,
         },
         Ok(bytes) => decode_provider_error_body(bytes),
         Err(error) => DecodedProviderError {
             code: None,
             message: format!("the provider error body could not be read: {error}"),
+            retry_after_seconds: None,
         },
     };
-    AppError::from_provider_rejection(Some(status), decoded.code.as_deref(), decoded.message)
+    AppError::from_provider_rejection(
+        Some(status),
+        decoded.code.as_deref(),
+        decoded.message,
+        decoded.retry_after_seconds.or(retry_after_header),
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct DecodedProviderError {
     code: Option<String>,
     message: String,
+    retry_after_seconds: Option<u64>,
 }
 
 fn decode_provider_error_body(bytes: Vec<u8>) -> DecodedProviderError {
@@ -277,12 +293,14 @@ fn decode_provider_error_body(bytes: Vec<u8>) -> DecodedProviderError {
             return DecodedProviderError {
                 code: None,
                 message: "the provider returned a blank error body".into(),
+                retry_after_seconds: None,
             };
         }
         Err(error) => {
             return DecodedProviderError {
                 code: None,
                 message: format!("the provider returned a non-UTF-8 error body: {error}"),
+                retry_after_seconds: None,
             };
         }
     };
@@ -290,6 +308,7 @@ fn decode_provider_error_body(bytes: Vec<u8>) -> DecodedProviderError {
         return DecodedProviderError {
             code: None,
             message: bounded_error_text(&body),
+            retry_after_seconds: None,
         };
     };
     let error = value.get("error").unwrap_or(&value);
@@ -309,14 +328,13 @@ fn decode_provider_error_body(bytes: Vec<u8>) -> DecodedProviderError {
         .or_else(|| error.get("type").and_then(Value::as_str))
         .map(bounded_error_text)
         .filter(|code| !code.is_empty());
-    let reset = error
+    let reset_seconds = error
         .get("resets_in_seconds")
         .and_then(Value::as_u64)
-        .filter(|seconds| *seconds > 0)
-        .map(format_reset_duration);
+        .filter(|seconds| *seconds > 0);
 
     let mut formatted = message;
-    if let Some(reset) = reset {
+    if let Some(reset) = reset_seconds.map(format_reset_duration) {
         formatted.push_str("; reset in approximately ");
         formatted.push_str(&reset);
     }
@@ -328,6 +346,7 @@ fn decode_provider_error_body(bytes: Vec<u8>) -> DecodedProviderError {
     DecodedProviderError {
         code,
         message: bounded_error_text(&formatted),
+        retry_after_seconds: reset_seconds,
     }
 }
 
@@ -371,7 +390,7 @@ async fn read_limited(response: Response, maximum_bytes: usize) -> Result<Vec<u8
     let mut output = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| AppError::Provider(error.to_string()))?;
+        let chunk = chunk.map_err(|error| AppError::Transport(error.to_string()))?;
         if output.len().saturating_add(chunk.len()) > maximum_bytes {
             return Err(AppError::Provider(format!(
                 "provider response exceeds {maximum_bytes} bytes"
@@ -383,8 +402,10 @@ async fn read_limited(response: Response, maximum_bytes: usize) -> Result<Vec<u8
 }
 
 async fn retry_delay(attempt: usize) {
-    let multiplier = (attempt + 1) as u64;
-    tokio::time::sleep(Duration::from_millis(200 * multiplier)).await;
+    let exponent = u32::try_from(attempt).unwrap_or(u32::MAX).min(16);
+    let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
+    let delay = Duration::from_millis(500u64.saturating_mul(multiplier)).min(MAX_RETRY_DELAY);
+    tokio::time::sleep(delay).await;
 }
 
 #[derive(Debug, Default)]
@@ -567,6 +588,19 @@ mod tests {
             "The usage limit has been reached; reset in approximately 5d 22h (provider type: usage_limit_reached)"
         );
         assert_eq!(usage.code.as_deref(), Some("usage_limit_reached"));
+        assert_eq!(usage.retry_after_seconds, Some(511_936));
+        assert!(matches!(
+            AppError::from_provider_rejection(
+                Some(429),
+                usage.code.as_deref(),
+                usage.message.clone(),
+                usage.retry_after_seconds,
+            ),
+            AppError::RateLimited {
+                retry_after_seconds: Some(511_936),
+                ..
+            }
+        ));
 
         let invalid = decode_provider_error_body(
             br#"{"error":{"message":"No tool output found","type":"invalid_request_error"}}"#
@@ -592,7 +626,12 @@ mod tests {
             "too large (provider type: invalid_request_error)"
         );
         assert!(matches!(
-            AppError::from_provider_rejection(Some(400), decoded.code.as_deref(), decoded.message),
+            AppError::from_provider_rejection(
+                Some(400),
+                decoded.code.as_deref(),
+                decoded.message,
+                decoded.retry_after_seconds,
+            ),
             AppError::ContextWindowExceeded(_)
         ));
     }

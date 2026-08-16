@@ -34,7 +34,7 @@ export function addProject(
   projects: readonly ProjectRecord[],
   path: string,
 ): readonly ProjectRecord[] {
-  const normalized = validatePath(path);
+  const normalized = normalizeProjectPath(path);
   const existing = projects.find((project) => pathsEqual(project.path, normalized));
   if (existing !== undefined) {
     return projects;
@@ -64,7 +64,7 @@ export function updateProject(
   path: string,
   updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
 ): readonly ProjectRecord[] {
-  const normalized = validatePath(path);
+  const normalized = normalizeProjectPath(path);
   return projects.map((project) => {
     if (pathsEqual(project.path, normalized)) {
       return {
@@ -76,6 +76,10 @@ export function updateProject(
     }
     return project;
   });
+}
+
+export function normalizeProjectPath(path: string): string {
+  return validatePath(path);
 }
 
 function decodeStoredProjects(value: unknown): StoredProjects {

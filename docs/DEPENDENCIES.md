@@ -24,3 +24,20 @@ Fontes primárias:
 - [tauri-utils 2.9.3](https://raw.githubusercontent.com/tauri-apps/tauri/tauri-v2.11.5/crates/tauri-utils/Cargo.toml);
 - [rust-urlpattern atual](https://github.com/denoland/rust-urlpattern/releases);
 - [tauri-utils em desenvolvimento](https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-utils/Cargo.toml).
+
+## Ferramentas locais de desenvolvimento
+
+O `ripgrep` é uma ferramenta de desenvolvimento opcional e reproduzível; ele não
+participa do build, do bundle nem do runtime release. Execute:
+
+```powershell
+pnpm tools:bootstrap
+pnpm rg -- -n "texto" src src-tauri/src
+```
+
+O bootstrap fixa `ripgrep 15.2.0`, detecta Windows x64 ou ARM64, baixa somente o
+asset MSVC do release oficial, valida SHA-256 do ZIP e do `rg.exe` e instala em
+`.tools/ripgrep/`, que permanece ignorado pelo Git. Nenhum PATH global é alterado.
+Os scripts dev adicionam o diretório validado apenas ao ambiente do processo,
+permitindo que comandos filhos usem `rg`; se a ferramenta estiver ausente, eles
+mostram a ação explícita de bootstrap sem baixar nada silenciosamente.

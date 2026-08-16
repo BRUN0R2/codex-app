@@ -2,30 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createRateLimitRefreshCoordinator,
-  RATE_LIMIT_REFRESH_INTERVAL_MS,
+  RATE_LIMIT_STALE_TIME_MS,
   type RateLimitRefreshHost,
 } from "./rateLimitRefresh";
 
 class FakeHost implements RateLimitRefreshHost {
   nowValue = 0;
   visible = true;
-  intervalMs: number | null = null;
-  interval: (() => void) | null = null;
   readonly focusListeners = new Set<() => void>();
   readonly visibilityListeners = new Set<() => void>();
 
   readonly now = () => this.nowValue;
   readonly isVisible = () => this.visible;
-
-  readonly setInterval = (callback: () => void, intervalMs: number): number => {
-    this.interval = callback;
-    this.intervalMs = intervalMs;
-    return 1;
-  };
-
-  readonly clearInterval = (_intervalId: number): void => {
-    this.interval = null;
-  };
 
   readonly addFocusListener = (listener: () => void): (() => void) => {
     this.focusListeners.add(listener);
@@ -36,11 +24,6 @@ class FakeHost implements RateLimitRefreshHost {
     this.visibilityListeners.add(listener);
     return () => this.visibilityListeners.delete(listener);
   };
-
-  tickInterval(): void {
-    this.nowValue += RATE_LIMIT_REFRESH_INTERVAL_MS;
-    this.interval?.();
-  }
 
   focus(): void {
     for (const listener of this.focusListeners) {
@@ -70,8 +53,15 @@ function deferred<T>(): {
   };
 }
 
+async function flushCoordinator(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe("atualização dos limites de uso", () => {
-  it("usa a cadência de um minuto da aplicação oficial", async () => {
+  it("não faz polling e revalida no foco somente quando o cache vence", async () => {
     const host = new FakeHost();
     const read = vi.fn(async () => 28);
     const apply = vi.fn();
@@ -84,15 +74,24 @@ describe("atualização dos limites de uso", () => {
     });
 
     coordinator.start();
-    expect(host.intervalMs).toBe(RATE_LIMIT_REFRESH_INTERVAL_MS);
-    host.tickInterval();
-    await Promise.resolve();
+    expect(read).not.toHaveBeenCalled();
 
+    host.focus();
+    await flushCoordinator();
     expect(read).toHaveBeenCalledTimes(1);
     expect(apply).toHaveBeenCalledWith(28);
+
+    host.nowValue += RATE_LIMIT_STALE_TIME_MS - 1;
+    host.focus();
+    expect(read).toHaveBeenCalledTimes(1);
+
+    host.nowValue += 1;
+    host.focus();
+    await flushCoordinator();
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
-  it("pausa em segundo plano e revalida ao recuperar visibilidade", async () => {
+  it("ignora eventos em segundo plano e revalida ao recuperar visibilidade", async () => {
     const host = new FakeHost();
     const read = vi.fn(async () => 28);
     const coordinator = createRateLimitRefreshCoordinator({
@@ -105,15 +104,20 @@ describe("atualização dos limites de uso", () => {
     coordinator.start();
 
     host.changeVisibility(false);
-    host.tickInterval();
     expect(read).not.toHaveBeenCalled();
 
     host.changeVisibility(true);
-    await Promise.resolve();
+    await flushCoordinator();
     expect(read).toHaveBeenCalledTimes(1);
 
+    host.nowValue += RATE_LIMIT_STALE_TIME_MS;
+    host.changeVisibility(false);
     host.focus();
     expect(read).toHaveBeenCalledTimes(1);
+
+    host.changeVisibility(true);
+    await flushCoordinator();
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it("deduplica leituras concorrentes", async () => {
@@ -173,5 +177,24 @@ describe("atualização dos limites de uso", () => {
     await coordinator.refresh();
 
     expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("remove os observadores ao descartar o coordenador", () => {
+    const host = new FakeHost();
+    const coordinator = createRateLimitRefreshCoordinator({
+      getSessionKey: () => "account",
+      read: async () => 28,
+      apply: vi.fn(),
+      reportError: vi.fn(),
+      host,
+    });
+
+    coordinator.start();
+    expect(host.focusListeners.size).toBe(1);
+    expect(host.visibilityListeners.size).toBe(1);
+
+    coordinator.dispose();
+    expect(host.focusListeners.size).toBe(0);
+    expect(host.visibilityListeners.size).toBe(0);
   });
 });

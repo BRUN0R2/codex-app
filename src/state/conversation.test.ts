@@ -39,7 +39,7 @@ describe("conversation reducer", () => {
         name: "read_file",
         description: "Read",
         status: "completed",
-        output: "ok",
+        output: { id: "output-1", preview: "ok", byteLength: 2, nextCursor: null },
       }),
     ).toThrow(/mudou/u);
   });

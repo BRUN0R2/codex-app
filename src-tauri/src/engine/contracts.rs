@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,7 +42,8 @@ pub struct EngineDescriptor {
 pub struct EngineStartResponse {
     pub engine: EngineDescriptor,
     pub schema_version: u32,
-    pub permission_profile: PermissionProfile,
+    pub diagnostic_log_path: String,
+    pub config: ConfigReadResponse,
     pub permission_profiles: Vec<PermissionProfile>,
 }
 
@@ -151,6 +151,24 @@ pub struct ItemNotification {
     pub item: ThreadItem,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadOutput {
+    pub id: String,
+    pub preview: String,
+    pub byte_length: u64,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputReadResponse {
+    pub output_id: String,
+    pub chunk: String,
+    pub byte_length: u64,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamDeltasNotification {
@@ -212,12 +230,24 @@ pub enum ModelVerification {
     TrustedAccessForCyber,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModerationMetadata {
+    pub presentation: ModerationPresentation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModerationPresentation {
+    Inline,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnModerationMetadataNotification {
     pub thread_id: String,
     pub turn_id: String,
-    pub metadata: Value,
+    pub metadata: ModerationMetadata,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -672,7 +702,7 @@ pub enum ThreadItem {
         source: CommandSource,
         status: ActivityStatus,
         #[serde(rename = "aggregatedOutput")]
-        aggregated_output: Option<String>,
+        aggregated_output: Option<ThreadOutput>,
         #[serde(rename = "exitCode")]
         exit_code: Option<i32>,
         #[serde(rename = "durationMs")]
@@ -690,7 +720,7 @@ pub enum ThreadItem {
         name: String,
         description: String,
         status: ActivityStatus,
-        output: Option<String>,
+        output: Option<ThreadOutput>,
     },
 }
 
@@ -904,7 +934,7 @@ pub struct DesktopPreferences {
 impl Default for DesktopPreferences {
     fn default() -> Self {
         Self {
-            ui_font_size: 14,
+            ui_font_size: 15,
             motion: MotionPreference::Full,
             pointer_cursor: true,
             diff_display: DiffDisplay::Unified,

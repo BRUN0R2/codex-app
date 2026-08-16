@@ -3,7 +3,7 @@ import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from
 
 import { openExternalUrl } from "../infrastructure/codexClient";
 import { isDesktopRuntime } from "../platform/DesktopRuntime";
-import type { AppController } from "../state/createAppController";
+import type { AppController } from "../state/appController";
 
 import { ApprovalCard } from "./ApprovalCard";
 import { Composer, type ComposerDraftRequest } from "./Composer";
@@ -12,7 +12,7 @@ import { HomeComposerModeToggle } from "./HomeComposerModeToggle";
 import { Icon } from "./Icon";
 import { PlanProgress } from "./PlanProgress";
 import { ReviewPanel } from "./ReviewPanel";
-import { latestTurnFileChanges } from "./reviewChanges";
+import { LatestTurnFileChangeStore } from "./reviewChanges";
 import { SettingsDialog, type SettingsPage } from "./SettingsDialog";
 import { Sidebar } from "./Sidebar";
 import { Timeline } from "./Timeline";
@@ -23,8 +23,9 @@ export function AppShell(props: { readonly controller: AppController }) {
   const [settingsPage, setSettingsPage] = createSignal<SettingsPage | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
   const [reviewOpen, setReviewOpen] = createSignal(false);
+  const reviewChangeStore = new LatestTurnFileChangeStore();
   const reviewChanges = createMemo(() =>
-    latestTurnFileChanges(props.controller.turns(), props.controller.activeTurnId()),
+    reviewChangeStore.project(props.controller.turns(), props.controller.activeTurnId()),
   );
 
   function openSettings(page?: SettingsPage): void {
@@ -181,7 +182,11 @@ export function AppShell(props: { readonly controller: AppController }) {
             </div>
           </section>
           <Show when={reviewOpen() && reviewChanges().length > 0}>
-            <ReviewPanel changes={reviewChanges()} onClose={() => setReviewOpen(false)} />
+            <ReviewPanel
+              changes={reviewChanges()}
+              mode={props.controller.config()?.config.desktop.diffDisplay ?? "unified"}
+              onClose={() => setReviewOpen(false)}
+            />
           </Show>
         </div>
       </main>
