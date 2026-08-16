@@ -85,6 +85,11 @@ Esse modo existe apenas em desenvolvimento, usa contratos determinísticos pelo
 mock oficial do Tauri e rejeita comandos que dependem do engine nativo. O módulo
 de preview é removido do build de produção.
 
+Dois arquivos auxiliares ficam na raiz sem participar do build: o launcher
+interativo `codex-app.bat` para uso manual no Windows e
+`assets/app-icon.svg`, fonte vetorial dos ícones empacotados em
+`src-tauri/icons/`.
+
 ## Verificação
 
 ```powershell

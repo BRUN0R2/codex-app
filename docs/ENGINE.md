@@ -23,8 +23,8 @@ externo. A CLI aberta é uma referência de estudo, não uma integração.
 | tarefas | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive`, `engine_thread_unarchive`, `engine_thread_delete`, `engine_thread_fork`, `engine_thread_compact_start` |
 | saídas | `engine_output_read` |
 | turnos | `engine_turn_start`, `engine_turn_steer`, `engine_turn_interrupt` |
-| projeto | `workspace_repository_read` |
-| configuração | `engine_config_read`, `engine_config_update`, `engine_model_list`, `engine_chat_model_list` |
+| preferências | `application_preferences_read`, `application_preferences_update` |
+| configuração | `engine_config_update`, `engine_model_list`, `engine_chat_model_list` |
 | aprovação | `engine_server_request_respond` |
 | anexos | `attachment_inspect`, `attachment_read_image`, `attachment_save_pasted_image` |
 
@@ -46,8 +46,7 @@ Notificações suportadas:
 - `thread.created`, `thread.updated`, `thread.archived`, `thread.unarchived`,
   `thread.deleted`;
 - `turn.started`, `turn.completed`;
-- `item.started`, `item.completed`, `item.agentTextDelta`;
-- `item.reasoningSummaryDelta`, `item.reasoningTextDelta`;
+- `item.started`, `item.completed`, `item.streamDeltas`;
 - `model.rerouted`, `model.verification`, `model.safetyBufferingUpdated` e
   `turn.moderationMetadata`.
 
@@ -83,7 +82,7 @@ podem trocar o estado de uma tentativa mais nova.
 
 Uma resposta bem-sucedida de `engine_start` é a confirmação autoritativa de
 `ready` e inclui `diagnosticLogPath` e a configuração versionada. O frontend não
-depende de uma segunda entrega assíncrona nem de um `engine_config_read` separado
+depende de uma segunda entrega assíncrona nem de um comando de leitura separado
 para concluir o boot. Erros de interface posteriores usam
 `engine_runtime_diagnostic_report`, cujo payload é fechado e limitado, para
 persistir a mesma causa no log nativo.

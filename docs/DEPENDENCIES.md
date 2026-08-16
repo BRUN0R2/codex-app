@@ -1,6 +1,43 @@
-# Dependências transitivas
+# Dependências
 
-## `unic-*` via Tauri
+## Dependências diretas
+
+Toda dependência direta tem escopo isolado e substituição custosa; nenhuma fica
+ociosa. As versões exatas estão travadas em `package.json` e `src-tauri/Cargo.toml`.
+
+### Interface (`package.json`)
+
+| Dependência | Papel |
+| --- | --- |
+| `solid-js` | Reactivity e renderização da UI |
+| `@tauri-apps/api` | Ponte `invoke`/eventos com o backend nativo |
+| `@tauri-apps/plugin-dialog` | Diálogos nativos de arquivo para anexos e workspace |
+| `@tauri-apps/plugin-opener` | Abertura de links externos e arquivos no SO |
+| `marked` | Parse de Markdown das mensagens |
+| `dompurify` | Sanitização do HTML renderizado antes do DOM |
+
+Ferramentas de desenvolvimento: `vite` + `vite-plugin-solid` (build),
+`typescript` (tipagem estrita), `@biomejs/biome` (lint e formato), `vitest`
+(testes), `@tauri-apps/cli` (empacotamento) e `@types/node` (tipos de script).
+
+### Backend (`src-tauri/Cargo.toml`)
+
+| Grupo | Crates | Papel |
+| --- | --- | --- |
+| Shell | `tauri`, `tauri-plugin-dialog`, `tauri-plugin-opener`, `tauri-plugin-autostart`, `tauri-plugin-single-instance`, `tauri-build` | Janela nativa, integrações do SO e build |
+| Async | `tokio`, `futures-util` | Runtime de tarefas e streaming SSE incremental |
+| HTTP | `reqwest` (rustls, cookies, stream), `url` | HTTPS do provider sem OpenSSL e validação de URLs |
+| Persistência | `rusqlite` (bundled), `r2d2`, `r2d2_sqlite` | SQLite WAL transacional com pool dimensionado |
+| Credenciais | `age`, `keyring-core`, `windows-native-keyring-store`, `zeroize`, `rand`, `sha2` | Envelope cifrado, chave no Credential Manager, PKCE e hashing |
+| Serialização | `serde`, `serde_json`, `base64` | Contratos IPC fechados e codificações de envelope |
+| Domínio | `chrono`, `uuid` (v7), `thiserror`, `tempfile`, `parking_lot` | Carimbos de tempo ordenáveis, ids, taxonomia de erros, spool de saídas em disco e locks |
+
+A política de atualização é contínua: versões modernas e estáveis, mudanças
+revisadas pelo Dependabot e gates de lockfile em `pnpm verify`.
+
+## Dependências transitivas
+
+### `unic-*` via Tauri
 
 O grafo travado atual contém somente este caminho não mantido:
 
