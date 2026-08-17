@@ -1,0 +1,337 @@
+[
+  {
+    "method": "auth.loginCompleted",
+    "params": {
+      "loginId": "login-1",
+      "success": true,
+      "error": null
+    }
+  },
+  {
+    "method": "auth.sessionChanged",
+    "params": {
+      "signedIn": true
+    }
+  },
+  {
+    "method": "thread.created",
+    "params": {
+      "thread": {
+        "id": "0192b4f0-0000-7000-8000-000000000001",
+        "mode": "work",
+        "preview": "Fix the failing build",
+        "name": "Build fix",
+        "cwd": "C:\\workspace\\codex-app",
+        "projectPath": "C:\\workspace\\codex-app",
+        "createdAt": 1755000000,
+        "updatedAt": 1755000900,
+        "recencyAt": 1755000900,
+        "status": {
+          "type": "active",
+          "activeFlags": [
+            "waitingOnApproval"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "method": "thread.updated",
+    "params": {
+      "thread": {
+        "id": "0192b4f0-0000-7000-8000-000000000001",
+        "mode": "work",
+        "preview": "Fix the failing build",
+        "name": "Build fix",
+        "cwd": "C:\\workspace\\codex-app",
+        "projectPath": "C:\\workspace\\codex-app",
+        "createdAt": 1755000000,
+        "updatedAt": 1755000900,
+        "recencyAt": 1755000900,
+        "status": {
+          "type": "idle"
+        }
+      }
+    }
+  },
+  {
+    "method": "thread.archived",
+    "params": {
+      "threadId": "thread-1"
+    }
+  },
+  {
+    "method": "thread.unarchived",
+    "params": {
+      "threadId": "thread-1"
+    }
+  },
+  {
+    "method": "thread.deleted",
+    "params": {
+      "threadId": "thread-1"
+    }
+  },
+  {
+    "method": "turn.started",
+    "params": {
+      "threadId": "thread-1",
+      "turn": {
+        "id": "0192b4f0-0000-7000-8000-000000000002",
+        "status": "inProgress",
+        "createdAt": 1755000100,
+        "updatedAt": 1755000800
+      }
+    }
+  },
+  {
+    "method": "turn.completed",
+    "params": {
+      "threadId": "thread-1",
+      "turn": {
+        "id": "turn-1",
+        "status": "failed",
+        "error": "provider rejected the request",
+        "updatedAt": 1755000800
+      },
+      "error": {
+        "code": "PROVIDER",
+        "message": "provider rejected the request"
+      }
+    }
+  },
+  {
+    "method": "item.streamDeltas",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "deltas": [
+        {
+          "kind": "agentText",
+          "itemId": "item-1",
+          "delta": "Olá"
+        },
+        {
+          "kind": "reasoningSummary",
+          "itemId": "item-2",
+          "index": 0,
+          "delta": "planejando"
+        },
+        {
+          "kind": "reasoningText",
+          "itemId": "item-2",
+          "index": 1,
+          "delta": "detalhe"
+        }
+      ]
+    }
+  },
+  {
+    "method": "model.rerouted",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "fromModel": "gpt-5.6-codex",
+      "toModel": "gpt-5.6",
+      "reason": "highRiskCyberActivity"
+    }
+  },
+  {
+    "method": "model.verification",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "verifications": [
+        "trustedAccessForCyber"
+      ]
+    }
+  },
+  {
+    "method": "model.safetyBufferingUpdated",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "model": "gpt-5.6",
+      "useCases": [
+        "cyber"
+      ],
+      "reasons": [
+        "untrusted_access"
+      ],
+      "showBufferingUi": true,
+      "fasterModel": "gpt-5.6-mini"
+    }
+  },
+  {
+    "method": "item.completed",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "item": {
+        "type": "contextUsage",
+        "id": "item-usage",
+        "model": "gpt-5.6-codex",
+        "usage": {
+          "inputTokens": 164000,
+          "cachedInputTokens": 120000,
+          "outputTokens": 10000,
+          "reasoningOutputTokens": 8000,
+          "totalTokens": 174000
+        },
+        "contextWindow": {
+          "tokens": 400000,
+          "usableTokens": 396000,
+          "usablePercent": 99,
+          "maximumTokens": null
+        }
+      }
+    }
+  },
+  {
+    "method": "item.completed",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "item": {
+        "type": "contextCompaction",
+        "id": "item-compaction"
+      }
+    }
+  },
+  {
+    "method": "item.completed",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "item": {
+        "type": "userMessage",
+        "id": "item-user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Explique o diff"
+          },
+          {
+            "type": "mention",
+            "name": "notes.md",
+            "path": "C:\\workspace\\codex-app\\notes.md"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "method": "item.completed",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "item": {
+        "type": "agentMessage",
+        "id": "item-agent",
+        "text": "O diff troca o parser.",
+        "phase": "finalAnswer"
+      }
+    }
+  },
+  {
+    "method": "item.completed",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "item": {
+        "type": "reasoning",
+        "id": "item-reasoning",
+        "summary": [
+          "Resumo"
+        ],
+        "content": [
+          "Conteúdo"
+        ]
+      }
+    }
+  },
+  {
+    "method": "item.completed",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "item": {
+        "type": "plan",
+        "id": "item-plan",
+        "explanation": "Plano do turno",
+        "steps": [
+          {
+            "step": "Corrigir o parser",
+            "status": "completed"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "method": "item.completed",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "item": {
+        "type": "commandExecution",
+        "id": "item-command",
+        "command": "cargo test",
+        "cwd": "C:\\workspace\\codex-app",
+        "processId": "4242",
+        "source": "agent",
+        "status": "completed",
+        "aggregatedOutput": {
+          "id": "output-1",
+          "preview": "172 passed; 0 failed",
+          "byteLength": 20,
+          "nextCursor": null
+        },
+        "exitCode": 0,
+        "durationMs": 4800
+      }
+    }
+  },
+  {
+    "method": "item.completed",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "item": {
+        "type": "fileChange",
+        "id": "item-file-change",
+        "changes": [
+          {
+            "path": "src/parser.rs",
+            "kind": {
+              "type": "update",
+              "movePath": null
+            },
+            "diff": "--- before\n+++ after"
+          }
+        ],
+        "status": "completed"
+      }
+    }
+  },
+  {
+    "method": "item.completed",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "item": {
+        "type": "toolExecution",
+        "id": "item-tool",
+        "name": "read_file",
+        "description": "Read src/parser.rs",
+        "status": "completed",
+        "output": {
+          "id": "output-2",
+          "preview": "1: fn main()",
+          "byteLength": 12,
+          "nextCursor": null
+        }
+      }
+    }
+  }
+]

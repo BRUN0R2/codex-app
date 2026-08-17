@@ -1,0 +1,55 @@
+{
+  "engine": {
+    "id": "native-engine",
+    "name": "Native Engine",
+    "provider": "ChatGPT Codex",
+    "auth": "ChatGPT OAuth",
+    "transport": "httpsSse",
+    "storage": "sqlite",
+    "capabilities": [
+      "chatGptOauth",
+      "localThreads",
+      "modelStreaming",
+      "nativeTools",
+      "explicitApprovals"
+    ]
+  },
+  "schemaVersion": 9,
+  "diagnosticLogPath": "C:\\appdata\\logs\\runtime.jsonl",
+  "config": {
+    "config": {
+      "model": "gpt-5.6-codex",
+      "modelReasoningEffort": "medium",
+      "serviceTier": "priority",
+      "permissionProfile": {
+        "sandbox": "workspace-write",
+        "approvals": "on-request"
+      },
+      "webSearch": "live",
+      "modelVerbosity": "medium",
+      "personality": "pragmatic",
+      "developerInstructions": "Keep answers bounded.",
+      "desktop": {
+        "uiFontSize": 15,
+        "motion": "full",
+        "pointerCursor": true,
+        "diffDisplay": "unified"
+      }
+    },
+    "version": 3
+  },
+  "permissionProfiles": [
+    {
+      "sandbox": "read-only",
+      "approvals": "untrusted"
+    },
+    {
+      "sandbox": "workspace-write",
+      "approvals": "on-request"
+    },
+    {
+      "sandbox": "danger-full-access",
+      "approvals": "never"
+    }
+  ]
+}

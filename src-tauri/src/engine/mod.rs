@@ -1,4 +1,6 @@
 mod contracts;
+#[cfg(test)]
+mod contracts_fixtures;
 mod native;
 
 use tauri::AppHandle;

@@ -49,7 +49,7 @@ use crate::engine::{
 };
 use crate::error::AppError;
 
-const CONTRACT_SCHEMA_VERSION: u32 = 9;
+pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 9;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 

@@ -24,6 +24,7 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
     "verbatimModuleSyntax": true,
     "types": ["vite/client", "node"]
   },
