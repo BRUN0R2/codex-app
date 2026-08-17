@@ -19,6 +19,10 @@ import { CodexGlyph } from "./CodexGlyph";
 import { Icon, type IconName } from "./Icon";
 import type { SettingsPage } from "./SettingsDialog";
 
+const MAX_VISIBLE_PROJECT_GROUPS = 5;
+const MAX_UNGROUPED_RECENT_THREADS = 8;
+const MAX_INLINE_PROJECT_THREADS = 5;
+
 export interface SidebarProps {
   readonly collapsed: boolean;
   readonly controller: AppController;
@@ -57,7 +61,7 @@ export function Sidebar(props: SidebarProps) {
     if (normalizedSearchQuery().length > 0 || showAllProjects()) {
       return grouped();
     }
-    return grouped().slice(0, 5);
+    return grouped().slice(0, MAX_VISIBLE_PROJECT_GROUPS);
   });
   const ungrouped = createMemo(() =>
     threadsWithoutConfiguredProject(props.controller.threads(), props.controller.projects())
@@ -66,7 +70,7 @@ export function Sidebar(props: SidebarProps) {
           normalizedSearchQuery().length === 0 || matchesThread(thread, normalizedSearchQuery()),
       )
       .sort((left, right) => right.updatedAt - left.updatedAt)
-      .slice(0, 8),
+      .slice(0, MAX_UNGROUPED_RECENT_THREADS),
   );
   const pinnedThreads = createMemo(() => {
     const pinned = new Set(props.controller.pinnedThreadIds());
@@ -80,10 +84,10 @@ export function Sidebar(props: SidebarProps) {
       .sort((left, right) => right.updatedAt - left.updatedAt);
   });
   const pinnedProjects = createMemo(() => {
-    const pinned = new Set(props.controller.pinnedThreadIds());
+    const pinned = props.controller.pinnedProjectPaths();
     return props.controller
       .projects()
-      .filter((project) => pinned.has(project.path))
+      .filter((project) => pinned.some((path) => pathsEqual(path, project.path)))
       .filter(
         (project) =>
           normalizedSearchQuery().length === 0 || matchesProject(project, normalizedSearchQuery()),
@@ -614,14 +618,15 @@ interface ProjectGroupProps {
 function ProjectGroup(props: ProjectGroupProps) {
   let menu: HTMLDetailsElement | undefined;
   const [editingProject, setEditingProject] = createSignal(false);
-  const isPinned = () => props.controller.pinnedThreadIds().includes(props.project.path);
+  const isPinned = () =>
+    props.controller.pinnedProjectPaths().some((path) => pathsEqual(path, props.project.path));
   const isProjectPageActive = () =>
     props.controller.currentThread() === null &&
     pathsEqual(props.controller.workspace(), props.project.path);
   const visibleThreads = () =>
-    props.threadListExpanded || props.threads.length <= 5
+    props.threadListExpanded || props.threads.length <= MAX_INLINE_PROJECT_THREADS
       ? props.threads
-      : props.threads.slice(0, 5);
+      : props.threads.slice(0, MAX_INLINE_PROJECT_THREADS);
 
   return (
     <section class="project-group" classList={{ expanded: props.expanded }}>
@@ -677,7 +682,7 @@ function ProjectGroup(props: ProjectGroupProps) {
                     if (menu !== undefined) {
                       menu.open = false;
                     }
-                    props.controller.togglePinnedThread(props.project.path);
+                    props.controller.togglePinnedProject(props.project.path);
                   }}
                   role="menuitem"
                   type="button"

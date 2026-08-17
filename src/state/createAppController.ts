@@ -94,6 +94,12 @@ import {
   saveProductFlowState,
 } from "./productFlow";
 import {
+  loadPinnedProjectPaths,
+  removePinnedProjectPath,
+  savePinnedProjectPaths,
+  togglePinnedProjectPath,
+} from "./projectPins";
+import {
   defaultProjectSidebarState,
   loadProjectSidebarState,
   type ProjectSidebarState,
@@ -191,6 +197,14 @@ export function createAppController(): AppController {
     pinLoadError = asError(reason);
   }
   const [pinnedThreadIds, setPinnedThreadIds] = createSignal(initialPinnedThreadIds);
+  let initialPinnedProjectPaths: readonly string[] = [];
+  let projectPinLoadError: Error | null = null;
+  try {
+    initialPinnedProjectPaths = loadPinnedProjectPaths();
+  } catch (reason) {
+    projectPinLoadError = asError(reason);
+  }
+  const [pinnedProjectPaths, setPinnedProjectPaths] = createSignal(initialPinnedProjectPaths);
   const [threadRuntime, setThreadRuntime] = createSignal<ReadonlyMap<string, ThreadRuntimeState>>(
     new Map(),
   );
@@ -416,6 +430,9 @@ export function createAppController(): AppController {
     }
     if (pinLoadError !== null) {
       reportError(pinLoadError);
+    }
+    if (projectPinLoadError !== null) {
+      reportError(projectPinLoadError);
     }
     for (const warning of messageQueueLoadWarnings) {
       reportError(new Error(warning));
@@ -1260,6 +1277,8 @@ export function createAppController(): AppController {
       return;
     }
 
+    removePinnedProject(path);
+
     const nextProjectSidebarState = removeProjectSidebarState(projectSidebarState(), path);
     if (nextProjectSidebarState === projectSidebarState()) {
       return;
@@ -1326,6 +1345,33 @@ export function createAppController(): AppController {
     try {
       savePinnedThreadIds(next);
       setPinnedThreadIds(next);
+    } catch (reason) {
+      reportError(reason);
+    }
+  }
+
+  function togglePinnedProject(path: string): void {
+    if (!projects().some((project) => pathsEqual(project.path, path))) {
+      setError("O projeto precisa estar disponível antes de ser fixado.");
+      return;
+    }
+    try {
+      const next = togglePinnedProjectPath(pinnedProjectPaths(), path);
+      savePinnedProjectPaths(next);
+      setPinnedProjectPaths(next);
+    } catch (reason) {
+      reportError(reason);
+    }
+  }
+
+  function removePinnedProject(path: string): void {
+    const next = removePinnedProjectPath(pinnedProjectPaths(), path);
+    if (next.length === pinnedProjectPaths().length) {
+      return;
+    }
+    try {
+      savePinnedProjectPaths(next);
+      setPinnedProjectPaths(next);
     } catch (reason) {
       reportError(reason);
     }
@@ -2130,6 +2176,7 @@ export function createAppController(): AppController {
     modelReroute,
     modelVerifications,
     pendingOperations,
+    pinnedProjectPaths,
     pinnedThreadIds,
     persistedTurns,
     projectSectionExpanded,
@@ -2183,6 +2230,7 @@ export function createAppController(): AppController {
     sendMessage,
     sendQueuedMessageNow,
     takeQueuedMessage,
+    togglePinnedProject,
     togglePinnedThread,
     toggleProjectExpanded,
     toggleProjectSection,

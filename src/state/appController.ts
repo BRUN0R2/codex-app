@@ -71,6 +71,7 @@ export interface AppController {
   readonly modelReroute: Accessor<ModelReroutedNotification["params"] | null>;
   readonly modelVerifications: Accessor<readonly ModelVerification[]>;
   readonly pendingOperations: Accessor<number>;
+  readonly pinnedProjectPaths: Accessor<readonly string[]>;
   readonly pinnedThreadIds: Accessor<readonly string[]>;
   readonly persistedTurns: Accessor<readonly VisibleThreadTurn[]>;
   readonly projectSectionExpanded: Accessor<boolean>;
@@ -125,6 +126,7 @@ export interface AppController {
   readonly sendQueuedMessageNow: (messageId?: string) => Promise<boolean>;
   readonly takeQueuedMessage: (messageId: string) => QueuedMessage | null;
   readonly togglePinnedThread: (threadId: string) => void;
+  readonly togglePinnedProject: (path: string) => void;
   readonly toggleProjectExpanded: (path: string) => void;
   readonly toggleProjectSection: () => void;
   readonly toggleProjectThreadListExpanded: (path: string) => void;
