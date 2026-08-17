@@ -29,7 +29,7 @@ use crate::engine::{
     ActivityStatus, AppConfig, ConversationMode, DiagnosticStream, ImageDetail, ItemNotification,
     MessagePhase, ModelRerouteReason, ModelReroutedNotification,
     ModelSafetyBufferingUpdatedNotification, ModelVerificationNotification, Personality,
-    StreamDelta, ThreadItem, TurnInput, TurnModerationMetadataNotification, WebSearchMode,
+    StreamDelta, ThreadItem, TurnInput, WebSearchMode,
 };
 use crate::error::AppError;
 
@@ -512,7 +512,6 @@ pub(super) async fn run_turn(
                     ResponseEvent::ServerModel(_)
                     | ResponseEvent::TurnState(_)
                     | ResponseEvent::ModelVerifications(_)
-                    | ResponseEvent::TurnModerationMetadata(_)
                     | ResponseEvent::SafetyBuffering(_) => {
                         return Err(AppError::State(
                             "provider control event escaped its handler".into(),
@@ -946,19 +945,6 @@ pub(super) fn handle_provider_control_event(
                     ),
                 )?;
             }
-            Ok(None)
-        }
-        ResponseEvent::TurnModerationMetadata(metadata) => {
-            inner.emit_notification(
-                app,
-                crate::engine::EngineNotification::TurnModerationMetadata(
-                    TurnModerationMetadataNotification {
-                        thread_id: run.thread_id.clone(),
-                        turn_id: run.turn_id.clone(),
-                        metadata,
-                    },
-                ),
-            )?;
             Ok(None)
         }
         ResponseEvent::SafetyBuffering(buffering) => {

@@ -78,8 +78,6 @@ pub enum EngineNotification {
     ModelRerouted(ModelReroutedNotification),
     #[serde(rename = "model.verification")]
     ModelVerification(ModelVerificationNotification),
-    #[serde(rename = "turn.moderationMetadata")]
-    TurnModerationMetadata(TurnModerationMetadataNotification),
     #[serde(rename = "model.safetyBufferingUpdated")]
     ModelSafetyBufferingUpdated(ModelSafetyBufferingUpdatedNotification),
 }
@@ -228,26 +226,6 @@ pub struct ModelVerificationNotification {
 #[serde(rename_all = "camelCase")]
 pub enum ModelVerification {
     TrustedAccessForCyber,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ModerationMetadata {
-    pub presentation: ModerationPresentation,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ModerationPresentation {
-    Inline,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnModerationMetadataNotification {
-    pub thread_id: String,
-    pub turn_id: String,
-    pub metadata: ModerationMetadata,
 }
 
 #[derive(Debug, Clone, Serialize)]

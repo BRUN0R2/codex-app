@@ -106,7 +106,6 @@ pub(super) async fn compact_context(
             ResponseEvent::ServerModel(_)
             | ResponseEvent::TurnState(_)
             | ResponseEvent::ModelVerifications(_)
-            | ResponseEvent::TurnModerationMetadata(_)
             | ResponseEvent::SafetyBuffering(_) => {
                 return Err(AppError::State(
                     "provider control event escaped its handler".into(),

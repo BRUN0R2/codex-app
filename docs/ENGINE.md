@@ -8,7 +8,7 @@ O único backend é `NativeEngine`:
 - provider: `ChatGPT Codex`;
 - autenticação: `ChatGPT OAuth`;
 - armazenamento: `sqlite`;
-- schema IPC: versão `8`.
+- schema IPC: versão `9`.
 
 Não existe variável de ambiente para trocar backend nem execução de binário
 externo. A CLI aberta é uma referência de estudo, não uma integração.
@@ -47,8 +47,7 @@ Notificações suportadas:
   `thread.deleted`;
 - `turn.started`, `turn.completed`;
 - `item.started`, `item.completed`, `item.streamDeltas`;
-- `model.rerouted`, `model.verification`, `model.safetyBufferingUpdated` e
-  `turn.moderationMetadata`.
+- `model.rerouted`, `model.verification` e `model.safetyBufferingUpdated`.
 
 Qualquer método diferente falha na fronteira TypeScript e gera diagnóstico
 visível.

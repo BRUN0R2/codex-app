@@ -42,7 +42,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 8;
+  readonly schemaVersion: 9;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -591,21 +591,6 @@ export interface ModelVerificationNotification {
   };
 }
 
-export type ModerationPresentation = "inline";
-
-export interface ModerationMetadata {
-  readonly presentation: ModerationPresentation;
-}
-
-export interface TurnModerationMetadataNotification {
-  readonly method: "turn.moderationMetadata";
-  readonly params: {
-    readonly threadId: string;
-    readonly turnId: string;
-    readonly metadata: ModerationMetadata;
-  };
-}
-
 export interface ModelSafetyBufferingUpdatedNotification {
   readonly method: "model.safetyBufferingUpdated";
   readonly params: {
@@ -631,7 +616,6 @@ export type EngineNotification =
   | ThreadDeletedNotification
   | ThreadNotification
   | ThreadUnarchivedNotification
-  | TurnModerationMetadataNotification
   | TurnCompletedNotification
   | TurnNotification;
 

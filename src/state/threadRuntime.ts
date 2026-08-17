@@ -23,7 +23,6 @@ export interface ThreadRuntimeState {
   readonly itemOverlays: readonly VisibleThreadItem[];
   readonly modelReroute: ModelReroutedNotification["params"] | null;
   readonly modelVerifications: readonly ModelVerification[];
-  readonly moderationMetadata: unknown | null;
   readonly safetyBuffering: ModelSafetyBufferingUpdatedNotification["params"] | null;
 }
 
@@ -83,7 +82,6 @@ export function synchronizeThreadRuntime(
         : [],
     modelReroute: existing?.modelReroute ?? null,
     modelVerifications: existing?.modelVerifications ?? [],
-    moderationMetadata: existing?.moderationMetadata ?? null,
     safetyBuffering: existing?.safetyBuffering ?? null,
   });
   return next;
@@ -204,7 +202,6 @@ function emptyThreadRuntime(): ThreadRuntimeState {
     itemOverlays: [],
     modelReroute: null,
     modelVerifications: [],
-    moderationMetadata: null,
     safetyBuffering: null,
   };
 }

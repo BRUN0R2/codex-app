@@ -145,7 +145,7 @@ describe("decodificação dos contratos nativos", () => {
           "explicitApprovals",
         ],
       },
-      schemaVersion: 8,
+      schemaVersion: 9,
       config: configFixture(),
       diagnosticLogPath: "C:\\Users\\Bruno\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
@@ -172,7 +172,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 8,
+        schemaVersion: 9,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",
@@ -574,19 +574,10 @@ describe("decodificação dos contratos nativos", () => {
         verifications: ["trustedAccessForCyber"],
       },
     });
-    const moderation = decodeEngineNotification({
-      method: "turn.moderationMetadata",
-      params: {
-        threadId: "thread-1",
-        turnId: "turn-1",
-        metadata: { presentation: "inline" },
-      },
-    });
 
     expect(buffering.method).toBe("model.safetyBufferingUpdated");
     expect(rerouted.method).toBe("model.rerouted");
     expect(verification.method).toBe("model.verification");
-    expect(moderation.method).toBe("turn.moderationMetadata");
   });
 
   it("preserva falhas de turno e rejeita estados incoerentes", () => {

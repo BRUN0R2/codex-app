@@ -817,7 +817,6 @@ export function createAppController(): AppController {
           activeTurnId: notification.params.turn.id,
           modelReroute: null,
           modelVerifications: [],
-          moderationMetadata: null,
           safetyBuffering: null,
         }));
         void rateLimitRefresh.refreshIfStale();
@@ -879,12 +878,6 @@ export function createAppController(): AppController {
         updateThreadRuntime(notification.params.threadId, (runtime) => ({
           ...runtime,
           modelVerifications: notification.params.verifications,
-        }));
-        return;
-      case "turn.moderationMetadata":
-        updateThreadRuntime(notification.params.threadId, (runtime) => ({
-          ...runtime,
-          moderationMetadata: notification.params.metadata,
         }));
         return;
       case "model.safetyBufferingUpdated":

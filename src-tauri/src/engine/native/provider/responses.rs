@@ -10,7 +10,6 @@ use tokio::time::Instant;
 use crate::engine::ImageDetail;
 use crate::engine::ModelVerbosity;
 use crate::engine::ModelVerification;
-use crate::engine::ModerationMetadata;
 use crate::engine::ReasoningEffort;
 use crate::engine::TokenUsage;
 use crate::error::AppError;
@@ -360,7 +359,6 @@ pub enum ResponseEvent {
     ServerModel(String),
     TurnState(String),
     ModelVerifications(Vec<ModelVerification>),
-    TurnModerationMetadata(ModerationMetadata),
     SafetyBuffering(SafetyBuffering),
     OutputItemDone(ResponseItem),
     Completed(Option<TokenUsage>),
@@ -764,15 +762,6 @@ fn emit_metadata_events(
                 output.push_back(ResponseEvent::ModelVerifications(verifications));
             }
         }
-        if let Some(metadata) = event
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("openai_chatgpt_moderation_metadata"))
-        {
-            output.push_back(ResponseEvent::TurnModerationMetadata(
-                decode_moderation_metadata(metadata)?,
-            ));
-        }
     }
 
     if let Some(buffering) =
@@ -781,12 +770,6 @@ fn emit_metadata_events(
         output.push_back(ResponseEvent::SafetyBuffering(buffering));
     }
     Ok(())
-}
-
-fn decode_moderation_metadata(value: &Value) -> Result<ModerationMetadata, AppError> {
-    serde_json::from_value(value.clone()).map_err(|error| {
-        AppError::Provider(format!("invalid ChatGPT moderation metadata: {error}"))
-    })
 }
 
 fn decode_model_verifications(value: &Value) -> Result<Vec<ModelVerification>, AppError> {
@@ -1159,14 +1142,7 @@ mod tests {
             Some(ResponseEvent::ModelVerifications(verifications))
                 if verifications == [ModelVerification::TrustedAccessForCyber]
         ));
-        assert!(matches!(
-            events.pop_front(),
-            Some(ResponseEvent::TurnModerationMetadata(metadata))
-                if matches!(
-                    metadata.presentation,
-                    crate::engine::ModerationPresentation::Inline
-                )
-        ));
+        // Unknown metadata fields such as moderation metadata are ignored by the contract.
         assert!(events.is_empty());
     }
 

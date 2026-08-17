@@ -105,7 +105,7 @@ const PREVIEW_ENGINE = {
       "nativeTools",
     ],
   },
-  schemaVersion: 8,
+  schemaVersion: 9,
   config: PREVIEW_CONFIG,
   diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
   permissionProfiles: [

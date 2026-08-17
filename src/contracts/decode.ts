@@ -38,7 +38,6 @@ import type {
   ModelListResponse,
   ModelServiceTier,
   ModelVerbosity,
-  ModerationMetadata,
   MotionPreference,
   OperationAck,
   OutputReadResponse,
@@ -148,7 +147,6 @@ const RATE_LIMIT_REACHED_TYPES = [
 ] as const;
 const MODEL_REROUTE_REASONS = ["highRiskCyberActivity"] as const;
 const MODEL_VERIFICATIONS = ["trustedAccessForCyber"] as const;
-const MODERATION_PRESENTATIONS = ["inline"] as const;
 
 export class ContractError extends Error {
   public readonly path: string;
@@ -177,7 +175,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [8] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [9] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -556,17 +554,6 @@ export function decodeEngineNotification(value: unknown): EngineNotification {
             (value, path) => literal(value, path, MODEL_VERIFICATIONS),
             64,
           ),
-        },
-      };
-    }
-    case "turn.moderationMetadata": {
-      const params = exactRecord(root.params, "$.params", ["metadata", "threadId", "turnId"]);
-      return {
-        method,
-        params: {
-          threadId: identifier(params.threadId, "$.params.threadId"),
-          turnId: identifier(params.turnId, "$.params.turnId"),
-          metadata: decodeModerationMetadata(params.metadata, "$.params.metadata"),
         },
       };
     }
@@ -1297,13 +1284,6 @@ function decodeDesktopPreferences(value: unknown, path: string): DesktopPreferen
     motion: literal(object.motion, `${path}.motion`, MOTION_PREFERENCES),
     pointerCursor: booleanValue(object.pointerCursor, `${path}.pointerCursor`),
     diffDisplay: literal(object.diffDisplay, `${path}.diffDisplay`, DIFF_DISPLAYS),
-  };
-}
-
-function decodeModerationMetadata(value: unknown, path: string): ModerationMetadata {
-  const object = exactRecord(value, path, ["presentation"]);
-  return {
-    presentation: literal(object.presentation, `${path}.presentation`, MODERATION_PRESENTATIONS),
   };
 }
 
