@@ -10,7 +10,7 @@ describe("cache de páginas de conversa", () => {
     cache.write(page("b", 2));
 
     expect(cache.read("a")?.thread.id).toBe("a");
-    expect(cache.write(page("c", 3))).toBe("b");
+    cache.write(page("c", 3));
     expect(cache.read("b")).toBeNull();
     expect(cache.read("a")?.thread.id).toBe("a");
     expect(cache.read("c")?.thread.id).toBe("c");

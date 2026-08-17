@@ -10,9 +10,3 @@ export function isDesktopRuntime(): boolean {
   const windowWithInternals = window as { __TAURI_INTERNALS__?: unknown };
   return windowWithInternals.__TAURI_INTERNALS__ !== undefined;
 }
-
-export function requireDesktopRuntime(): void {
-  if (!isDesktopRuntime()) {
-    throw new Error("Runtime Tauri indisponível. Abra o app pelo processo desktop.");
-  }
-}

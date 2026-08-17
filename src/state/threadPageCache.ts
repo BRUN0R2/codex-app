@@ -25,36 +25,32 @@ export class ThreadPageCache {
     return page;
   }
 
-  public write(page: CachedThreadPage): string | null {
+  public write(page: CachedThreadPage): void {
     const threadId = page.thread.id;
     if (threadId.length === 0) {
       throw new Error("A cache de conversas não aceita um identificador vazio.");
     }
     this.#touch(threadId, page);
     if (this.#pages.size <= this.#capacity) {
-      return null;
+      return;
     }
     const oldestThreadId = this.#pages.keys().next().value;
     if (oldestThreadId === undefined) {
       throw new Error("A cache de conversas perdeu o candidato à expulsão.");
     }
     this.#pages.delete(oldestThreadId);
-    return oldestThreadId;
   }
 
-  public update(
-    threadId: string,
-    update: (page: CachedThreadPage) => CachedThreadPage,
-  ): string | null {
+  public update(threadId: string, update: (page: CachedThreadPage) => CachedThreadPage): void {
     const current = this.#pages.get(threadId);
     if (current === undefined) {
-      return null;
+      return;
     }
     const next = update(current);
     if (next.thread.id !== threadId) {
       throw new Error("Uma atualização da cache tentou trocar o identificador da conversa.");
     }
-    return this.write(next);
+    this.write(next);
   }
 
   public delete(threadId: string): boolean {
@@ -63,10 +59,6 @@ export class ThreadPageCache {
 
   public clear(): void {
     this.#pages.clear();
-  }
-
-  public size(): number {
-    return this.#pages.size;
   }
 
   #touch(threadId: string, page: CachedThreadPage): void {
