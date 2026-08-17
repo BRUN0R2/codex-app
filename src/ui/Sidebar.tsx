@@ -12,6 +12,46 @@ import { Portal } from "solid-js/web";
 
 import type { ProjectRecord, ThreadSummary } from "../contracts/types";
 import type { AppController } from "../state/appController";
+
+type SidebarController = Pick<
+  AppController,
+  | "account"
+  | "archiveThread"
+  | "chooseWorkspace"
+  | "compactThread"
+  | "currentThread"
+  | "deleteThread"
+  | "forkThread"
+  | "isThreadActive"
+  | "loadMoreThreads"
+  | "logout"
+  | "newThread"
+  | "openThread"
+  | "pendingOperations"
+  | "pinnedProjectPaths"
+  | "pinnedThreadIds"
+  | "product"
+  | "projectExpanded"
+  | "projectSectionExpanded"
+  | "projectThreadListExpanded"
+  | "projects"
+  | "rateLimits"
+  | "refreshAccountProfile"
+  | "refreshRateLimitsIfStale"
+  | "removeProject"
+  | "renameThread"
+  | "selectProduct"
+  | "threads"
+  | "threadsNextCursor"
+  | "togglePinnedProject"
+  | "togglePinnedThread"
+  | "toggleProjectExpanded"
+  | "toggleProjectSection"
+  | "toggleProjectThreadListExpanded"
+  | "updateProject"
+  | "workspace"
+>;
+
 import { pathsEqual } from "../state/projects";
 import { threadsWithoutConfiguredProject } from "../state/sidebarThreads";
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
@@ -25,7 +65,7 @@ const MAX_INLINE_PROJECT_THREADS = 5;
 
 export interface SidebarProps {
   readonly collapsed: boolean;
-  readonly controller: AppController;
+  readonly controller: SidebarController;
   readonly inert: boolean;
   readonly onOpenSettings: (page?: SettingsPage) => void;
 }
@@ -601,7 +641,7 @@ function SidebarSectionHeading(props: {
 
 interface ProjectGroupProps {
   readonly collapsed: boolean;
-  readonly controller: AppController;
+  readonly controller: SidebarController;
   readonly expanded: boolean;
   readonly onBeginRename: (thread: ThreadSummary) => void;
   readonly onSubmitRename: (event: SubmitEvent) => Promise<void>;
@@ -797,7 +837,7 @@ function ProjectGroup(props: ProjectGroupProps) {
 }
 
 interface ThreadButtonProps {
-  readonly controller: AppController;
+  readonly controller: SidebarController;
   readonly onBeginRename: (thread: ThreadSummary) => void;
   readonly onSubmitRename: (event: SubmitEvent) => Promise<void>;
   readonly onTogglePinned: () => void;
@@ -952,11 +992,11 @@ function matchesThread(thread: ThreadSummary, query: string): boolean {
     .includes(query);
 }
 
-function accountLabel(controller: AppController): string {
+function accountLabel(controller: SidebarController): string {
   return accountDisplayName(controller.account()?.account);
 }
 
-function remainingUsageLabel(controller: AppController): string {
+function remainingUsageLabel(controller: SidebarController): string {
   const usedPercent = controller.rateLimits()?.rateLimits.primary?.usedPercent;
   if (usedPercent === undefined) {
     return "—";

@@ -9,6 +9,31 @@ import type {
   ReasoningEffort,
 } from "../contracts/types";
 import type { AppController } from "../state/appController";
+
+type ComposerController = Pick<
+  AppController,
+  | "chatModels"
+  | "chooseWorkspace"
+  | "config"
+  | "contextUsage"
+  | "conversationMode"
+  | "deleteQueuedMessage"
+  | "engine"
+  | "enqueueMessage"
+  | "inspectFiles"
+  | "interrupt"
+  | "models"
+  | "pendingOperations"
+  | "queuedMessages"
+  | "saveClipboardImage"
+  | "sendMessage"
+  | "sendQueuedMessageNow"
+  | "takeQueuedMessage"
+  | "turnBusy"
+  | "updateSetting"
+  | "workspace"
+>;
+
 import {
   type ChatIntelligenceSelection,
   chatOptionLabel,
@@ -28,7 +53,7 @@ import { Icon } from "./Icon";
 import { ImagePreview } from "./ImagePreview";
 
 export interface ComposerProps {
-  readonly controller: AppController;
+  readonly controller: ComposerController;
   readonly draftRequest: ComposerDraftRequest | null;
   readonly onDraftConsumed: (requestId: number) => void;
   readonly onOpenSettings: () => void;

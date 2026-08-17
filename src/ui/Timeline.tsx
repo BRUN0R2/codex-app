@@ -13,6 +13,22 @@ import {
 
 import type { FileChange, ThreadItem, VisibleThreadItem } from "../contracts/types";
 import type { AppController } from "../state/appController";
+
+type TimelineController = Pick<
+  AppController,
+  | "activeTurnId"
+  | "config"
+  | "conversationMode"
+  | "currentThread"
+  | "hasOlderHistory"
+  | "historyLoading"
+  | "loadOlderHistory"
+  | "persistedTurns"
+  | "reportError"
+  | "turns"
+  | "workspace"
+>;
+
 import { projectName } from "../state/projects";
 import type { VisibleThreadTurn } from "../state/visibleTurnSequence";
 import { fileName, toolIconName, toolLabel } from "./activityLabels";
@@ -139,7 +155,7 @@ interface TimelineUserMessageEntry extends UserMessageEntry {
 }
 
 export function Timeline(props: {
-  readonly controller: AppController;
+  readonly controller: TimelineController;
   readonly onSelectSuggestion: (prompt: string) => void;
 }) {
   let scrollElement: HTMLDivElement | undefined;

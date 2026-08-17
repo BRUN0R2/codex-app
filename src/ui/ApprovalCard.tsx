@@ -2,9 +2,12 @@ import { createSignal, Show } from "solid-js";
 
 import type { EngineServerRequest } from "../contracts/types";
 import type { AppController } from "../state/appController";
+
+type ApprovalCardController = Pick<AppController, "approvals" | "respondToApproval">;
+
 import { Icon } from "./Icon";
 
-export function ApprovalCard(props: { readonly controller: AppController }) {
+export function ApprovalCard(props: { readonly controller: ApprovalCardController }) {
   return (
     <Show when={props.controller.approvals()[0]}>
       {(request) => <CommandApproval controller={props.controller} request={request()} />}
@@ -13,7 +16,7 @@ export function ApprovalCard(props: { readonly controller: AppController }) {
 }
 
 function CommandApproval(props: {
-  readonly controller: AppController;
+  readonly controller: ApprovalCardController;
   readonly request: EngineServerRequest;
 }) {
   const [responding, setResponding] = createSignal(false);

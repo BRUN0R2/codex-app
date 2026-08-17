@@ -1,10 +1,16 @@
 import { Show } from "solid-js";
 
 import type { AppController } from "../state/appController";
+
+type LoginScreenController = Pick<
+  AppController,
+  "cancelLogin" | "error" | "login" | "loginPending"
+>;
+
 import { CodexGlyph } from "./CodexGlyph";
 import { Icon } from "./Icon";
 
-export function LoginScreen(props: { readonly controller: AppController }) {
+export function LoginScreen(props: { readonly controller: LoginScreenController }) {
   return (
     <main class="login-screen">
       <section class="login-card" aria-labelledby="login-title">

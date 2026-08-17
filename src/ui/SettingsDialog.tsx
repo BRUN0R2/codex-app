@@ -31,6 +31,30 @@ import {
 } from "../infrastructure/codexClient";
 import { isDesktopRuntime } from "../platform/DesktopRuntime";
 import type { AppController } from "../state/appController";
+
+type SettingsDialogController = Pick<
+  AppController,
+  | "account"
+  | "archivedThreads"
+  | "archivedThreadsLoaded"
+  | "archivedThreadsLoading"
+  | "archivedThreadsNextCursor"
+  | "config"
+  | "deleteThread"
+  | "diagnostics"
+  | "engine"
+  | "loadMoreArchivedThreads"
+  | "logout"
+  | "rateLimits"
+  | "rateLimitsError"
+  | "rateLimitsLoading"
+  | "refreshRateLimits"
+  | "refreshRateLimitsIfStale"
+  | "reportError"
+  | "unarchiveThread"
+  | "updateSetting"
+>;
+
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { formatShortDate } from "./dateFormat";
 import { Icon, type IconName } from "./Icon";
@@ -86,7 +110,7 @@ const SETTINGS_NAVIGATION: readonly SettingsNavigationSection[] = [
 ];
 
 export function SettingsDialog(props: {
-  readonly controller: AppController;
+  readonly controller: SettingsDialogController;
   readonly initialPage?: SettingsPage | undefined;
   readonly onClose: () => void;
 }) {
@@ -312,7 +336,7 @@ const DEFAULT_APPLICATION_PREFERENCES = {
   closeToTray: false,
 } as const satisfies ApplicationPreferences;
 
-function ApplicationPreferencesSettings(props: { readonly controller: AppController }) {
+function ApplicationPreferencesSettings(props: { readonly controller: SettingsDialogController }) {
   const desktopRuntime = isDesktopRuntime();
   const [preferences, setPreferences] = createSignal<ApplicationPreferences>(
     DEFAULT_APPLICATION_PREFERENCES,
@@ -458,7 +482,7 @@ function PreferenceCheckbox(props: {
   );
 }
 
-function GeneralSettings(props: { readonly controller: AppController }) {
+function GeneralSettings(props: { readonly controller: SettingsDialogController }) {
   const configuration = () => props.controller.config()?.config;
 
   return (
@@ -504,7 +528,7 @@ function GeneralSettings(props: { readonly controller: AppController }) {
   );
 }
 
-function SecuritySettings(props: { readonly controller: AppController }) {
+function SecuritySettings(props: { readonly controller: SettingsDialogController }) {
   const profile = () => props.controller.config()?.config.permissionProfile;
   return (
     <div class="settings-page">
@@ -542,7 +566,7 @@ function SecuritySettings(props: { readonly controller: AppController }) {
 }
 
 function PersonalizationSettings(props: {
-  readonly controller: AppController;
+  readonly controller: SettingsDialogController;
   readonly developerInstructions: string;
   readonly setDeveloperInstructions: (value: string) => void;
 }) {
@@ -601,7 +625,7 @@ function PersonalizationSettings(props: {
   );
 }
 
-function AppearanceSettings(props: { readonly controller: AppController }) {
+function AppearanceSettings(props: { readonly controller: SettingsDialogController }) {
   const desktop = () => props.controller.config()?.config.desktop;
 
   function save(patch: Partial<DesktopPreferences>): void {
@@ -706,7 +730,7 @@ function ShortcutRow(props: { readonly keys: readonly string[]; readonly label: 
   );
 }
 
-function UsageSettings(props: { readonly controller: AppController }) {
+function UsageSettings(props: { readonly controller: SettingsDialogController }) {
   const rateLimits = () => props.controller.rateLimits();
   const snapshot = () => rateLimits()?.rateLimits;
   onMount(() => {
@@ -936,7 +960,7 @@ function planLabel(planType: AccountPlanType | null): string {
   }
 }
 
-function ProfileSettings(props: { readonly controller: AppController }) {
+function ProfileSettings(props: { readonly controller: SettingsDialogController }) {
   const account = () => props.controller.account()?.account;
   return (
     <div class="settings-page">
@@ -956,7 +980,7 @@ function ProfileSettings(props: { readonly controller: AppController }) {
   );
 }
 
-function DiagnosticsSettings(props: { readonly controller: AppController }) {
+function DiagnosticsSettings(props: { readonly controller: SettingsDialogController }) {
   return (
     <div class="settings-page diagnostics-page">
       <SettingsHeading
@@ -991,7 +1015,7 @@ function DiagnosticsSettings(props: { readonly controller: AppController }) {
   );
 }
 
-function ArchivedChatsSettings(props: { readonly controller: AppController }) {
+function ArchivedChatsSettings(props: { readonly controller: SettingsDialogController }) {
   onMount(() => {
     if (!props.controller.archivedThreadsLoaded()) {
       void props.controller.loadMoreArchivedThreads();
