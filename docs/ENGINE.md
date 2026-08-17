@@ -52,6 +52,12 @@ Notificações suportadas:
 Qualquer método diferente falha na fronteira TypeScript e gera diagnóstico
 visível.
 
+A sincronização Rust↔TypeScript é travada por fixtures golden em
+`src/contracts/fixtures/`: `cargo test` falha se o contrato Rust mudar sem
+regenerá-los e os testes do Vitest decodificam os mesmos arquivos com os
+decoders estritos da interface. Regenere intencionalmente com
+`cargo test -p codex-desktop-next regenerate_golden_contract_fixtures -- --ignored`.
+
 `turn.completed` carrega a projeção terminal persistida do turno: `id`,
 `status`, `error` e `updatedAt`. O storage produz esses valores na mesma
 transação que encerra o turno e atualiza a thread. O frontend aplica a projeção
