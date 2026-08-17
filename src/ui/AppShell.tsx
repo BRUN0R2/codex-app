@@ -6,6 +6,7 @@ import { isDesktopRuntime } from "../platform/DesktopRuntime";
 import type { AppController } from "../state/appController";
 
 import { ApprovalCard } from "./ApprovalCard";
+import { applyDesktopAppearance } from "./appearance";
 import { Composer, type ComposerDraftRequest } from "./Composer";
 import { formatShortDate } from "./dateFormat";
 import { HomeComposerModeToggle } from "./HomeComposerModeToggle";
@@ -57,6 +58,13 @@ export function AppShell(props: { readonly controller: AppController }) {
   createEffect(() => {
     if (reviewChanges().length === 0) {
       setReviewOpen(false);
+    }
+  });
+
+  createEffect(() => {
+    const preferences = props.controller.config()?.config.desktop;
+    if (preferences !== undefined) {
+      applyDesktopAppearance(preferences);
     }
   });
 

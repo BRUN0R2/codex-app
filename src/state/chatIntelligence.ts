@@ -3,6 +3,7 @@ import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 
 const STORAGE_KEY = PROFILE_STORAGE_KEYS.chatIntelligence;
 const MAX_STORED_VALUE_CHARACTERS = 1_024;
+const MAX_MODEL_OPTION_ID_CHARACTERS = 256;
 
 export interface ChatIntelligenceSelection {
   readonly version: 2;
@@ -93,7 +94,7 @@ function optionId(value: unknown): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
-    value.length > 256 ||
+    value.length > MAX_MODEL_OPTION_ID_CHARACTERS ||
     /\p{Cc}/u.test(value)
   ) {
     throw new Error("A opção de modelo selecionada para o Chat é inválida.");

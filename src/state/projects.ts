@@ -5,6 +5,7 @@ import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 const STORAGE_KEY = PROFILE_STORAGE_KEYS.projects;
 const MAX_PROJECTS = 32;
 const MAX_PATH_CHARACTERS = 4_096;
+const MAX_NAME_CHARACTERS = 256;
 
 interface StoredProjects {
   readonly version: 1;
@@ -105,7 +106,7 @@ function decodeStoredProjects(value: unknown): StoredProjects {
     const project = entry as Record<"color" | "icon" | "name" | "path", unknown>;
     const path = validatePath(project.path);
     const name = project.name;
-    if (typeof name !== "string" || name.length === 0 || name.length > 256) {
+    if (typeof name !== "string" || name.length === 0 || name.length > MAX_NAME_CHARACTERS) {
       throw new Error(`O nome do projeto ${index + 1} é inválido.`);
     }
     const icon = typeof project.icon === "string" ? (project.icon as IconName) : undefined;
