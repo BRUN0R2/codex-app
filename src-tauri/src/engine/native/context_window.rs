@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::provider::{ResponseContent, ResponseItem};
+use super::text::truncate_utf8;
 use crate::engine::{ModelContextWindow, TokenUsage};
 
 #[derive(Debug, Clone)]
@@ -303,23 +304,12 @@ fn truncate_text_to_bytes(text: &str, maximum_bytes: usize) -> String {
         return String::new();
     }
     if maximum_bytes <= MESSAGE_TRUNCATION_MARKER.len() {
-        return truncate_utf8(text, maximum_bytes).to_string();
+        return truncate_utf8(text, maximum_bytes);
     }
     let prefix_bytes = maximum_bytes.saturating_sub(MESSAGE_TRUNCATION_MARKER.len());
-    let mut output = truncate_utf8(text, prefix_bytes).to_string();
+    let mut output = truncate_utf8(text, prefix_bytes);
     output.push_str(MESSAGE_TRUNCATION_MARKER);
     output
-}
-
-fn truncate_utf8(value: &str, maximum_bytes: usize) -> &str {
-    if value.len() <= maximum_bytes {
-        return value;
-    }
-    let mut end = maximum_bytes;
-    while !value.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    &value[..end]
 }
 
 fn bytes_to_tokens(bytes: u64) -> u64 {
