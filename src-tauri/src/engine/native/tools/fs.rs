@@ -450,11 +450,17 @@ mod tests {
     use std::ffi::OsStr;
     use std::hint::black_box;
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
+    use futures_util::future::join_all;
     use tokio::sync::watch;
 
+    use super::super::ToolRegistry;
+    use super::super::read_cache::{CachedReadOutput, ReadToolCache, ReadToolCacheKey};
     use super::{SearchTextArgs, search_text};
+    use crate::engine::native::output_compaction::TextOutputKind;
     use crate::engine::native::tools::ripgrep::Ripgrep;
     use crate::error::AppError;
 
@@ -644,6 +650,115 @@ mod tests {
         );
     }
 
+    #[ignore = "performance benchmark; run through `pnpm measure:tool-cache`"]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn benchmark_duplicate_search_coalescence() {
+        const DIRECTORY_COUNT: usize = 32;
+        const FILES_PER_DIRECTORY: usize = 40;
+        const FILE_BYTES: usize = 32 * 1_024;
+        const DUPLICATE_CALLS: usize = 8;
+        const SAMPLE_COUNT: usize = 7;
+        const QUERY: &str = "absent-cache-probe-f081a760";
+
+        let workspace = tempfile::tempdir().expect("benchmark workspace should be created");
+        create_search_benchmark_corpus(
+            workspace.path(),
+            DIRECTORY_COUNT,
+            FILES_PER_DIRECTORY,
+            FILE_BYTES,
+        );
+        let workspace_path =
+            std::fs::canonicalize(workspace.path()).expect("workspace should canonicalize");
+        let ripgrep = test_ripgrep();
+        let args = SearchTextArgs {
+            path: ".".into(),
+            query: QUERY.into(),
+            case_sensitive: true,
+        };
+        let prepared = ToolRegistry
+            .prepare(
+                "cache-benchmark".into(),
+                "search_text",
+                &format!(r#"{{"path":".","query":"{QUERY}","case_sensitive":true}}"#),
+            )
+            .expect("benchmark search should prepare");
+        let key = ReadToolCacheKey::from_operation(
+            &workspace_path,
+            "benchmark-thread",
+            &prepared.operation,
+        )
+        .expect("search should be cacheable");
+
+        let mut independent_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut coalesced_samples = Vec::with_capacity(SAMPLE_COUNT);
+        for sample in 0..SAMPLE_COUNT + 2 {
+            let (independent, coalesced) = if sample % 2 == 0 {
+                (
+                    measure_parallel_duplicate_search(
+                        &ripgrep,
+                        &workspace_path,
+                        &args,
+                        DUPLICATE_CALLS,
+                    )
+                    .await,
+                    measure_coalesced_duplicate_search(
+                        &ripgrep,
+                        &workspace_path,
+                        &args,
+                        &key,
+                        DUPLICATE_CALLS,
+                    )
+                    .await,
+                )
+            } else {
+                let coalesced = measure_coalesced_duplicate_search(
+                    &ripgrep,
+                    &workspace_path,
+                    &args,
+                    &key,
+                    DUPLICATE_CALLS,
+                )
+                .await;
+                let independent = measure_parallel_duplicate_search(
+                    &ripgrep,
+                    &workspace_path,
+                    &args,
+                    DUPLICATE_CALLS,
+                )
+                .await;
+                (independent, coalesced)
+            };
+            if sample >= 2 {
+                independent_samples.push(independent);
+                coalesced_samples.push(coalesced);
+            }
+        }
+
+        let independent_median = median(independent_samples);
+        let coalesced_median = median(coalesced_samples);
+        let speedup = independent_median.as_secs_f64() / coalesced_median.as_secs_f64();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "corpusMiB": (DIRECTORY_COUNT * FILES_PER_DIRECTORY * FILE_BYTES) as f64
+                    / (1024.0 * 1024.0),
+                "duplicateCalls": DUPLICATE_CALLS,
+                "independentSearchExecutions": DUPLICATE_CALLS,
+                "coalescedSearchExecutions": 1,
+                "executionReductionPercent": (1.0 - 1.0 / DUPLICATE_CALLS as f64) * 100.0,
+                "samples": SAMPLE_COUNT,
+                "independentMedianMs": independent_median.as_secs_f64() * 1_000.0,
+                "coalescedMedianMs": coalesced_median.as_secs_f64() * 1_000.0,
+                "latencySpeedup": speedup,
+            }))
+            .expect("benchmark result should serialize")
+        );
+        assert!(
+            speedup >= 0.8,
+            "coalescence must not introduce a material latency regression; measured {speedup:.3}x"
+        );
+    }
+
     fn test_ripgrep() -> Ripgrep {
         Ripgrep::for_project_tests()
     }
@@ -683,6 +798,71 @@ mod tests {
         let duration = started_at.elapsed();
         assert_eq!(output, "No matches found.");
         black_box(output);
+        duration
+    }
+
+    async fn measure_parallel_duplicate_search(
+        ripgrep: &Ripgrep,
+        workspace: &Path,
+        args: &SearchTextArgs,
+        duplicate_calls: usize,
+    ) -> Duration {
+        let (_sender, cancellation) = watch::channel(false);
+        let started_at = Instant::now();
+        let outputs = join_all((0..duplicate_calls).map(|_| {
+            let mut cancellation = cancellation.clone();
+            async move { search_text(ripgrep, workspace, args, &mut cancellation).await }
+        }))
+        .await;
+        let duration = started_at.elapsed();
+        for output in outputs {
+            let output = output.expect("independent search should succeed");
+            assert_eq!(output, "No matches found.");
+            black_box(output);
+        }
+        duration
+    }
+
+    async fn measure_coalesced_duplicate_search(
+        ripgrep: &Ripgrep,
+        workspace: &Path,
+        args: &SearchTextArgs,
+        key: &ReadToolCacheKey,
+        duplicate_calls: usize,
+    ) -> Duration {
+        let cache = ReadToolCache::default();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let (_sender, cancellation) = watch::channel(false);
+        let started_at = Instant::now();
+        let outputs = join_all((0..duplicate_calls).map(|_| {
+            let cache = &cache;
+            let key = key.clone();
+            let executions = Arc::clone(&executions);
+            let mut cancellation = cancellation.clone();
+            async move {
+                cache
+                    .get_or_execute(key, || async move {
+                        executions.fetch_add(1, Ordering::Relaxed);
+                        search_text(ripgrep, workspace, args, &mut cancellation)
+                            .await
+                            .map(|output| {
+                                assert_eq!(output, "No matches found.");
+                                CachedReadOutput::text(output, TextOutputKind::SearchText)
+                            })
+                    })
+                    .await
+            }
+        }))
+        .await;
+        let duration = started_at.elapsed();
+        assert_eq!(executions.load(Ordering::Relaxed), 1);
+        for output in outputs {
+            black_box(
+                output
+                    .expect("coalesced search should succeed")
+                    .into_stored_output(),
+            );
+        }
         duration
     }
 

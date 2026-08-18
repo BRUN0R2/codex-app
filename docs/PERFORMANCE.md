@@ -185,6 +185,33 @@ permaneçam presentes. A porcentagem acima mede bytes, não tokens: a economia
 exata de tokens depende do tokenizer e do conteúdo. Também não representa
 latência de rede ou do modelo.
 
+#### Coalescência de leituras — 18 de agosto de 2026
+
+Chamadas idênticas de `read_file`, `list_files`, `search_text` e `read_output`
+no mesmo lote paralelo compartilham uma única operação em voo. A chave inclui
+tipo, workspace canônico, tarefa e todos os argumentos. Cada chamada ainda
+materializa seu próprio item e recurso de saída. O cache termina junto com o
+lote: a rodada seguinte volta a ler a fonte, evitando servir resultados
+obsoletos após edições, comandos ou mudanças externas.
+
+`pnpm measure:tool-cache` compara oito buscas `ripgrep` idênticas e concorrentes
+com uma busca compartilhada em um corpus de 40 MiB. Três execuções, cada uma com
+duas amostras de aquecimento e sete amostras válidas em ordem alternada,
+produziram:
+
+| Dimensão | Oito execuções independentes | Uma execução coalescida |
+| --- | ---: | ---: |
+| processos de busca por lote | 8 | 1 |
+| redução de execuções | — | 87,5% |
+| mediana de parede | 192,310–192,803 ms | 133,106–135,021 ms |
+| aceleração observada | — | 1,428–1,447× |
+
+O teste funcional exige exatamente uma execução para oito chamadas, preserva o
+tipo dos erros compartilhados, diferencia workspace/tarefa/argumentos e prova
+que um novo lote não reutiliza o anterior. A aceleração mede somente chamadas
+duplicadas no mesmo lote; chamadas distintas continuam paralelas e não recebem
+um ganho artificial atribuído ao cache.
+
 #### Benchmark da conversa de referência — 16 de agosto de 2026
 
 `pnpm measure:history` reproduz 741 turnos, 15.529 itens de transcript e 231 MiB

@@ -22,7 +22,8 @@ use super::storage::ProviderHistorySnapshot;
 use super::stream_notifications::StreamNotificationBatcher;
 use super::text::{format_duration, truncate_utf8};
 use super::tools::{
-    MAX_PROVIDER_ITEM_BYTES, PreparedTool, ToolExecutionContext, ToolExecutionResult, ToolRegistry,
+    MAX_PROVIDER_ITEM_BYTES, PreparedTool, ReadToolCache, ToolExecutionContext,
+    ToolExecutionResult, ToolRegistry,
 };
 use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
 use crate::engine::{
@@ -564,6 +565,7 @@ pub(super) async fn run_turn(
                     }
                 }
 
+                let read_cache = ReadToolCache::default();
                 let executions = batch.iter().map(|pending| {
                     let mut cancellation = run.cancellation.clone();
                     let context = ToolExecutionContext {
@@ -575,6 +577,7 @@ pub(super) async fn run_turn(
                         approvals: &inner.approvals,
                         storage: &inner.storage,
                         ripgrep: &inner.ripgrep,
+                        read_cache: &read_cache,
                     };
                     async move { pending.execute(context, &mut cancellation).await }
                 });

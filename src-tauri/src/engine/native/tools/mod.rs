@@ -22,11 +22,14 @@ use crate::error::AppError;
 
 mod exec;
 mod fs;
+mod read_cache;
 mod ripgrep;
 mod workspace;
 
 use self::exec::{CommandOutput, command_timeout, execute_command};
 use self::fs::{edit_file, list_files, read_file, search_text, write_file};
+pub(super) use self::read_cache::ReadToolCache;
+use self::read_cache::{CachedReadOutput, ReadToolCacheKey};
 pub(super) use self::ripgrep::Ripgrep;
 use self::workspace::{canonical_workspace, display_workspace_path, resolve_existing_directory};
 
@@ -96,6 +99,7 @@ pub struct ToolExecutionContext<'a> {
     pub approvals: &'a ApprovalBroker,
     pub storage: &'a NativeStorage,
     pub ripgrep: &'a Ripgrep,
+    pub(super) read_cache: &'a ReadToolCache,
 }
 
 #[derive(Debug, Deserialize)]
@@ -445,6 +449,19 @@ impl PreparedTool {
         )
     }
 
+    fn read_cache_key(
+        &self,
+        workspace: &Path,
+        thread_id: &str,
+    ) -> Result<ReadToolCacheKey, AppError> {
+        ReadToolCacheKey::from_operation(workspace, thread_id, &self.operation).ok_or_else(|| {
+            AppError::State(format!(
+                "non-readable tool `{}` entered the read cache",
+                self.name
+            ))
+        })
+    }
+
     pub fn started_item(&self, workspace: &Path) -> ThreadItem {
         match &self.operation {
             ToolOperation::ApplyPatch(patch) => ThreadItem::FileChange {
@@ -532,44 +549,69 @@ impl PreparedTool {
             )
             .await
             .map(ToolResult::Patch),
-            ToolOperation::ReadFile(args) => read_file(&workspace, args).await.map(|output| {
-                ToolResult::StoredOutput(StoredToolOutput::Text {
-                    output,
-                    kind: TextOutputKind::ReadFile,
-                })
-            }),
-            ToolOperation::ListFiles(args) => list_files(&workspace, args).await.map(|output| {
-                ToolResult::StoredOutput(StoredToolOutput::Text {
-                    output,
-                    kind: TextOutputKind::ListFiles,
-                })
-            }),
-            ToolOperation::SearchText(args) => {
-                search_text(context.ripgrep, &workspace, args, cancellation)
-                    .await
-                    .map(|output| {
-                        ToolResult::StoredOutput(StoredToolOutput::Text {
-                            output,
-                            kind: TextOutputKind::SearchText,
-                        })
-                    })
-            }
-            ToolOperation::ReadOutput(args) => context
-                .storage
-                .read_output_for_thread(
-                    context.thread_id.to_string(),
-                    args.output_id.clone(),
-                    args.cursor.clone(),
+            ToolOperation::ReadFile(args) => context
+                .read_cache
+                .get_or_execute(
+                    self.read_cache_key(&workspace, context.thread_id)?,
+                    || async {
+                        read_file(&workspace, args)
+                            .await
+                            .map(|output| CachedReadOutput::text(output, TextOutputKind::ReadFile))
+                    },
                 )
                 .await
-                .map(|response| {
-                    ToolResult::StoredOutput(StoredToolOutput::OutputPage(format!(
-                        "output_id: {}\nnext_cursor: {}\nchunk:\n{}",
-                        response.output_id,
-                        response.next_cursor.as_deref().unwrap_or("null"),
-                        response.chunk
-                    )))
-                }),
+                .map(|output| ToolResult::StoredOutput(output.into_stored_output())),
+            ToolOperation::ListFiles(args) => context
+                .read_cache
+                .get_or_execute(
+                    self.read_cache_key(&workspace, context.thread_id)?,
+                    || async {
+                        list_files(&workspace, args)
+                            .await
+                            .map(|output| CachedReadOutput::text(output, TextOutputKind::ListFiles))
+                    },
+                )
+                .await
+                .map(|output| ToolResult::StoredOutput(output.into_stored_output())),
+            ToolOperation::SearchText(args) => context
+                .read_cache
+                .get_or_execute(
+                    self.read_cache_key(&workspace, context.thread_id)?,
+                    || async {
+                        search_text(context.ripgrep, &workspace, args, cancellation)
+                            .await
+                            .map(|output| {
+                                CachedReadOutput::text(output, TextOutputKind::SearchText)
+                            })
+                    },
+                )
+                .await
+                .map(|output| ToolResult::StoredOutput(output.into_stored_output())),
+            ToolOperation::ReadOutput(args) => context
+                .read_cache
+                .get_or_execute(
+                    self.read_cache_key(&workspace, context.thread_id)?,
+                    || async {
+                        context
+                            .storage
+                            .read_output_for_thread(
+                                context.thread_id.to_string(),
+                                args.output_id.clone(),
+                                args.cursor.clone(),
+                            )
+                            .await
+                            .map(|response| {
+                                CachedReadOutput::output_page(format!(
+                                    "output_id: {}\nnext_cursor: {}\nchunk:\n{}",
+                                    response.output_id,
+                                    response.next_cursor.as_deref().unwrap_or("null"),
+                                    response.chunk
+                                ))
+                            })
+                    },
+                )
+                .await
+                .map(|output| ToolResult::StoredOutput(output.into_stored_output())),
             ToolOperation::EditFile(args) => {
                 require_workspace_write(context.permissions)?;
                 edit_file(&workspace, args)
