@@ -23,6 +23,7 @@ pub enum EngineCapability {
     ModelStreaming,
     NativeTools,
     ExplicitApprovals,
+    ScheduledAutomations,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +81,12 @@ pub enum EngineNotification {
     ModelVerification(ModelVerificationNotification),
     #[serde(rename = "model.safetyBufferingUpdated")]
     ModelSafetyBufferingUpdated(ModelSafetyBufferingUpdatedNotification),
+    #[serde(rename = "automation.changed")]
+    AutomationChanged(AutomationNotification),
+    #[serde(rename = "automation.deleted")]
+    AutomationDeleted(AutomationDeletedNotification),
+    #[serde(rename = "automation.runUpdated")]
+    AutomationRunUpdated(AutomationRunNotification),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -313,6 +320,80 @@ pub enum DiagnosticStream {
 #[serde(rename_all = "camelCase")]
 pub struct OperationAck {
     pub applied: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AutomationNotification {
+    pub automation: Automation,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationDeletedNotification {
+    pub automation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AutomationRunNotification {
+    pub run: AutomationRun,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationListResponse {
+    pub data: Vec<Automation>,
+    pub runs: Vec<AutomationRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Automation {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    pub project_path: Option<String>,
+    pub enabled: bool,
+    pub interval_minutes: u32,
+    pub timezone: String,
+    pub timezone_offset_min: i32,
+    pub next_run_at: Option<i64>,
+    pub last_run_at: Option<i64>,
+    pub version: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AutomationRunTrigger {
+    Manual,
+    Scheduled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AutomationRunStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationRun {
+    pub id: String,
+    pub automation_id: String,
+    pub trigger: AutomationRunTrigger,
+    pub status: AutomationRunStatus,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub error: Option<String>,
+    pub reviewed: bool,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

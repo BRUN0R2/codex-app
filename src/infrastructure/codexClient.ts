@@ -10,6 +10,9 @@ import {
   decodeAttachment,
   decodeAttachmentImageResponse,
   decodeAttachments,
+  decodeAutomation,
+  decodeAutomationListResponse,
+  decodeAutomationRun,
   decodeCancelLoginResponse,
   decodeChatModelListResponse,
   decodeConfigUpdateResponse,
@@ -40,6 +43,10 @@ import type {
   ApprovalDecision,
   Attachment,
   AttachmentImageResponse,
+  Automation,
+  AutomationInput,
+  AutomationListResponse,
+  AutomationRun,
   CancelLoginResponse,
   ChatModelListResponse,
   ConfigUpdate,
@@ -281,6 +288,56 @@ export function steerTurn(request: SteerTurnRequest): Promise<OperationAck> {
 export function interruptTurn(threadId: string, turnId: string): Promise<OperationAck> {
   return invokeDecoded("engine_turn_interrupt", decodeOperationAck, {
     request: { threadId, turnId },
+  });
+}
+
+function automationPayload(input: AutomationInput) {
+  return {
+    ...input,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    timezoneOffsetMin: new Date().getTimezoneOffset(),
+  };
+}
+
+export function listAutomations(): Promise<AutomationListResponse> {
+  return invokeDecoded("engine_automation_list", decodeAutomationListResponse);
+}
+
+export function createAutomation(input: AutomationInput): Promise<Automation> {
+  return invokeDecoded("engine_automation_create", decodeAutomation, {
+    request: automationPayload(input),
+  });
+}
+
+export function updateAutomation(
+  automationId: string,
+  expectedVersion: number,
+  input: AutomationInput,
+): Promise<Automation> {
+  return invokeDecoded("engine_automation_update", decodeAutomation, {
+    request: {
+      id: automationId,
+      expectedVersion,
+      ...automationPayload(input),
+    },
+  });
+}
+
+export function deleteAutomation(automationId: string): Promise<OperationAck> {
+  return invokeDecoded("engine_automation_delete", decodeOperationAck, {
+    request: { automationId },
+  });
+}
+
+export function runAutomationNow(automationId: string): Promise<AutomationRun> {
+  return invokeDecoded("engine_automation_run_now", decodeAutomationRun, {
+    request: { automationId },
+  });
+}
+
+export function markAutomationRunReviewed(runId: string): Promise<OperationAck> {
+  return invokeDecoded("engine_automation_run_mark_reviewed", decodeOperationAck, {
+    request: { runId },
   });
 }
 

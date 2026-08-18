@@ -5,6 +5,9 @@ import type {
   AccountRateLimitsResponse,
   AccountReadResponse,
   ApplicationPreferences,
+  Automation,
+  AutomationListResponse,
+  AutomationRun,
   ChatModelListResponse,
   CodexModel,
   CodexThread,
@@ -104,9 +107,10 @@ const PREVIEW_ENGINE = {
       "localThreads",
       "modelStreaming",
       "nativeTools",
+      "scheduledAutomations",
     ],
   },
-  schemaVersion: 9,
+  schemaVersion: 10,
   config: PREVIEW_CONFIG,
   diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
   permissionProfiles: [
@@ -538,6 +542,42 @@ const PREVIEW_THREADS = {
   nextCursor: null,
 } as const satisfies ThreadListResponse;
 
+const PREVIEW_AUTOMATION_ID = "preview-automation-review";
+const previewAutomationNow = Math.floor(Date.now() / 1_000);
+let previewAutomations: Automation[] = [
+  {
+    id: PREVIEW_AUTOMATION_ID,
+    name: "Revisar regressões",
+    prompt:
+      "Analise as alterações recentes, execute os testes relevantes e resuma regressões, riscos e próximos passos.",
+    projectPath: PREVIEW_WORKSPACE,
+    enabled: true,
+    intervalMinutes: 60,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    timezoneOffsetMin: new Date().getTimezoneOffset(),
+    nextRunAt: previewAutomationNow + 3_600,
+    lastRunAt: previewAutomationNow - 7_200,
+    version: 1,
+    createdAt: previewAutomationNow - 86_400,
+    updatedAt: previewAutomationNow - 7_200,
+  },
+];
+let previewAutomationRuns: AutomationRun[] = [
+  {
+    id: "preview-automation-run",
+    automationId: PREVIEW_AUTOMATION_ID,
+    trigger: "scheduled",
+    status: "completed",
+    threadId: PREVIEW_CONTEXT_THREAD.id,
+    turnId: PREVIEW_CONTEXT_THREAD.turns.at(-1)?.id ?? null,
+    error: null,
+    reviewed: false,
+    createdAt: previewAutomationNow - 7_260,
+    startedAt: previewAutomationNow - 7_250,
+    completedAt: previewAutomationNow - 7_200,
+  },
+];
+
 function previewThreadSummary(thread: CodexThread): ThreadSummary {
   return {
     id: thread.id,
@@ -601,6 +641,87 @@ export function setupBrowserPreview(): void {
           return PREVIEW_CHAT_MODEL_CATALOG;
         case "engine_thread_list":
           return PREVIEW_THREADS;
+        case "engine_automation_list":
+          return {
+            data: previewAutomations,
+            runs: previewAutomationRuns,
+          } satisfies AutomationListResponse;
+        case "engine_automation_create": {
+          const request = readPreviewAutomationRequest(args);
+          const now = Math.floor(Date.now() / 1_000);
+          const automation: Automation = {
+            id: `preview-automation-${Date.now()}`,
+            ...request,
+            nextRunAt: request.enabled ? now + request.intervalMinutes * 60 : null,
+            lastRunAt: null,
+            version: 1,
+            createdAt: now,
+            updatedAt: now,
+          };
+          previewAutomations = [automation, ...previewAutomations];
+          return automation;
+        }
+        case "engine_automation_update": {
+          const request = readPreviewAutomationRequest(args);
+          const automationId = readPreviewRequestString(args, "id");
+          const expectedVersion = readPreviewRequestNumber(args, "expectedVersion");
+          const current = previewAutomations.find((automation) => automation.id === automationId);
+          if (current === undefined || current.version !== expectedVersion) {
+            throw new Error("A automação de prévia foi alterada por outra operação.");
+          }
+          const now = Math.floor(Date.now() / 1_000);
+          const automation: Automation = {
+            ...current,
+            ...request,
+            nextRunAt: request.enabled ? now + request.intervalMinutes * 60 : null,
+            version: current.version + 1,
+            updatedAt: now,
+          };
+          previewAutomations = previewAutomations.map((entry) =>
+            entry.id === automationId ? automation : entry,
+          );
+          return automation;
+        }
+        case "engine_automation_delete": {
+          const automationId = readPreviewRequestString(args, "automationId");
+          previewAutomations = previewAutomations.filter(
+            (automation) => automation.id !== automationId,
+          );
+          previewAutomationRuns = previewAutomationRuns.filter(
+            (run) => run.automationId !== automationId,
+          );
+          return { applied: true };
+        }
+        case "engine_automation_run_now": {
+          const automationId = readPreviewRequestString(args, "automationId");
+          const automation = previewAutomations.find((entry) => entry.id === automationId);
+          if (automation === undefined) {
+            throw new Error("A automação de prévia não existe.");
+          }
+          const now = Math.floor(Date.now() / 1_000);
+          const run: AutomationRun = {
+            id: `preview-automation-run-${Date.now()}`,
+            automationId,
+            trigger: "manual",
+            status: "completed",
+            threadId: PREVIEW_CONTEXT_THREAD.id,
+            turnId: PREVIEW_CONTEXT_THREAD.turns.at(-1)?.id ?? null,
+            error: null,
+            reviewed: false,
+            createdAt: now,
+            startedAt: now,
+            completedAt: now,
+          };
+          previewAutomationRuns = [run, ...previewAutomationRuns];
+          return run;
+        }
+        case "engine_automation_run_mark_reviewed": {
+          const runId = readPreviewRequestString(args, "runId");
+          previewAutomationRuns = previewAutomationRuns.map((run) =>
+            run.id === runId ? { ...run, reviewed: true } : run,
+          );
+          return { applied: true };
+        }
         case "engine_thread_resume":
           return {
             thread: PREVIEW_CONTEXT_THREAD,
@@ -676,6 +797,58 @@ export function setupBrowserPreview(): void {
 
 function previewSvg(svg: string): string {
   return `data:image/svg+xml,${encodeURIComponent(svg.trim())}`;
+}
+
+function readPreviewAutomationRequest(args: unknown): {
+  readonly enabled: boolean;
+  readonly intervalMinutes: number;
+  readonly name: string;
+  readonly projectPath: string | null;
+  readonly prompt: string;
+  readonly timezone: string;
+  readonly timezoneOffsetMin: number;
+} {
+  const request = (args as { request?: PreviewAutomationRequestRecord }).request;
+  if (request === undefined) {
+    throw new Error("A operação de automação não recebeu um request.");
+  }
+  const projectPath = request.projectPath;
+  if (projectPath !== null && typeof projectPath !== "string") {
+    throw new Error("O projeto da automação de prévia é inválido.");
+  }
+  if (typeof request.enabled !== "boolean") {
+    throw new Error("O estado da automação de prévia é inválido.");
+  }
+  return {
+    enabled: request.enabled,
+    intervalMinutes: readPreviewRequestNumber(args, "intervalMinutes"),
+    name: readPreviewRequestString(args, "name"),
+    projectPath,
+    prompt: readPreviewRequestString(args, "prompt"),
+    timezone: readPreviewRequestString(args, "timezone"),
+    timezoneOffsetMin: readPreviewRequestNumber(args, "timezoneOffsetMin"),
+  };
+}
+
+interface PreviewAutomationRequestRecord extends Record<string, unknown> {
+  readonly enabled?: unknown;
+  readonly projectPath?: unknown;
+}
+
+function readPreviewRequestString(args: unknown, key: string): string {
+  const value = (args as { request?: Record<string, unknown> }).request?.[key];
+  if (typeof value !== "string") {
+    throw new Error(`O campo ${key} do request de prévia é inválido.`);
+  }
+  return value;
+}
+
+function readPreviewRequestNumber(args: unknown, key: string): number {
+  const value = (args as { request?: Record<string, unknown> }).request?.[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`O campo ${key} do request de prévia é inválido.`);
+  }
+  return value;
 }
 
 function createPreviewModel(id: string, displayName: string, isDefault: boolean): CodexModel {

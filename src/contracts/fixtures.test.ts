@@ -18,6 +18,9 @@ const NOTIFICATION_METHODS: readonly string[] = [
   "model.rerouted",
   "model.verification",
   "model.safetyBufferingUpdated",
+  "automation.changed",
+  "automation.deleted",
+  "automation.runUpdated",
 ];
 
 const ITEM_PAYLOAD_TYPES: readonly string[] = [
@@ -36,8 +39,9 @@ describe("golden contract fixtures gerados pelo engine Rust", () => {
   it("decodifica o payload de inicialização do engine", () => {
     const response = decodeEngineStartResponse(engineStartFixture);
 
-    expect(response.schemaVersion).toBe(9);
+    expect(response.schemaVersion).toBe(10);
     expect(response.engine.id).toBe("native-engine");
+    expect(response.engine.capabilities).toContain("scheduledAutomations");
     expect(response.config.config.desktop.uiFontSize).toBe(15);
     expect(response.permissionProfiles).toHaveLength(3);
   });

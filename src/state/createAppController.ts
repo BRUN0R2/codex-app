@@ -8,6 +8,9 @@ import type {
   AppProduct,
   ApprovalDecision,
   Attachment,
+  Automation,
+  AutomationInput,
+  AutomationRun,
   ChatGptMode,
   ChatModelOption,
   CodexModel,
@@ -27,17 +30,21 @@ import {
   archiveThread as archiveThreadCommand,
   cancelLogin as cancelLoginCommand,
   compactThread as compactThreadCommand,
+  createAutomation as createAutomationCommand,
+  deleteAutomation as deleteAutomationCommand,
   deleteThread as deleteThreadCommand,
   describeDiagnosticError,
   describeError,
   forkThread as forkThreadCommand,
   inspectAttachments,
   interruptTurn,
+  listAutomations,
   listChatModels,
   listModels,
   listThreads,
   loginWithChatGpt,
   logout as logoutCommand,
+  markAutomationRunReviewed as markAutomationRunReviewedCommand,
   openExternalUrl,
   readAccount,
   readAccountProfile,
@@ -46,6 +53,7 @@ import {
   reportFrontendDiagnostic,
   respondToServerRequest,
   resumeThread,
+  runAutomationNow as runAutomationNowCommand,
   savePastedImage,
   setThreadName,
   startEngine,
@@ -54,10 +62,20 @@ import {
   steerTurn,
   subscribeToEvents,
   unarchiveThread as unarchiveThreadCommand,
+  updateAutomation as updateAutomationCommand,
   updateConfig,
 } from "../infrastructure/codexClient";
 import { createAccountProfileRefreshCoordinator } from "./accountProfileRefresh";
 import type { AppController, DiagnosticEntry, SendMessageInput } from "./appController";
+import {
+  unreadAutomationRuns as readUnreadAutomationRuns,
+  removeAutomation,
+  removeAutomationRuns,
+  replaceAutomationRuns,
+  replaceAutomations,
+  upsertAutomation,
+  upsertAutomationRun,
+} from "./automations";
 import { readLatestTurnFailure, upsertItem } from "./conversation";
 import {
   type InitializationStage,
@@ -185,6 +203,9 @@ export function createAppController(): AppController {
   const [archivedThreadsNextCursor, setArchivedThreadsNextCursor] = createSignal<string | null>(
     null,
   );
+  const [automations, setAutomations] = createSignal<readonly Automation[]>([]);
+  const [automationRuns, setAutomationRuns] = createSignal<readonly AutomationRun[]>([]);
+  const [automationsLoading, setAutomationsLoading] = createSignal(false);
   const [currentThread, setCurrentThread] = createSignal<CodexThread | null>(null);
   const [historyCursor, setHistoryCursor] = createSignal<string | null>(null);
   const [historyLoading, setHistoryLoading] = createSignal(false);
@@ -378,6 +399,7 @@ export function createAppController(): AppController {
     return threadId === undefined ? [] : readQueuedMessages(messageQueues(), threadId);
   });
   const busy = createMemo(() => turnBusy() || pendingOperations() > 0);
+  const unreadAutomationRuns = createMemo(() => readUnreadAutomationRuns(automationRuns()));
   const projectSectionExpanded = createMemo(() => projectSidebarState().projectsExpanded);
   const currentThreadTitle = createMemo(() => {
     const thread = currentThread();
@@ -618,20 +640,144 @@ export function createAppController(): AppController {
   }
 
   async function loadLocalAuthenticatedState(expectedSessionKey: string): Promise<boolean> {
-    const threadPage = await listThreads(null);
-    if (disposed || accountSessionKey(account()) !== expectedSessionKey) {
+    setAutomationsLoading(true);
+    try {
+      const [threadPage, automationSnapshot] = await Promise.all([
+        listThreads(null),
+        listAutomations(),
+      ]);
+      if (disposed || accountSessionKey(account()) !== expectedSessionKey) {
+        return false;
+      }
+      batch(() => {
+        setThreads(threadPage.data);
+        setThreadsNextCursor(threadPage.nextCursor);
+        setAutomations(replaceAutomations(automationSnapshot.data));
+        setAutomationRuns(replaceAutomationRuns(automationSnapshot.runs));
+      });
+      await restoreActiveDestination(productFlow());
+      const loaded = !disposed && accountSessionKey(account()) === expectedSessionKey;
+      if (loaded) {
+        resumePersistedMessageQueues(threadPage.data);
+      }
+      return loaded;
+    } finally {
+      if (!disposed) {
+        setAutomationsLoading(false);
+      }
+    }
+  }
+
+  async function refreshAutomations(): Promise<boolean> {
+    if (!signedIn() || automationsLoading()) {
       return false;
     }
-    batch(() => {
-      setThreads(threadPage.data);
-      setThreadsNextCursor(threadPage.nextCursor);
-    });
-    await restoreActiveDestination(productFlow());
-    const loaded = !disposed && accountSessionKey(account()) === expectedSessionKey;
-    if (loaded) {
-      resumePersistedMessageQueues(threadPage.data);
+    setAutomationsLoading(true);
+    try {
+      const snapshot = await withPending(() => listAutomations());
+      batch(() => {
+        setAutomations(replaceAutomations(snapshot.data));
+        setAutomationRuns((current) => replaceAutomationRuns([...snapshot.runs, ...current]));
+      });
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    } finally {
+      setAutomationsLoading(false);
     }
-    return loaded;
+  }
+
+  async function createAutomation(input: AutomationInput): Promise<boolean> {
+    try {
+      const created = await withPending(() => createAutomationCommand(input));
+      setAutomations((current) => upsertAutomation(current, created));
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  async function updateAutomation(
+    automationId: string,
+    expectedVersion: number,
+    input: AutomationInput,
+  ): Promise<boolean> {
+    try {
+      const updated = await withPending(() =>
+        updateAutomationCommand(automationId, expectedVersion, input),
+      );
+      setAutomations((current) => upsertAutomation(current, updated));
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  async function deleteAutomation(automationId: string): Promise<boolean> {
+    const automation = automations().find((entry) => entry.id === automationId);
+    if (automation === undefined) {
+      setError("A automação que seria excluída não está mais disponível.");
+      return false;
+    }
+    const hasActiveRun = automationRuns().some(
+      (run) =>
+        run.automationId === automationId && (run.status === "queued" || run.status === "running"),
+    );
+    if (hasActiveRun) {
+      setError("Aguarde a execução ativa terminar antes de excluir esta automação.");
+      return false;
+    }
+    try {
+      const confirmed = await confirm(
+        `A automação “${automation.name}” e seu histórico de execuções serão excluídos permanentemente. As conversas já criadas serão preservadas.`,
+        {
+          cancelLabel: "Cancelar",
+          kind: "warning",
+          okLabel: "Excluir",
+          title: "Excluir automação?",
+        },
+      );
+      if (!confirmed) {
+        return false;
+      }
+      await withPending(() => deleteAutomationCommand(automationId));
+      batch(() => {
+        setAutomations((current) => removeAutomation(current, automationId));
+        setAutomationRuns((current) => removeAutomationRuns(current, automationId));
+      });
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  async function runAutomationNow(automationId: string): Promise<boolean> {
+    try {
+      const run = await withPending(() => runAutomationNowCommand(automationId));
+      setAutomationRuns((current) => upsertAutomationRun(current, run));
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  async function markAutomationRunReviewed(runId: string): Promise<boolean> {
+    try {
+      await withPending(() => markAutomationRunReviewedCommand(runId));
+      const run = automationRuns().find((entry) => entry.id === runId);
+      if (run !== undefined) {
+        setAutomationRuns((current) => upsertAutomationRun(current, { ...run, reviewed: true }));
+      }
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
   }
 
   function ensureModelsForMode(mode: ConversationMode): Promise<boolean> {
@@ -718,6 +864,11 @@ export function createAppController(): AppController {
     authenticatedStateLoaded = false;
     authenticatedStateRequest = null;
     persistedQueuesResumed = false;
+    batch(() => {
+      setAutomations([]);
+      setAutomationRuns([]);
+      setAutomationsLoading(false);
+    });
   }
 
   function handleNotification(notification: EngineNotification): void {
@@ -751,6 +902,28 @@ export function createAppController(): AppController {
         return;
       case "auth.sessionChanged":
         void synchronizeAuthentication(notification.params.signedIn);
+        return;
+      case "automation.changed":
+        if (signedIn()) {
+          setAutomations((current) => upsertAutomation(current, notification.params.automation));
+        }
+        return;
+      case "automation.deleted":
+        if (signedIn()) {
+          batch(() => {
+            setAutomations((current) =>
+              removeAutomation(current, notification.params.automationId),
+            );
+            setAutomationRuns((current) =>
+              removeAutomationRuns(current, notification.params.automationId),
+            );
+          });
+        }
+        return;
+      case "automation.runUpdated":
+        if (signedIn()) {
+          setAutomationRuns((current) => upsertAutomationRun(current, notification.params.run));
+        }
         return;
       case "thread.created":
       case "thread.updated":
@@ -2142,6 +2315,9 @@ export function createAppController(): AppController {
     archivedThreadsLoaded,
     archivedThreadsLoading,
     archivedThreadsNextCursor,
+    automations,
+    automationRuns,
+    automationsLoading,
     busy,
     config,
     contextUsage,
@@ -2178,12 +2354,15 @@ export function createAppController(): AppController {
     threadsNextCursor,
     turnBusy,
     turns,
+    unreadAutomationRuns,
     workspace,
     archiveThread,
     cancelLogin,
     chooseWorkspace,
     clearError: () => setError(null),
     compactThread,
+    createAutomation,
+    deleteAutomation,
     deleteThread,
     deleteQueuedMessage,
     ensureModelsForMode,
@@ -2199,8 +2378,10 @@ export function createAppController(): AppController {
     loadOlderHistory,
     login,
     logout,
+    markAutomationRunReviewed,
     newThread,
     openThread,
+    refreshAutomations,
     refreshAccountProfile: accountProfileRefresh.refreshIfStale,
     refreshRateLimits,
     refreshRateLimitsIfStale: rateLimitRefresh.refreshIfStale,
@@ -2209,6 +2390,7 @@ export function createAppController(): AppController {
     renameThread,
     retryInitialization,
     respondToApproval,
+    runAutomationNow,
     saveClipboardImage: saveClipboard,
     selectProject,
     selectProduct,
@@ -2221,6 +2403,7 @@ export function createAppController(): AppController {
     toggleProjectExpanded,
     toggleProjectSection,
     toggleProjectThreadListExpanded,
+    updateAutomation,
     updateProject,
     updateSetting,
     unarchiveThread,

@@ -2,6 +2,7 @@ mod agent;
 mod apply_patch;
 mod approval;
 pub(crate) mod auth;
+mod automation;
 mod chat;
 mod compaction;
 mod content_references;
@@ -21,38 +22,45 @@ use std::collections::hash_map::Entry;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter as _, Manager as _};
-use tokio::sync::{Mutex, oneshot, watch};
-use tokio::task::JoinSet;
+use tokio::sync::{Mutex, Notify, oneshot, watch};
+use tokio::task::{JoinHandle, JoinSet};
+use uuid::Uuid;
 
 use self::agent::{RunCompletion, TurnRun};
 use self::approval::ApprovalBroker;
 use self::auth::ChatGptAuth;
+use self::automation::{
+    AutomationDraft, AutomationUpdate, ClaimedAutomationRun, MAX_CONCURRENT_AUTOMATION_RUNS,
+};
 use self::chat::ChatGptConsumerProvider;
 use self::diagnostics::RuntimeDiagnostics;
 use self::provider::ChatGptCodexProvider;
 use self::storage::NativeStorage;
 use self::tools::{Ripgrep, ToolRegistry};
 use crate::engine::{
-    AccountRateLimitsResponse, ChatModelListResponse, ConfigUpdate, ConfigUpdateResponse,
-    ConversationMode, DiagnosticStream, EngineCapability, EngineDescriptor, EngineNotification,
-    EngineStartResponse, EngineStorage, EngineTransport, ItemNotification, ModelListResponse,
-    NOTIFICATION_EVENT, OperationAck, OperationFailure, OutputReadResponse, PermissionProfile,
-    RUNTIME_STATUS_EVENT, ReasoningEffort, RuntimeDiagnosticSubsystem, RuntimeState, RuntimeStatus,
-    ServerResponse, ThreadArchivedNotification, ThreadCompactStartResponse,
-    ThreadDeletedNotification, ThreadForkResponse, ThreadItem, ThreadListResponse,
-    ThreadNotification, ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse,
-    ThreadSummary, ThreadUnarchiveResponse, ThreadUnarchivedNotification,
-    TurnCompletedNotification, TurnInput, TurnNotification, TurnStartResponse, TurnStatus,
-    TurnSummary,
+    AccountRateLimitsResponse, Automation, AutomationDeletedNotification, AutomationListResponse,
+    AutomationNotification, AutomationRun, AutomationRunNotification, ChatModelListResponse,
+    ConfigUpdate, ConfigUpdateResponse, ConversationMode, DiagnosticStream, EngineCapability,
+    EngineDescriptor, EngineNotification, EngineStartResponse, EngineStorage, EngineTransport,
+    ItemNotification, ModelListResponse, NOTIFICATION_EVENT, OperationAck, OperationFailure,
+    OutputReadResponse, PermissionProfile, RUNTIME_STATUS_EVENT, ReasoningEffort,
+    RuntimeDiagnosticSubsystem, RuntimeState, RuntimeStatus, ServerResponse,
+    ThreadArchivedNotification, ThreadCompactStartResponse, ThreadDeletedNotification,
+    ThreadForkResponse, ThreadItem, ThreadListResponse, ThreadNotification, ThreadReadResponse,
+    ThreadResumeResponse, ThreadStartResponse, ThreadSummary, ThreadUnarchiveResponse,
+    ThreadUnarchivedNotification, TurnCompletedNotification, TurnInput, TurnNotification,
+    TurnStartResponse, TurnStatus, TurnSummary,
 };
 use crate::error::AppError;
 
-pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 9;
+pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 10;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTOMATION_SCHEDULER_MAX_SLEEP: Duration = Duration::from_secs(15 * 60);
+const AUTOMATION_SCHEDULER_RETRY_DELAY: Duration = Duration::from_secs(15);
 
 pub struct StartTurn {
     pub thread_id: String,
@@ -72,6 +80,28 @@ pub struct SteerTurn {
     pub input: Vec<TurnInput>,
 }
 
+pub struct CreateAutomation {
+    pub name: String,
+    pub prompt: String,
+    pub project_path: Option<String>,
+    pub enabled: bool,
+    pub interval_minutes: u32,
+    pub timezone: String,
+    pub timezone_offset_min: i32,
+}
+
+pub struct UpdateAutomation {
+    pub id: String,
+    pub expected_version: u64,
+    pub name: String,
+    pub prompt: String,
+    pub project_path: Option<String>,
+    pub enabled: bool,
+    pub interval_minutes: u32,
+    pub timezone: String,
+    pub timezone_offset_min: i32,
+}
+
 struct ActiveTurn {
     turn_id: String,
     cancellation: watch::Sender<bool>,
@@ -79,6 +109,11 @@ struct ActiveTurn {
     steer_pending: bool,
     pending_deletion: Option<oneshot::Sender<Result<OperationAck, AppError>>>,
     deletion_in_progress: bool,
+}
+
+struct AutomationSchedulerTask {
+    shutdown: watch::Sender<bool>,
+    handle: JoinHandle<()>,
 }
 
 impl ActiveTurn {
@@ -136,10 +171,13 @@ pub(super) struct NativeEngineInner {
     active_turns: Mutex<HashMap<String, ActiveTurn>>,
     thread_lifecycle_gate: Mutex<()>,
     tasks: Mutex<JoinSet<()>>,
+    automation_scheduler: Mutex<Option<AutomationSchedulerTask>>,
+    automation_wake: Notify,
     start_gate: Mutex<()>,
     started: AtomicBool,
 }
 
+#[derive(Clone)]
 pub struct NativeEngine {
     inner: Arc<NativeEngineInner>,
 }
@@ -165,6 +203,8 @@ impl NativeEngine {
                 active_turns: Mutex::new(HashMap::new()),
                 thread_lifecycle_gate: Mutex::new(()),
                 tasks: Mutex::new(JoinSet::new()),
+                automation_scheduler: Mutex::new(None),
+                automation_wake: Notify::new(),
                 start_gate: Mutex::new(()),
                 started: AtomicBool::new(false),
             }),
@@ -192,6 +232,223 @@ impl NativeEngine {
                 .finalize_turn(&app_handle, result, &background_turn_id)
                 .await;
         });
+    }
+
+    async fn ensure_automation_scheduler(&self, app: &AppHandle) {
+        let mut scheduler = self.inner.automation_scheduler.lock().await;
+        if scheduler.is_some() {
+            return;
+        }
+        let (shutdown, receiver) = watch::channel(false);
+        let engine = self.clone();
+        let app_handle = app.clone();
+        let handle = tokio::spawn(async move {
+            engine.run_automation_scheduler(app_handle, receiver).await;
+        });
+        *scheduler = Some(AutomationSchedulerTask { shutdown, handle });
+    }
+
+    async fn stop_automation_scheduler(&self, app: &AppHandle) {
+        let task = self.inner.automation_scheduler.lock().await.take();
+        let Some(task) = task else {
+            return;
+        };
+        task.shutdown.send_replace(true);
+        self.inner.automation_wake.notify_waiters();
+        let mut handle = task.handle;
+        if tokio::time::timeout(Duration::from_secs(2), &mut handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+            if let Err(error) = handle.await
+                && !error.is_cancelled()
+            {
+                self.inner.emit_diagnostic(
+                    app,
+                    DiagnosticStream::Runtime,
+                    format!("automation scheduler failed during shutdown: {error}"),
+                );
+            }
+        }
+    }
+
+    async fn run_automation_scheduler(&self, app: AppHandle, mut shutdown: watch::Receiver<bool>) {
+        loop {
+            if *shutdown.borrow() {
+                return;
+            }
+            self.run_due_automations(&app).await;
+            let delay = self.automation_scheduler_delay(&app).await;
+            tokio::select! {
+                result = shutdown.changed() => {
+                    if result.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                }
+                () = self.inner.automation_wake.notified() => {}
+                () = tokio::time::sleep(delay) => {}
+            }
+        }
+    }
+
+    async fn automation_scheduler_delay(&self, app: &AppHandle) -> Duration {
+        match self.inner.storage.next_automation_run_at().await {
+            Ok(None) => AUTOMATION_SCHEDULER_MAX_SLEEP,
+            Ok(Some(next_run_at)) => {
+                let now = current_unix_timestamp().unwrap_or(next_run_at);
+                if next_run_at <= now {
+                    AUTOMATION_SCHEDULER_RETRY_DELAY
+                } else {
+                    Duration::from_secs(
+                        u64::try_from(next_run_at - now)
+                            .unwrap_or(AUTOMATION_SCHEDULER_MAX_SLEEP.as_secs())
+                            .min(AUTOMATION_SCHEDULER_MAX_SLEEP.as_secs()),
+                    )
+                }
+            }
+            Err(error) => {
+                self.inner.emit_diagnostic(
+                    app,
+                    DiagnosticStream::Runtime,
+                    format!("could not read the next automation schedule: {error}"),
+                );
+                AUTOMATION_SCHEDULER_RETRY_DELAY
+            }
+        }
+    }
+
+    async fn run_due_automations(&self, app: &AppHandle) {
+        for _ in 0..MAX_CONCURRENT_AUTOMATION_RUNS {
+            let claim = match self.inner.storage.claim_due_automation().await {
+                Ok(Some(claim)) => claim,
+                Ok(None) => return,
+                Err(error) => {
+                    self.inner.emit_diagnostic(
+                        app,
+                        DiagnosticStream::Runtime,
+                        format!("could not claim a due automation: {error}"),
+                    );
+                    return;
+                }
+            };
+            self.emit_automation_claim(app, &claim);
+            if let Err(error) = self.launch_automation_claim(app, claim).await {
+                self.inner.emit_diagnostic(
+                    app,
+                    DiagnosticStream::Runtime,
+                    format!("could not launch a claimed automation: {error}"),
+                );
+            }
+        }
+    }
+
+    fn emit_automation_claim(&self, app: &AppHandle, claim: &ClaimedAutomationRun) {
+        for notification in [
+            EngineNotification::AutomationChanged(AutomationNotification {
+                automation: claim.automation.clone(),
+            }),
+            EngineNotification::AutomationRunUpdated(AutomationRunNotification {
+                run: claim.run.clone(),
+            }),
+        ] {
+            if let Err(error) = self.inner.emit_notification(app, notification) {
+                self.inner
+                    .emit_diagnostic(app, DiagnosticStream::Runtime, error.to_string());
+            }
+        }
+    }
+
+    async fn launch_automation_claim(
+        &self,
+        app: &AppHandle,
+        claim: ClaimedAutomationRun,
+    ) -> Result<AutomationRun, AppError> {
+        let run_id = claim.run.id.clone();
+        let launch = async {
+            if let Some(project_path) = claim.automation.project_path.as_deref() {
+                let metadata = tokio::fs::metadata(project_path)
+                    .await
+                    .map_err(|error| AppError::FileSystem(error.to_string()))?;
+                if !metadata.is_dir() {
+                    return Err(AppError::FileSystem(
+                        "automation project path is no longer a directory".into(),
+                    ));
+                }
+            }
+            let thread = self
+                .thread_start(
+                    app,
+                    claim.automation.project_path.clone(),
+                    ConversationMode::Codex,
+                )
+                .await?;
+            let attached = self
+                .inner
+                .storage
+                .attach_automation_run_thread(run_id.clone(), thread.thread.id.clone())
+                .await?;
+            self.inner.emit_notification(
+                app,
+                EngineNotification::AutomationRunUpdated(AutomationRunNotification {
+                    run: attached,
+                }),
+            )?;
+            let (_, run) = self
+                .turn_start_bound(
+                    app,
+                    StartTurn {
+                        thread_id: thread.thread.id.clone(),
+                        client_user_message_id: Uuid::now_v7().to_string(),
+                        input: vec![TurnInput::Text(claim.automation.prompt.clone())],
+                        model: None,
+                        effort: None,
+                        service_tier: None,
+                        timezone: claim.automation.timezone.clone(),
+                        timezone_offset_min: claim.automation.timezone_offset_min,
+                    },
+                    Some(run_id.clone()),
+                )
+                .await?;
+            run.ok_or_else(|| {
+                AppError::State("automation turn started without a linked run".into())
+            })
+        }
+        .await;
+
+        match launch {
+            Ok(run) => Ok(run),
+            Err(error) => {
+                let message = error.to_string();
+                self.inner.emit_diagnostic(
+                    app,
+                    DiagnosticStream::Runtime,
+                    format!("automation run `{run_id}` failed to start: {message}"),
+                );
+                if let Some(run) = self
+                    .inner
+                    .storage
+                    .fail_automation_run(run_id.clone(), message)
+                    .await?
+                {
+                    if let Err(notification_error) = self.inner.emit_notification(
+                        app,
+                        EngineNotification::AutomationRunUpdated(AutomationRunNotification {
+                            run: run.clone(),
+                        }),
+                    ) {
+                        self.inner.emit_diagnostic(
+                            app,
+                            DiagnosticStream::Runtime,
+                            notification_error.to_string(),
+                        );
+                    }
+                    self.inner.automation_wake.notify_one();
+                    return Ok(run);
+                }
+                self.inner.storage.read_automation_run(run_id).await
+            }
+        }
     }
 
     pub async fn start(&self, app: &AppHandle) -> Result<EngineStartResponse, AppError> {
@@ -231,6 +488,7 @@ impl NativeEngine {
             }
             self.inner.started.store(true, Ordering::Release);
         }
+        self.ensure_automation_scheduler(app).await;
         let config = self.inner.storage.read_config().await?;
         self.inner.emit_status(app, RuntimeState::Ready, None)?;
         Ok(EngineStartResponse {
@@ -588,6 +846,17 @@ impl NativeEngine {
         app: &AppHandle,
         request: StartTurn,
     ) -> Result<TurnStartResponse, AppError> {
+        self.turn_start_bound(app, request, None)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    async fn turn_start_bound(
+        &self,
+        app: &AppHandle,
+        request: StartTurn,
+        automation_run_id: Option<String>,
+    ) -> Result<(TurnStartResponse, Option<AutomationRun>), AppError> {
         self.ensure_started()?;
         self.reap_finished_tasks(app).await;
         let thread = self
@@ -596,7 +865,15 @@ impl NativeEngine {
             .read_thread_summary(request.thread_id.clone())
             .await?;
         if thread.mode == ConversationMode::Chat {
-            return self.start_chat_turn(app, request, thread).await;
+            if automation_run_id.is_some() {
+                return Err(AppError::State(
+                    "automation runs cannot target ChatGPT consumer threads".into(),
+                ));
+            }
+            return self
+                .start_chat_turn(app, request, thread)
+                .await
+                .map(|response| (response, None));
         }
         let config = self.inner.storage.read_config().await?.config;
         let requested_model = request.model.as_deref().or(config.model.as_deref());
@@ -641,6 +918,39 @@ impl NativeEngine {
             .await?;
         drop(lifecycle_guard);
 
+        let automation_run = if let Some(run_id) = automation_run_id {
+            match self
+                .inner
+                .storage
+                .start_automation_run(run_id, request.thread_id.clone(), turn.id.clone())
+                .await
+            {
+                Ok(run) => {
+                    if let Err(error) = self.inner.emit_notification(
+                        app,
+                        EngineNotification::AutomationRunUpdated(AutomationRunNotification {
+                            run: run.clone(),
+                        }),
+                    ) {
+                        self.inner.emit_diagnostic(
+                            app,
+                            DiagnosticStream::Runtime,
+                            error.to_string(),
+                        );
+                    }
+                    Some(run)
+                }
+                Err(error) => {
+                    return Err(self
+                        .inner
+                        .rollback_unspawned_turn(app, &request.thread_id, &turn.id, error)
+                        .await);
+                }
+            }
+        } else {
+            None
+        };
+
         self.inner
             .announce_turn_start(app, &request.thread_id, &turn, Some(user_item))
             .await?;
@@ -663,7 +973,7 @@ impl NativeEngine {
         })
         .await;
 
-        Ok(TurnStartResponse { turn })
+        Ok((TurnStartResponse { turn }, automation_run))
     }
 
     async fn start_chat_turn(
@@ -837,6 +1147,124 @@ impl NativeEngine {
         Ok(OperationAck { applied: true })
     }
 
+    pub async fn automation_list(&self) -> Result<AutomationListResponse, AppError> {
+        self.ensure_started()?;
+        self.inner.storage.list_automations().await
+    }
+
+    pub async fn automation_create(
+        &self,
+        app: &AppHandle,
+        request: CreateAutomation,
+    ) -> Result<Automation, AppError> {
+        self.ensure_started()?;
+        let automation = self
+            .inner
+            .storage
+            .create_automation(AutomationDraft {
+                name: request.name,
+                prompt: request.prompt,
+                project_path: request.project_path,
+                enabled: request.enabled,
+                interval_minutes: request.interval_minutes,
+                timezone: request.timezone,
+                timezone_offset_min: request.timezone_offset_min,
+            })
+            .await?;
+        self.inner.emit_notification(
+            app,
+            EngineNotification::AutomationChanged(AutomationNotification {
+                automation: automation.clone(),
+            }),
+        )?;
+        self.inner.automation_wake.notify_one();
+        Ok(automation)
+    }
+
+    pub async fn automation_update(
+        &self,
+        app: &AppHandle,
+        request: UpdateAutomation,
+    ) -> Result<Automation, AppError> {
+        self.ensure_started()?;
+        let automation = self
+            .inner
+            .storage
+            .update_automation(AutomationUpdate {
+                id: request.id,
+                expected_version: request.expected_version,
+                name: request.name,
+                prompt: request.prompt,
+                project_path: request.project_path,
+                enabled: request.enabled,
+                interval_minutes: request.interval_minutes,
+                timezone: request.timezone,
+                timezone_offset_min: request.timezone_offset_min,
+            })
+            .await?;
+        self.inner.emit_notification(
+            app,
+            EngineNotification::AutomationChanged(AutomationNotification {
+                automation: automation.clone(),
+            }),
+        )?;
+        self.inner.automation_wake.notify_one();
+        Ok(automation)
+    }
+
+    pub async fn automation_delete(
+        &self,
+        app: &AppHandle,
+        automation_id: String,
+    ) -> Result<OperationAck, AppError> {
+        self.ensure_started()?;
+        let response = self
+            .inner
+            .storage
+            .delete_automation(automation_id.clone())
+            .await?;
+        self.inner.emit_notification(
+            app,
+            EngineNotification::AutomationDeleted(AutomationDeletedNotification { automation_id }),
+        )?;
+        self.inner.automation_wake.notify_one();
+        Ok(response)
+    }
+
+    pub async fn automation_run_now(
+        &self,
+        app: &AppHandle,
+        automation_id: String,
+    ) -> Result<AutomationRun, AppError> {
+        self.ensure_started()?;
+        let claim = self
+            .inner
+            .storage
+            .claim_automation_now(automation_id)
+            .await?;
+        self.emit_automation_claim(app, &claim);
+        self.launch_automation_claim(app, claim).await
+    }
+
+    pub async fn automation_run_mark_reviewed(
+        &self,
+        app: &AppHandle,
+        run_id: String,
+    ) -> Result<OperationAck, AppError> {
+        self.ensure_started()?;
+        let response = self
+            .inner
+            .storage
+            .mark_automation_run_reviewed(run_id.clone())
+            .await?;
+        let run = self.inner.storage.read_automation_run(run_id).await?;
+        self.inner.emit_notification(
+            app,
+            EngineNotification::AutomationRunUpdated(AutomationRunNotification { run }),
+        )?;
+        Ok(response)
+    }
+
     pub async fn config_update(
         &self,
         expected_version: u64,
@@ -893,6 +1321,7 @@ impl NativeEngine {
         if !self.inner.started.swap(false, Ordering::AcqRel) {
             return;
         }
+        self.stop_automation_scheduler(app).await;
         let cancellations = self
             .inner
             .active_turns
@@ -1068,7 +1497,7 @@ impl NativeEngineInner {
         let lifecycle_guard = self.thread_lifecycle_gate.lock().await;
         let completion = self
             .storage
-            .complete_turn(
+            .complete_turn_settlement(
                 thread_id.clone(),
                 turn_id.into(),
                 status,
@@ -1104,6 +1533,19 @@ impl NativeEngineInner {
             drop(lifecycle_guard);
             match deletion {
                 Ok(response) => {
+                    if let Ok(settlement) = &completion
+                        && let Some(run) = settlement.automation_run.clone()
+                    {
+                        if let Err(error) = self.emit_notification(
+                            app,
+                            EngineNotification::AutomationRunUpdated(AutomationRunNotification {
+                                run,
+                            }),
+                        ) {
+                            self.emit_diagnostic(app, DiagnosticStream::Runtime, error.to_string());
+                        }
+                        self.automation_wake.notify_one();
+                    }
                     let result = self
                         .emit_notification(
                             app,
@@ -1126,7 +1568,17 @@ impl NativeEngineInner {
             drop(lifecycle_guard);
         }
 
-        let turn = completion?;
+        let settlement = completion?;
+        if let Some(run) = settlement.automation_run {
+            if let Err(error) = self.emit_notification(
+                app,
+                EngineNotification::AutomationRunUpdated(AutomationRunNotification { run }),
+            ) {
+                self.emit_diagnostic(app, DiagnosticStream::Runtime, error.to_string());
+            }
+            self.automation_wake.notify_one();
+        }
+        let turn = settlement.turn;
         if let Err(error) = self.emit_notification(
             app,
             EngineNotification::TurnCompleted(TurnCompletedNotification {
@@ -1287,6 +1739,14 @@ impl NativeEngineInner {
     }
 }
 
+fn current_unix_timestamp() -> Result<i64, AppError> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| AppError::State(error.to_string()))?
+        .as_secs();
+    i64::try_from(seconds).map_err(|error| AppError::State(error.to_string()))
+}
+
 fn descriptor() -> EngineDescriptor {
     EngineDescriptor {
         id: "native-engine",
@@ -1301,6 +1761,7 @@ fn descriptor() -> EngineDescriptor {
             EngineCapability::ModelStreaming,
             EngineCapability::NativeTools,
             EngineCapability::ExplicitApprovals,
+            EngineCapability::ScheduledAutomations,
         ],
     }
 }

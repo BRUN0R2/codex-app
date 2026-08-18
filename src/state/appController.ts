@@ -6,6 +6,9 @@ import type {
   AppProduct,
   ApprovalDecision,
   Attachment,
+  Automation,
+  AutomationInput,
+  AutomationRun,
   ChatGptMode,
   ChatModelOption,
   CodexModel,
@@ -51,6 +54,9 @@ export interface AppController {
   readonly archivedThreadsLoaded: Accessor<boolean>;
   readonly archivedThreadsLoading: Accessor<boolean>;
   readonly archivedThreadsNextCursor: Accessor<string | null>;
+  readonly automations: Accessor<readonly Automation[]>;
+  readonly automationRuns: Accessor<readonly AutomationRun[]>;
+  readonly automationsLoading: Accessor<boolean>;
   readonly busy: Accessor<boolean>;
   readonly config: Accessor<ConfigReadResponse | null>;
   readonly contextUsage: Accessor<ContextUsageItem | null>;
@@ -87,12 +93,15 @@ export interface AppController {
   readonly threadsNextCursor: Accessor<string | null>;
   readonly turnBusy: Accessor<boolean>;
   readonly turns: Accessor<VisibleTurnSequence>;
+  readonly unreadAutomationRuns: Accessor<readonly AutomationRun[]>;
   readonly workspace: Accessor<string | null>;
   readonly archiveThread: (threadId: string) => Promise<boolean>;
   readonly cancelLogin: () => Promise<void>;
   readonly chooseWorkspace: () => Promise<string | null>;
   readonly clearError: () => void;
   readonly compactThread: (threadId: string) => Promise<boolean>;
+  readonly createAutomation: (input: AutomationInput) => Promise<boolean>;
+  readonly deleteAutomation: (automationId: string) => Promise<boolean>;
   readonly deleteThread: (threadId: string) => Promise<boolean>;
   readonly deleteQueuedMessage: (messageId: string) => boolean;
   readonly ensureModelsForMode: (mode: ConversationMode) => Promise<boolean>;
@@ -108,8 +117,10 @@ export interface AppController {
   readonly loadOlderHistory: () => Promise<boolean>;
   readonly login: () => Promise<boolean>;
   readonly logout: () => Promise<boolean>;
+  readonly markAutomationRunReviewed: (runId: string) => Promise<boolean>;
   readonly newThread: (workspace?: string) => boolean;
   readonly openThread: (threadId: string) => Promise<boolean>;
+  readonly refreshAutomations: () => Promise<boolean>;
   readonly refreshAccountProfile: () => Promise<boolean>;
   readonly refreshRateLimits: () => Promise<boolean>;
   readonly refreshRateLimitsIfStale: () => Promise<boolean>;
@@ -118,6 +129,7 @@ export interface AppController {
   readonly renameThread: (threadId: string, name: string) => Promise<boolean>;
   readonly retryInitialization: () => void;
   readonly respondToApproval: (requestId: string, decision: ApprovalDecision) => Promise<boolean>;
+  readonly runAutomationNow: (automationId: string) => Promise<boolean>;
   readonly saveClipboardImage: (dataBase64: string) => Promise<Attachment | null>;
   readonly selectProject: (path: string) => boolean;
   readonly selectProduct: (product: AppProduct) => Promise<boolean>;
@@ -134,6 +146,11 @@ export interface AppController {
     path: string,
     updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
   ) => void;
+  readonly updateAutomation: (
+    automationId: string,
+    expectedVersion: number,
+    input: AutomationInput,
+  ) => Promise<boolean>;
   readonly updateSetting: (update: ConfigUpdate) => Promise<boolean>;
   readonly unarchiveThread: (threadId: string) => Promise<boolean>;
 }

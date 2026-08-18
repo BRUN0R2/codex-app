@@ -195,6 +195,50 @@ impl EngineManager {
         self.engine.turn_interrupt(thread_id, turn_id).await
     }
 
+    pub async fn automation_list(&self) -> Result<AutomationListResponse, AppError> {
+        self.engine.automation_list().await
+    }
+
+    pub async fn automation_create(
+        &self,
+        app: &AppHandle,
+        request: native::CreateAutomation,
+    ) -> Result<Automation, AppError> {
+        self.engine.automation_create(app, request).await
+    }
+
+    pub async fn automation_update(
+        &self,
+        app: &AppHandle,
+        request: native::UpdateAutomation,
+    ) -> Result<Automation, AppError> {
+        self.engine.automation_update(app, request).await
+    }
+
+    pub async fn automation_delete(
+        &self,
+        app: &AppHandle,
+        automation_id: String,
+    ) -> Result<OperationAck, AppError> {
+        self.engine.automation_delete(app, automation_id).await
+    }
+
+    pub async fn automation_run_now(
+        &self,
+        app: &AppHandle,
+        automation_id: String,
+    ) -> Result<AutomationRun, AppError> {
+        self.engine.automation_run_now(app, automation_id).await
+    }
+
+    pub async fn automation_run_mark_reviewed(
+        &self,
+        app: &AppHandle,
+        run_id: String,
+    ) -> Result<OperationAck, AppError> {
+        self.engine.automation_run_mark_reviewed(app, run_id).await
+    }
+
     pub async fn config_update(
         &self,
         expected_version: u64,
@@ -246,4 +290,4 @@ impl EngineManager {
     }
 }
 
-pub use native::{StartTurn, SteerTurn};
+pub use native::{CreateAutomation, StartTurn, SteerTurn, UpdateAutomation};

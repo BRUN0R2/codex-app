@@ -11,10 +11,11 @@
       "localThreads",
       "modelStreaming",
       "nativeTools",
-      "explicitApprovals"
+      "explicitApprovals",
+      "scheduledAutomations"
     ]
   },
-  "schemaVersion": 9,
+  "schemaVersion": 10,
   "diagnosticLogPath": "C:\\appdata\\logs\\runtime.jsonl",
   "config": {
     "config": {

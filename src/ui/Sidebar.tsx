@@ -48,6 +48,7 @@ type SidebarController = Pick<
   | "toggleProjectExpanded"
   | "toggleProjectSection"
   | "toggleProjectThreadListExpanded"
+  | "unreadAutomationRuns"
   | "updateProject"
   | "workspace"
 >;
@@ -64,10 +65,13 @@ const MAX_UNGROUPED_RECENT_THREADS = 8;
 const MAX_INLINE_PROJECT_THREADS = 5;
 
 export interface SidebarProps {
+  readonly automationsActive: boolean;
   readonly collapsed: boolean;
   readonly controller: SidebarController;
   readonly inert: boolean;
+  readonly onOpenAutomations: () => void;
   readonly onOpenSettings: (page?: SettingsPage) => void;
+  readonly onShowChat: () => void;
 }
 
 export function Sidebar(props: SidebarProps) {
@@ -213,6 +217,11 @@ export function Sidebar(props: SidebarProps) {
     return normalizedSearchQuery().length > 0 || props.controller.projectExpanded(project.path);
   }
 
+  function startNewThread(workspace?: string): void {
+    props.onShowChat();
+    props.controller.newThread(workspace);
+  }
+
   return (
     <aside
       aria-label="Navegação principal"
@@ -248,6 +257,7 @@ export function Sidebar(props: SidebarProps) {
                   classList={{ selected: props.controller.product() === "chatgpt" }}
                   onClick={() => {
                     setBrandMenuOpen(false);
+                    props.onShowChat();
                     void props.controller.selectProduct("chatgpt");
                   }}
                   role="menuitemradio"
@@ -267,6 +277,7 @@ export function Sidebar(props: SidebarProps) {
                   classList={{ selected: props.controller.product() === "codex" }}
                   onClick={() => {
                     setBrandMenuOpen(false);
+                    props.onShowChat();
                     void props.controller.selectProduct("codex");
                   }}
                   role="menuitemradio"
@@ -289,9 +300,7 @@ export function Sidebar(props: SidebarProps) {
       <nav aria-label="Ações principais" class="sidebar-primary-nav">
         <button
           class="new-thread-button"
-          onClick={() => {
-            props.controller.newThread();
-          }}
+          onClick={() => startNewThread()}
           title="Novo chat"
           type="button"
         >
@@ -300,6 +309,26 @@ export function Sidebar(props: SidebarProps) {
           </span>
           <Show when={!props.collapsed}>
             <span class="sidebar-row-label">Novo chat</span>
+          </Show>
+        </button>
+        <button
+          aria-current={props.automationsActive ? "page" : undefined}
+          class="automation-nav-button"
+          classList={{ active: props.automationsActive }}
+          onClick={props.onOpenAutomations}
+          title="Automações"
+          type="button"
+        >
+          <span class="sidebar-item-icon">
+            <Icon name="calendar" size={16} />
+          </span>
+          <Show when={!props.collapsed}>
+            <span class="sidebar-row-label">Automações</span>
+          </Show>
+          <Show when={props.controller.unreadAutomationRuns().length > 0}>
+            <span class="sidebar-automation-badge">
+              {Math.min(99, props.controller.unreadAutomationRuns().length)}
+            </span>
           </Show>
         </button>
       </nav>
@@ -351,6 +380,7 @@ export function Sidebar(props: SidebarProps) {
                       controller={props.controller}
                       expanded={isProjectExpanded(project)}
                       onBeginRename={beginRename}
+                      onShowChat={props.onShowChat}
                       onSubmitRename={submitRename}
                       onToggleExpanded={() => props.controller.toggleProjectExpanded(project.path)}
                       onToggleThreadList={() =>
@@ -371,6 +401,7 @@ export function Sidebar(props: SidebarProps) {
                   <ThreadButton
                     controller={props.controller}
                     onBeginRename={beginRename}
+                    onShowChat={props.onShowChat}
                     onSubmitRename={submitRename}
                     onTogglePinned={() => props.controller.togglePinnedThread(thread.id)}
                     pinned
@@ -425,6 +456,7 @@ export function Sidebar(props: SidebarProps) {
                   controller={props.controller}
                   expanded={isProjectExpanded(group.project)}
                   onBeginRename={beginRename}
+                  onShowChat={props.onShowChat}
                   onSubmitRename={submitRename}
                   onToggleExpanded={() =>
                     props.controller.toggleProjectExpanded(group.project.path)
@@ -465,7 +497,7 @@ export function Sidebar(props: SidebarProps) {
           >
             <button
               aria-label="Novo chat sem projeto"
-              onClick={() => props.controller.newThread()}
+              onClick={() => startNewThread()}
               title="Novo chat"
               type="button"
             >
@@ -486,6 +518,7 @@ export function Sidebar(props: SidebarProps) {
                   <ThreadButton
                     controller={props.controller}
                     onBeginRename={beginRename}
+                    onShowChat={props.onShowChat}
                     onSubmitRename={submitRename}
                     onTogglePinned={() => props.controller.togglePinnedThread(thread.id)}
                     pinned={props.controller.pinnedThreadIds().includes(thread.id)}
@@ -644,6 +677,7 @@ interface ProjectGroupProps {
   readonly controller: SidebarController;
   readonly expanded: boolean;
   readonly onBeginRename: (thread: ThreadSummary) => void;
+  readonly onShowChat: () => void;
   readonly onSubmitRename: (event: SubmitEvent) => Promise<void>;
   readonly onToggleExpanded: () => void;
   readonly onToggleThreadList: () => void;
@@ -705,6 +739,7 @@ function ProjectGroup(props: ProjectGroupProps) {
               aria-label={`Novo chat em ${props.project.name}`}
               class="project-new-chat-button"
               onClick={() => {
+                props.onShowChat();
                 props.controller.newThread(props.project.path);
               }}
               title="Novo chat"
@@ -805,6 +840,7 @@ function ProjectGroup(props: ProjectGroupProps) {
               <ThreadButton
                 controller={props.controller}
                 onBeginRename={props.onBeginRename}
+                onShowChat={props.onShowChat}
                 onSubmitRename={props.onSubmitRename}
                 onTogglePinned={() => props.controller.togglePinnedThread(thread.id)}
                 pinned={props.controller.pinnedThreadIds().includes(thread.id)}
@@ -839,6 +875,7 @@ function ProjectGroup(props: ProjectGroupProps) {
 interface ThreadButtonProps {
   readonly controller: SidebarController;
   readonly onBeginRename: (thread: ThreadSummary) => void;
+  readonly onShowChat: () => void;
   readonly onSubmitRename: (event: SubmitEvent) => Promise<void>;
   readonly onTogglePinned: () => void;
   readonly pinned: boolean;
@@ -885,7 +922,10 @@ function ThreadButton(props: ThreadButtonProps) {
             props.controller.currentThread()?.id === props.thread.id ? "page" : undefined
           }
           class="thread-main"
-          onClick={() => void props.controller.openThread(props.thread.id)}
+          onClick={() => {
+            props.onShowChat();
+            void props.controller.openThread(props.thread.id);
+          }}
           onContextMenu={(event) => {
             event.preventDefault();
             if (menu !== undefined) {

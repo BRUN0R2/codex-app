@@ -163,6 +163,50 @@
     }
   },
   {
+    "method": "automation.changed",
+    "params": {
+      "automation": {
+        "id": "automation-1",
+        "name": "Revisar regressões",
+        "prompt": "Revise regressões recentes e proponha correções.",
+        "projectPath": "C:\\workspace\\codex-app",
+        "enabled": true,
+        "intervalMinutes": 60,
+        "timezone": "America/Sao_Paulo",
+        "timezoneOffsetMin": 180,
+        "nextRunAt": 1755004500,
+        "lastRunAt": 1755000900,
+        "version": 2,
+        "createdAt": 1754900000,
+        "updatedAt": 1755000900
+      }
+    }
+  },
+  {
+    "method": "automation.deleted",
+    "params": {
+      "automationId": "automation-2"
+    }
+  },
+  {
+    "method": "automation.runUpdated",
+    "params": {
+      "run": {
+        "id": "automation-run-1",
+        "automationId": "automation-1",
+        "trigger": "scheduled",
+        "status": "completed",
+        "threadId": "thread-1",
+        "turnId": "turn-1",
+        "error": null,
+        "reviewed": false,
+        "createdAt": 1755000100,
+        "startedAt": 1755000120,
+        "completedAt": 1755000800
+      }
+    }
+  },
+  {
     "method": "item.completed",
     "params": {
       "threadId": "thread-1",

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -12,13 +12,18 @@ use tauri::{AppHandle, Manager as _};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use super::automation::{
+    AutomationDraft, AutomationUpdate, ClaimedAutomationRun, MAX_AUTOMATION_RUN_HISTORY,
+    MAX_CONCURRENT_AUTOMATION_RUNS, advance_due_run, next_run_from_now, validate_interval,
+};
 use super::context_window::ContextUsageSnapshot;
 use super::output::{OUTPUT_CHUNK_BYTES, OutputSource};
 use super::provider::ResponseItem;
 use super::terminal_output::normalize_terminal_bytes;
 use super::text::truncate_utf8;
 use crate::engine::{
-    AppConfig, CompletedTurn, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
+    AppConfig, Automation, AutomationListResponse, AutomationRun, AutomationRunStatus,
+    AutomationRunTrigger, CompletedTurn, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
     ConversationMode, DesktopPreferences, OperationAck, OutputReadResponse, ThreadActiveFlag,
     ThreadItem, ThreadListResponse, ThreadOutput, ThreadStatus, ThreadSummary, TurnStatus,
     TurnSummary,
@@ -33,12 +38,14 @@ mod history;
 use self::history::{StoredThreadPage, parse_history_cursor, read_thread_page as load_thread_page};
 
 const DATABASE_FILE_NAME: &str = "native-state-profile-v2.sqlite3";
-const DATABASE_SCHEMA_VERSION: i64 = 2;
+const DATABASE_SCHEMA_VERSION: i64 = 3;
 const DATABASE_APPLICATION_ID: i64 = 1_128_552_527;
-const DATABASE_TABLES: &str = "app_config,chat_conversations,output_chunks,output_resources,provider_items,thread_items,threads,turns";
+const DATABASE_TABLES: &str = "app_config,automation_runs,automations,chat_conversations,output_chunks,output_resources,provider_items,thread_items,threads,turns";
 const THREAD_COLUMNS: &str = "id,cwd,name,preview,archived,created_at,updated_at,project_path,mode";
 const TURN_COLUMNS: &str =
     "id,thread_id,owner_id,status,model,reasoning_effort,error,created_at,updated_at";
+const AUTOMATION_COLUMNS: &str = "id,name,prompt,project_path,enabled,interval_minutes,timezone,timezone_offset_min,next_run_at,last_run_at,version,created_at,updated_at";
+const AUTOMATION_RUN_COLUMNS: &str = "id,automation_id,trigger,status,thread_id,turn_id,error,reviewed,created_at,started_at,completed_at";
 const THREAD_PAGE_SIZE: usize = 50;
 const MAX_CURSOR_BYTES: usize = 20;
 const MAX_OUTPUT_CURSOR_BYTES: usize = 20;
@@ -50,6 +57,53 @@ const MAX_PREVIEW_BYTES: usize = 512;
 const MAX_DEVELOPER_INSTRUCTIONS_BYTES: usize = 262_144;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const MAX_DATABASE_CONNECTIONS: u32 = 8;
+const MAX_AUTOMATION_NAME_BYTES: usize = 160;
+const MAX_AUTOMATION_PROMPT_BYTES: usize = 262_144;
+const MAX_AUTOMATION_ERROR_BYTES: usize = 16_384;
+const MAX_AUTOMATION_RUNS_LOADED: i64 = 200;
+const AUTOMATION_SCHEMA_SQL: &str = "
+    CREATE TABLE automations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        project_path TEXT,
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        interval_minutes INTEGER NOT NULL CHECK (interval_minutes BETWEEN 5 AND 10080),
+        timezone TEXT NOT NULL,
+        timezone_offset_min INTEGER NOT NULL CHECK (timezone_offset_min BETWEEN -840 AND 840),
+        next_run_at INTEGER,
+        last_run_at INTEGER,
+        version INTEGER NOT NULL CHECK (version >= 1),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK (enabled = 0 OR next_run_at IS NOT NULL)
+    );
+    CREATE INDEX automations_due
+        ON automations(enabled, next_run_at, id);
+    CREATE TABLE automation_runs (
+        id TEXT PRIMARY KEY,
+        automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+        trigger TEXT NOT NULL CHECK (trigger IN ('manual', 'scheduled')),
+        status TEXT NOT NULL CHECK (
+            status IN ('queued', 'running', 'completed', 'failed', 'interrupted')
+        ),
+        thread_id TEXT REFERENCES threads(id) ON DELETE SET NULL,
+        turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+        error TEXT,
+        reviewed INTEGER NOT NULL DEFAULT 0 CHECK (reviewed IN (0, 1)),
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        completed_at INTEGER,
+        CHECK (status != 'failed' OR error IS NOT NULL)
+    );
+    CREATE UNIQUE INDEX automation_runs_one_active
+        ON automation_runs(automation_id)
+        WHERE status IN ('queued', 'running');
+    CREATE INDEX automation_runs_review_queue
+        ON automation_runs(reviewed, completed_at DESC, created_at DESC);
+    CREATE INDEX automation_runs_automation_created
+        ON automation_runs(automation_id, created_at DESC, id DESC);
+";
 
 type SqlitePool = Pool<SqliteConnectionManager>;
 
@@ -76,6 +130,11 @@ pub(super) struct ProviderHistorySnapshot {
     pub items: Vec<ResponseItem>,
     encoded_bytes: usize,
     last_sequence: i64,
+}
+
+pub(super) struct TurnSettlement {
+    pub turn: CompletedTurn,
+    pub automation_run: Option<AutomationRun>,
 }
 
 impl ProviderHistorySnapshot {
@@ -160,8 +219,15 @@ impl NativeStorage {
             if version == 0 && application_id == 0 {
                 initialize_database(&mut connection)?;
             } else {
-                if application_id == DATABASE_APPLICATION_ID && version == 1 {
-                    migrate_database_v1_to_v2(&mut connection)?;
+                if application_id == DATABASE_APPLICATION_ID {
+                    let mut current_version = version;
+                    if current_version == 1 {
+                        migrate_database_v1_to_v2(&mut connection)?;
+                        current_version = 2;
+                    }
+                    if current_version == 2 {
+                        migrate_database_v2_to_v3(&mut connection)?;
+                    }
                 }
                 let migrated_version: i64 = connection
                     .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -172,11 +238,22 @@ impl NativeStorage {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage_error)?;
+            let now = unix_timestamp()?;
             transaction
                 .execute(
                     "UPDATE turns SET status = 'interrupted', updated_at = ?1
                      WHERE status = 'inProgress'",
-                    [unix_timestamp()?],
+                    [now],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "UPDATE automation_runs
+                     SET status = 'interrupted',
+                         error = COALESCE(error, 'application stopped before automation completed'),
+                         completed_at = ?1
+                     WHERE status IN ('queued', 'running')",
+                    [now],
                 )
                 .map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
@@ -1285,6 +1362,19 @@ impl NativeStorage {
         status: TurnStatus,
         error: Option<String>,
     ) -> Result<CompletedTurn, AppError> {
+        Ok(self
+            .complete_turn_settlement(thread_id, turn_id, status, error)
+            .await?
+            .turn)
+    }
+
+    pub async fn complete_turn_settlement(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        status: TurnStatus,
+        error: Option<String>,
+    ) -> Result<TurnSettlement, AppError> {
         if status == TurnStatus::InProgress {
             return Err(AppError::State(
                 "complete_turn cannot preserve an in-progress status".into(),
@@ -1315,13 +1405,397 @@ impl NativeStorage {
                     params![now, thread_id],
                 )
                 .map_err(storage_error)?;
+            let automation_status = automation_status_for_turn(status);
+            let automation_error = if status == TurnStatus::Failed {
+                Some(
+                    error
+                        .clone()
+                        .unwrap_or_else(|| "automation turn failed".into()),
+                )
+            } else {
+                error.clone()
+            };
+            transaction
+                .execute(
+                    "UPDATE automation_runs
+                     SET status = ?1, error = ?2, completed_at = ?3, reviewed = 0
+                     WHERE turn_id = ?4 AND status = 'running'",
+                    params![
+                        automation_run_status_name(automation_status),
+                        automation_error,
+                        now,
+                        turn_id
+                    ],
+                )
+                .map_err(storage_error)?;
+            let automation_run = read_automation_run_by_turn(&transaction, &turn_id)?;
             transaction.commit().map_err(storage_error)?;
-            Ok(CompletedTurn {
-                id: turn_id,
-                status,
-                error,
-                updated_at: now,
+            Ok(TurnSettlement {
+                turn: CompletedTurn {
+                    id: turn_id,
+                    status,
+                    error,
+                    updated_at: now,
+                },
+                automation_run,
             })
+        })
+        .await
+    }
+
+    pub async fn list_automations(&self) -> Result<AutomationListResponse, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let automations = {
+                let mut statement = connection
+                    .prepare(&format!(
+                        "SELECT {AUTOMATION_COLUMNS}
+                         FROM automations
+                         ORDER BY enabled DESC, next_run_at IS NULL, next_run_at, name COLLATE NOCASE, id"
+                    ))
+                    .map_err(storage_error)?;
+                statement
+                    .query_map([], automation_from_row)
+                    .map_err(storage_error)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(storage_error)?
+            };
+            let runs = {
+                let mut statement = connection
+                    .prepare(&format!(
+                        "SELECT {AUTOMATION_RUN_COLUMNS}
+                         FROM automation_runs
+                         ORDER BY COALESCE(completed_at, started_at, created_at) DESC, id DESC
+                         LIMIT ?1"
+                    ))
+                    .map_err(storage_error)?;
+                statement
+                    .query_map([MAX_AUTOMATION_RUNS_LOADED], automation_run_from_row)
+                    .map_err(storage_error)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(storage_error)?
+            };
+            Ok(AutomationListResponse {
+                data: automations,
+                runs,
+            })
+        })
+        .await
+    }
+
+    pub async fn create_automation(&self, draft: AutomationDraft) -> Result<Automation, AppError> {
+        validate_automation_draft(&draft)?;
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
+            let id = Uuid::now_v7().to_string();
+            let now = unix_timestamp()?;
+            let next_run_at = draft
+                .enabled
+                .then(|| next_run_from_now(now, draft.interval_minutes))
+                .transpose()?;
+            transaction
+                .execute(
+                    "INSERT INTO automations (
+                         id, name, prompt, project_path, enabled, interval_minutes, timezone,
+                         timezone_offset_min, next_run_at, last_run_at, version, created_at,
+                         updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, 1, ?10, ?10)",
+                    params![
+                        id,
+                        draft.name,
+                        draft.prompt,
+                        draft.project_path,
+                        draft.enabled,
+                        draft.interval_minutes,
+                        draft.timezone,
+                        draft.timezone_offset_min,
+                        next_run_at,
+                        now
+                    ],
+                )
+                .map_err(storage_error)?;
+            let automation = read_automation_by_id(&transaction, &id)?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(automation)
+        })
+        .await
+    }
+
+    pub async fn update_automation(
+        &self,
+        update: AutomationUpdate,
+    ) -> Result<Automation, AppError> {
+        validate_automation_update(&update)?;
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
+            let current = transaction
+                .query_row(
+                    "SELECT enabled, interval_minutes, next_run_at, version
+                     FROM automations WHERE id = ?1",
+                    [&update.id],
+                    |row| {
+                        Ok((
+                            row.get::<_, bool>(0)?,
+                            row.get::<_, u32>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(storage_error)?
+                .ok_or_else(|| AppError::State("automation does not exist".into()))?;
+            let expected_version_sql = i64::try_from(update.expected_version).map_err(|error| {
+                AppError::Storage(format!("automation version is too large: {error}"))
+            })?;
+            if current.3 != expected_version_sql {
+                return Err(AppError::State(format!(
+                    "automation version changed from {} to {}",
+                    update.expected_version, current.3
+                )));
+            }
+            let now = unix_timestamp()?;
+            let next_run_at = if update.enabled {
+                if !current.0 || current.1 != update.interval_minutes || current.2.is_none() {
+                    Some(next_run_from_now(now, update.interval_minutes)?)
+                } else {
+                    current.2
+                }
+            } else {
+                None
+            };
+            let version = update
+                .expected_version
+                .checked_add(1)
+                .ok_or_else(|| AppError::Storage("automation version overflow".into()))?;
+            let version_sql = i64::try_from(version).map_err(|error| {
+                AppError::Storage(format!("automation version overflow: {error}"))
+            })?;
+            let changed = transaction
+                .execute(
+                    "UPDATE automations
+                     SET name = ?1, prompt = ?2, project_path = ?3, enabled = ?4,
+                         interval_minutes = ?5, timezone = ?6, timezone_offset_min = ?7,
+                         next_run_at = ?8, version = ?9, updated_at = ?10
+                     WHERE id = ?11 AND version = ?12",
+                    params![
+                        update.name,
+                        update.prompt,
+                        update.project_path,
+                        update.enabled,
+                        update.interval_minutes,
+                        update.timezone,
+                        update.timezone_offset_min,
+                        next_run_at,
+                        version_sql,
+                        now,
+                        update.id,
+                        expected_version_sql
+                    ],
+                )
+                .map_err(storage_error)?;
+            require_changed(changed, "automation")?;
+            let automation = read_automation_by_id(&transaction, &update.id)?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(automation)
+        })
+        .await
+    }
+
+    pub async fn delete_automation(&self, automation_id: String) -> Result<OperationAck, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM automation_runs
+                         WHERE automation_id = ?1 AND status IN ('queued', 'running')
+                     )",
+                    [&automation_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if active {
+                return Err(AppError::State(
+                    "an automation with an active run cannot be deleted".into(),
+                ));
+            }
+            let changed = transaction
+                .execute("DELETE FROM automations WHERE id = ?1", [&automation_id])
+                .map_err(storage_error)?;
+            require_changed(changed, "automation")?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(OperationAck { applied: true })
+        })
+        .await
+    }
+
+    pub async fn claim_due_automation(&self) -> Result<Option<ClaimedAutomationRun>, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || claim_automation_run(&pool, None, AutomationRunTrigger::Scheduled))
+            .await
+    }
+
+    pub async fn next_automation_run_at(&self) -> Result<Option<i64>, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            connection
+                .query_row(
+                    "SELECT MIN(next_run_at) FROM automations WHERE enabled = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)
+        })
+        .await
+    }
+
+    pub async fn claim_automation_now(
+        &self,
+        automation_id: String,
+    ) -> Result<ClaimedAutomationRun, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            claim_automation_run(
+                &pool,
+                Some(automation_id.as_str()),
+                AutomationRunTrigger::Manual,
+            )?
+            .ok_or_else(|| {
+                AppError::State(
+                    "the automation concurrency limit is currently in use; try again shortly"
+                        .into(),
+                )
+            })
+        })
+        .await
+    }
+
+    pub async fn attach_automation_run_thread(
+        &self,
+        run_id: String,
+        thread_id: String,
+    ) -> Result<AutomationRun, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let changed = connection
+                .execute(
+                    "UPDATE automation_runs SET thread_id = ?1
+                     WHERE id = ?2 AND status = 'queued' AND thread_id IS NULL",
+                    params![thread_id, run_id],
+                )
+                .map_err(storage_error)?;
+            require_changed(changed, "queued automation run")?;
+            read_automation_run_by_id(&connection, &run_id)
+        })
+        .await
+    }
+
+    pub async fn start_automation_run(
+        &self,
+        run_id: String,
+        thread_id: String,
+        turn_id: String,
+    ) -> Result<AutomationRun, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let now = unix_timestamp()?;
+            let changed = connection
+                .execute(
+                    "UPDATE automation_runs
+                     SET status = 'running', thread_id = ?1, turn_id = ?2, started_at = ?3
+                     WHERE id = ?4 AND status = 'queued'
+                       AND (thread_id IS NULL OR thread_id = ?1)",
+                    params![thread_id, turn_id, now, run_id],
+                )
+                .map_err(storage_error)?;
+            require_changed(changed, "queued automation run")?;
+            read_automation_run_by_id(&connection, &run_id)
+        })
+        .await
+    }
+
+    pub async fn fail_automation_run(
+        &self,
+        run_id: String,
+        error: String,
+    ) -> Result<Option<AutomationRun>, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let now = unix_timestamp()?;
+            let error = bounded_automation_error(error);
+            let changed = connection
+                .execute(
+                    "UPDATE automation_runs
+                     SET status = 'failed', error = ?1, completed_at = ?2, reviewed = 0
+                     WHERE id = ?3 AND status IN ('queued', 'running')",
+                    params![error, now, run_id],
+                )
+                .map_err(storage_error)?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            Ok(Some(read_automation_run_by_id(&connection, &run_id)?))
+        })
+        .await
+    }
+
+    pub async fn read_automation_run(&self, run_id: String) -> Result<AutomationRun, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            read_automation_run_by_id(&connection, &run_id)
+        })
+        .await
+    }
+
+    pub async fn mark_automation_run_reviewed(
+        &self,
+        run_id: String,
+    ) -> Result<OperationAck, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM automation_runs
+                         WHERE id = ?1
+                           AND status IN ('completed', 'failed', 'interrupted')
+                     )",
+                    [&run_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !exists {
+                return Err(AppError::State(
+                    "terminal automation run does not exist".into(),
+                ));
+            }
+            connection
+                .execute(
+                    "UPDATE automation_runs SET reviewed = 1 WHERE id = ?1",
+                    [&run_id],
+                )
+                .map_err(storage_error)?;
+            Ok(OperationAck { applied: true })
         })
         .await
     }
@@ -1398,6 +1872,386 @@ impl NativeStorage {
             .map(|database| database.pool.clone())
             .ok_or_else(|| AppError::Storage("native storage is not initialized".into()))
     }
+}
+
+fn claim_automation_run(
+    pool: &SqlitePool,
+    requested_automation_id: Option<&str>,
+    trigger: AutomationRunTrigger,
+) -> Result<Option<ClaimedAutomationRun>, AppError> {
+    let mut connection = pool.get().map_err(pool_error)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)?;
+    let active_count: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM automation_runs WHERE status IN ('queued', 'running')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if active_count >= MAX_CONCURRENT_AUTOMATION_RUNS {
+        return Ok(None);
+    }
+
+    let now = unix_timestamp()?;
+    let automation_id = match requested_automation_id {
+        Some(automation_id) => {
+            let exists: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM automations WHERE id = ?1)",
+                    [automation_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !exists {
+                return Err(AppError::State("automation does not exist".into()));
+            }
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM automation_runs
+                         WHERE automation_id = ?1 AND status IN ('queued', 'running')
+                     )",
+                    [automation_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if active {
+                return Err(AppError::State(
+                    "automation already has an active run".into(),
+                ));
+            }
+            automation_id.to_string()
+        }
+        None => {
+            let automation_id = transaction
+                .query_row(
+                    "SELECT automations.id
+                     FROM automations
+                     WHERE enabled = 1
+                       AND next_run_at <= ?1
+                       AND NOT EXISTS(
+                           SELECT 1 FROM automation_runs
+                           WHERE automation_id = automations.id
+                             AND status IN ('queued', 'running')
+                       )
+                     ORDER BY next_run_at, id
+                     LIMIT 1",
+                    [now],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(storage_error)?;
+            let Some(automation_id) = automation_id else {
+                return Ok(None);
+            };
+            automation_id
+        }
+    };
+
+    let current = read_automation_by_id(&transaction, &automation_id)?;
+    match trigger {
+        AutomationRunTrigger::Scheduled => {
+            let next_run_at = current.next_run_at.ok_or_else(|| {
+                AppError::Storage("enabled automation has no next run timestamp".into())
+            })?;
+            let next_run_at = advance_due_run(next_run_at, now, current.interval_minutes)?;
+            transaction
+                .execute(
+                    "UPDATE automations
+                     SET next_run_at = ?1, last_run_at = ?2, updated_at = ?2
+                     WHERE id = ?3 AND enabled = 1",
+                    params![next_run_at, now, automation_id],
+                )
+                .map_err(storage_error)?;
+        }
+        AutomationRunTrigger::Manual => {
+            transaction
+                .execute(
+                    "UPDATE automations SET last_run_at = ?1, updated_at = ?1 WHERE id = ?2",
+                    params![now, automation_id],
+                )
+                .map_err(storage_error)?;
+        }
+    }
+
+    let run_id = Uuid::now_v7().to_string();
+    transaction
+        .execute(
+            "INSERT INTO automation_runs (
+                 id, automation_id, trigger, status, thread_id, turn_id, error, reviewed,
+                 created_at, started_at, completed_at
+             ) VALUES (?1, ?2, ?3, 'queued', NULL, NULL, NULL, 0, ?4, NULL, NULL)",
+            params![
+                run_id,
+                automation_id,
+                automation_run_trigger_name(trigger),
+                now
+            ],
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "DELETE FROM automation_runs
+             WHERE id IN (
+                 SELECT id FROM automation_runs
+                 WHERE automation_id = ?1
+                   AND status IN ('completed', 'failed', 'interrupted')
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT -1 OFFSET ?2
+             )",
+            params![automation_id, MAX_AUTOMATION_RUN_HISTORY],
+        )
+        .map_err(storage_error)?;
+
+    let automation = read_automation_by_id(&transaction, &automation_id)?;
+    let run = read_automation_run_by_id(&transaction, &run_id)?;
+    transaction.commit().map_err(storage_error)?;
+    Ok(Some(ClaimedAutomationRun { automation, run }))
+}
+
+fn read_automation_by_id(
+    connection: &Connection,
+    automation_id: &str,
+) -> Result<Automation, AppError> {
+    connection
+        .query_row(
+            &format!("SELECT {AUTOMATION_COLUMNS} FROM automations WHERE id = ?1"),
+            [automation_id],
+            automation_from_row,
+        )
+        .optional()
+        .map_err(storage_error)?
+        .ok_or_else(|| AppError::State("automation does not exist".into()))
+}
+
+fn read_automation_run_by_id(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<AutomationRun, AppError> {
+    connection
+        .query_row(
+            &format!("SELECT {AUTOMATION_RUN_COLUMNS} FROM automation_runs WHERE id = ?1"),
+            [run_id],
+            automation_run_from_row,
+        )
+        .optional()
+        .map_err(storage_error)?
+        .ok_or_else(|| AppError::State("automation run does not exist".into()))
+}
+
+fn read_automation_run_by_turn(
+    connection: &Connection,
+    turn_id: &str,
+) -> Result<Option<AutomationRun>, AppError> {
+    connection
+        .query_row(
+            &format!("SELECT {AUTOMATION_RUN_COLUMNS} FROM automation_runs WHERE turn_id = ?1"),
+            [turn_id],
+            automation_run_from_row,
+        )
+        .optional()
+        .map_err(storage_error)
+}
+
+fn automation_from_row(row: &Row<'_>) -> rusqlite::Result<Automation> {
+    Ok(Automation {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        prompt: row.get(2)?,
+        project_path: row.get(3)?,
+        enabled: row.get(4)?,
+        interval_minutes: row.get(5)?,
+        timezone: row.get(6)?,
+        timezone_offset_min: row.get(7)?,
+        next_run_at: row.get(8)?,
+        last_run_at: row.get(9)?,
+        version: read_u64_column(row, 10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+fn automation_run_from_row(row: &Row<'_>) -> rusqlite::Result<AutomationRun> {
+    let trigger = row.get::<_, String>(2)?;
+    let status = row.get::<_, String>(3)?;
+    Ok(AutomationRun {
+        id: row.get(0)?,
+        automation_id: row.get(1)?,
+        trigger: parse_automation_run_trigger(&trigger, 2)?,
+        status: parse_automation_run_status(&status, 3)?,
+        thread_id: row.get(4)?,
+        turn_id: row.get(5)?,
+        error: row.get(6)?,
+        reviewed: row.get(7)?,
+        created_at: row.get(8)?,
+        started_at: row.get(9)?,
+        completed_at: row.get(10)?,
+    })
+}
+
+fn read_u64_column(row: &Row<'_>, column: usize) -> rusqlite::Result<u64> {
+    let value = row.get::<_, i64>(column)?;
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Integer,
+            error.into(),
+        )
+    })
+}
+
+fn automation_run_trigger_name(trigger: AutomationRunTrigger) -> &'static str {
+    match trigger {
+        AutomationRunTrigger::Manual => "manual",
+        AutomationRunTrigger::Scheduled => "scheduled",
+    }
+}
+
+fn parse_automation_run_trigger(
+    value: &str,
+    column: usize,
+) -> rusqlite::Result<AutomationRunTrigger> {
+    match value {
+        "manual" => Ok(AutomationRunTrigger::Manual),
+        "scheduled" => Ok(AutomationRunTrigger::Scheduled),
+        _ => Err(invalid_database_enum(
+            column,
+            format!("unknown automation run trigger `{value}`"),
+        )),
+    }
+}
+
+fn automation_run_status_name(status: AutomationRunStatus) -> &'static str {
+    match status {
+        AutomationRunStatus::Queued => "queued",
+        AutomationRunStatus::Running => "running",
+        AutomationRunStatus::Completed => "completed",
+        AutomationRunStatus::Failed => "failed",
+        AutomationRunStatus::Interrupted => "interrupted",
+    }
+}
+
+fn parse_automation_run_status(
+    value: &str,
+    column: usize,
+) -> rusqlite::Result<AutomationRunStatus> {
+    match value {
+        "queued" => Ok(AutomationRunStatus::Queued),
+        "running" => Ok(AutomationRunStatus::Running),
+        "completed" => Ok(AutomationRunStatus::Completed),
+        "failed" => Ok(AutomationRunStatus::Failed),
+        "interrupted" => Ok(AutomationRunStatus::Interrupted),
+        _ => Err(invalid_database_enum(
+            column,
+            format!("unknown automation run status `{value}`"),
+        )),
+    }
+}
+
+fn automation_status_for_turn(status: TurnStatus) -> AutomationRunStatus {
+    match status {
+        TurnStatus::Completed => AutomationRunStatus::Completed,
+        TurnStatus::Failed => AutomationRunStatus::Failed,
+        TurnStatus::Interrupted => AutomationRunStatus::Interrupted,
+        TurnStatus::InProgress => AutomationRunStatus::Running,
+    }
+}
+
+fn invalid_database_enum(column: usize, message: String) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        rusqlite::types::Type::Text,
+        std::io::Error::new(std::io::ErrorKind::InvalidData, message).into(),
+    )
+}
+
+fn validate_automation_draft(draft: &AutomationDraft) -> Result<(), AppError> {
+    validate_automation_fields(
+        &draft.name,
+        &draft.prompt,
+        draft.project_path.as_deref(),
+        draft.interval_minutes,
+        &draft.timezone,
+        draft.timezone_offset_min,
+    )
+}
+
+fn validate_automation_update(update: &AutomationUpdate) -> Result<(), AppError> {
+    if update.id.trim().is_empty() || update.id.len() > MAX_IDENTIFIER_BYTES {
+        return Err(AppError::Protocol("automation id is invalid".into()));
+    }
+    validate_automation_fields(
+        &update.name,
+        &update.prompt,
+        update.project_path.as_deref(),
+        update.interval_minutes,
+        &update.timezone,
+        update.timezone_offset_min,
+    )
+}
+
+fn validate_automation_fields(
+    name: &str,
+    prompt: &str,
+    project_path: Option<&str>,
+    interval_minutes: u32,
+    timezone: &str,
+    timezone_offset_min: i32,
+) -> Result<(), AppError> {
+    if name.trim().is_empty()
+        || name.len() > MAX_AUTOMATION_NAME_BYTES
+        || name.chars().any(char::is_control)
+    {
+        return Err(AppError::Protocol(format!(
+            "automation name must contain between 1 and {MAX_AUTOMATION_NAME_BYTES} bytes without control characters"
+        )));
+    }
+    if prompt.trim().is_empty()
+        || prompt.len() > MAX_AUTOMATION_PROMPT_BYTES
+        || prompt
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(AppError::Protocol(format!(
+            "automation prompt must contain between 1 and {MAX_AUTOMATION_PROMPT_BYTES} bytes"
+        )));
+    }
+    if let Some(project_path) = project_path
+        && (project_path.len() > 4_096 || !Path::new(project_path).is_absolute())
+    {
+        return Err(AppError::Protocol(
+            "automation project path must be an absolute path of at most 4096 bytes".into(),
+        ));
+    }
+    validate_interval(interval_minutes)?;
+    if timezone.trim().is_empty()
+        || timezone.len() > 128
+        || timezone.chars().any(|character| {
+            character.is_control()
+                || !(character.is_ascii_alphanumeric()
+                    || matches!(character, '/' | '_' | '-' | '+'))
+        })
+    {
+        return Err(AppError::Protocol("automation timezone is invalid".into()));
+    }
+    if !(-840..=840).contains(&timezone_offset_min) {
+        return Err(AppError::Protocol(
+            "automation timezone offset must be between -840 and 840 minutes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_automation_error(error: String) -> String {
+    let error = error.trim();
+    let error = if error.is_empty() {
+        "automation failed"
+    } else {
+        error
+    };
+    truncate_utf8(error, MAX_AUTOMATION_ERROR_BYTES)
 }
 
 fn encode_provider_history(items: Vec<ResponseItem>) -> Result<Vec<String>, AppError> {
@@ -2086,6 +2940,9 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
         )
         .map_err(storage_error)?;
     transaction
+        .execute_batch(AUTOMATION_SCHEMA_SQL)
+        .map_err(storage_error)?;
+    transaction
         .execute(
             "INSERT INTO app_config (singleton, version, payload) VALUES (1, 1, ?1)",
             [default_payload],
@@ -2190,6 +3047,17 @@ fn migrate_database_v1_to_v2(connection: &mut Connection) -> Result<(), AppError
         persist_output_source(&transaction, &turn_id, &item_id, source)?;
     }
 
+    transaction
+        .pragma_update(None, "user_version", 2_i64)
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_database_v2_to_v3(connection: &mut Connection) -> Result<(), AppError> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(AUTOMATION_SCHEMA_SQL)
+        .map_err(storage_error)?;
     transaction
         .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
         .map_err(storage_error)?;
@@ -2355,11 +3223,12 @@ mod tests {
         DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, NativeStorage, encode_bounded,
         initialize_database,
     };
+    use crate::engine::native::automation::{AutomationDraft, AutomationUpdate};
     use crate::engine::native::output::OutputSource;
     use crate::engine::native::provider::{ResponseContent, ResponseItem};
     use crate::engine::{
-        ActivityStatus, ConfigUpdate, ConversationMode, ModelVerbosity, ThreadItem, ThreadOutput,
-        TokenUsage, TurnStatus, UserContent,
+        ActivityStatus, AutomationRunStatus, AutomationRunTrigger, ConfigUpdate, ConversationMode,
+        ModelVerbosity, ThreadItem, ThreadOutput, TokenUsage, TurnStatus, UserContent,
     };
 
     async fn read_complete_output(storage: &NativeStorage, output_id: &str) -> String {
@@ -2386,6 +3255,23 @@ mod tests {
                 ..
             } => output,
             item => panic!("expected a tool output reference, received {item:?}"),
+        }
+    }
+
+    fn automation_draft(
+        directory: &TempDir,
+        name: &str,
+        enabled: bool,
+        interval_minutes: u32,
+    ) -> AutomationDraft {
+        AutomationDraft {
+            name: name.into(),
+            prompt: format!("Execute a rotina {name}."),
+            project_path: Some(directory.path().display().to_string()),
+            enabled,
+            interval_minutes,
+            timezone: "UTC".into(),
+            timezone_offset_min: 0,
         }
     }
 
@@ -2443,6 +3329,255 @@ mod tests {
         let failed_turn = loaded.turns.first().expect("failed turn should be present");
         assert_eq!(failed_turn.status, TurnStatus::Failed);
         assert_eq!(failed_turn.error.as_deref(), Some("provider stream failed"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn creates_updates_and_lists_automations_with_optimistic_versions() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("automations.sqlite3"))
+            .await
+            .expect("storage should initialize");
+
+        let created = storage
+            .create_automation(automation_draft(&directory, "Revisar regressões", true, 60))
+            .await
+            .expect("automation should persist");
+        assert_eq!(created.version, 1);
+        assert!(created.enabled);
+        assert!(created.next_run_at.is_some());
+
+        let updated = storage
+            .update_automation(AutomationUpdate {
+                id: created.id.clone(),
+                expected_version: created.version,
+                name: "Revisar regressões críticas".into(),
+                prompt: "Revise somente regressões críticas.".into(),
+                project_path: created.project_path.clone(),
+                enabled: false,
+                interval_minutes: 30,
+                timezone: "UTC".into(),
+                timezone_offset_min: 0,
+            })
+            .await
+            .expect("automation should update");
+        assert_eq!(updated.version, 2);
+        assert!(!updated.enabled);
+        assert_eq!(updated.next_run_at, None);
+
+        let stale = storage
+            .update_automation(AutomationUpdate {
+                id: created.id,
+                expected_version: 1,
+                name: "Atualização obsoleta".into(),
+                prompt: "Não deve ser aplicada.".into(),
+                project_path: created.project_path,
+                enabled: true,
+                interval_minutes: 15,
+                timezone: "UTC".into(),
+                timezone_offset_min: 0,
+            })
+            .await
+            .expect_err("stale automation version must be rejected");
+        assert!(stale.to_string().contains("version changed"));
+
+        let listed = storage
+            .list_automations()
+            .await
+            .expect("automations should list");
+        assert_eq!(listed.data, vec![updated]);
+        assert!(listed.runs.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn claims_due_runs_once_and_advances_without_backfill() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("due-automation.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let automation = storage
+            .create_automation(automation_draft(&directory, "Rotina vencida", true, 5))
+            .await
+            .expect("automation should persist");
+        let pool = storage.pool().await.expect("pool should load");
+        let connection = pool.get().expect("connection should load");
+        connection
+            .execute(
+                "UPDATE automations SET next_run_at = 1 WHERE id = ?1",
+                [&automation.id],
+            )
+            .expect("automation should become due");
+        drop(connection);
+
+        let claim = storage
+            .claim_due_automation()
+            .await
+            .expect("due claim should succeed")
+            .expect("one automation should be due");
+        assert_eq!(claim.run.trigger, AutomationRunTrigger::Scheduled);
+        assert_eq!(claim.run.status, AutomationRunStatus::Queued);
+        assert!(
+            claim
+                .automation
+                .next_run_at
+                .is_some_and(|next_run_at| next_run_at > claim.run.created_at)
+        );
+        assert!(
+            storage
+                .claim_due_automation()
+                .await
+                .expect("second due lookup should succeed")
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn enforces_one_run_per_automation_and_the_global_concurrency_limit() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("automation-concurrency.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let first = storage
+            .create_automation(automation_draft(&directory, "Primeira", false, 60))
+            .await
+            .expect("first automation should persist");
+        let second = storage
+            .create_automation(automation_draft(&directory, "Segunda", false, 60))
+            .await
+            .expect("second automation should persist");
+        let third = storage
+            .create_automation(automation_draft(&directory, "Terceira", false, 60))
+            .await
+            .expect("third automation should persist");
+
+        let first_run = storage
+            .claim_automation_now(first.id.clone())
+            .await
+            .expect("first run should claim");
+        assert!(
+            storage
+                .claim_automation_now(first.id)
+                .await
+                .expect_err("same automation cannot run twice")
+                .to_string()
+                .contains("already has an active run")
+        );
+        storage
+            .claim_automation_now(second.id)
+            .await
+            .expect("second run should claim");
+        assert!(
+            storage
+                .claim_automation_now(third.id.clone())
+                .await
+                .expect_err("third simultaneous run must be rejected")
+                .to_string()
+                .contains("concurrency limit")
+        );
+        storage
+            .fail_automation_run(first_run.run.id, "falha de teste".into())
+            .await
+            .expect("first run should fail");
+        storage
+            .claim_automation_now(third.id)
+            .await
+            .expect("capacity should be released by a terminal run");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completes_the_linked_automation_run_with_its_turn_transaction() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("automation-turn.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let automation = storage
+            .create_automation(automation_draft(&directory, "Executar testes", false, 60))
+            .await
+            .expect("automation should persist");
+        let claim = storage
+            .claim_automation_now(automation.id)
+            .await
+            .expect("automation should claim");
+        let project_path = directory.path().display().to_string();
+        let thread = storage
+            .create_thread(
+                project_path.clone(),
+                Some(project_path),
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("thread should persist");
+        storage
+            .attach_automation_run_thread(claim.run.id.clone(), thread.id.clone())
+            .await
+            .expect("run should link to its thread");
+        let turn = storage
+            .begin_compaction_turn(thread.id.clone(), "gpt-test".into(), None)
+            .await
+            .expect("turn should begin");
+        storage
+            .start_automation_run(claim.run.id, thread.id.clone(), turn.id.clone())
+            .await
+            .expect("run should start");
+
+        let settlement = storage
+            .complete_turn_settlement(thread.id.clone(), turn.id, TurnStatus::Completed, None)
+            .await
+            .expect("turn and automation should complete");
+        assert_eq!(settlement.turn.status, TurnStatus::Completed);
+        let run = settlement
+            .automation_run
+            .expect("linked automation run should be returned");
+        assert_eq!(run.status, AutomationRunStatus::Completed);
+        assert!(!run.reviewed);
+        assert!(run.completed_at.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovers_unfinished_automation_runs_as_interrupted_after_restart() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("automation-recovery.sqlite3");
+        let run_id = {
+            let storage = NativeStorage::default();
+            storage
+                .initialize_at(database_path.clone())
+                .await
+                .expect("storage should initialize");
+            let automation = storage
+                .create_automation(automation_draft(&directory, "Recuperar", false, 60))
+                .await
+                .expect("automation should persist");
+            storage
+                .claim_automation_now(automation.id)
+                .await
+                .expect("run should claim")
+                .run
+                .id
+        };
+
+        let reopened = NativeStorage::default();
+        reopened
+            .initialize_at(database_path)
+            .await
+            .expect("storage should recover");
+        let run = reopened
+            .read_automation_run(run_id)
+            .await
+            .expect("recovered run should load");
+        assert_eq!(run.status, AutomationRunStatus::Interrupted);
+        assert!(
+            run.error
+                .as_deref()
+                .is_some_and(|error| error.contains("application stopped"))
+        );
+        assert!(run.completed_at.is_some());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2699,6 +3834,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn migrates_schema_two_to_persistent_automations_transactionally() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("schema-two.sqlite3");
+        let mut connection = Connection::open(&database_path).expect("database should open");
+        initialize_database(&mut connection).expect("current fixture should initialize");
+        connection
+            .execute_batch(
+                "DROP TABLE automation_runs;
+                 DROP TABLE automations;
+                 PRAGMA user_version = 2;",
+            )
+            .expect("fixture should become schema two");
+        drop(connection);
+
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(database_path.clone())
+            .await
+            .expect("schema two should migrate");
+        let listed = storage
+            .list_automations()
+            .await
+            .expect("automation tables should be usable");
+        assert!(listed.data.is_empty());
+        assert!(listed.runs.is_empty());
+
+        let connection = Connection::open(database_path).expect("database should reopen");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version should be readable");
+        let automation_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name IN ('automations', 'automation_runs')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("automation tables should be readable");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+        assert_eq!(automation_tables, 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn rejects_an_incomplete_current_schema_without_repairing_it() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let database_path = directory.path().join("schema-one.sqlite3");
@@ -2782,7 +3960,9 @@ mod tests {
             .expect("legacy item should persist");
         connection
             .execute_batch(
-                "DROP TABLE output_chunks;
+                "DROP TABLE automation_runs;
+                 DROP TABLE automations;
+                 DROP TABLE output_chunks;
                  DROP TABLE output_resources;
                  PRAGMA user_version = 1;",
             )

@@ -7,15 +7,21 @@ use crate::command_validation::{
     validate_protocol_id, validate_timezone, validate_workspace,
 };
 use crate::engine::{
-    AccountProfileResponse, AccountRateLimitsResponse, AccountReadResponse, CancelLoginResponse,
-    ChatModelListResponse, ConfigUpdate, ConfigUpdateResponse, ConversationMode, EngineManager,
+    AccountProfileResponse, AccountRateLimitsResponse, AccountReadResponse, Automation,
+    AutomationListResponse, AutomationRun, CancelLoginResponse, ChatModelListResponse,
+    ConfigUpdate, ConfigUpdateResponse, ConversationMode, CreateAutomation, EngineManager,
     EngineStartResponse, LoginResponse, LogoutResponse, ModelListResponse, OperationAck,
     OutputReadResponse, ReasoningEffort, RuntimeDiagnosticSubsystem, ServerResponse, StartTurn,
     SteerTurn, ThreadCompactStartResponse, ThreadForkResponse, ThreadListResponse,
     ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse, ThreadUnarchiveResponse,
-    TurnInput, TurnStartResponse,
+    TurnInput, TurnStartResponse, UpdateAutomation,
 };
 use crate::error::{AppError, CommandError, CommandResult};
+
+const MIN_AUTOMATION_INTERVAL_MINUTES: u32 = 5;
+const MAX_AUTOMATION_INTERVAL_MINUTES: u32 = 10_080;
+const MAX_AUTOMATION_NAME_BYTES: usize = 160;
+const MAX_AUTOMATION_PROMPT_BYTES: usize = 262_144;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -135,6 +141,44 @@ pub struct CancelLoginRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeDiagnosticRequest {
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationCreateRequest {
+    name: String,
+    prompt: String,
+    project_path: Option<String>,
+    enabled: bool,
+    interval_minutes: u32,
+    timezone: String,
+    timezone_offset_min: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationUpdateRequest {
+    id: String,
+    expected_version: u64,
+    name: String,
+    prompt: String,
+    project_path: Option<String>,
+    enabled: bool,
+    interval_minutes: u32,
+    timezone: String,
+    timezone_offset_min: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationIdRequest {
+    automation_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationRunIdRequest {
+    run_id: String,
 }
 
 #[tauri::command]
@@ -424,6 +468,162 @@ pub async fn engine_turn_interrupt(
         .turn_interrupt(request.thread_id, request.turn_id)
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_automation_list(
+    engine: State<'_, EngineManager>,
+) -> CommandResult<AutomationListResponse> {
+    engine.automation_list().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_automation_create(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: AutomationCreateRequest,
+) -> CommandResult<Automation> {
+    let (name, prompt) = validate_automation_content(request.name, request.prompt)?;
+    let project_path = match request.project_path {
+        Some(path) => Some(validate_workspace(&path).await?),
+        None => None,
+    };
+    let timezone = validate_timezone(request.timezone)?;
+    validate_automation_schedule(request.interval_minutes, request.timezone_offset_min)?;
+    engine
+        .automation_create(
+            &app,
+            CreateAutomation {
+                name,
+                prompt,
+                project_path,
+                enabled: request.enabled,
+                interval_minutes: request.interval_minutes,
+                timezone,
+                timezone_offset_min: request.timezone_offset_min,
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_automation_update(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: AutomationUpdateRequest,
+) -> CommandResult<Automation> {
+    validate_protocol_id("automation id", &request.id)?;
+    let (name, prompt) = validate_automation_content(request.name, request.prompt)?;
+    let project_path = match request.project_path {
+        Some(path) => Some(validate_workspace(&path).await?),
+        None => None,
+    };
+    let timezone = validate_timezone(request.timezone)?;
+    validate_automation_schedule(request.interval_minutes, request.timezone_offset_min)?;
+    engine
+        .automation_update(
+            &app,
+            UpdateAutomation {
+                id: request.id,
+                expected_version: request.expected_version,
+                name,
+                prompt,
+                project_path,
+                enabled: request.enabled,
+                interval_minutes: request.interval_minutes,
+                timezone,
+                timezone_offset_min: request.timezone_offset_min,
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_automation_delete(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: AutomationIdRequest,
+) -> CommandResult<OperationAck> {
+    validate_protocol_id("automation id", &request.automation_id)?;
+    engine
+        .automation_delete(&app, request.automation_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_automation_run_now(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: AutomationIdRequest,
+) -> CommandResult<AutomationRun> {
+    validate_protocol_id("automation id", &request.automation_id)?;
+    engine
+        .automation_run_now(&app, request.automation_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_automation_run_mark_reviewed(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: AutomationRunIdRequest,
+) -> CommandResult<OperationAck> {
+    validate_protocol_id("automation run id", &request.run_id)?;
+    engine
+        .automation_run_mark_reviewed(&app, request.run_id)
+        .await
+        .map_err(Into::into)
+}
+
+fn validate_automation_content(name: String, prompt: String) -> CommandResult<(String, String)> {
+    let name = name.trim().to_string();
+    if name.is_empty()
+        || name.len() > MAX_AUTOMATION_NAME_BYTES
+        || name.chars().any(char::is_control)
+    {
+        return Err(AppError::Protocol(format!(
+            "automation name must contain between 1 and {MAX_AUTOMATION_NAME_BYTES} bytes without control characters"
+        ))
+        .into());
+    }
+    let prompt = prompt.trim().to_string();
+    if prompt.is_empty()
+        || prompt.len() > MAX_AUTOMATION_PROMPT_BYTES
+        || prompt
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(AppError::Protocol(format!(
+            "automation prompt must contain between 1 and {MAX_AUTOMATION_PROMPT_BYTES} bytes"
+        ))
+        .into());
+    }
+    Ok((name, prompt))
+}
+
+fn validate_automation_schedule(
+    interval_minutes: u32,
+    timezone_offset_min: i32,
+) -> CommandResult<()> {
+    if !(MIN_AUTOMATION_INTERVAL_MINUTES..=MAX_AUTOMATION_INTERVAL_MINUTES)
+        .contains(&interval_minutes)
+    {
+        return Err(AppError::Protocol(format!(
+            "automation interval must be between {MIN_AUTOMATION_INTERVAL_MINUTES} and {MAX_AUTOMATION_INTERVAL_MINUTES} minutes"
+        ))
+        .into());
+    }
+    if !(-840..=840).contains(&timezone_offset_min) {
+        return Err(AppError::Protocol(
+            "automation timezone offset must be between -840 and 840 minutes".into(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 async fn decode_turn_input(

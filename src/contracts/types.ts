@@ -10,7 +10,8 @@ export type EngineCapability =
   | "explicitApprovals"
   | "localThreads"
   | "modelStreaming"
-  | "nativeTools";
+  | "nativeTools"
+  | "scheduledAutomations";
 
 export interface RuntimeStatus {
   readonly state: RuntimeState;
@@ -42,7 +43,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 9;
+  readonly schemaVersion: 10;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -366,6 +367,52 @@ export interface OperationAck {
   readonly applied: true;
 }
 
+export interface AutomationInput {
+  readonly name: string;
+  readonly prompt: string;
+  readonly projectPath: string | null;
+  readonly enabled: boolean;
+  readonly intervalMinutes: number;
+}
+
+export interface Automation {
+  readonly id: string;
+  readonly name: string;
+  readonly prompt: string;
+  readonly projectPath: string | null;
+  readonly enabled: boolean;
+  readonly intervalMinutes: number;
+  readonly timezone: string;
+  readonly timezoneOffsetMin: number;
+  readonly nextRunAt: number | null;
+  readonly lastRunAt: number | null;
+  readonly version: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export type AutomationRunTrigger = "manual" | "scheduled";
+export type AutomationRunStatus = "completed" | "failed" | "interrupted" | "queued" | "running";
+
+export interface AutomationRun {
+  readonly id: string;
+  readonly automationId: string;
+  readonly trigger: AutomationRunTrigger;
+  readonly status: AutomationRunStatus;
+  readonly threadId: string | null;
+  readonly turnId: string | null;
+  readonly error: string | null;
+  readonly reviewed: boolean;
+  readonly createdAt: number;
+  readonly startedAt: number | null;
+  readonly completedAt: number | null;
+}
+
+export interface AutomationListResponse {
+  readonly data: readonly Automation[];
+  readonly runs: readonly AutomationRun[];
+}
+
 export type WebSearchMode = "disabled" | "live";
 export type ModelVerbosity = "high" | "low" | "medium";
 export type Personality = "friendly" | "none" | "pragmatic";
@@ -604,7 +651,25 @@ export interface ModelSafetyBufferingUpdatedNotification {
   };
 }
 
+export interface AutomationChangedNotification {
+  readonly method: "automation.changed";
+  readonly params: { readonly automation: Automation };
+}
+
+export interface AutomationDeletedNotification {
+  readonly method: "automation.deleted";
+  readonly params: { readonly automationId: string };
+}
+
+export interface AutomationRunUpdatedNotification {
+  readonly method: "automation.runUpdated";
+  readonly params: { readonly run: AutomationRun };
+}
+
 export type EngineNotification =
+  | AutomationChangedNotification
+  | AutomationDeletedNotification
+  | AutomationRunUpdatedNotification
   | AuthLoginCompletedNotification
   | AuthSessionChangedNotification
   | ItemNotification

@@ -9,12 +9,44 @@ import { fileURLToPath } from "node:url";
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VITE_ENTRY = path.join(PROJECT_ROOT, "node_modules", "vite", "bin", "vite.js");
 const PREVIEW_PORT = 1420;
-const PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=general`;
+const SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=general`;
+const AUTOMATIONS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&surface=automations`;
 const ARTIFACT_DIRECTORY = path.join(PROJECT_ROOT, ".freebuff", "visual-audit");
 const VIEWPORTS = [
   { width: 920, height: 640 },
   { width: 1280, height: 820 },
   { width: 1920, height: 1080 },
+];
+const SCENARIOS = [
+  {
+    id: "settings",
+    url: SETTINGS_PREVIEW_URL,
+    readyExpression: `document.querySelector(".settings-dialog") !== null &&
+      document.querySelector(".window-chrome-controls") !== null &&
+      document.querySelectorAll(".application-preference").length === 3`,
+    auditExpression: settingsVisualAuditExpression,
+    validate: validateSettingsMetrics,
+  },
+  {
+    id: "automations",
+    url: AUTOMATIONS_PREVIEW_URL,
+    readyExpression: `document.querySelector(".automations-view") !== null &&
+      document.querySelector(".automation-card") !== null &&
+      document.querySelector(".automation-run-row") !== null &&
+      document.querySelector(".window-chrome-controls") !== null`,
+    auditExpression: automationsVisualAuditExpression,
+    validate: validateAutomationsMetrics,
+  },
+  {
+    id: "automation-editor",
+    url: AUTOMATIONS_PREVIEW_URL,
+    readyExpression: `document.querySelector(".automation-editor") !== null`,
+    prepareExpression: `document.querySelector(".automations-header .automation-primary-button")?.click()`,
+    initialReadyExpression: `document.querySelector(".automations-view") !== null &&
+      document.querySelector(".automations-header .automation-primary-button") !== null`,
+    auditExpression: automationEditorVisualAuditExpression,
+    validate: validateAutomationEditorMetrics,
+  },
 ];
 
 async function main() {
@@ -35,7 +67,7 @@ async function main() {
   let browserController;
 
   try {
-    await waitForHttp(PREVIEW_URL, server, serverOutput);
+    await waitForHttp(SETTINGS_PREVIEW_URL, server, serverOutput);
     browser = spawn(
       browserPath,
       [
@@ -68,8 +100,10 @@ async function main() {
     await mkdir(ARTIFACT_DIRECTORY, { recursive: true });
 
     const reports = [];
-    for (const viewport of VIEWPORTS) {
-      reports.push(await auditViewport(debugPort, viewport));
+    for (const scenario of SCENARIOS) {
+      for (const viewport of VIEWPORTS) {
+        reports.push(await auditViewport(debugPort, viewport, scenario));
+      }
     }
 
     process.stdout.write(`${JSON.stringify({ browserPath, reports }, null, 2)}\n`);
@@ -93,7 +127,7 @@ async function main() {
   }
 }
 
-async function auditViewport(debugPort, viewport) {
+async function auditViewport(debugPort, viewport, scenario) {
   const target = await fetchJson(
     `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent("about:blank")}`,
     { method: "PUT" },
@@ -109,9 +143,17 @@ async function auditViewport(debugPort, viewport) {
       mobile: false,
     });
     const loaded = client.waitForEvent("Page.loadEventFired");
-    await client.send("Page.navigate", { url: PREVIEW_URL });
+    await client.send("Page.navigate", { url: scenario.url });
     await loaded;
-    await waitForPreview(client);
+    await waitForPreview(
+      client,
+      scenario.initialReadyExpression ?? scenario.readyExpression,
+      scenario.id,
+    );
+    if (scenario.prepareExpression !== undefined) {
+      await client.evaluate(scenario.prepareExpression, false);
+      await waitForPreview(client, scenario.readyExpression, scenario.id);
+    }
     await client.evaluate(
       `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(async () => {
         await document.fonts.ready;
@@ -120,8 +162,8 @@ async function auditViewport(debugPort, viewport) {
       true,
     );
 
-    const metrics = await client.evaluate(visualAuditExpression(), false);
-    validateMetrics(metrics, viewport);
+    const metrics = await client.evaluate(scenario.auditExpression(), false);
+    scenario.validate(metrics, viewport);
     const screenshot = await client.send("Page.captureScreenshot", {
       format: "png",
       fromSurface: true,
@@ -129,10 +171,10 @@ async function auditViewport(debugPort, viewport) {
     });
     const screenshotPath = path.join(
       ARTIFACT_DIRECTORY,
-      `settings-${viewport.width}x${viewport.height}.png`,
+      `${scenario.id}-${viewport.width}x${viewport.height}.png`,
     );
     await writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
-    return { viewport, screenshotPath, metrics };
+    return { scenario: scenario.id, viewport, screenshotPath, metrics };
   } finally {
     client.close();
     await fetch(
@@ -141,14 +183,11 @@ async function auditViewport(debugPort, viewport) {
   }
 }
 
-async function waitForPreview(client) {
+async function waitForPreview(client, readyExpression, scenarioId) {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const ready = await client.evaluate(
-      `document.readyState === "complete" &&
-        document.querySelector(".settings-dialog") !== null &&
-        document.querySelector(".window-chrome-controls") !== null &&
-        document.querySelectorAll(".application-preference").length === 3`,
+      `document.readyState === "complete" && (${readyExpression})`,
       false,
     );
     if (ready === true) {
@@ -156,10 +195,10 @@ async function waitForPreview(client) {
     }
     await delay(50);
   }
-  throw new Error("A prévia visual não ficou pronta dentro de 15 segundos.");
+  throw new Error(`A prévia visual de ${scenarioId} não ficou pronta dentro de 15 segundos.`);
 }
 
-function visualAuditExpression() {
+function settingsVisualAuditExpression() {
   return `(() => {
     const rectangle = (selector) => {
       const element = document.querySelector(selector);
@@ -217,7 +256,177 @@ function visualAuditExpression() {
   })()`;
 }
 
-function validateMetrics(metrics, viewport) {
+function automationsVisualAuditExpression() {
+  return `(() => {
+    const rectangle = (selector) => {
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Elemento ausente: " + selector);
+      }
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+        display: style.display,
+        visibility: style.visibility,
+        fontSize: style.fontSize,
+      };
+    };
+    const chrome = rectangle(".window-chrome");
+    const content = rectangle(".application-frame-content");
+    const controls = rectangle(".window-chrome-controls");
+    const surface = rectangle(".automations-view");
+    const header = rectangle(".automations-header");
+    const heading = rectangle(".automations-header h1");
+    const notice = rectangle(".automation-local-notice");
+    const card = rectangle(".automation-card");
+    const surfaceElement = document.querySelector(".automations-view");
+    if (!(surfaceElement instanceof HTMLElement)) {
+      throw new Error("Superfície de Automações ausente.");
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      chrome,
+      content,
+      controls,
+      surface,
+      header,
+      heading,
+      notice,
+      card,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      surfaceHorizontalOverflow: surfaceElement.scrollWidth - surfaceElement.clientWidth,
+      activeNavigationItems: document.querySelectorAll(
+        '.automation-nav-button[aria-current="page"]',
+      ).length,
+      unreadBadges: document.querySelectorAll(".sidebar-automation-badge").length,
+      automationCards: document.querySelectorAll(".automation-card").length,
+      runRows: document.querySelectorAll(".automation-run-row").length,
+      primaryButtons: document.querySelectorAll(".automations-header .automation-primary-button").length,
+    };
+  })()`;
+}
+
+function automationEditorVisualAuditExpression() {
+  return `(() => {
+    const rectangle = (selector) => {
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Elemento ausente: " + selector);
+      }
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+        display: style.display,
+        visibility: style.visibility,
+        fontSize: style.fontSize,
+      };
+    };
+    const chrome = rectangle(".window-chrome");
+    const content = rectangle(".application-frame-content");
+    const controls = rectangle(".window-chrome-controls");
+    const backdrop = rectangle(".automation-editor-backdrop");
+    const editor = rectangle(".automation-editor");
+    const heading = rectangle(".automation-editor h2");
+    const prompt = rectangle(".automation-editor textarea");
+    const editorElement = document.querySelector(".automation-editor");
+    const switchElement = document.querySelector('.automation-enabled-field input[role="switch"]');
+    if (!(editorElement instanceof HTMLElement) || !(switchElement instanceof HTMLInputElement)) {
+      throw new Error("Controles do editor de Automação ausentes.");
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      chrome,
+      content,
+      controls,
+      backdrop,
+      editor,
+      heading,
+      prompt,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      editorHorizontalOverflow: editorElement.scrollWidth - editorElement.clientWidth,
+      dialogCount: document.querySelectorAll('.automation-editor[role="dialog"][aria-modal="true"]').length,
+      namedFields: document.querySelectorAll(".automation-editor input, .automation-editor textarea, .automation-editor select").length,
+      footerButtons: document.querySelectorAll(".automation-editor footer button").length,
+      switchAriaChecked: switchElement.getAttribute("aria-checked"),
+    };
+  })()`;
+}
+
+function validateSettingsMetrics(metrics, viewport) {
+  const tolerance = 1;
+  validateChromeMetrics(metrics, viewport);
+  assert(metrics.chromeOverlapsSettings === false, "as configurações cobrem o titlebar");
+  assert(metrics.horizontalOverflow <= tolerance, "a página possui overflow horizontal");
+  assert(metrics.navigation.width >= 248, "a navegação de configurações ficou estreita");
+  assert(metrics.main.width >= 600, "o painel principal de configurações ficou estreito");
+  assert(metrics.page.width >= 500, "o conteúdo de configurações ficou excessivamente estreito");
+  assert(Number.parseFloat(metrics.heading.fontSize) >= 21, "o título ficou pequeno demais");
+  assert(Number.parseFloat(metrics.firstRowLabel.fontSize) >= 11, "os rótulos ficaram pequenos");
+  assert(metrics.switchCount === 3, "os três controles booleanos não foram renderizados");
+  assert(metrics.visibleCards >= 2, "menos de dois cartões de configurações estão visíveis");
+}
+
+function validateAutomationsMetrics(metrics, viewport) {
+  const tolerance = 1;
+  validateChromeMetrics(metrics, viewport);
+  assert(metrics.horizontalOverflow <= tolerance, "Automações possui overflow horizontal global");
+  assert(
+    metrics.surfaceHorizontalOverflow <= tolerance,
+    "a superfície de Automações possui overflow horizontal",
+  );
+  assert(
+    Math.abs(metrics.surface.top - metrics.content.top) <= tolerance,
+    "Automações não começa no topo do conteúdo",
+  );
+  assert(metrics.surface.width > 500, "a superfície de Automações ficou estreita");
+  assert(metrics.header.width <= metrics.surface.width, "o cabeçalho ultrapassa a superfície");
+  assert(metrics.notice.width <= metrics.surface.width, "o aviso local ultrapassa a superfície");
+  assert(metrics.card.left >= metrics.surface.left, "o cartão ultrapassa a borda esquerda");
+  assert(metrics.card.right <= metrics.surface.right + tolerance, "o cartão ultrapassa a borda direita");
+  assert(Number.parseFloat(metrics.heading.fontSize) >= 21, "o título de Automações ficou pequeno");
+  assert(metrics.activeNavigationItems === 1, "a navegação não marca Automações como ativa");
+  assert(metrics.unreadBadges === 1, "o badge de resultados não revisados não foi renderizado");
+  assert(metrics.automationCards >= 1, "nenhum cartão de Automação foi renderizado");
+  assert(metrics.runRows >= 2, "fila e histórico não renderizaram as execuções");
+  assert(metrics.primaryButtons === 1, "o botão principal de nova Automação está ausente");
+}
+
+function validateAutomationEditorMetrics(metrics, viewport) {
+  const tolerance = 1;
+  validateChromeMetrics(metrics, viewport);
+  assert(metrics.horizontalOverflow <= tolerance, "o editor possui overflow horizontal global");
+  assert(
+    metrics.editorHorizontalOverflow <= tolerance,
+    "o conteúdo do editor possui overflow horizontal",
+  );
+  assert(
+    Math.abs(metrics.backdrop.top - metrics.content.top) <= tolerance,
+    "o backdrop do editor cobre ou se afasta do início do conteúdo",
+  );
+  assert(metrics.editor.top >= metrics.content.top, "o editor ficou acima do conteúdo");
+  assert(metrics.editor.bottom <= viewport.height + tolerance, "o editor ultrapassa o viewport");
+  assert(metrics.editor.width >= 500, "o editor ficou excessivamente estreito");
+  assert(Number.parseFloat(metrics.heading.fontSize) >= 17, "o título do editor ficou pequeno");
+  assert(metrics.prompt.height >= 150, "o campo de instruções ficou baixo demais");
+  assert(metrics.dialogCount === 1, "o editor não expõe um único diálogo modal");
+  assert(metrics.namedFields >= 6, "os campos essenciais do editor não foram renderizados");
+  assert(metrics.footerButtons === 2, "as ações de cancelar e salvar não foram renderizadas");
+  assert(metrics.switchAriaChecked === "true", "o switch inicial não expõe aria-checked");
+}
+
+function validateChromeMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
@@ -229,21 +438,12 @@ function validateMetrics(metrics, viewport) {
     Math.abs(metrics.content.top - metrics.chrome.bottom) <= tolerance,
     "o conteúdo não começa imediatamente abaixo do titlebar",
   );
-  assert(metrics.chromeOverlapsSettings === false, "as configurações cobrem o titlebar");
   assert(metrics.controls.top >= 0, "os controles da janela ficaram acima do viewport");
   assert(
     metrics.controls.right <= viewport.width + tolerance,
     "os controles da janela ultrapassam a borda direita",
   );
   assert(metrics.controls.width >= 138, "a área dos controles da janela ficou estreita");
-  assert(metrics.horizontalOverflow <= tolerance, "a página possui overflow horizontal");
-  assert(metrics.navigation.width >= 248, "a navegação de configurações ficou estreita");
-  assert(metrics.main.width >= 600, "o painel principal de configurações ficou estreito");
-  assert(metrics.page.width >= 500, "o conteúdo de configurações ficou excessivamente estreito");
-  assert(Number.parseFloat(metrics.heading.fontSize) >= 21, "o título ficou pequeno demais");
-  assert(Number.parseFloat(metrics.firstRowLabel.fontSize) >= 11, "os rótulos ficaram pequenos");
-  assert(metrics.switchCount === 3, "os três controles booleanos não foram renderizados");
-  assert(metrics.visibleCards >= 2, "menos de dois cartões de configurações estão visíveis");
 }
 
 function assert(condition, message) {

@@ -6,6 +6,8 @@ import {
   decodeAccountReadResponse,
   decodeApplicationPreferences,
   decodeAttachmentImageResponse,
+  decodeAutomationListResponse,
+  decodeAutomationRun,
   decodeChatModelListResponse,
   decodeEngineNotification,
   decodeEngineStartResponse,
@@ -143,9 +145,10 @@ describe("decodificação dos contratos nativos", () => {
           "modelStreaming",
           "nativeTools",
           "explicitApprovals",
+          "scheduledAutomations",
         ],
       },
-      schemaVersion: 9,
+      schemaVersion: 10,
       config: configFixture(),
       diagnosticLogPath: "C:\\Users\\Bruno\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
@@ -172,7 +175,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 9,
+        schemaVersion: 10,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",
@@ -181,6 +184,72 @@ describe("decodificação dos contratos nativos", () => {
         permissionProfiles: [],
       }),
     ).toThrow(ContractError);
+  });
+
+  it("valida snapshots completos de Automações", () => {
+    const decoded = decodeAutomationListResponse({
+      data: [automationFixture()],
+      runs: [automationRunFixture()],
+    });
+
+    expect(decoded.data[0]?.intervalMinutes).toBe(60);
+    expect(decoded.runs[0]).toMatchObject({
+      status: "completed",
+      reviewed: false,
+    });
+    expect(() =>
+      decodeAutomationListResponse({
+        data: [automationFixture({ nextRunAt: null })],
+        runs: [],
+      }),
+    ).toThrow("enabled automations require a nextRunAt timestamp");
+  });
+
+  it("rejeita estados impossíveis de execuções automatizadas", () => {
+    expect(() =>
+      decodeAutomationRun(
+        automationRunFixture({
+          status: "running",
+          completedAt: null,
+          startedAt: null,
+        }),
+      ),
+    ).toThrow("running automation runs require startedAt");
+    expect(() =>
+      decodeAutomationRun(
+        automationRunFixture({
+          status: "queued",
+          completedAt: null,
+          startedAt: 1_010,
+        }),
+      ),
+    ).toThrow("queued automation runs cannot contain startedAt");
+    expect(() =>
+      decodeAutomationRun(
+        automationRunFixture({
+          status: "failed",
+          error: null,
+        }),
+      ),
+    ).toThrow("failed automation runs require an error");
+    expect(() =>
+      decodeAutomationRun(
+        automationRunFixture({
+          completedAt: 1_005,
+          startedAt: 1_010,
+        }),
+      ),
+    ).toThrow("automation completedAt must not precede startedAt");
+    expect(() =>
+      decodeAutomationRun(
+        automationRunFixture({
+          status: "queued",
+          completedAt: null,
+          reviewed: true,
+          startedAt: null,
+        }),
+      ),
+    ).toThrow("active automation runs cannot be reviewed");
   });
 
   it("valida a coerência semântica do catálogo de modelos", () => {
@@ -640,3 +709,39 @@ describe("decodificação dos contratos nativos", () => {
     ).toThrow("turn updatedAt must not precede createdAt");
   });
 });
+
+function automationFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "automation-1",
+    name: "Revisar projeto",
+    prompt: "Revise o projeto e execute os testes.",
+    projectPath: "C:\\workspace\\codex-app",
+    enabled: true,
+    intervalMinutes: 60,
+    timezone: "America/Sao_Paulo",
+    timezoneOffsetMin: 180,
+    nextRunAt: 4_600,
+    lastRunAt: 1_000,
+    version: 1,
+    createdAt: 1_000,
+    updatedAt: 1_100,
+    ...overrides,
+  };
+}
+
+function automationRunFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "automation-run-1",
+    automationId: "automation-1",
+    trigger: "scheduled",
+    status: "completed",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    error: null,
+    reviewed: false,
+    createdAt: 1_000,
+    startedAt: 1_010,
+    completedAt: 1_100,
+    ...overrides,
+  };
+}

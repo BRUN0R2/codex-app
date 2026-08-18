@@ -6,6 +6,7 @@ import { isBrowserPreview } from "../platform/DesktopRuntime";
 import type { AppController } from "../state/appController";
 
 import { ApprovalCard } from "./ApprovalCard";
+import { AutomationsView } from "./AutomationsView";
 import { applyDesktopAppearance } from "./appearance";
 import { Composer, type ComposerDraftRequest } from "./Composer";
 import { formatShortDate } from "./dateFormat";
@@ -20,10 +21,12 @@ import { Timeline } from "./Timeline";
 
 export function AppShell(props: { readonly controller: AppController }) {
   const previewSettingsPage = readPreviewSettingsPage();
+  const previewSurface = readPreviewSurface();
   const [settingsOpen, setSettingsOpen] = createSignal(previewSettingsPage !== null);
   const [settingsPage, setSettingsPage] = createSignal<SettingsPage | null>(previewSettingsPage);
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
   const [reviewOpen, setReviewOpen] = createSignal(false);
+  const [activeSurface, setActiveSurface] = createSignal<"automations" | "chat">(previewSurface);
   const reviewChangeStore = new LatestTurnFileChangeStore();
   const reviewChanges = createMemo(() =>
     reviewChangeStore.project(props.controller.turns(), props.controller.activeTurnId()),
@@ -99,7 +102,10 @@ export function AppShell(props: { readonly controller: AppController }) {
       scheduleChatDockInset();
     }
     const unlisteners = [
-      listen("menu:new-thread", () => props.controller.newThread()),
+      listen("menu:new-thread", () => {
+        setActiveSurface("chat");
+        props.controller.newThread();
+      }),
       listen("menu:settings", () => openSettings()),
       listen("menu:toggle-sidebar", () => setSidebarCollapsed((value) => !value)),
     ];
@@ -132,13 +138,19 @@ export function AppShell(props: { readonly controller: AppController }) {
       }}
     >
       <Sidebar
+        automationsActive={activeSurface() === "automations"}
         collapsed={sidebarCollapsed()}
         controller={props.controller}
         inert={settingsOpen()}
+        onOpenAutomations={() => {
+          setReviewOpen(false);
+          setActiveSurface("automations");
+        }}
         onOpenSettings={openSettings}
+        onShowChat={() => setActiveSurface("chat")}
       />
       <main class="main-panel" inert={settingsOpen()}>
-        <Show when={props.controller.product() === "chatgpt"}>
+        <Show when={activeSurface() === "chat" && props.controller.product() === "chatgpt"}>
           <HomeComposerModeToggle
             mode={props.controller.chatGptMode()}
             onChange={(mode) => void props.controller.selectChatGptMode(mode)}
@@ -154,6 +166,7 @@ export function AppShell(props: { readonly controller: AppController }) {
                 props.controller.currentThread() === null,
               "work-surface": props.controller.conversationMode() === "work",
             }}
+            hidden={activeSurface() !== "chat"}
             ref={chatPageElement}
           >
             <Timeline controller={props.controller} onSelectSuggestion={requestDraft} />
@@ -183,7 +196,14 @@ export function AppShell(props: { readonly controller: AppController }) {
               />
             </div>
           </section>
-          <Show when={reviewOpen() && reviewChanges().length > 0}>
+          <Show when={activeSurface() === "automations"}>
+            <AutomationsView
+              controller={props.controller}
+              onOpenSettings={() => openSettings("general")}
+              onShowChat={() => setActiveSurface("chat")}
+            />
+          </Show>
+          <Show when={activeSurface() === "chat" && reviewOpen() && reviewChanges().length > 0}>
             <ReviewPanel
               changes={reviewChanges()}
               mode={props.controller.config()?.config.desktop.diffDisplay ?? "unified"}
@@ -236,6 +256,15 @@ function readPreviewSettingsPage(): SettingsPage | null {
   return requestedPage !== null && SETTINGS_PAGES.has(requestedPage as SettingsPage)
     ? (requestedPage as SettingsPage)
     : null;
+}
+
+function readPreviewSurface(): "automations" | "chat" {
+  if (!import.meta.env.DEV || !isBrowserPreview()) {
+    return "chat";
+  }
+  return new URLSearchParams(window.location.search).get("surface") === "automations"
+    ? "automations"
+    : "chat";
 }
 
 function UsageLimitBanner(props: { readonly controller: AppController }) {
