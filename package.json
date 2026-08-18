@@ -42,6 +42,7 @@
     "measure:search": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::tools::fs::tests::benchmark_ripgrep_against_previous_scanner -- --ignored --nocapture --test-threads=1",
     "measure:soak": "node --experimental-strip-types scripts/measure-soak.ts",
     "measure:streaming": "node --experimental-strip-types scripts/measure-streaming.ts",
+    "measure:tool-output": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::output_compaction::tests::benchmark_provider_output_reduction -- --ignored --nocapture --test-threads=1",
     "format:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --all",
     "tauri": "tauri"
   },

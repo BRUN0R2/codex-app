@@ -86,6 +86,17 @@ impl OutputSource {
         )
     }
 
+    pub fn provider_output_with_preview(&self, preview: &str, complete: bool) -> String {
+        if complete {
+            return preview.to_string();
+        }
+        let separator = if preview.is_empty() { "" } else { "\n\n" };
+        format!(
+            "{preview}{separator}[Full output stored as `{}` ({} UTF-8 bytes). Use the `read_output` tool with this output_id and cursor `null`; follow each next_cursor until it is null.]",
+            self.reference.id, self.reference.byte_length
+        )
+    }
+
     pub fn into_reader(mut self) -> io::Result<Box<dyn Read + Send>> {
         match &mut self.content {
             OutputContent::File(file) => {

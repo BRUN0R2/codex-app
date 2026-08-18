@@ -8,6 +8,7 @@ mod content_references;
 mod context_window;
 mod diagnostics;
 mod output;
+mod output_compaction;
 mod provider;
 mod storage;
 mod stream_notifications;

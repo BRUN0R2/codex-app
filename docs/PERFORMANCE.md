@@ -162,6 +162,29 @@ caminhos retornam o mesmo resultado vazio. Ele mede varredura local aquecida e
 inclui a criação do processo `rg`; não representa busca fria em disco, indexação
 semântica, latência do provider ou tempo até o primeiro token.
 
+#### Compactação de saídas de ferramentas — 18 de agosto de 2026
+
+Saídas extensas de `read_file`, `list_files`, `search_text` e comandos agora são
+compactadas antes de entrar no próximo request do provider. O algoritmo mantém o
+início, o fim e linhas prioritárias da região omitida; em comandos com falha,
+reserva mais espaço para `stderr`. O conteúdo integral continua persistido em
+blocos SQLite de 64 KiB e pode ser percorrido sem compactação por `read_output`.
+
+`pnpm measure:tool-output` gera deterministicamente 40.000 linhas e 2.439.995
+bytes, incluindo uma falha representativa no centro. Em perfil release, a
+prévia final enviada ao provider mediu 6.494 bytes e levou 12,6204 ms para ser
+produzida:
+
+| Dimensão | Original | Prévia atual | Redução |
+| --- | ---: | ---: | ---: |
+| bytes UTF-8 | 2.439.995 | 6.494 | 99,7339% |
+| linhas originais | 40.000 | — | — |
+
+O teste também exige que a linha de falha e o identificador do recurso integral
+permaneçam presentes. A porcentagem acima mede bytes, não tokens: a economia
+exata de tokens depende do tokenizer e do conteúdo. Também não representa
+latência de rede ou do modelo.
+
 #### Benchmark da conversa de referência — 16 de agosto de 2026
 
 `pnpm measure:history` reproduz 741 turnos, 15.529 itens de transcript e 231 MiB

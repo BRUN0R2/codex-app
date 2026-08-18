@@ -11,6 +11,7 @@ use super::apply_patch::plan::{prepare_patch, preview_changes};
 use super::apply_patch::transaction::{PatchOutcome, commit_patch};
 use super::approval::ApprovalBroker;
 use super::output::OutputSource;
+use super::output_compaction::{TextOutputKind, compact_command_output, compact_text};
 use super::storage::NativeStorage;
 use super::text::{truncate_utf8, truncate_utf8_marked};
 use crate::engine::{
@@ -531,16 +532,27 @@ impl PreparedTool {
             )
             .await
             .map(ToolResult::Patch),
-            ToolOperation::ReadFile(args) => read_file(&workspace, args)
-                .await
-                .map(|output| ToolResult::StoredOutput(StoredToolOutput::Text(output))),
-            ToolOperation::ListFiles(args) => list_files(&workspace, args)
-                .await
-                .map(|output| ToolResult::StoredOutput(StoredToolOutput::Text(output))),
+            ToolOperation::ReadFile(args) => read_file(&workspace, args).await.map(|output| {
+                ToolResult::StoredOutput(StoredToolOutput::Text {
+                    output,
+                    kind: TextOutputKind::ReadFile,
+                })
+            }),
+            ToolOperation::ListFiles(args) => list_files(&workspace, args).await.map(|output| {
+                ToolResult::StoredOutput(StoredToolOutput::Text {
+                    output,
+                    kind: TextOutputKind::ListFiles,
+                })
+            }),
             ToolOperation::SearchText(args) => {
                 search_text(context.ripgrep, &workspace, args, cancellation)
                     .await
-                    .map(|output| ToolResult::StoredOutput(StoredToolOutput::Text(output)))
+                    .map(|output| {
+                        ToolResult::StoredOutput(StoredToolOutput::Text {
+                            output,
+                            kind: TextOutputKind::SearchText,
+                        })
+                    })
             }
             ToolOperation::ReadOutput(args) => context
                 .storage
@@ -780,7 +792,10 @@ enum ToolResult {
 }
 
 enum StoredToolOutput {
-    Text(String),
+    Text {
+        output: String,
+        kind: TextOutputKind,
+    },
     OutputPage(String),
     Command(CommandOutput),
 }
@@ -788,9 +803,11 @@ enum StoredToolOutput {
 impl StoredToolOutput {
     async fn into_output(self) -> Result<(OutputSource, String, Option<i32>), AppError> {
         match self {
-            Self::Text(output) => {
+            Self::Text { output, kind } => {
+                let compacted = compact_text(&output, kind);
                 let source = OutputSource::text(output);
-                let provider_output = source.provider_output();
+                let provider_output =
+                    source.provider_output_with_preview(&compacted.text, compacted.complete);
                 Ok((source, provider_output, None))
             }
             Self::OutputPage(output) => {
@@ -799,13 +816,18 @@ impl StoredToolOutput {
             }
             Self::Command(output) => {
                 let exit_code = output.exit_code;
-                let source = tokio::task::spawn_blocking(move || {
-                    OutputSource::command(exit_code, output.stdout, output.stderr)
+                let (source, provider_output) = tokio::task::spawn_blocking(move || {
+                    let mut stdout = output.stdout;
+                    let mut stderr = output.stderr;
+                    let compacted = compact_command_output(exit_code, &mut stdout, &mut stderr)?;
+                    let source = OutputSource::command(exit_code, stdout, stderr)?;
+                    let provider_output =
+                        source.provider_output_with_preview(&compacted.text, compacted.complete);
+                    Ok::<_, std::io::Error>((source, provider_output))
                 })
                 .await
                 .map_err(|error| AppError::Tool(format!("output spool task failed: {error}")))?
                 .map_err(|error| AppError::Tool(format!("could not assemble output: {error}")))?;
-                let provider_output = source.provider_output();
                 Ok((source, provider_output, Some(exit_code)))
             }
         }
@@ -948,6 +970,7 @@ mod tests {
     use crate::engine::{ActivityStatus, PermissionProfile, PlanStepStatus, ThreadItem};
     use crate::error::AppError;
 
+    use super::super::output_compaction::TextOutputKind;
     use super::fs::atomic_write;
     use super::workspace::resolve_write_target;
     use super::{
@@ -975,13 +998,17 @@ mod tests {
     async fn externalizes_tool_output_instead_of_rejecting_it() {
         let output = "x".repeat(2 * 1_048_576);
 
-        let (source, provider_output, exit_code) = StoredToolOutput::Text(output.clone())
-            .into_output()
-            .await
-            .expect("large tool output should remain available as a resource");
+        let (source, provider_output, exit_code) = StoredToolOutput::Text {
+            output: output.clone(),
+            kind: TextOutputKind::ReadFile,
+        }
+        .into_output()
+        .await
+        .expect("large tool output should remain available as a resource");
 
         assert_eq!(source.reference().byte_length, output.len() as u64);
         assert!(provider_output.contains(&source.reference().id));
+        assert!(provider_output.len() < 12 * 1_024);
         assert_eq!(exit_code, None);
     }
 
