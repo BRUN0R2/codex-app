@@ -21,6 +21,7 @@ export interface MeasurementBatch {
 export class VariableSizeVirtualizer {
   readonly #estimate: number;
   #keys: readonly string[] = [];
+  #sourceKeys: readonly string[] | null = null;
   #indexByKey = new Map<string, number>();
   #measuredByKey = new Map<string, number>();
   #sizes = new Float64Array(0);
@@ -34,7 +35,11 @@ export class VariableSizeVirtualizer {
   }
 
   setKeys(keys: readonly string[]): boolean {
+    if (this.#sourceKeys === keys) {
+      return false;
+    }
     if (sameKeys(this.#keys, keys)) {
+      this.#sourceKeys = keys;
       return false;
     }
     const unique = new Set(keys);
@@ -47,6 +52,7 @@ export class VariableSizeVirtualizer {
       }
     }
     this.#keys = [...keys];
+    this.#sourceKeys = keys;
     this.#indexByKey = new Map(keys.map((key, index) => [key, index]));
     this.#sizes = Float64Array.from(keys, (key) => this.#measuredByKey.get(key) ?? this.#estimate);
     this.#tree = new Float64Array(keys.length + 1);

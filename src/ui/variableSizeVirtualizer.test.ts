@@ -21,6 +21,20 @@ describe("variable-size timeline virtualizer", () => {
     expect(virtualizer.totalSize()).toBe(550);
   });
 
+  it("reuses immutable key sources without rebuilding preserved measurements", () => {
+    const virtualizer = new VariableSizeVirtualizer(100);
+    const keys = ["a", "b"] as const;
+
+    expect(virtualizer.setKeys(keys)).toBe(true);
+    virtualizer.measure("a", 240);
+    expect(virtualizer.setKeys(keys)).toBe(false);
+
+    const equivalentKeys = [...keys];
+    expect(virtualizer.setKeys(equivalentKeys)).toBe(false);
+    expect(virtualizer.setKeys(equivalentKeys)).toBe(false);
+    expect(virtualizer.totalSize()).toBe(340);
+  });
+
   it("normalizes fractional DOM measurements to stable whole-pixel offsets", () => {
     const virtualizer = new VariableSizeVirtualizer(100);
     virtualizer.setKeys(["a", "b"]);

@@ -388,7 +388,10 @@ export function Timeline(props: {
     return timelineTransitionRevision;
   }
 
-  function activateTimelineThread(threadId: string | null, keys: readonly string[]): void {
+  function activateTimelineThread(
+    threadId: string | null,
+    persistedTurns: readonly VisibleThreadTurn[],
+  ): void {
     saveActiveTimelineViewport();
     const transitionRevision = cancelPendingTimelineWork();
     activeTimelineThreadId = threadId;
@@ -402,7 +405,8 @@ export function Timeline(props: {
     });
 
     const viewportSize = Math.max(1, scrollElement?.clientHeight ?? 1);
-    const session = threadId === null ? null : timelineSessions.activate(threadId, keys);
+    const session =
+      threadId === null ? null : timelineSessions.activate(threadId, persistedTurns).session;
     virtualizer =
       session?.virtualizer ?? new VariableSizeVirtualizer(TIMELINE_ESTIMATED_TURN_HEIGHT);
     const following = session?.followingLatest ?? true;
@@ -764,15 +768,12 @@ export function Timeline(props: {
 
   createEffect(() => {
     const threadId = props.controller.currentThread()?.id ?? null;
-    const keys =
-      threadId === null
-        ? []
-        : props.controller.persistedTurns().map((turn) => `${threadId}\u0000${turn.id}`);
+    const persistedTurns = props.controller.persistedTurns();
     if (activeTimelineThreadId !== threadId) {
-      activateTimelineThread(threadId, keys);
+      activateTimelineThread(threadId, persistedTurns);
       return;
     }
-    if (virtualizer.setKeys(keys)) {
+    if (threadId !== null && timelineSessions.activate(threadId, persistedTurns).keysChanged) {
       setVirtualRevision((revision) => revision + 1);
       scheduleTimelineFrame(false, false);
     }

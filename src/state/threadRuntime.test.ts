@@ -91,6 +91,20 @@ describe("thread runtime reducer", () => {
     expect(turns.at(0)?.createdAt).toBe(1);
   });
 
+  it("reuses persisted turn projections until the immutable turn source changes", () => {
+    const thread = threadFixture("completed");
+    const first = readPersistedVisibleTurns(thread);
+    const metadataOnly = readPersistedVisibleTurns({ ...thread, updatedAt: thread.updatedAt + 1 });
+    const changedTurns = readPersistedVisibleTurns({
+      ...thread,
+      turns: [...thread.turns],
+    });
+
+    expect(metadataOnly).toBe(first);
+    expect(changedTurns).not.toBe(first);
+    expect(changedTurns).toEqual(first);
+  });
+
   it("selects only the latest plan from the active turn", () => {
     const thread = threadFixture("inProgress");
     const turns = mergeRuntimeThreadItems(

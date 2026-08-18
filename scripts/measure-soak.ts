@@ -48,24 +48,24 @@ const timelineSessions = new TimelineThreadSessionStore(
   () => new VariableSizeVirtualizer(ESTIMATED_TURN_HEIGHT),
   16,
 );
-const timelineSessionKeys = Array.from({ length: TIMELINE_SESSION_COUNT }, (_, sessionIndex) =>
+const timelineSessionTurns = Array.from({ length: TIMELINE_SESSION_COUNT }, (_, sessionIndex) =>
   Array.from(
     { length: TIMELINE_SESSION_TURN_COUNT },
-    (_, turnIndex) => `thread-${sessionIndex}\u0000turn-${turnIndex}`,
+    (_, turnIndex) => ({ id: `turn-${turnIndex}` }),
   ),
 );
 for (let sessionIndex = 0; sessionIndex < TIMELINE_SESSION_COUNT; sessionIndex += 1) {
   const threadId = `thread-${sessionIndex}`;
-  const sessionKeys = timelineSessionKeys[sessionIndex];
-  if (sessionKeys === undefined) {
-    throw new Error("Timeline session benchmark could not resolve its keys.");
+  const sessionTurns = timelineSessionTurns[sessionIndex];
+  if (sessionTurns === undefined) {
+    throw new Error("Timeline session benchmark could not resolve its turns.");
   }
-  const session = timelineSessions.activate(threadId, sessionKeys);
-  const firstKey = sessionKeys[0];
-  if (firstKey === undefined) {
+  const session = timelineSessions.activate(threadId, sessionTurns).session;
+  const firstTurn = sessionTurns[0];
+  if (firstTurn === undefined) {
     throw new Error("Timeline session benchmark requires at least one turn.");
   }
-  session.virtualizer.measure(firstKey, 600 + sessionIndex);
+  session.virtualizer.measure(`${threadId}\u0000${firstTurn.id}`, 600 + sessionIndex);
   timelineSessions.save(threadId, {
     followingLatest: sessionIndex % 2 === 0,
     scrollTop: sessionIndex * 1_000,
@@ -76,11 +76,11 @@ const timelineSessionSwitchMilliseconds = duration(() => {
   for (let switchIndex = 0; switchIndex < TIMELINE_SESSION_SWITCH_COUNT; switchIndex += 1) {
     const sessionIndex = switchIndex % TIMELINE_SESSION_COUNT;
     const threadId = `thread-${sessionIndex}`;
-    const sessionKeys = timelineSessionKeys[sessionIndex];
-    if (sessionKeys === undefined) {
-      throw new Error("Timeline session switch lost its key set.");
+    const sessionTurns = timelineSessionTurns[sessionIndex];
+    if (sessionTurns === undefined) {
+      throw new Error("Timeline session switch lost its turn source.");
     }
-    const session = timelineSessions.activate(threadId, sessionKeys);
+    const session = timelineSessions.activate(threadId, sessionTurns).session;
     timelineSessionChecksum +=
       session.virtualizer.offsetOf(1) + session.scrollTop + Number(session.followingLatest);
   }

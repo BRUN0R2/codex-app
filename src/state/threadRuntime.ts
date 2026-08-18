@@ -6,6 +6,7 @@ import type {
   ModelVerification,
   PlanItem,
   ThreadSummary,
+  ThreadTurn,
   VisibleThreadItem,
 } from "../contracts/types";
 import { applyStreamDeltas, readLatestContextUsage } from "./conversation";
@@ -27,6 +28,11 @@ export interface ThreadRuntimeState {
 }
 
 export type ThreadRuntimeMap = ReadonlyMap<string, ThreadRuntimeState>;
+
+const persistedVisibleTurnsBySource = new WeakMap<
+  readonly ThreadTurn[],
+  readonly VisibleThreadTurn[]
+>();
 
 export function updateThreadRuntime(
   current: ThreadRuntimeMap,
@@ -134,10 +140,16 @@ export function readActiveTurnPlan(
 }
 
 export function readPersistedVisibleTurns(thread: CodexThread): readonly VisibleThreadTurn[] {
-  return thread.turns.map((turn) => ({
+  const cached = persistedVisibleTurnsBySource.get(thread.turns);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const projected = thread.turns.map((turn) => ({
     ...turn,
     items: turn.items.filter((item) => item.type !== "contextUsage"),
   }));
+  persistedVisibleTurnsBySource.set(thread.turns, projected);
+  return projected;
 }
 
 export function mergeRuntimeThreadItems(
