@@ -52,6 +52,8 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Prepare bundled runtime tools
+        run: pnpm tools:bootstrap
       - name: Verify transitive dependency exception
         run: pnpm verify:transitive
       - name: Check formatting

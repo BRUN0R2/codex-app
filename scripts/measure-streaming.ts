@@ -1,7 +1,7 @@
 import { performance } from "node:perf_hooks";
 
 import type { VisibleThreadItem } from "../src/contracts/types.ts";
-import { appendAgentText, applyStreamDeltas } from "../src/state/conversation.ts";
+import { applyStreamDeltas } from "../src/state/conversation.ts";
 import type { StreamDelta } from "../src/state/streamDeltas.ts";
 
 const ITEM_COUNT = 20_000;
@@ -28,11 +28,18 @@ const deltas: readonly StreamDelta[] = Array.from({ length: DELTA_COUNT }, () =>
 const sequential = measure(() => {
   let items = initialItems;
   for (const delta of deltas) {
-    items = appendAgentText(items, delta.itemId, delta.delta);
+    items = applyStreamDeltas(items, [delta]);
   }
   return readTargetLength(items);
 });
 const batched = measure(() => readTargetLength(applyStreamDeltas(initialItems, deltas)));
+const speedup = sequential.medianMilliseconds / batched.medianMilliseconds;
+
+if (speedup < 2) {
+  throw new Error(
+    `Streaming batching regressed below the required 2x speedup: ${speedup.toFixed(3)}x.`,
+  );
+}
 
 process.stdout.write(
   `${JSON.stringify(
@@ -42,7 +49,7 @@ process.stdout.write(
       samples: SAMPLE_COUNT,
       sequentialMedianMs: sequential.medianMilliseconds,
       batchedMedianMs: batched.medianMilliseconds,
-      speedup: sequential.medianMilliseconds / batched.medianMilliseconds,
+      speedup,
     },
     null,
     2,

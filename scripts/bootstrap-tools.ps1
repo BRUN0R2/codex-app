@@ -20,4 +20,5 @@ if ($CheckOnly) {
 }
 
 $ripgrepPath = Install-ProjectRipgrep -ProjectRoot $projectRoot
-Write-Host "ripgrep $script:RipgrepVersion disponível em $ripgrepPath"
+$definition = Get-ProjectRipgrepDefinition -ProjectRoot $projectRoot
+Write-Host "ripgrep $($definition.Version) disponível em $ripgrepPath"

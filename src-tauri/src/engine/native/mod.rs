@@ -33,7 +33,7 @@ use self::chat::ChatGptConsumerProvider;
 use self::diagnostics::RuntimeDiagnostics;
 use self::provider::ChatGptCodexProvider;
 use self::storage::NativeStorage;
-use self::tools::ToolRegistry;
+use self::tools::{Ripgrep, ToolRegistry};
 use crate::engine::{
     AccountRateLimitsResponse, ChatModelListResponse, ConfigUpdate, ConfigUpdateResponse,
     ConversationMode, DiagnosticStream, EngineCapability, EngineDescriptor, EngineNotification,
@@ -129,6 +129,7 @@ pub(super) struct NativeEngineInner {
     provider: ChatGptCodexProvider,
     storage: NativeStorage,
     tools: ToolRegistry,
+    ripgrep: Ripgrep,
     approvals: ApprovalBroker,
     diagnostics: Arc<RuntimeDiagnostics>,
     active_turns: Mutex<HashMap<String, ActiveTurn>>,
@@ -157,6 +158,7 @@ impl NativeEngine {
                 provider: ChatGptCodexProvider::default(),
                 storage: NativeStorage::default(),
                 tools: ToolRegistry,
+                ripgrep: Ripgrep::default(),
                 approvals: ApprovalBroker::default(),
                 diagnostics,
                 active_turns: Mutex::new(HashMap::new()),
@@ -202,6 +204,7 @@ impl NativeEngine {
                     self.inner.auth.initialize(app),
                     self.inner.chat.initialize(app),
                     self.inner.provider.initialize(),
+                    self.inner.ripgrep.initialize(),
                 )?;
                 Ok::<(), AppError>(())
             }

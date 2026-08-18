@@ -62,19 +62,26 @@ Fontes primárias:
 - [rust-urlpattern atual](https://github.com/denoland/rust-urlpattern/releases);
 - [tauri-utils em desenvolvimento](https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-utils/Cargo.toml).
 
-## Ferramentas locais de desenvolvimento
+## Ripgrep nativo e reproduzível
 
-O `ripgrep` é uma ferramenta de desenvolvimento opcional e reproduzível; ele não
-participa do build, do bundle nem do runtime release. Execute:
+O `ripgrep` é uma dependência nativa explícita do aplicativo. A busca de código
+não depende de uma instalação global, do Codex CLI nem do `PATH` do usuário.
+Execute manualmente quando quiser antecipar o bootstrap:
 
 ```powershell
 pnpm tools:bootstrap
 pnpm rg -- -n "texto" src src-tauri/src
 ```
 
-O bootstrap fixa `ripgrep 15.2.0`, detecta Windows x64 ou ARM64, baixa somente o
-asset MSVC do release oficial, valida SHA-256 do ZIP e do `rg.exe` e instala em
-`.tools/ripgrep/`, que permanece ignorado pelo Git. Nenhum PATH global é alterado.
-Os scripts dev adicionam o diretório validado apenas ao ambiente do processo,
-permitindo que comandos filhos usem `rg`; se a ferramenta estiver ausente, eles
-mostram a ação explícita de bootstrap sem baixar nada silenciosamente.
+O manifesto único em `scripts/ripgrep-manifest.json` fixa `ripgrep 15.2.0`,
+revisão, assets x64/ARM64 e os hashes SHA-256 do ZIP e do executável. Dev, build,
+verificação nativa e CI executam o bootstrap automaticamente. Ele detecta a
+arquitetura Windows, baixa apenas o asset MSVC oficial, valida os dois hashes e
+instala em `.tools/ripgrep/`, que permanece ignorado pelo Git.
+
+No build, `src-tauri/build.rs` valida novamente o executável e materializa o
+sidecar nomeado pelo target que o Tauri inclui por `externalBin`. No início do
+runtime, o app exige o `rg.exe` ao lado do executável principal, rejeita symlink,
+confere o hash compilado e a versão exata. A ferramenta `search_text` chama esse
+binário por caminho absoluto, sem shell; comandos autorizados recebem o diretório
+validado somente no `PATH` do processo filho. O `PATH` global nunca é alterado.

@@ -574,6 +574,7 @@ pub(super) async fn run_turn(
                         turn_id: &run.turn_id,
                         approvals: &inner.approvals,
                         storage: &inner.storage,
+                        ripgrep: &inner.ripgrep,
                     };
                     async move { pending.execute(context, &mut cancellation).await }
                 });

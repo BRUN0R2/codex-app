@@ -1,30 +1,52 @@
 Set-StrictMode -Version Latest
 
-$script:RipgrepVersion = "15.2.0"
-$script:RipgrepReleaseBaseUrl = "https://github.com/BurntSushi/ripgrep/releases/download"
+function Get-ProjectRipgrepManifest {
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  $manifestPath = Join-Path $ProjectRoot "scripts\ripgrep-manifest.json"
+  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "Manifesto do ripgrep ausente: $manifestPath"
+  }
+  $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
+    ConvertFrom-Json -Depth 10
+  if ($manifest.schemaVersion -ne 1 -or [string]::IsNullOrWhiteSpace($manifest.version)) {
+    throw "Manifesto do ripgrep inválido: $manifestPath"
+  }
+  return $manifest
+}
 
 function Get-ProjectRipgrepDefinition {
-  $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-  switch ($architecture) {
-    "X64" {
-      return [pscustomobject]@{
-        Architecture = "x64"
-        AssetName = "ripgrep-$script:RipgrepVersion-x86_64-pc-windows-msvc.zip"
-        ArchiveSha256 = "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5"
-        ExecutableSha256 = "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680"
-      }
-    }
-    "Arm64" {
-      return [pscustomobject]@{
-        Architecture = "arm64"
-        AssetName = "ripgrep-$script:RipgrepVersion-aarch64-pc-windows-msvc.zip"
-        ArchiveSha256 = "e4abca10c3a64ebea742667dd7009449d49403db5460dd6873e389fa2945360f"
-        ExecutableSha256 = "d33a29a9ef03c9f4c03be9e8d88498e6e2d2e566d64cdbdef97f9afc8f13120c"
-      }
-    }
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  $manifest = Get-ProjectRipgrepManifest -ProjectRoot $ProjectRoot
+  $runtimeArchitecture =
+    [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+  $target = switch ($runtimeArchitecture) {
+    "X64" { "x86_64-pc-windows-msvc" }
+    "Arm64" { "aarch64-pc-windows-msvc" }
     default {
-      throw "Arquitetura Windows não suportada para o ripgrep local: $architecture."
+      throw "Arquitetura Windows não suportada para o ripgrep local: $runtimeArchitecture."
     }
+  }
+  $definition = $manifest.targets.PSObject.Properties[$target].Value
+  if ($null -eq $definition) {
+    throw "O manifesto do ripgrep não define o alvo $target."
+  }
+  return [pscustomobject]@{
+    Version = [string]$manifest.version
+    Revision = [string]$manifest.revision
+    ReleaseBaseUrl = [string]$manifest.releaseBaseUrl
+    Target = $target
+    Architecture = [string]$definition.architecture
+    AssetName = [string]$definition.assetName
+    ArchiveSha256 = [string]$definition.archiveSha256
+    ExecutableSha256 = [string]$definition.executableSha256
   }
 }
 
@@ -34,8 +56,8 @@ function Get-ProjectRipgrepPath {
     [string]$ProjectRoot
   )
 
-  $definition = Get-ProjectRipgrepDefinition
-  return Join-Path $ProjectRoot ".tools\ripgrep\$script:RipgrepVersion\$($definition.Architecture)\rg.exe"
+  $definition = Get-ProjectRipgrepDefinition -ProjectRoot $ProjectRoot
+  return Join-Path $ProjectRoot ".tools\ripgrep\$($definition.Version)\$($definition.Architecture)\rg.exe"
 }
 
 function Get-ProjectToolSha256 {
@@ -60,7 +82,7 @@ function Test-ProjectRipgrep {
     [string]$ProjectRoot
   )
 
-  $definition = Get-ProjectRipgrepDefinition
+  $definition = Get-ProjectRipgrepDefinition -ProjectRoot $ProjectRoot
   $executablePath = Get-ProjectRipgrepPath -ProjectRoot $ProjectRoot
   if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
     return $false
@@ -72,7 +94,7 @@ function Test-ProjectRipgrep {
   $versionOutput = @(& $executablePath --version 2>$null)
   return $LASTEXITCODE -eq 0 -and
     $versionOutput.Count -gt 0 -and
-    $versionOutput[0] -eq "ripgrep $script:RipgrepVersion (rev e89fff89ac)"
+    $versionOutput[0] -eq "ripgrep $($definition.Version) (rev $($definition.Revision))"
 }
 
 function Install-ProjectRipgrep {
@@ -86,13 +108,13 @@ function Install-ProjectRipgrep {
     return Get-ProjectRipgrepPath -ProjectRoot $resolvedProjectRoot
   }
 
-  $definition = Get-ProjectRipgrepDefinition
+  $definition = Get-ProjectRipgrepDefinition -ProjectRoot $resolvedProjectRoot
   $toolsRoot = Join-Path $resolvedProjectRoot ".tools\ripgrep"
-  $targetDirectory = Join-Path $toolsRoot "$script:RipgrepVersion\$($definition.Architecture)"
+  $targetDirectory = Join-Path $toolsRoot "$($definition.Version)\$($definition.Architecture)"
   $stagingDirectory = Join-Path $toolsRoot (".staging-{0}" -f [System.Guid]::NewGuid().ToString("N"))
   $archivePath = Join-Path $stagingDirectory $definition.AssetName
   $extractDirectory = Join-Path $stagingDirectory "extract"
-  $downloadUrl = "$script:RipgrepReleaseBaseUrl/$script:RipgrepVersion/$($definition.AssetName)"
+  $downloadUrl = "$($definition.ReleaseBaseUrl)/$($definition.Version)/$($definition.AssetName)"
   $backupDirectory = $null
 
   New-Item -ItemType Directory -Path $extractDirectory -Force | Out-Null

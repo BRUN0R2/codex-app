@@ -139,6 +139,29 @@ não ao tamanho integral da conversa:
   lê do SQLite apenas itens posteriores ao cursor e serializa requests por
   referência. Steers continuam entrando na ordem transacional do banco.
 
+#### Busca nativa de código — 18 de agosto de 2026
+
+`search_text` deixou de enumerar, ordenar, abrir e decodificar arquivos
+sequencialmente no processo principal. O runtime agora chama diretamente o
+`ripgrep 15.2.0` empacotado e validado, limita a busca a duas threads, consome
+stdout incrementalmente, encerra ao atingir 200 resultados e preserva timeout e
+cancelamento do turno.
+
+`pnpm measure:search` executa em perfil release um corpus UTF-8 de 75 MiB,
+distribuído em 2.400 arquivos e 48 diretórios. Sete amostras, com a ordem dos
+caminhos alternada para reduzir viés de cache, produziram:
+
+| Caminho | Mediana |
+| --- | ---: |
+| scanner sequencial anterior | 488,321 ms |
+| `ripgrep` empacotado | 226,521 ms |
+| aceleração | 2,156× |
+
+O benchmark exige pelo menos `2×` nesse corpus e também valida que ambos os
+caminhos retornam o mesmo resultado vazio. Ele mede varredura local aquecida e
+inclui a criação do processo `rg`; não representa busca fria em disco, indexação
+semântica, latência do provider ou tempo até o primeiro token.
+
 #### Benchmark da conversa de referência — 16 de agosto de 2026
 
 `pnpm measure:history` reproduz 741 turnos, 15.529 itens de transcript e 231 MiB

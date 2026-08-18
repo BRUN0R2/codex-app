@@ -7,6 +7,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::watch;
 
 use super::super::terminal_output::{configure_plain_terminal, normalize_terminal_file};
+use super::ripgrep::Ripgrep;
 use super::workspace::resolve_existing_directory;
 use super::{
     DEFAULT_COMMAND_TIMEOUT_SECONDS, ExecCommandArgs, MAX_COMMAND_BYTES, MAX_COMMAND_REASON_BYTES,
@@ -24,6 +25,7 @@ pub(super) struct CommandOutput {
 pub(super) async fn execute_command(
     workspace: &Path,
     args: &ExecCommandArgs,
+    ripgrep: &Ripgrep,
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<CommandOutput, AppError> {
     if args.command.trim().is_empty() || args.command.len() > MAX_COMMAND_BYTES {
@@ -40,6 +42,7 @@ pub(super) async fn execute_command(
     let cwd = resolve_existing_directory(workspace, &args.cwd).await?;
     let mut command = headless_shell_command(&args.command);
     configure_plain_terminal(&mut command);
+    ripgrep.configure_child_command(&mut command)?;
     let mut child = command
         .current_dir(cwd)
         .stdin(Stdio::null())

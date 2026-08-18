@@ -21,10 +21,12 @@ use crate::error::AppError;
 
 mod exec;
 mod fs;
+mod ripgrep;
 mod workspace;
 
 use self::exec::{CommandOutput, command_timeout, execute_command};
 use self::fs::{edit_file, list_files, read_file, search_text, write_file};
+pub(super) use self::ripgrep::Ripgrep;
 use self::workspace::{canonical_workspace, display_workspace_path, resolve_existing_directory};
 
 pub(super) const MAX_PROVIDER_ITEM_BYTES: usize = 2 * 1_048_576;
@@ -35,8 +37,6 @@ const MAX_READ_LINES: usize = 2_000;
 const MAX_LIST_RESULTS: usize = 500;
 const MAX_LIST_DEPTH: usize = 12;
 const MAX_SEARCH_RESULTS: usize = 200;
-const MAX_SEARCH_FILES: usize = 10_000;
-const MAX_SEARCH_DIRECTORIES: usize = 10_000;
 const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 const MAX_SEARCH_LINE_BYTES: usize = 500;
 const MAX_EDIT_OCCURRENCES: u16 = 100;
@@ -94,6 +94,7 @@ pub struct ToolExecutionContext<'a> {
     pub turn_id: &'a str,
     pub approvals: &'a ApprovalBroker,
     pub storage: &'a NativeStorage,
+    pub ripgrep: &'a Ripgrep,
 }
 
 #[derive(Debug, Deserialize)]
@@ -536,9 +537,11 @@ impl PreparedTool {
             ToolOperation::ListFiles(args) => list_files(&workspace, args)
                 .await
                 .map(|output| ToolResult::StoredOutput(StoredToolOutput::Text(output))),
-            ToolOperation::SearchText(args) => search_text(&workspace, args)
-                .await
-                .map(|output| ToolResult::StoredOutput(StoredToolOutput::Text(output))),
+            ToolOperation::SearchText(args) => {
+                search_text(context.ripgrep, &workspace, args, cancellation)
+                    .await
+                    .map(|output| ToolResult::StoredOutput(StoredToolOutput::Text(output)))
+            }
             ToolOperation::ReadOutput(args) => context
                 .storage
                 .read_output_for_thread(
@@ -609,7 +612,7 @@ impl PreparedTool {
                         }
                     }
                 }
-                execute_command(&workspace, args, cancellation)
+                execute_command(&workspace, args, context.ripgrep, cancellation)
                     .await
                     .map(|output| ToolResult::StoredOutput(StoredToolOutput::Command(output)))
             }
@@ -948,8 +951,8 @@ mod tests {
     use super::fs::atomic_write;
     use super::workspace::resolve_write_target;
     use super::{
-        MAX_COMMAND_TIMEOUT_SECONDS, SearchTextArgs, StoredToolOutput, ToolOperation, ToolRegistry,
-        activity_status_for_exit_code, execute_patch_operation, search_text,
+        MAX_COMMAND_TIMEOUT_SECONDS, Ripgrep, SearchTextArgs, StoredToolOutput, ToolOperation,
+        ToolRegistry, activity_status_for_exit_code, execute_patch_operation, search_text,
     };
 
     #[test]
@@ -1323,14 +1326,18 @@ mod tests {
         tokio::fs::write(nested.join("needle.txt"), "before\nDeep marker\nafter\n")
             .await
             .expect("deep file should exist");
+        let ripgrep = Ripgrep::for_project_tests();
+        let (_sender, mut cancellation) = watch::channel(false);
 
         let output = search_text(
+            &ripgrep,
             &workspace,
             &SearchTextArgs {
                 path: ".".into(),
                 query: "deep marker".into(),
                 case_sensitive: false,
             },
+            &mut cancellation,
         )
         .await
         .expect("directory depth must not prevent a workspace search");
