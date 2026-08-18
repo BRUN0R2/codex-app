@@ -153,9 +153,9 @@ caminhos alternada para reduzir viés de cache, produziram:
 
 | Caminho | Mediana |
 | --- | ---: |
-| scanner sequencial anterior | 488,321 ms |
-| `ripgrep` empacotado | 226,521 ms |
-| aceleração | 2,156× |
+| scanner sequencial anterior | 496,774 ms |
+| `ripgrep` empacotado | 224,357 ms |
+| aceleração | 2,214× |
 
 O benchmark exige pelo menos `2×` nesse corpus e também valida que ambos os
 caminhos retornam o mesmo resultado vazio. Ele mede varredura local aquecida e
@@ -172,7 +172,7 @@ blocos SQLite de 64 KiB e pode ser percorrido sem compactação por `read_output
 
 `pnpm measure:tool-output` gera deterministicamente 40.000 linhas e 2.439.995
 bytes, incluindo uma falha representativa no centro. Em perfil release, a
-prévia final enviada ao provider mediu 6.494 bytes e levou 12,6204 ms para ser
+prévia final enviada ao provider mediu 6.494 bytes e levou 12,5687 ms para ser
 produzida:
 
 | Dimensão | Original | Prévia atual | Redução |
@@ -195,16 +195,15 @@ lote: a rodada seguinte volta a ler a fonte, evitando servir resultados
 obsoletos após edições, comandos ou mudanças externas.
 
 `pnpm measure:tool-cache` compara oito buscas `ripgrep` idênticas e concorrentes
-com uma busca compartilhada em um corpus de 40 MiB. Três execuções, cada uma com
-duas amostras de aquecimento e sete amostras válidas em ordem alternada,
-produziram:
+com uma busca compartilhada em um corpus de 40 MiB. A coleta release final usou
+sete amostras válidas em ordem alternada:
 
 | Dimensão | Oito execuções independentes | Uma execução coalescida |
 | --- | ---: | ---: |
 | processos de busca por lote | 8 | 1 |
 | redução de execuções | — | 87,5% |
-| mediana de parede | 192,310–192,803 ms | 133,106–135,021 ms |
-| aceleração observada | — | 1,428–1,447× |
+| mediana de parede | 195,978 ms | 134,292 ms |
+| aceleração observada | — | 1,459× |
 
 O teste funcional exige exatamente uma execução para oito chamadas, preserva o
 tipo dos erros compartilhados, diferencia workspace/tarefa/argumentos e prova
@@ -223,25 +222,25 @@ comparável ao alvo exibido na referência, e não significa 64 turnos.
 | --- | ---: | ---: | ---: |
 | itens materializados | 15.529 | 64 | 99,588% |
 | contrato codificado | 232,169 MiB | 0,957 MiB | 99,588% |
-| crescimento incremental de heap Node | 243,716–243,738 MiB | 1,148 MiB | 99,529% |
+| crescimento incremental de heap Node | 243,717 MiB | 1,148 MiB | 99,529% |
 | requisições para abrir | — | 1 | — |
 
-No corpus sintético, os 64 itens representam os quatro turnos mais recentes. Em
-três execuções isoladas, com três amostras completas e sete amostras da página
-por execução:
+No corpus sintético, os 64 itens representam os quatro turnos mais recentes. Na
+coleta isolada final, com três amostras completas e sete amostras da página:
 
 | Caminho local | Completo | Página inicial | Aceleração |
 | --- | ---: | ---: | ---: |
-| validação do contrato | 32,284–34,210 ms | 0,198–0,222 ms | 148,2–163,1× |
-| `JSON.parse` + validação | 302,631–307,001 ms | 0,939–0,952 ms | 322,1–326,6× |
+| validação do contrato | 31,660 ms | 0,212 ms | 149,340× |
+| `JSON.parse` + validação | 293,283 ms | 0,989 ms | 296,545× |
 
 Antes da última otimização, a validação criava um `TextEncoder` e um buffer
 proporcional para cada campo. No mesmo benchmark ela consumiu 145,866 ms no
 contrato completo e 0,678 ms na página. A medição UTF-8 atual reutiliza um buffer
 de 64 KiB com `encodeInto`, interrompe cedo quando ultrapassa o limite e reduziu
-esse custo em aproximadamente 4,3 vezes no contrato completo e 3 vezes na
-página. O caminho `JSON.parse` + validação completo caiu de 438,127 ms para
-302,631–307,001 ms.
+esse custo em aproximadamente 4,6 vezes no contrato completo e 3,2 vezes na
+página. Na coleta final, a validação ficou em 31,660 ms no contrato completo e
+0,212 ms na página, enquanto o caminho `JSON.parse` + validação completo caiu de
+438,127 ms para 293,283 ms.
 
 Manter 64 itens é deliberado: o caminho local já fica abaixo de 1 ms e reduzir
 para 32 economizaria frações de milissegundo, mas dobraria a chance de abrir uma
@@ -257,35 +256,37 @@ execução:
 
 | Caminho atual | Mediana |
 | --- | ---: |
-| 1.200 atualizações sequenciais | 19,063–19,342 ms |
-| um lote coalescido | 0,116–0,125 ms |
+| 1.200 atualizações sequenciais | 18,872 ms |
+| um lote coalescido | 0,097 ms |
 
-O lote ficou entre 154,7 e 164,3 vezes mais rápido que as atualizações sequenciais
-já otimizadas nesse cenário. Este benchmark mede somente custo local de redução
+O lote ficou 194,557 vezes mais rápido que as atualizações sequenciais já
+otimizadas nesse cenário. Este benchmark mede somente custo local de redução
 de estado; não representa TTFT de rede, tempo do modelo ou tempo de ferramentas.
 
 O comando `pnpm measure:soak` cobre estruturas destinadas a sessões longas sem
-simular rede ou provider. Nas coletas de 16 de agosto de 2026, 100.000 turnos,
+simular rede ou provider. Na revalidação de 18 de agosto de 2026, 100.000 turnos,
 10.000 medições de altura, 50.000 consultas de viewport e 5.000 blocos Markdown
-produziram; as três coletas incluíram também 50.000 trocas entre 12 sessões de
-timeline com 1.000 turnos cada e 20.000 atualizações de projeções estáveis:
+produziram:
 
 | Operação sintética | Resultado |
 | --- | ---: |
-| construção do índice de 100.000 turnos | 59,552–62,693 ms |
-| 10.000 atualizações de altura | 4,807–5,210 ms |
-| 50.000 consultas de viewport | 37,022–38,350 ms |
+| construção do índice de 100.000 turnos | 58,366 ms |
+| 10.000 atualizações de altura | 5,113 ms |
+| 50.000 consultas de viewport | 37,513 ms |
 | maior conjunto montado por viewport | 8 turnos |
-| 50.000 trocas de sessão da timeline | 306,501–655,780 ms |
-| 50.000 projeções do overlay sobre 100.000 turnos | 14,262–15,507 ms |
-| 5.000 atualizações incrementais Markdown | 1.095,358–1.115,506 ms |
-| 20.000 projeções de atividade | 133,830–137,081 ms |
-| 20.000 projeções de turno em streaming | 157,037–163,420 ms |
+| 50.000 trocas de sessão da timeline | 13,843 ms, mediana de cinco coletas |
+| 50.000 projeções do overlay sobre 100.000 turnos | 16,711 ms |
+| 5.000 atualizações incrementais Markdown | 84,905 ms, mediana de cinco coletas |
+| 20.000 projeções de atividade | 133,587 ms |
+| 20.000 projeções de turno em streaming | 158,085 ms |
 
-A dispersão nas trocas de sessão vem de uma única janela cronometrada sujeita a
-coleta de lixo; mesmo o extremo corresponde a aproximadamente 13 microssegundos
-por troca. Não foi adicionado hash ou estado duplicado para otimizar esse
-microbenchmark e criar risco de invalidação incorreta.
+A linha de base registrada antes destas duas otimizações era 644,2 ms para as
+trocas de sessão e 1.037,254 ms para Markdown. O resultado final representa cerca
+de 46,5× e 12,2× de aceleração, respectivamente, ou reduções de aproximadamente
+97,9% e 91,8%. A timeline reutiliza projeções imutáveis e o Markdown não compara
+mais todo o prefixo acumulado a cada bloco. Não foi introduzido hash
+probabilístico: a origem append-only é controlada pelo lifecycle de overlays e a
+conclusão continua integral e autoritativa.
 
 O teste nativo também persiste e percorre 1.200 turnos — acima do antigo teto
 de 1.000 — por todas as páginas, validando cardinalidade e ordem sem um limite
@@ -302,13 +303,13 @@ highlight e consultas de viewport sem limitar o conteúdo. Em três execuções 
 
 | Operação sintética | Resultado |
 | --- | ---: |
-| estatísticas sem materializar linhas | 30,021–30,436 ms |
-| documento unificado completo | 90,052–92,955 ms |
-| projeção split completa e lazy | 63,913–67,954 ms |
-| highlight de todo o documento | 639,852–654,429 ms |
-| highlight da janela visível | 0,379–0,462 ms |
+| estatísticas sem materializar linhas | 30,312 ms |
+| documento unificado completo | 89,630 ms |
+| projeção split completa e lazy | 64,516 ms |
+| highlight de todo o documento | 623,162 ms |
+| highlight da janela visível | 0,440 ms |
 | linhas montadas no maior viewport | 73 |
-| 100.000 consultas de viewport | 12,083–12,499 ms |
+| 100.000 consultas de viewport | 11,959 ms |
 | redução de linhas montadas | 2.054,808 vezes |
 
 A sequência inteira continua acessível do início ao fim; a redução ocorre apenas
@@ -328,13 +329,17 @@ controle entra no diagnóstico normal do app.
 As configurações usam uma largura de navegação independente da sidebar,
 tipografia e espaçamento consistentes, superfícies semânticas e switches
 acessíveis. `pnpm verify:visual` abre a preview por CDP em um perfil temporário,
-captura PNGs e valida geometria nos viewports `920 × 640`, `1280 × 820` e
-`1920 × 1080`. Nas três medições:
+captura PNGs e valida configurações, lista de Automações e editor nos viewports
+`920 × 640`, `1280 × 820` e `1920 × 1080`. Nos nove cenários:
 
 - o titlebar ocupou exatamente `0–34 px`;
 - os controles permaneceram nos `138 px` finais da janela;
 - o conteúdo e o overlay começaram em `34 px`, sem interseção com o titlebar;
 - não houve overflow horizontal;
+- a área de Automações manteve uma única navegação ativa, badge não lido, card,
+  duas linhas de execução e ação primária;
+- o editor manteve um único diálogo, seis campos nomeados, dois botões de rodapé
+  e switch acessível;
 - a navegação mediu `248–288 px` e o conteúdo útil permaneceu entre
   `533,219–820 px`.
 
@@ -370,28 +375,27 @@ janela de contexto anunciada pelo modelo. A janela de contexto é tratada por
 compactação transacional; as demais condições produzem espera ou erro explícito,
 nunca descarte silencioso.
 
-### Validação integral — 16 de agosto de 2026
+### Validação integral — 18 de agosto de 2026
 
-`pnpm verify` concluiu sem falhas:
+`pnpm verify:frontend` e `pnpm verify:native` concluíram sem falhas:
 
-- 41 arquivos e 192 testes frontend;
+- 47 arquivos e 221 testes frontend;
 - TypeScript estrito e build Vite de produção;
 - verificação de dependências transitivas, `cargo check`, `rustfmt` e Clippy com
   warnings tratados como erro;
-- 165 de 165 testes Rust.
+- 194 testes Rust aprovados e 4 benchmarks ignorados no fluxo comum por design.
 
-O build produziu o chunk principal do app com 366,23 KiB, ou 109,39 KiB gzip; o
-chunk auxiliar ficou em 20,25 KiB, o CSS em 95,87 KiB e o worker Markdown em
-45,49 KiB.
+O build produziu o chunk principal do app com 399,24 KiB, ou 118,24 KiB gzip; o
+chunk auxiliar ficou em 20,25 KiB, o CSS em 114,63 KiB, ou 21,53 KiB gzip, e o
+worker Markdown em 45,51 KiB.
 
-A linkedição nativa release atual não pôde ser concluída dentro desta sessão:
-quatro execuções/retomadas chegaram a 2.315 artefatos em
-`src-tauri/target/release/deps`, mas cada processo foi encerrado pelo teto externo
-de 120 segundos antes de gerar `codex-desktop-next.exe`. O perfil continua com
-`opt-level = 3`, ThinLTO e uma codegen unit; ele não foi enfraquecido para
-fabricar uma medição. Portanto as métricas de executável, startup e working set
-de 14 de agosto continuam sendo a última coleta release válida, e uma nova
-medição permanece pendente em um terminal sem esse teto.
+A linkedição Tauri release também concluiu com `opt-level = 3`, ThinLTO e uma
+codegen unit, gerando
+`.freebuff/release-validation-target/release/codex-desktop-next.exe`. O target
+isolado foi necessário porque o executável canônico estava aberto; nenhum
+processo foi encerrado ou substituído. Startup e memória do binário novo
+continuam pendentes até que a instância atual possa ser fechada, pois o plugin de
+instância única invalidaria uma segunda amostra.
 
 Em novas medições, “demora para responder” deve ser decomposta em pelo menos
 quatro intervalos: aceitação de `turn_start`, primeira rodada, espera de

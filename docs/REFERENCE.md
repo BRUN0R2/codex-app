@@ -103,6 +103,12 @@ Este projeto implementa do zero:
 - perfis de permissão e aprovação;
 - UI e reducers TypeScript.
 
+Automações também foram implementadas no domínio próprio após estudar a
+superfície pública do Codex Desktop: tarefas recorrentes em segundo plano e uma
+fila de resultados para revisão. O projeto não copia scheduler, banco ou código
+do produto oficial. O scheduler, transações, limites, tarefas Codex vinculadas e
+UI foram construídos sobre o `NativeEngine`.
+
 Deliberadamente não foram adotados `app-server`, JSONL por `stdio`, config da
 CLI, `CODEX_HOME`, rollout files, MCP, colaboração, aliases antigos, migrações de
 formatos externos ou fallbacks de protocolo.
@@ -177,8 +183,9 @@ produto. O estado atual é:
 | Compactação automática/manual e direcionamento de turno ativo | implementada |
 | Fork, arquivamento, desarquivamento e exclusão de tarefa | implementada |
 | Markdown sanitizado, scroll medido e janela de contexto | implementada |
+| Automações recorrentes, execução manual, pausa, histórico e fila de revisão | implementada |
 | Worktrees e fluxo Git completo de diff, revisão e commit | não implementada |
-| Terminal e navegador integrados, tarefas agendadas, plugins, skills e MCP | não implementada |
+| Terminal e navegador integrados, plugins, skills e MCP | não implementada |
 
 O aplicativo executa o fluxo essencial moderno de um agente Codex para PC sem
 depender da CLI. As superfícies ainda ausentes não são representadas por botões

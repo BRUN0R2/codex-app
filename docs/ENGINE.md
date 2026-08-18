@@ -11,7 +11,10 @@ O único backend é `NativeEngine`:
 - schema IPC: versão `9`.
 
 Não existe variável de ambiente para trocar backend nem execução de binário
-externo. A CLI aberta é uma referência de estudo, não uma integração.
+genérico. O único sidecar é o `rg.exe` 15.2.0 fixado por manifesto e hash para a
+ferramenta `search_text`; ele é chamado por caminho absoluto, sem shell e sem
+dependência do `PATH`. A CLI aberta é uma referência de estudo, não uma
+integração.
 
 ## Comandos Tauri
 
@@ -23,6 +26,7 @@ externo. A CLI aberta é uma referência de estudo, não uma integração.
 | tarefas | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive`, `engine_thread_unarchive`, `engine_thread_delete`, `engine_thread_fork`, `engine_thread_compact_start` |
 | saídas | `engine_output_read` |
 | turnos | `engine_turn_start`, `engine_turn_steer`, `engine_turn_interrupt` |
+| automações | `engine_automation_list`, `engine_automation_create`, `engine_automation_update`, `engine_automation_delete`, `engine_automation_run_now`, `engine_automation_run_mark_reviewed` |
 | preferências | `application_preferences_read`, `application_preferences_update` |
 | configuração | `engine_config_update`, `engine_model_list`, `engine_chat_model_list` |
 | aprovação | `engine_server_request_respond` |
@@ -47,7 +51,8 @@ Notificações suportadas:
   `thread.deleted`;
 - `turn.started`, `turn.completed`;
 - `item.started`, `item.completed`, `item.streamDeltas`;
-- `model.rerouted`, `model.verification` e `model.safetyBufferingUpdated`.
+- `model.rerouted`, `model.verification` e `model.safetyBufferingUpdated`;
+- `automation.changed`, `automation.deleted` e `automation.runUpdated`.
 
 Qualquer método diferente falha na fronteira TypeScript e gera diagnóstico
 visível.
@@ -164,6 +169,30 @@ delimitador final também fica oculta. Renderização, prévias e cópia aplicam
 mesma fronteira, impedindo que identificadores como `turn0search0` apareçam ao
 usuário mesmo ao abrir uma conversa antiga.
 
+`item.completed` é uma barreira autoritativa. Antes de instalar o item
+persistido, o frontend descarta qualquer delta daquele item ainda aguardando o
+próximo frame; em seguida remove o overlay transitório. Somente IDs presentes no
+overlay entram no renderer append-only. A conclusão canônica executa uma
+renderização final integral, portanto uma normalização do provider nunca é
+tratada como continuação de texto.
+
+## Automações
+
+Automações são registros nativos versionados com nome, prompt, projeto opcional,
+estado habilitado, intervalo de 5 minutos a 7 dias, timezone, próximo disparo e
+última execução. Atualizações exigem `expectedVersion`; conflitos são visíveis.
+
+O scheduler mantém no máximo duas execuções globais e uma por automação. Claim,
+avanço de agenda e criação do run são uma única transação SQLite. Execução manual
+é permitida mesmo quando a definição está pausada, mas obedece aos mesmos limites
+de concorrência. Não há backfill de todos os intervalos perdidos.
+
+Cada run inicia uma tarefa Codex normal e um turno ligado ao seu ID. Conclusão do
+turno e conclusão do run são persistidas na mesma transação. Falha antes do
+turno, interrupção, reinício e revisão possuem estados explícitos e eventos
+monotônicos. A fila de revisão é apenas uma projeção de runs terminais ainda não
+marcados como revisados.
+
 ## Compactação dinâmica de contexto
 
 Antes da primeira amostragem e de toda continuação no mesmo turno, o
@@ -214,6 +243,11 @@ tamanho agregado imposto pelo aplicativo. O item do turno contém somente ID,
 prévia, tamanho total e cursor; UI e agente continuam por `engine_output_read` e
 `read_output`. Recusa de comando retorna um resultado tipado ao modelo;
 cancelamento interrompe o turno.
+
+`search_text` usa o `ripgrep` embarcado com correspondência literal,
+sensibilidade de caixa explícita, regras `.gitignore`, leitura incremental,
+limite global de resultados, timeout e cancelamento. O binário é validado no
+bootstrap, no build e novamente no runtime.
 
 Erros de validação ou execução de uma ferramenta pertencem à chamada, não ao
 turno inteiro. Um plano com mais de uma etapa `in_progress`, um patch malformado

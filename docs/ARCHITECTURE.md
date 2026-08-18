@@ -35,9 +35,11 @@ O engine nativo divide ownership assim:
   conversa do ChatGPT;
 - `provider/`: catálogo Codex, Responses, cookies restritos e stream do agente;
 - `agent.rs`: composição das instruções, rodadas e ciclo das ferramentas;
+- `automation.rs`: agenda, limites e transições determinísticas das Automações;
 - `tools/`: contratos e orquestração das ferramentas (`mod.rs`), operações de
-  arquivo (`fs.rs`), execução e árvore de processos (`exec.rs`) e confinamento
-  de paths no workspace (`workspace.rs`);
+  arquivo (`fs.rs`), resolução do `ripgrep` embarcado (`ripgrep.rs`), execução e
+  árvore de processos (`exec.rs`) e confinamento de paths no workspace
+  (`workspace.rs`);
 - `approval.rs`: solicitações de uso único que aguardam decisão, cancelamento
   explícito ou encerramento, sem expiração arbitrária;
 - `storage.rs`: schema SQLite próprio, transações e configuração versionada;
@@ -99,9 +101,12 @@ página correspondente das configurações é realmente aberta.
 
 Deltas de texto atravessam `streamDeltas.ts`: o primeiro fragmento de cada item
 é aplicado imediatamente e os seguintes são coalescidos por frame. O runtime
-armazena somente overlays do turno ativo; o histórico persistido permanece uma
-única fonte de verdade. `Markdown.tsx` limita apenas recomputações intermediárias
-durante streaming e sempre publica o valor terminal sem atraso. A timeline
+armazena somente overlays do turno ativo; `item.completed` descarta deltas
+pendentes, remove o item do overlay e torna o snapshot persistido imediatamente
+autoritativo. O histórico persistido permanece uma única fonte de verdade.
+`Markdown.tsx` usa modo append-only somente para IDs ainda presentes no overlay,
+consolida blocos estáveis sem comparar novamente todo o prefixo acumulado e
+sempre publica o valor terminal sem atraso. A timeline
 projeta cada turno em blocos cronológicos: toda mensagem de usuário e agente
 permanece na posição persistida, inclusive steers enviados durante um turno;
 somente comandos, ferramentas, raciocínio e alterações entram nos blocos
@@ -123,8 +128,10 @@ posição de leitura, política de acompanhamento do fim e o índice de alturas 
 medidas. A troca salva a sessão anterior, invalida frames e medições pendentes,
 pré-calcula a janela com o índice correto e restaura a posição uma única vez no
 frame seguinte. Retornar a uma conversa não reutiliza estimativas ou intenção de
-scroll de outra tarefa. A expulsão da cache remove somente metadados visuais;
-turnos e conteúdo persistido nunca são limitados por ela.
+scroll de outra tarefa. A sessão também conserva a identidade imutável da
+projeção de turnos; quando ela não mudou, não recria chaves nem percorre os
+1.000+ itens apenas para confirmar igualdade. A expulsão da cache remove somente
+metadados visuais; turnos e conteúdo persistido nunca são limitados por ela.
 
 `response.output_item.added` preserva a fase de mensagem antes do primeiro
 delta. Por isso “Pensando” aparece imediatamente, acompanha o título da atividade
@@ -158,6 +165,17 @@ restaurar a última conversa e o último projeto do destino escolhido. A lista d
 ChatGPT reúne conversas Chat e Work; a lista do Codex contém apenas tarefas
 Codex. Abrir uma conversa Chat ou Work também sincroniza o seletor interno.
 
+Automações pertencem ao `NativeEngine`, não a timers da interface. Um scheduler
+cancelável consulta dinamicamente o próximo vencimento, dorme no máximo quinze
+minutos, acorda em mudanças e tenta novamente após quinze segundos em falhas
+operacionais. O claim é transacional: no máximo duas execuções ficam
+`queued/running` no aplicativo e somente uma por automação. Cada execução cria
+uma tarefa Codex comum e percorre o mesmo pipeline de turno, ferramentas,
+aprovações, persistência e eventos. Reinício converte execuções inacabadas em
+`interrupted`; intervalos perdidos avançam a agenda uma vez, sem backfill em
+rajada. A interface apresenta definições, editor, pausa, execução manual,
+histórico e fila de revisão, mas não é proprietária da agenda.
+
 ## Dados e segredos
 
 - SQLite: `native-state-profile-v2.sqlite3` no diretório de dados do perfil;
@@ -180,6 +198,10 @@ Codex. Abrir uma conversa Chat ou Work também sincroniza o seletor interno.
 - continuidade consumer do Chat: `conversation_id` e `parent_message_id` na
   tabela SQLite `chat_conversations`; tokens de integridade e conduit não são
   persistidos.
+- Automações e execuções: tabelas SQLite `automations` e `automation_runs`, com
+  versão otimista, agenda, vínculo opcional a projeto/tarefa/turno e estado de
+  revisão. Até 500 execuções por automação são retidas; a leitura inicial da UI
+  materializa no máximo 200.
 - diagnósticos operacionais: `logs/runtime.jsonl` no diretório de dados do perfil,
   com rotação única para `logs/runtime.previous.jsonl`; o path absoluto atual é
   retornado por `engine_start` e exibido nas configurações.
@@ -206,7 +228,9 @@ configuração explícita de entrada, saída e comunicação nativa em UTF-8 sem
 Antes da persistência, sequências ANSI/OSC, carriage return de progresso,
 backspace e controles invisíveis são normalizados em streaming e não chegam ao
 contrato visual. A migração transacional do schema SQLite 1 para o 2 normaliza
-também saídas de comando antigas ao externalizá-las.
+também saídas de comando antigas ao externalizá-las. A migração 2 para 3 cria
+Automações e execuções de forma atômica; um schema incompleto ou não versionado é
+rejeitado em vez de ser reparado silenciosamente.
 
 Saídas de ferramentas e comandos não ficam dentro de `thread_items`. O SQLite
 mantém um recurso por item em `output_resources` e o texto integral em

@@ -42,3 +42,13 @@ Esses comandos têm responsabilidades separadas:
 - `release` só é interrompido quando outra instância release está aberta.
 - Servidores Vite podem permanecer ativos durante o build e a execução da release; a porta
   de desenvolvimento não é usada pelo executável compilado.
+
+O build valida e inclui o sidecar `rg.exe` correspondente ao target. O manifesto,
+hash e versão são conferidos antes da linkedição; uma release sem o binário
+esperado falha.
+
+Quando o executável canônico estiver aberto, não o encerre para forçar uma
+substituição. Para uma validação não publicável, pode-se definir
+`CARGO_TARGET_DIR` para um diretório temporário/ignorado e executar
+`pnpm tauri build --no-bundle`. A publicação oficial continua usando apenas o
+pipeline e o target canônicos.

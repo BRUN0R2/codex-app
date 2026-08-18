@@ -11,11 +11,9 @@
   início, meio e fim do diff. Registrar Long Tasks, heap, nós DOM, INP,
   estabilidade do scroll, containment da viewport e nitidez em
   `PERFORMANCE.md`.
-- [ ] Em um terminal sem limite de 120 segundos por processo, concluir
-  `pnpm release:build` e executar `pnpm measure:release`; registrar startup,
-  working set e memória privada do executável atualizado em `PERFORMANCE.md`.
-  Em 16 de agosto de 2026, quatro execuções/retomadas acumularam 2.315 artefatos
-  release, mas a etapa final com ThinLTO/codegen-unit único foi encerrada pelo
-  teto do executor antes da linkedição e não produziu um executável mensurável.
+- [ ] Com a instância release atual fechada, executar `pnpm release:build` no
+  target canônico e `pnpm measure:release`; registrar startup, working set e
+  memória privada do executável atualizado em `PERFORMANCE.md`. A linkedição
+  completa já foi validada em target isolado em 18 de agosto de 2026.
 - [ ] Inserir os quatro secrets reais de publicação descritos em
   `docs/RELEASE.md` quando o certificado do distribuidor estiver disponível.
