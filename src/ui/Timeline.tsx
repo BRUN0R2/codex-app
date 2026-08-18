@@ -22,6 +22,7 @@ type TimelineController = Pick<
   | "currentThread"
   | "hasOlderHistory"
   | "historyLoading"
+  | "isItemStreaming"
   | "loadOlderHistory"
   | "persistedTurns"
   | "reportError"
@@ -903,6 +904,7 @@ export function Timeline(props: {
                           <VirtualConversationTurn
                             clock={clock()}
                             diffDisplay={props.controller.config()?.config.desktop.diffDisplay}
+                            isItemStreaming={props.controller.isItemStreaming}
                             measurementKey={virtualTurnKey(turnId)}
                             onMeasure={measureVirtualTurn}
                             top={virtualOffset(virtualRange().start + relativeIndex())}
@@ -995,6 +997,7 @@ export function Timeline(props: {
 function VirtualConversationTurn(props: {
   readonly clock: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly isItemStreaming: (itemId: string) => boolean;
   readonly measurementKey: string;
   readonly onMeasure: (key: string, size: number) => void;
   readonly top: number;
@@ -1052,7 +1055,12 @@ function VirtualConversationTurn(props: {
           />
         )}
       >
-        <ConversationTurn clock={props.clock} diffDisplay={props.diffDisplay} turn={turn()} />
+        <ConversationTurn
+          clock={props.clock}
+          diffDisplay={props.diffDisplay}
+          isItemStreaming={props.isItemStreaming}
+          turn={turn()}
+        />
       </ErrorBoundary>
     </div>
   );
@@ -1061,6 +1069,7 @@ function VirtualConversationTurn(props: {
 function ConversationTurn(props: {
   readonly clock: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly isItemStreaming: (itemId: string) => boolean;
   readonly turn: VisibleThreadTurn;
 }) {
   const disclosure = useTimelineDisclosure(
@@ -1137,6 +1146,7 @@ function ConversationTurn(props: {
             diffDisplay={props.diffDisplay}
             disclosure={disclosure}
             firstWorkBlockIndex={presentation().firstWorkBlockIndex}
+            isItemStreaming={props.isItemStreaming}
             reasoningHeading={latestReasoningHeading()}
             status={props.turn.status}
             trailingAgentMessageBlockIndex={presentation().trailingAgentMessageBlockIndex}
@@ -1181,6 +1191,7 @@ function TurnPresentationBlockView(props: {
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly disclosure: TimelineDisclosureBinding;
   readonly firstWorkBlockIndex: number | null;
+  readonly isItemStreaming: (itemId: string) => boolean;
   readonly reasoningHeading: string | null;
   readonly status: VisibleThreadTurn["status"];
   readonly trailingAgentMessageBlockIndex: number | null;
@@ -1199,6 +1210,10 @@ function TurnPresentationBlockView(props: {
             }
             diffDisplay={props.diffDisplay}
             item={messageBlock().item}
+            streaming={
+              messageBlock().item.type === "agentMessage" &&
+              props.isItemStreaming(messageBlock().item.id)
+            }
           />
         )}
       </Match>
@@ -1505,6 +1520,7 @@ interface TimelineItemProps {
   readonly active?: boolean | undefined;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly item: VisibleThreadItem;
+  readonly streaming?: boolean | undefined;
   readonly variant?: "default" | "grouped" | undefined;
 }
 
@@ -1516,6 +1532,7 @@ function TimelineItem(props: TimelineItemProps) {
           active={props.active}
           diffDisplay={props.diffDisplay}
           item={props.item}
+          streaming={props.streaming}
           variant={props.variant}
         />
       )}
@@ -1529,9 +1546,9 @@ function TimelineItemContent(props: TimelineItemProps) {
       return <UserMessage item={props.item} />;
     case "agentMessage":
       return props.item.phase === "commentary" ? (
-        <CommentaryMessage item={props.item} streaming={props.active === true} />
+        <CommentaryMessage item={props.item} streaming={props.streaming === true} />
       ) : (
-        <AgentMessage item={props.item} streaming={props.active === true} />
+        <AgentMessage item={props.item} streaming={props.streaming === true} />
       );
     case "contextCompaction":
       return <ContextCompaction active={props.active} item={props.item} />;

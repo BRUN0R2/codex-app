@@ -109,6 +109,7 @@ export interface AppController {
   readonly forkThread: (threadId: string) => Promise<boolean>;
   readonly inspectFiles: (paths: readonly string[]) => Promise<readonly Attachment[]>;
   readonly interrupt: () => Promise<boolean>;
+  readonly isItemStreaming: (itemId: string) => boolean;
   readonly projectExpanded: (path: string) => boolean;
   readonly projectThreadListExpanded: (path: string) => boolean;
   readonly isThreadActive: (threadId: string) => boolean;

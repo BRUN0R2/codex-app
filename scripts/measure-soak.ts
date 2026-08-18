@@ -117,10 +117,10 @@ let committedCharacters = 0;
 const markdownMilliseconds = duration(() => {
   for (let index = 0; index < MARKDOWN_BLOCK_COUNT; index += 1) {
     markdownSource += `${index === 0 ? "" : "\n\n"}Paragraph ${index}.`;
-    const update = markdown.render(markdownSource, true);
+    const update = markdown.render(markdownSource, "append");
     committedCharacters += update.appendHtml.length;
   }
-  const completed = markdown.render(markdownSource, false);
+  const completed = markdown.render(markdownSource, "final");
   if (completed.appendHtml.length !== markdownSource.length) {
     throw new Error("Markdown soak benchmark lost content during finalization.");
   }

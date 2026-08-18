@@ -40,7 +40,7 @@
     "measure:diff": "node --experimental-strip-types scripts/measure-diff.ts",
     "measure:history": "node --import ./scripts/register-typescript-imports.mjs --expose-gc --max-old-space-size=4096 --experimental-strip-types scripts/measure-history.ts",
     "measure:search": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::tools::fs::tests::benchmark_ripgrep_against_previous_scanner -- --ignored --nocapture --test-threads=1",
-    "measure:soak": "node --experimental-strip-types scripts/measure-soak.ts",
+    "measure:soak": "node --import ./scripts/register-typescript-imports.mjs --experimental-strip-types scripts/measure-soak.ts",
     "measure:streaming": "node --experimental-strip-types scripts/measure-streaming.ts",
     "measure:tool-cache": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::tools::fs::tests::benchmark_duplicate_search_coalescence -- --ignored --nocapture --test-threads=1",
     "measure:tool-output": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::output_compaction::tests::benchmark_provider_output_reduction -- --ignored --nocapture --test-threads=1",

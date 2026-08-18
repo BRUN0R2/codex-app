@@ -79,7 +79,7 @@ describe("stream delta batcher", () => {
     ]);
   });
 
-  it("releases leading state when an item completes and drops work after disposal", () => {
+  it("discards pending deltas when an item completes and drops work after disposal", () => {
     const scheduler = new ManualScheduler();
     const batches: (readonly StreamDelta[])[] = [];
     const batcher = createStreamDeltaBatcher({
@@ -91,6 +91,7 @@ describe("stream delta batcher", () => {
     });
 
     batcher.enqueue(agentDelta("A"));
+    batcher.enqueue(agentDelta("stale"));
     batcher.releaseItem("thread-a", "message-a");
     batcher.enqueue(agentDelta("B"));
     batcher.dispose();

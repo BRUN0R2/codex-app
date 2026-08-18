@@ -58,11 +58,11 @@ export function Markdown(props: MarkdownProps) {
           reportFailure(
             frontendFailureMessage("Falha ao renderizar Markdown em segundo plano", reason),
           );
-          applyRenderUpdate(markdownRenderer.render(source, false));
+          applyRenderUpdate(markdownRenderer.render(source, "final"));
         });
       return;
     }
-    applyRenderUpdate(markdownRenderer.render(source, streaming));
+    applyRenderUpdate(markdownRenderer.render(source, streaming ? "append" : "final"));
   }
 
   function applyRenderUpdate(update: MarkdownRenderUpdate): void {
@@ -76,9 +76,13 @@ export function Markdown(props: MarkdownProps) {
       element.append(tailStart, tailEnd);
     }
     clearTail();
-    insertHtml(update.appendHtml, tailStart);
-    insertHtml(update.tailHtml, tailEnd);
-    queueMicrotask(hydrateImages);
+    const images = [
+      ...insertHtml(update.appendHtml, tailStart),
+      ...insertHtml(update.tailHtml, tailEnd),
+    ];
+    if (images.length > 0) {
+      queueMicrotask(() => hydrateImages(images));
+    }
   }
 
   function clearTail(): void {
@@ -93,13 +97,17 @@ export function Markdown(props: MarkdownProps) {
     }
   }
 
-  function insertHtml(html: string, before: Node | undefined): void {
+  function insertHtml(html: string, before: Node | undefined): readonly HTMLImageElement[] {
     if (element === undefined || before === undefined || html.length === 0) {
-      return;
+      return [];
     }
     const template = document.createElement("template");
     template.innerHTML = html;
+    const images = [
+      ...template.content.querySelectorAll<HTMLImageElement>("img[data-image-source]"),
+    ];
     element.insertBefore(template.content, before);
+    return images;
   }
 
   function handleClick(event: MouseEvent): void {
@@ -152,9 +160,11 @@ export function Markdown(props: MarkdownProps) {
     });
   }
 
-  function hydrateImages(): void {
-    const images = element?.querySelectorAll<HTMLImageElement>("img[data-image-source]") ?? [];
+  function hydrateImages(images: readonly HTMLImageElement[]): void {
     for (const image of images) {
+      if (!image.isConnected) {
+        continue;
+      }
       const source = image.getAttribute("data-image-source");
       if (
         source === null ||

@@ -86,11 +86,29 @@ export function createStreamDeltaBatcher(options: StreamDeltaBatcherOptions): St
     flushPending();
   }
 
-  function releaseMatchingKeys(prefix: string): void {
+  function releaseMatching(prefix: string): void {
     for (const key of leadingKeys) {
       if (key.startsWith(prefix)) {
         leadingKeys.delete(key);
       }
+    }
+    if (pending.length === 0) {
+      return;
+    }
+    const retained = pending.filter((delta) => !streamDeltaKey(delta).startsWith(prefix));
+    if (retained.length === pending.length) {
+      return;
+    }
+    pending = retained;
+    pendingIndexes.clear();
+    for (let index = 0; index < pending.length; index += 1) {
+      const delta = pending[index];
+      if (delta !== undefined) {
+        pendingIndexes.set(streamDeltaKey(delta), index);
+      }
+    }
+    if (pending.length === 0) {
+      cancelScheduledFlush();
     }
   }
 
@@ -128,10 +146,10 @@ export function createStreamDeltaBatcher(options: StreamDeltaBatcherOptions): St
     },
     flush,
     releaseItem(threadId, itemId) {
-      releaseMatchingKeys(`${threadId}${KEY_SEPARATOR}${itemId}${KEY_SEPARATOR}`);
+      releaseMatching(`${threadId}${KEY_SEPARATOR}${itemId}${KEY_SEPARATOR}`);
     },
     releaseThread(threadId) {
-      releaseMatchingKeys(`${threadId}${KEY_SEPARATOR}`);
+      releaseMatching(`${threadId}${KEY_SEPARATOR}`);
     },
   };
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { applyStreamDeltas, readLatestTurnFailure, upsertItem } from "./conversation";
+import { applyStreamDeltas, readLatestTurnFailure, removeItem, upsertItem } from "./conversation";
 
 describe("conversation reducer", () => {
   it("rejects an id that changes semantic type", () => {
@@ -42,6 +42,16 @@ describe("conversation reducer", () => {
         ],
       }),
     ).toBe("Falha persistida");
+  });
+
+  it("removes completed overlays without replacing unchanged collections", () => {
+    const items = [
+      { type: "agentMessage", id: "first", text: "A", phase: null },
+      { type: "agentMessage", id: "second", text: "B", phase: null },
+    ] as const;
+
+    expect(removeItem(items, "missing")).toBe(items);
+    expect(removeItem(items, "first")).toEqual([items[1]]);
   });
 
   it("applies a large stream batch with one immutable item-array replacement", () => {

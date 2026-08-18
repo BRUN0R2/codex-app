@@ -76,7 +76,7 @@ import {
   upsertAutomation,
   upsertAutomationRun,
 } from "./automations";
-import { readLatestTurnFailure, upsertItem } from "./conversation";
+import { readLatestTurnFailure, removeItem, upsertItem } from "./conversation";
 import {
   type InitializationStage,
   InitializationTimeoutError,
@@ -367,6 +367,14 @@ export function createAppController(): AppController {
   });
   const activeTurnId = createMemo(() => selectedRuntime()?.activeTurnId ?? null);
   const contextUsage = createMemo(() => selectedRuntime()?.contextUsage ?? null);
+  const streamingItemIds = createMemo<ReadonlySet<string>>(
+    () =>
+      new Set(
+        (selectedRuntime()?.itemOverlays ?? [])
+          .filter((item) => item.type === "agentMessage")
+          .map((item) => item.id),
+      ),
+  );
   const persistedTurns = createMemo<readonly VisibleThreadTurn[]>(() => {
     const thread = currentThread();
     return thread === null ? [] : readPersistedVisibleTurns(thread);
@@ -1083,7 +1091,10 @@ export function createAppController(): AppController {
           return {
             ...runtime,
             contextUsage: item.type === "contextCompaction" ? null : runtime.contextUsage,
-            itemOverlays: upsertItem(runtime.itemOverlays, item),
+            itemOverlays:
+              notification.method === "item.completed"
+                ? removeItem(runtime.itemOverlays, item.id)
+                : upsertItem(runtime.itemOverlays, item),
           };
         });
         return;
@@ -1692,6 +1703,10 @@ export function createAppController(): AppController {
   function isThreadActive(threadId: string): boolean {
     const thread = [...threads(), ...archivedThreads()].find((entry) => entry.id === threadId);
     return thread !== undefined && readThreadActive(thread, threadRuntime().get(threadId));
+  }
+
+  function isItemStreaming(itemId: string): boolean {
+    return streamingItemIds().has(itemId);
   }
 
   async function deleteThread(threadId: string): Promise<boolean> {
@@ -2370,6 +2385,7 @@ export function createAppController(): AppController {
     forkThread,
     inspectFiles,
     interrupt,
+    isItemStreaming,
     projectExpanded,
     projectThreadListExpanded,
     isThreadActive,

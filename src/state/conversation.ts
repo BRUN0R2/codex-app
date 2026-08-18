@@ -45,6 +45,17 @@ export function upsertItem(
   return next;
 }
 
+export function removeItem(
+  items: readonly VisibleThreadItem[],
+  itemId: string,
+): readonly VisibleThreadItem[] {
+  const index = findItemIndex(items, itemId);
+  if (index === -1) {
+    return items;
+  }
+  return [...items.slice(0, index), ...items.slice(index + 1)];
+}
+
 export function applyStreamDeltas(
   items: readonly VisibleThreadItem[],
   deltas: readonly StreamDelta[],
