@@ -1,134 +1,174 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { onCleanup, onMount } from "solid-js";
-import { isDesktopRuntime } from "../platform/DesktopRuntime";
+import { createSignal, onCleanup, onMount } from "solid-js";
 
-export function WindowChrome() {
-  if (!isDesktopRuntime()) {
-    return null;
-  }
+import { isBrowserPreview, isDesktopRuntime } from "../platform/DesktopRuntime";
 
-  return <DesktopWindowChrome />;
+interface WindowChromeProps {
+  readonly onError?: ((reason: unknown) => void) | undefined;
 }
 
-function DesktopWindowChrome() {
+interface WindowChromeLayoutProps {
+  readonly interactive: boolean;
+  readonly maximized: boolean;
+  readonly onClose?: () => void;
+  readonly onMinimize?: () => void;
+  readonly onToggleMaximize?: () => void;
+  readonly setControlsReference?: (element: HTMLDivElement) => void;
+}
+
+export function WindowChrome(props: WindowChromeProps) {
+  if (isDesktopRuntime()) {
+    return <DesktopWindowChrome onError={props.onError} />;
+  }
+  if (isBrowserPreview()) {
+    return <WindowChromeLayout interactive={false} maximized={false} />;
+  }
+  return null;
+}
+
+function DesktopWindowChrome(props: WindowChromeProps) {
   const appWindow = getCurrentWindow();
+  const [maximized, setMaximized] = createSignal(false);
   let controlsReference: HTMLDivElement | undefined;
+  let resizeFrame: number | undefined;
+  let disposed = false;
+
+  function reportControlFailure(operation: string, reason: unknown): void {
+    const detail = reason instanceof Error ? reason.message : String(reason);
+    props.onError?.(new Error(`Não foi possível ${operation}: ${detail}`));
+  }
+
+  async function synchronizeMaximizedState(): Promise<void> {
+    try {
+      const nextMaximized = await appWindow.isMaximized();
+      if (!disposed) {
+        setMaximized(nextMaximized);
+      }
+    } catch (reason: unknown) {
+      reportControlFailure("consultar o estado da janela", reason);
+    }
+  }
+
+  function scheduleMaximizedStateSynchronization(): void {
+    if (resizeFrame !== undefined) {
+      return;
+    }
+    resizeFrame = window.requestAnimationFrame(() => {
+      resizeFrame = undefined;
+      void synchronizeMaximizedState();
+    });
+  }
 
   function blurFocusedWindowControl(): void {
-    const controls = controlsReference;
     const activeElement = document.activeElement;
-
     if (
-      controls !== undefined &&
+      controlsReference !== undefined &&
       activeElement instanceof HTMLElement &&
-      controls.contains(activeElement)
+      controlsReference.contains(activeElement)
     ) {
       activeElement.blur();
     }
   }
 
-  onMount(() => {
-    let isCurrent = true;
-    let unlistenFocus: (() => void) | undefined;
-
-    function clearStuckHover(): void {
-      const controls = controlsReference;
-
-      if (controls === undefined) {
-        return;
-      }
-
-      // biome-ignore lint/complexity/useLiteralKeys: TypeScript index signature access
-      controls.dataset["suppressHover"] = "true";
-
-      blurFocusedWindowControl();
-
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => {
-          if (isCurrent) {
-            // biome-ignore lint/complexity/useLiteralKeys: TypeScript index signature access
-            delete controls.dataset["suppressHover"];
-          }
-        });
-      });
-    }
-
-    void appWindow
-      .onFocusChanged(({ payload: isFocused }) => {
-        if (isFocused) {
-          clearStuckHover();
+  function runControlAction(
+    operation: string,
+    action: () => Promise<void>,
+    refreshMaximizedState = false,
+  ): void {
+    blurFocusedWindowControl();
+    void action()
+      .then(() => {
+        if (refreshMaximizedState) {
+          return synchronizeMaximizedState();
         }
+        return undefined;
       })
-      .then((unlisten) => {
-        if (isCurrent) {
-          unlistenFocus = unlisten;
-        } else {
-          unlisten();
-        }
-      });
-    onCleanup(() => {
-      isCurrent = false;
-      unlistenFocus?.();
-    });
-  });
-
-  function runControlAction(action: Promise<void>): void {
-    const controls = controlsReference;
-
-    if (controls !== undefined) {
-      // biome-ignore lint/complexity/useLiteralKeys: TypeScript index signature access
-      controls.dataset["suppressHover"] = "true";
-
-      blurFocusedWindowControl();
-    }
-
-    void action.finally(() => {
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => {
-          if (controls !== undefined) {
-            // biome-ignore lint/complexity/useLiteralKeys: TypeScript index signature access
-            delete controls.dataset["suppressHover"];
-          }
-        });
-      });
-    });
+      .catch((reason: unknown) => reportControlFailure(operation, reason));
   }
 
+  onMount(() => {
+    void synchronizeMaximizedState();
+    window.addEventListener("resize", scheduleMaximizedStateSynchronization);
+  });
+
+  onCleanup(() => {
+    disposed = true;
+    window.removeEventListener("resize", scheduleMaximizedStateSynchronization);
+    if (resizeFrame !== undefined) {
+      window.cancelAnimationFrame(resizeFrame);
+    }
+  });
+
   return (
-    <div class="window-chrome">
+    <WindowChromeLayout
+      interactive={true}
+      maximized={maximized()}
+      onClose={() => runControlAction("fechar a janela", () => appWindow.close())}
+      onMinimize={() => runControlAction("minimizar a janela", () => appWindow.minimize())}
+      onToggleMaximize={() =>
+        runControlAction(
+          maximized() ? "restaurar a janela" : "maximizar a janela",
+          () => appWindow.toggleMaximize(),
+          true,
+        )
+      }
+      setControlsReference={(element) => {
+        controlsReference = element;
+      }}
+    />
+  );
+}
+
+function WindowChromeLayout(props: WindowChromeLayoutProps) {
+  const maximizeLabel = () => (props.maximized ? "Restaurar janela" : "Maximizar janela");
+
+  return (
+    <header class="window-chrome" classList={{ preview: !props.interactive }}>
       <button
-        aria-label="Área de arrasto da janela"
+        aria-label="Barra de título da janela"
         class="window-chrome-drag-region"
-        data-tauri-drag-region
-        onDblClick={() => runControlAction(appWindow.toggleMaximize())}
+        data-tauri-drag-region={props.interactive ? "" : undefined}
+        onDblClick={props.onToggleMaximize}
         tabIndex={-1}
         type="button"
-      />
-      <div class="window-chrome-controls" ref={controlsReference}>
+      >
+        <span class="window-chrome-title">Codex App</span>
+      </button>
+      <div
+        aria-hidden={props.interactive ? undefined : "true"}
+        class="window-chrome-controls"
+        ref={props.setControlsReference}
+      >
         <button
           aria-label="Minimizar janela"
+          onClick={props.onMinimize}
+          tabIndex={props.interactive ? 0 : -1}
+          title="Minimizar"
           type="button"
-          onClick={() => runControlAction(appWindow.minimize())}
         >
           <WindowChromeMinimizeIcon />
         </button>
         <button
-          aria-label="Maximizar ou restaurar janela"
+          aria-label={maximizeLabel()}
+          onClick={props.onToggleMaximize}
+          tabIndex={props.interactive ? 0 : -1}
+          title={maximizeLabel()}
           type="button"
-          onClick={() => runControlAction(appWindow.toggleMaximize())}
         >
-          <WindowChromeMaximizeIcon />
+          {props.maximized ? <WindowChromeRestoreIcon /> : <WindowChromeMaximizeIcon />}
         </button>
         <button
           aria-label="Fechar janela"
           class="window-chrome-close"
+          onClick={props.onClose}
+          tabIndex={props.interactive ? 0 : -1}
+          title="Fechar"
           type="button"
-          onClick={() => runControlAction(appWindow.close())}
         >
           <WindowChromeCloseIcon />
         </button>
       </div>
-    </div>
+    </header>
   );
 }
 
@@ -164,6 +204,25 @@ function WindowChromeMaximizeIcon() {
       width="13"
     >
       <rect height="14" rx="1" width="14" x="5" y="5" />
+    </svg>
+  );
+}
+
+function WindowChromeRestoreIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="14"
+      stroke="currentColor"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="1.6"
+      viewBox="0 0 24 24"
+      width="14"
+    >
+      <path d="M8 7V5.5A1.5 1.5 0 0 1 9.5 4h9A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H17" />
+      <rect height="12" rx="1.5" width="12" x="4" y="8" />
     </svg>
   );
 }

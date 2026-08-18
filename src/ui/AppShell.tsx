@@ -2,7 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 
 import { openExternalUrl } from "../infrastructure/codexClient";
-import { isDesktopRuntime } from "../platform/DesktopRuntime";
+import { isBrowserPreview } from "../platform/DesktopRuntime";
 import type { AppController } from "../state/appController";
 
 import { ApprovalCard } from "./ApprovalCard";
@@ -17,11 +17,11 @@ import { LatestTurnFileChangeStore } from "./reviewChanges";
 import { SettingsDialog, type SettingsPage } from "./SettingsDialog";
 import { Sidebar } from "./Sidebar";
 import { Timeline } from "./Timeline";
-import { WindowChrome } from "./WindowChrome";
 
 export function AppShell(props: { readonly controller: AppController }) {
-  const [settingsOpen, setSettingsOpen] = createSignal(false);
-  const [settingsPage, setSettingsPage] = createSignal<SettingsPage | null>(null);
+  const previewSettingsPage = readPreviewSettingsPage();
+  const [settingsOpen, setSettingsOpen] = createSignal(previewSettingsPage !== null);
+  const [settingsPage, setSettingsPage] = createSignal<SettingsPage | null>(previewSettingsPage);
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
   const [reviewOpen, setReviewOpen] = createSignal(false);
   const reviewChangeStore = new LatestTurnFileChangeStore();
@@ -124,19 +124,13 @@ export function AppShell(props: { readonly controller: AppController }) {
       cancelAnimationFrame(chatDockResizeFrame);
     }
   });
-  const showWindowChrome = isDesktopRuntime();
-
   return (
     <div
       class="app-shell"
       classList={{
         "sidebar-collapsed": sidebarCollapsed(),
-        "with-window-chrome": showWindowChrome,
       }}
     >
-      <Show when={showWindowChrome}>
-        <WindowChrome />
-      </Show>
       <Sidebar
         collapsed={sidebarCollapsed()}
         controller={props.controller}
@@ -220,6 +214,28 @@ export function AppShell(props: { readonly controller: AppController }) {
       </Show>
     </div>
   );
+}
+
+const SETTINGS_PAGES = new Set<SettingsPage>([
+  "appearance",
+  "archived",
+  "diagnostics",
+  "general",
+  "personalization",
+  "profile",
+  "security",
+  "shortcuts",
+  "usage",
+]);
+
+function readPreviewSettingsPage(): SettingsPage | null {
+  if (!import.meta.env.DEV || !isBrowserPreview()) {
+    return null;
+  }
+  const requestedPage = new URLSearchParams(window.location.search).get("settings");
+  return requestedPage !== null && SETTINGS_PAGES.has(requestedPage as SettingsPage)
+    ? (requestedPage as SettingsPage)
+    : null;
 }
 
 function UsageLimitBanner(props: { readonly controller: AppController }) {

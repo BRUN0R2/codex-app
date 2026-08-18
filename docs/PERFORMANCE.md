@@ -267,11 +267,30 @@ para evitar limites de layout do WebView, mas preserva a altura lógica e o
 mapeamento de todas as linhas. Esse benchmark roda em Node e não substitui
 medidas de paint, heap ou INP no WebView de produção.
 
-A interface preview também foi validada ao vivo em 14 de agosto de 2026 nos
-viewports solicitados de `920 × 640`, `1280 × 820` e `1920 × 1080`. Nos três
-casos não houve overflow horizontal, e timeline e compositor permaneceram
-visíveis. Escritas de layout originadas por `ResizeObserver` são coalescidas no
-próximo frame; a repetição do teste não produziu warnings ou erros no console.
+### Moldura e configurações — 18 de agosto de 2026
+
+A moldura customizada agora pertence à raiz do aplicativo, acima da área de
+conteúdo. Boot, login, conversa e configurações compartilham o mesmo titlebar;
+overlays não disputam mais a sua área por `z-index`. O estado maximizado é lido
+da janela nativa, o ícone alterna entre maximizar e restaurar e qualquer falha de
+controle entra no diagnóstico normal do app.
+
+As configurações usam uma largura de navegação independente da sidebar,
+tipografia e espaçamento consistentes, superfícies semânticas e switches
+acessíveis. `pnpm verify:visual` abre a preview por CDP em um perfil temporário,
+captura PNGs e valida geometria nos viewports `920 × 640`, `1280 × 820` e
+`1920 × 1080`. Nas três medições:
+
+- o titlebar ocupou exatamente `0–34 px`;
+- os controles permaneceram nos `138 px` finais da janela;
+- o conteúdo e o overlay começaram em `34 px`, sem interseção com o titlebar;
+- não houve overflow horizontal;
+- a navegação mediu `248–288 px` e o conteúdo útil permaneceu entre
+  `533,219–820 px`.
+
+As capturas ficam em `.freebuff/visual-audit/`. O teste geométrico evita
+regressões objetivas de sobreposição e responsividade, mas não substitui revisão
+humana de contraste, hierarquia e acabamento no WebView nativo.
 
 ### Autonomia prolongada — 16 de agosto de 2026
 

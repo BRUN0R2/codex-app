@@ -20,7 +20,7 @@
         "minHeight": 640,
         "decorations": false,
         "center": true,
-        "backgroundColor": "#111210"
+        "backgroundColor": "#111111"
       }
     ],
     "security": {

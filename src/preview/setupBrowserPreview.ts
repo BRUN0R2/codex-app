@@ -4,6 +4,7 @@ import type {
   AccountProfileResponse,
   AccountRateLimitsResponse,
   AccountReadResponse,
+  ApplicationPreferences,
   ChatModelListResponse,
   CodexModel,
   CodexThread,
@@ -567,9 +568,19 @@ const PREVIEW_RATE_LIMITS = {
   rateLimitsByLimitId: {},
 } as const satisfies AccountRateLimitsResponse;
 
+let previewApplicationPreferences: ApplicationPreferences = {
+  schemaVersion: 1,
+  startWithWindows: true,
+  startMinimized: false,
+  closeToTray: true,
+} satisfies ApplicationPreferences;
+
 export function setupBrowserPreview(): void {
   document.title = "Codex App · Visualização";
   document.documentElement.setAttribute("data-runtime", "browser-preview");
+  if (new URLSearchParams(window.location.search).get("chrome") === "1") {
+    document.documentElement.setAttribute("data-window-chrome-preview", "true");
+  }
   saveProjects(PREVIEW_PROJECTS);
 
   mockIPC(
@@ -598,6 +609,16 @@ export function setupBrowserPreview(): void {
           };
         case "engine_account_rate_limits_read":
           return PREVIEW_RATE_LIMITS;
+        case "application_preferences_read":
+          return previewApplicationPreferences;
+        case "application_preferences_update": {
+          const preferences = (args as { preferences?: ApplicationPreferences }).preferences;
+          if (preferences === undefined) {
+            throw new Error("A atualização de preferências não recebeu um valor.");
+          }
+          previewApplicationPreferences = preferences;
+          return previewApplicationPreferences;
+        }
         case "engine_turn_interrupt":
           return { applied: true };
         case "engine_turn_steer":

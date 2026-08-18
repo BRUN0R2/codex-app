@@ -29,7 +29,7 @@ import {
   readApplicationPreferences,
   updateApplicationPreferences,
 } from "../infrastructure/codexClient";
-import { isDesktopRuntime } from "../platform/DesktopRuntime";
+import { isBrowserPreview, isDesktopRuntime } from "../platform/DesktopRuntime";
 import type { AppController } from "../state/appController";
 
 type SettingsDialogController = Pick<
@@ -278,6 +278,7 @@ function SettingsNavButton(props: {
 }) {
   return (
     <button
+      aria-current={props.selected === props.page ? "page" : undefined}
       classList={{ active: props.selected === props.page }}
       onClick={() => props.setPage(props.page)}
       type="button"
@@ -337,7 +338,7 @@ const DEFAULT_APPLICATION_PREFERENCES = {
 } as const satisfies ApplicationPreferences;
 
 function ApplicationPreferencesSettings(props: { readonly controller: SettingsDialogController }) {
-  const desktopRuntime = isDesktopRuntime();
+  const desktopRuntime = isDesktopRuntime() || isBrowserPreview();
   const [preferences, setPreferences] = createSignal<ApplicationPreferences>(
     DEFAULT_APPLICATION_PREFERENCES,
   );
@@ -467,18 +468,18 @@ function PreferenceCheckbox(props: {
   readonly onChange: (checked: boolean) => void;
 }) {
   return (
-    <label class="application-preference" classList={{ disabled: props.disabled }}>
-      <input
-        checked={props.checked}
-        disabled={props.disabled}
-        onChange={(event) => props.onChange(event.currentTarget.checked)}
-        type="checkbox"
-      />
+    <div class="application-preference" classList={{ disabled: props.disabled }}>
       <span class="application-preference-copy">
         <strong>{props.label}</strong>
         <small>{props.description}</small>
       </span>
-    </label>
+      <SettingsSwitch
+        checked={props.checked}
+        disabled={props.disabled}
+        label={props.label}
+        onChange={props.onChange}
+      />
+    </div>
   );
 }
 
@@ -669,10 +670,11 @@ function AppearanceSettings(props: { readonly controller: SettingsDialogControll
         label="Cursor em botões"
         description="Mostra cursor de ponteiro em controles interativos."
       >
-        <input
+        <SettingsSwitch
           checked={desktop()?.pointerCursor ?? true}
-          onChange={(event) => save({ pointerCursor: event.currentTarget.checked })}
-          type="checkbox"
+          disabled={desktop() === undefined}
+          label="Cursor em botões"
+          onChange={(pointerCursor) => save({ pointerCursor })}
         />
       </SettingsRow>
       <SettingsRow
@@ -1265,6 +1267,28 @@ function SettingsRow(props: {
       </span>
       <div>{props.children}</div>
     </div>
+  );
+}
+
+function SettingsSwitch(props: {
+  readonly checked: boolean;
+  readonly disabled?: boolean;
+  readonly label: string;
+  readonly onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label class="settings-switch" classList={{ disabled: props.disabled }}>
+      <input
+        aria-checked={props.checked}
+        aria-label={props.label}
+        checked={props.checked}
+        disabled={props.disabled}
+        onChange={(event) => props.onChange(event.currentTarget.checked)}
+        role="switch"
+        type="checkbox"
+      />
+      <span aria-hidden="true" class="settings-switch-track" />
+    </label>
   );
 }
 
