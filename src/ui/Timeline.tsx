@@ -1171,7 +1171,11 @@ function ConversationTurn(props: {
 
       <Show when={failure()}>
         {(presentation) => (
-          <section class="turn-failure" role="alert">
+          <section
+            class="turn-failure"
+            data-tone={presentation().tone}
+            role={presentation().tone === "warning" ? "status" : "alert"}
+          >
             <strong>{presentation().title}</strong>
             <p>{presentation().detail}</p>
             <Show when={presentation().technical}>

@@ -4040,6 +4040,12 @@ pre {
   color: #efb0a9;
 }
 
+.turn-failure[data-tone="warning"] {
+  border-color: #625231;
+  background: rgb(75 60 28 / 34%);
+  color: #ead59b;
+}
+
 .turn-failure strong {
   display: block;
   margin-bottom: 4px;
@@ -4054,12 +4060,20 @@ pre {
   line-height: 1.55;
 }
 
+.turn-failure[data-tone="warning"] p {
+  color: #d8c384;
+}
+
 .turn-failure small {
   display: block;
   margin-top: 7px;
   color: #bf8983;
   font-size: 0.78rem;
   letter-spacing: 0.01em;
+}
+
+.turn-failure[data-tone="warning"] small {
+  color: #b8a66f;
 }
 
 @keyframes thinking {

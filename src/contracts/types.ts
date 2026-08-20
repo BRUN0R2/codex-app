@@ -43,7 +43,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 10;
+  readonly schemaVersion: 11;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -118,6 +118,8 @@ export interface ModelContextWindow {
   readonly usablePercent: number;
   readonly maximumTokens: number | null;
 }
+
+export type ModelContextWindowPreference = "default" | "maximum";
 
 export interface CodexModel {
   readonly id: string;
@@ -437,6 +439,7 @@ export interface AppConfig {
   readonly model: string | null;
   readonly modelReasoningEffort: ReasoningEffort | null;
   readonly serviceTier: string | null;
+  readonly modelContextWindowPreferences: Readonly<Record<string, ModelContextWindowPreference>>;
   readonly permissionProfile: PermissionProfile;
   readonly webSearch: WebSearchMode;
   readonly modelVerbosity: ModelVerbosity | null;
@@ -453,6 +456,11 @@ export interface ConfigReadResponse {
 export type ConfigUpdate =
   | { readonly type: "desktop"; readonly value: DesktopPreferences }
   | { readonly type: "developerInstructions"; readonly value: string | null }
+  | {
+      readonly type: "modelContextWindow";
+      readonly model: string;
+      readonly value: ModelContextWindowPreference;
+    }
   | { readonly type: "modelVerbosity"; readonly value: ModelVerbosity | null }
   | { readonly type: "permissionProfile"; readonly value: PermissionProfile }
   | { readonly type: "personality"; readonly value: Personality }

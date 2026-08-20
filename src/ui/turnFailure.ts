@@ -1,10 +1,17 @@
 const PROVIDER_HTTP_PATTERN = /^provider returned HTTP (\d{3}):\s*([\s\S]*)$/u;
+const PROVIDER_STREAM_PATTERN =
+  /^(provider request failed|provider temporarily unavailable|provider is temporarily overloaded):\s*(?:([a-z][a-z0-9_]*):\s*)?([\s\S]*)$/iu;
+const CONTEXT_WINDOW_PATTERN =
+  /^model context window exceeded:\s*(?:([a-z][a-z0-9_]*):\s*)?([\s\S]*)$/iu;
+const REQUEST_ID_PATTERN =
+  /(?:request ID|ID da solicitação)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/iu;
 const MAX_VISIBLE_FAILURE_CHARACTERS = 2_000;
 
 export interface TurnFailurePresentation {
   readonly detail: string;
   readonly technical: string | null;
   readonly title: string;
+  readonly tone: "error" | "warning";
 }
 
 interface ProviderErrorDetails {
@@ -15,17 +22,37 @@ interface ProviderErrorDetails {
 
 export function presentTurnFailure(message: string): TurnFailurePresentation {
   const provider = PROVIDER_HTTP_PATTERN.exec(message);
-  if (provider === null) {
+  if (provider !== null) {
+    return presentProviderHttpFailure(Number(provider[1]), provider[2] ?? "");
+  }
+
+  const stream = PROVIDER_STREAM_PATTERN.exec(message);
+  if (stream !== null) {
+    return presentProviderStreamFailure(stream[1] ?? "", stream[2] ?? null, stream[3] ?? "");
+  }
+
+  const context = CONTEXT_WINDOW_PATTERN.exec(message);
+  if (context !== null) {
     return {
-      detail: boundedText(message),
-      technical: null,
-      title: "O turno falhou",
+      detail:
+        "Não foi possível liberar espaço suficiente na conversa. Compacte o contexto ou inicie uma nova conversa.",
+      technical: context[1] ?? "context_length_exceeded",
+      title: "Contexto da conversa excedido",
+      tone: "error",
     };
   }
 
-  const status = Number(provider[1]);
-  const details = providerErrorDetails(provider[2] ?? "");
-  const technical = [`HTTP ${status}`, details.kind].filter(Boolean).join(" · ");
+  return {
+    detail: boundedText(message),
+    technical: null,
+    title: "O turno falhou",
+    tone: "error",
+  };
+}
+
+function presentProviderHttpFailure(status: number, body: string): TurnFailurePresentation {
+  const details = providerErrorDetails(body);
+  const technical = providerTechnical(`HTTP ${status}`, details.kind, details.message);
 
   if (status === 429 || details.kind === "usage_limit_reached") {
     return {
@@ -35,7 +62,12 @@ export function presentTurnFailure(message: string): TurnFailurePresentation {
           : `A conta atingiu a cota do Codex. Tente novamente em aproximadamente ${details.resetLabel}.`,
       technical,
       title: "Limite de uso atingido",
+      tone: "warning",
     };
+  }
+
+  if (isServerOverloaded(details.kind)) {
+    return overloadedPresentation(technical);
   }
 
   if (details.message.toLocaleLowerCase("en-US").includes("no tool output found")) {
@@ -44,14 +76,91 @@ export function presentTurnFailure(message: string): TurnFailurePresentation {
         "Uma chamada de ferramenta antiga ficou sem resultado. A versão atual corrige esse histórico automaticamente antes do próximo turno.",
       technical,
       title: "Histórico de ferramentas incompleto",
+      tone: "error",
+    };
+  }
+
+  if (status >= 500) {
+    return {
+      detail:
+        "O serviço não conseguiu processar a solicitação neste momento. Tente novamente em alguns instantes.",
+      technical,
+      title: "Instabilidade temporária no serviço",
+      tone: "warning",
     };
   }
 
   return {
     detail: details.message,
     technical,
-    title: status >= 500 ? "O provider está indisponível" : "O provider recusou o turno",
+    title: "O provider recusou o turno",
+    tone: "error",
   };
+}
+
+function presentProviderStreamFailure(
+  prefix: string,
+  kind: string | null,
+  body: string,
+): TurnFailurePresentation {
+  const technical = providerTechnical(null, kind, body);
+  const normalizedPrefix = prefix.toLocaleLowerCase("en-US");
+  if (normalizedPrefix.includes("overloaded") || isServerOverloaded(kind)) {
+    return overloadedPresentation(technical);
+  }
+  if (normalizedPrefix.includes("temporarily unavailable") || isTransientServerError(kind)) {
+    return {
+      detail:
+        "O serviço encontrou uma instabilidade temporária. Tente novamente em alguns instantes.",
+      technical,
+      title: "Instabilidade temporária no serviço",
+      tone: "warning",
+    };
+  }
+  return {
+    detail: boundedText(body || "O provider rejeitou a solicitação."),
+    technical,
+    title: "O provider recusou o turno",
+    tone: "error",
+  };
+}
+
+function overloadedPresentation(technical: string | null): TurnFailurePresentation {
+  return {
+    detail: "O serviço está com alta demanda no momento. Tente novamente em alguns instantes.",
+    technical,
+    title: "Serviço temporariamente ocupado",
+    tone: "warning",
+  };
+}
+
+function providerTechnical(
+  primary: string | null,
+  kind: string | null,
+  message: string,
+): string | null {
+  const requestId = REQUEST_ID_PATTERN.exec(message)?.[1] ?? null;
+  const parts = [primary, kind, requestId === null ? null : `ID ${requestId}`].filter(
+    (part): part is string => part !== null && part.length > 0,
+  );
+  return parts.length === 0 ? null : parts.join(" · ");
+}
+
+function isServerOverloaded(kind: string | null): boolean {
+  return (
+    kind === "server_is_overloaded" || kind === "server_overloaded" || kind === "overloaded_error"
+  );
+}
+
+function isTransientServerError(kind: string | null): boolean {
+  return (
+    kind === "server_error" ||
+    kind === "internal_server_error" ||
+    kind === "service_unavailable" ||
+    kind === "temporarily_unavailable" ||
+    kind === "upstream_error" ||
+    kind === "gateway_timeout"
+  );
 }
 
 function providerErrorDetails(body: string): ProviderErrorDetails {

@@ -7,6 +7,16 @@ pub enum AppError {
     Auth(String),
     #[error("provider request failed: {0}")]
     Provider(String),
+    #[error("provider temporarily unavailable: {message}")]
+    ProviderTransient {
+        message: String,
+        retry_after_seconds: Option<u64>,
+    },
+    #[error("provider is temporarily overloaded: {message}")]
+    ServerOverloaded {
+        message: String,
+        retry_after_seconds: Option<u64>,
+    },
     #[error("provider connection failed: {0}")]
     Transport(String),
     #[error("provider returned HTTP {status}: {message}")]
@@ -43,7 +53,8 @@ impl AppError {
         match self {
             Self::Auth(_) => "authFailed",
             Self::Provider(_) => "providerFailed",
-            Self::Transport(_) => "providerUnavailable",
+            Self::ProviderTransient { .. } | Self::Transport(_) => "providerUnavailable",
+            Self::ServerOverloaded { .. } => "serverOverloaded",
             Self::ProviderHttp { .. } => "providerHttpError",
             Self::RateLimited { .. } => "rateLimited",
             Self::ContextWindowExceeded(_) => "contextWindowExceeded",
@@ -62,7 +73,8 @@ impl AppError {
     const fn retryable(&self) -> bool {
         matches!(
             self,
-            Self::Provider(_)
+            Self::ProviderTransient { .. }
+                | Self::ServerOverloaded { .. }
                 | Self::Transport(_)
                 | Self::RateLimited { .. }
                 | Self::ProviderHttp {
@@ -100,6 +112,16 @@ impl AppError {
                 message,
                 retry_after_seconds,
             }
+        } else if is_server_overloaded_code(code) {
+            Self::ServerOverloaded {
+                message,
+                retry_after_seconds,
+            }
+        } else if is_transient_provider_code(code) {
+            Self::ProviderTransient {
+                message,
+                retry_after_seconds,
+            }
         } else if let Some(status) = status {
             Self::ProviderHttp { status, message }
         } else {
@@ -110,7 +132,8 @@ impl AppError {
     pub(crate) const fn is_transient(&self) -> bool {
         matches!(
             self,
-            Self::Transport(_)
+            Self::ProviderTransient { .. }
+                | Self::Transport(_)
                 | Self::ProviderHttp {
                     status: 500..=599,
                     ..
@@ -118,6 +141,45 @@ impl AppError {
                 | Self::Timeout { .. }
         )
     }
+
+    pub(crate) const fn retry_after_seconds(&self) -> Option<u64> {
+        match self {
+            Self::ProviderTransient {
+                retry_after_seconds,
+                ..
+            }
+            | Self::ServerOverloaded {
+                retry_after_seconds,
+                ..
+            }
+            | Self::RateLimited {
+                retry_after_seconds,
+                ..
+            } => *retry_after_seconds,
+            _ => None,
+        }
+    }
+}
+
+fn is_server_overloaded_code(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some("server_is_overloaded" | "server_overloaded" | "overloaded_error")
+    )
+}
+
+fn is_transient_provider_code(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some(
+            "server_error"
+                | "internal_server_error"
+                | "service_unavailable"
+                | "temporarily_unavailable"
+                | "upstream_error"
+                | "gateway_timeout"
+        )
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -182,6 +244,15 @@ mod tests {
     fn only_recoverable_transport_failures_are_transient() {
         assert!(AppError::Transport("connection reset".into()).is_transient());
         assert!(
+            AppError::from_provider_rejection(
+                None,
+                Some("server_error"),
+                "temporary failure".into(),
+                Some(2),
+            )
+            .is_transient()
+        );
+        assert!(
             AppError::ProviderHttp {
                 status: 503,
                 message: "unavailable".into(),
@@ -190,11 +261,53 @@ mod tests {
         );
         assert!(!AppError::Provider("invalid SSE event".into()).is_transient());
         assert!(
+            !AppError::from_provider_rejection(
+                None,
+                Some("server_is_overloaded"),
+                "high load".into(),
+                None,
+            )
+            .is_transient()
+        );
+        assert!(
             !AppError::ProviderHttp {
                 status: 400,
                 message: "bad request".into(),
             }
             .is_transient()
         );
+    }
+
+    #[test]
+    fn stream_server_failures_are_typed_without_making_protocol_errors_transient() {
+        let transient = AppError::from_provider_rejection(
+            None,
+            Some("server_error"),
+            "temporary failure".into(),
+            Some(3),
+        );
+        assert!(matches!(
+            transient,
+            AppError::ProviderTransient {
+                retry_after_seconds: Some(3),
+                ..
+            }
+        ));
+
+        let overloaded = AppError::from_provider_rejection(
+            None,
+            Some("server_is_overloaded"),
+            "high load".into(),
+            None,
+        );
+        assert!(matches!(overloaded, AppError::ServerOverloaded { .. }));
+
+        let protocol = AppError::from_provider_rejection(
+            None,
+            Some("invalid_request_error"),
+            "invalid input".into(),
+            None,
+        );
+        assert!(matches!(protocol, AppError::Provider(_)));
     }
 }

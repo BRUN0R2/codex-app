@@ -509,6 +509,13 @@ pub struct ModelContextWindow {
     pub maximum_tokens: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelContextWindowPreference {
+    Default,
+    Maximum,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexModel {
@@ -926,6 +933,8 @@ pub struct AppConfig {
     pub model: Option<String>,
     pub model_reasoning_effort: Option<ReasoningEffort>,
     pub service_tier: Option<String>,
+    #[serde(default)]
+    pub model_context_window_preferences: BTreeMap<String, ModelContextWindowPreference>,
     pub permission_profile: PermissionProfile,
     pub web_search: WebSearchMode,
     pub model_verbosity: Option<ModelVerbosity>,
@@ -948,6 +957,7 @@ impl Default for AppConfig {
             model: None,
             model_reasoning_effort: None,
             service_tier: None,
+            model_context_window_preferences: BTreeMap::new(),
             permission_profile: PermissionProfile::default(),
             web_search: WebSearchMode::Disabled,
             model_verbosity: None,
@@ -1025,13 +1035,31 @@ pub struct ConfigReadResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum ConfigUpdate {
-    ModelDefaults { value: ModelDefaults },
-    PermissionProfile { value: PermissionProfile },
-    WebSearch { value: WebSearchMode },
-    ModelVerbosity { value: Option<ModelVerbosity> },
-    Personality { value: Personality },
-    DeveloperInstructions { value: Option<String> },
-    Desktop { value: DesktopPreferences },
+    ModelDefaults {
+        value: ModelDefaults,
+    },
+    ModelContextWindow {
+        model: String,
+        value: ModelContextWindowPreference,
+    },
+    PermissionProfile {
+        value: PermissionProfile,
+    },
+    WebSearch {
+        value: WebSearchMode,
+    },
+    ModelVerbosity {
+        value: Option<ModelVerbosity>,
+    },
+    Personality {
+        value: Personality,
+    },
+    DeveloperInstructions {
+        value: Option<String>,
+    },
+    Desktop {
+        value: DesktopPreferences,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1129,7 +1157,22 @@ mod tests {
             PermissionProfile::workspace_write()
         );
         assert!(config.model.is_none());
+        assert!(config.model_context_window_preferences.is_empty());
         assert!(config.model_verbosity.is_none());
+    }
+
+    #[test]
+    fn legacy_configuration_without_context_preferences_remains_compatible() {
+        let mut value =
+            serde_json::to_value(AppConfig::default()).expect("configuration should serialize");
+        value
+            .as_object_mut()
+            .expect("configuration should be an object")
+            .remove("modelContextWindowPreferences");
+
+        let decoded: AppConfig =
+            serde_json::from_value(value).expect("legacy configuration should deserialize");
+        assert!(decoded.model_context_window_preferences.is_empty());
     }
 
     #[test]

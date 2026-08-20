@@ -78,6 +78,7 @@ const PREVIEW_CONFIG = {
     model: PREVIEW_MODEL_ID,
     modelReasoningEffort: PREVIEW_REASONING_EFFORT,
     serviceTier: null,
+    modelContextWindowPreferences: { [PREVIEW_MODEL_ID]: "maximum" },
     permissionProfile: PREVIEW_PERMISSION_PROFILE,
     webSearch: "live",
     modelVerbosity: null,
@@ -110,7 +111,7 @@ const PREVIEW_ENGINE = {
       "scheduledAutomations",
     ],
   },
-  schemaVersion: 10,
+  schemaVersion: 11,
   config: PREVIEW_CONFIG,
   diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
   permissionProfiles: [

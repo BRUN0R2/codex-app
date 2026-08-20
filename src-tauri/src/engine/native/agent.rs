@@ -46,6 +46,7 @@ const MAX_REJECTED_TOOL_ERROR_BYTES: usize = 4_096;
 const MAX_PARALLEL_READ_TOOLS: usize = 8;
 const MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS: u64 = 60;
+const MAX_CONTEXT_RECOVERY_ATTEMPTS_WITHOUT_PROGRESS: u8 = 1;
 pub(super) const DEFAULT_RETRY_AFTER_SECONDS: u64 = 60;
 
 pub(super) struct PreparedTurn {
@@ -72,11 +73,18 @@ pub(super) enum RunCompletion {
     Interrupted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextWindowRecovery {
+    Exhausted,
+    Interrupted,
+    Retry,
+}
+
 struct SamplingContext<'a> {
     app: &'a AppHandle,
     inner: &'a NativeEngineInner,
     instructions: &'a str,
-    snapshot: Option<&'a ContextUsageSnapshot>,
+    snapshot: &'a mut Option<ContextUsageSnapshot>,
     tools: &'a [serde_json::Value],
 }
 
@@ -205,6 +213,7 @@ pub(super) async fn run_turn(
         .await?;
     let mut history_requires_refresh = false;
     let mut transient_failure_count = 0u32;
+    let mut context_recovery_attempts = 0u8;
     let stream_deltas = StreamNotificationBatcher::new(
         Arc::clone(&inner),
         app.clone(),
@@ -230,7 +239,7 @@ pub(super) async fn run_turn(
                     app: &app,
                     inner: &inner,
                     instructions: &instructions,
-                    snapshot: context_snapshot.as_ref(),
+                    snapshot: &mut context_snapshot,
                     tools: &tools,
                 },
                 &mut run,
@@ -304,7 +313,33 @@ pub(super) async fn run_turn(
                         return Ok(RunCompletion::Interrupted);
                     }
                     if matches!(&error, AppError::ContextWindowExceeded(_)) {
-                        persist_full_context_usage(&inner, &app, &run).await?;
+                        match recover_from_context_window(
+                            SamplingContext {
+                                app: &app,
+                                inner: &inner,
+                                instructions: &instructions,
+                                snapshot: &mut context_snapshot,
+                                tools: &tools,
+                            },
+                            &mut run,
+                            &mut provider_state,
+                            &mut history,
+                            &mut context_recovery_attempts,
+                        )
+                        .await?
+                        {
+                            ContextWindowRecovery::Retry => {
+                                history_requires_refresh = false;
+                                transient_failure_count = 0;
+                                continue 'sampling;
+                            }
+                            ContextWindowRecovery::Interrupted => {
+                                return Ok(RunCompletion::Interrupted);
+                            }
+                            ContextWindowRecovery::Exhausted => {
+                                persist_full_context_usage(&inner, &app, &run).await?;
+                            }
+                        }
                     }
                     return Err(error);
                 }
@@ -352,7 +387,34 @@ pub(super) async fn run_turn(
                             return Ok(RunCompletion::Interrupted);
                         }
                         if matches!(&error, AppError::ContextWindowExceeded(_)) {
-                            persist_full_context_usage(&inner, &app, &run).await?;
+                            stream_deltas.flush().await?;
+                            match recover_from_context_window(
+                                SamplingContext {
+                                    app: &app,
+                                    inner: &inner,
+                                    instructions: &instructions,
+                                    snapshot: &mut context_snapshot,
+                                    tools: &tools,
+                                },
+                                &mut run,
+                                &mut provider_state,
+                                &mut history,
+                                &mut context_recovery_attempts,
+                            )
+                            .await?
+                            {
+                                ContextWindowRecovery::Retry => {
+                                    history_requires_refresh = false;
+                                    transient_failure_count = 0;
+                                    continue 'sampling;
+                                }
+                                ContextWindowRecovery::Interrupted => {
+                                    return Ok(RunCompletion::Interrupted);
+                                }
+                                ContextWindowRecovery::Exhausted => {
+                                    persist_full_context_usage(&inner, &app, &run).await?;
+                                }
+                            }
                         }
                         return Err(error);
                     }
@@ -485,6 +547,7 @@ pub(super) async fn run_turn(
                         }
                     }
                     ResponseEvent::Completed(usage) => {
+                        context_recovery_attempts = 0;
                         if let Some(usage) = usage {
                             context_snapshot = Some(ContextUsageSnapshot {
                                 model: run.model.id().into(),
@@ -646,7 +709,7 @@ pub(super) async fn run_turn(
     result
 }
 
-async fn wait_for_rate_limit_reset(
+pub(super) async fn wait_for_rate_limit_reset(
     inner: &NativeEngineInner,
     app: &AppHandle,
     run: &mut TurnRun,
@@ -690,14 +753,19 @@ pub(super) fn automatic_rate_limit_wait(retry_after_seconds: u64) -> Duration {
     Duration::from_secs(retry_after_seconds.clamp(1, MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS))
 }
 
-async fn wait_for_transient_provider_retry(
+pub(super) async fn wait_for_transient_provider_retry(
     inner: &NativeEngineInner,
     app: &AppHandle,
     run: &mut TurnRun,
     error: &AppError,
     failure_count: u32,
 ) -> bool {
-    let wait = automatic_provider_retry_wait(failure_count);
+    let wait = error
+        .retry_after_seconds()
+        .map(|seconds| {
+            Duration::from_secs(seconds.clamp(1, MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS))
+        })
+        .unwrap_or_else(|| automatic_provider_retry_wait(failure_count));
     inner.emit_diagnostic(
         app,
         DiagnosticStream::Runtime,
@@ -731,6 +799,61 @@ pub(super) fn automatic_provider_retry_wait(failure_count: u32) -> Duration {
             .unwrap_or(u64::MAX)
             .min(MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS),
     )
+}
+
+async fn recover_from_context_window(
+    context: SamplingContext<'_>,
+    run: &mut TurnRun,
+    provider_state: &mut TurnProviderState,
+    history: &mut ProviderHistorySnapshot,
+    attempts: &mut u8,
+) -> Result<ContextWindowRecovery, AppError> {
+    if *attempts >= MAX_CONTEXT_RECOVERY_ATTEMPTS_WITHOUT_PROGRESS {
+        return Ok(ContextWindowRecovery::Exhausted);
+    }
+    *attempts = (*attempts).saturating_add(1);
+    context.inner.emit_diagnostic(
+        context.app,
+        DiagnosticStream::Runtime,
+        "The provider reached the context boundary before the local estimate; compacting and retrying the active turn."
+            .into(),
+    );
+
+    let compacted = match compact_context(
+        context.inner,
+        context.app,
+        run,
+        context.instructions,
+        provider_state,
+        &history.items,
+        context.tools,
+    )
+    .await
+    {
+        Ok(compacted) => compacted,
+        Err(AppError::ContextWindowExceeded(_)) => {
+            context.inner.emit_diagnostic(
+                context.app,
+                DiagnosticStream::Runtime,
+                "Context recovery compaction also exceeded the model window; preserving the terminal failure."
+                    .into(),
+            );
+            return Ok(ContextWindowRecovery::Exhausted);
+        }
+        Err(error) => return Err(error),
+    };
+    if !compacted {
+        return Ok(ContextWindowRecovery::Interrupted);
+    }
+
+    *history = load_prompt_history(context.inner, context.app, &run.thread_id).await?;
+    *context.snapshot = None;
+    context.inner.emit_diagnostic(
+        context.app,
+        DiagnosticStream::Runtime,
+        "Context recovery completed; retrying the active turn.".into(),
+    );
+    Ok(ContextWindowRecovery::Retry)
 }
 
 pub(super) async fn run_compaction(
@@ -830,7 +953,7 @@ async fn prepare_sampling_input(
         context.instructions,
         &history.items,
         context.tools,
-        context.snapshot,
+        context.snapshot.as_ref(),
         run.model.auto_compact_token_limit(),
         context_window.as_ref(),
     );
@@ -861,6 +984,7 @@ async fn prepare_sampling_input(
     }
 
     *history = load_prompt_history(context.inner, context.app, &run.thread_id).await?;
+    *context.snapshot = None;
     Ok(true)
 }
 

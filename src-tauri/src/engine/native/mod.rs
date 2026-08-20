@@ -45,9 +45,9 @@ use crate::engine::{
     AutomationNotification, AutomationRun, AutomationRunNotification, ChatModelListResponse,
     ConfigUpdate, ConfigUpdateResponse, ConversationMode, DiagnosticStream, EngineCapability,
     EngineDescriptor, EngineNotification, EngineStartResponse, EngineStorage, EngineTransport,
-    ItemNotification, ModelListResponse, NOTIFICATION_EVENT, OperationAck, OperationFailure,
-    OutputReadResponse, PermissionProfile, RUNTIME_STATUS_EVENT, ReasoningEffort,
-    RuntimeDiagnosticSubsystem, RuntimeState, RuntimeStatus, ServerResponse,
+    ItemNotification, ModelContextWindowPreference, ModelListResponse, NOTIFICATION_EVENT,
+    OperationAck, OperationFailure, OutputReadResponse, PermissionProfile, RUNTIME_STATUS_EVENT,
+    ReasoningEffort, RuntimeDiagnosticSubsystem, RuntimeState, RuntimeStatus, ServerResponse,
     ThreadArchivedNotification, ThreadCompactStartResponse, ThreadDeletedNotification,
     ThreadForkResponse, ThreadItem, ThreadListResponse, ThreadNotification, ThreadReadResponse,
     ThreadResumeResponse, ThreadStartResponse, ThreadSummary, ThreadUnarchiveResponse,
@@ -56,7 +56,7 @@ use crate::engine::{
 };
 use crate::error::AppError;
 
-pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 10;
+pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 11;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTOMATION_SCHEDULER_MAX_SLEEP: Duration = Duration::from_secs(15 * 60);
@@ -787,6 +787,12 @@ impl NativeEngine {
             .provider
             .select_model(app, &self.inner.auth, config.model.as_deref())
             .await?;
+        let context_preference = config
+            .model_context_window_preferences
+            .get(model.id())
+            .copied()
+            .unwrap_or(ModelContextWindowPreference::Default);
+        let model = model.with_context_window_preference(context_preference)?;
         let reasoning_effort = config
             .model_reasoning_effort
             .or_else(|| model.default_reasoning_effort());
@@ -882,6 +888,12 @@ impl NativeEngine {
             .provider
             .select_model(app, &self.inner.auth, requested_model)
             .await?;
+        let context_preference = config
+            .model_context_window_preferences
+            .get(model.id())
+            .copied()
+            .unwrap_or(ModelContextWindowPreference::Default);
+        let model = model.with_context_window_preference(context_preference)?;
         let reasoning_effort = request
             .effort
             .or(config.model_reasoning_effort)

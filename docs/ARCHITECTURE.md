@@ -195,6 +195,10 @@ histórico e fila de revisão, mas não é proprietária da agenda.
 - preferência explícita de modelo/raciocínio do Chat:
   `codex-desktop.profile-v2.chat-intelligence` no WebView; a chave não existe enquanto o
   usuário usa o padrão dinâmico do catálogo.
+- preferência de janela de contexto do Codex: mapa versionado dentro da
+  configuração SQLite, indexado pelo ID do modelo; somente overrides `maximum`
+  são persistidos e os valores numéricos são resolvidos do catálogo oficial da
+  sessão.
 - continuidade consumer do Chat: `conversation_id` e `parent_message_id` na
   tabela SQLite `chat_conversations`; tokens de integridade e conduit não são
   persistidos.
@@ -215,10 +219,13 @@ os requisitos definidos em `docs/RULES.md`.
 
 Erros atravessam o IPC como `{ code, message, retryable }`. O provider limita
 corpos HTTP e SSE e possui deadline de inatividade semântica. Falhas de
-transporte, timeout e HTTP 5xx são repetidas com backoff limitado enquanto o
-turno continuar ativo; rate limits aguardam o reset anunciado e voltam a
-consultar o serviço, sem teto local de tentativas. Erros de protocolo ou payload
-malformado falham explicitamente para evitar loops infinitos de dados inválidos.
+transporte, timeout, HTTP 5xx e `response.failed` transitórios são repetidas com
+backoff limitado enquanto o turno continuar ativo; rate limits aguardam o reset
+anunciado e voltam a consultar o serviço, sem teto local de tentativas. Alta
+demanda possui código e apresentação de aviso próprios. Um estouro inesperado de
+contexto recebe uma única compactação e repetição no turno ativo antes de se
+tornar terminal. Erros de protocolo ou payload malformado falham explicitamente
+para evitar loops infinitos de dados inválidos.
 Leituras de arquivo e requisições possuem limites independentes; paths são
 canonicalizados e symlinks não podem escapar do workspace. Estados desconhecidos
 nunca viram fallback visual genérico.

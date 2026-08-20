@@ -45,12 +45,14 @@ type SettingsDialogController = Pick<
   | "engine"
   | "loadMoreArchivedThreads"
   | "logout"
+  | "models"
   | "rateLimits"
   | "rateLimitsError"
   | "rateLimitsLoading"
   | "refreshRateLimits"
   | "refreshRateLimitsIfStale"
   | "reportError"
+  | "turnBusy"
   | "unarchiveThread"
   | "updateSetting"
 >;
@@ -58,6 +60,11 @@ type SettingsDialogController = Pick<
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { formatShortDate } from "./dateFormat";
 import { Icon, type IconName } from "./Icon";
+import {
+  formatModelContextTokens,
+  modelContextWindowPreference,
+  modelSupportsMaximumContext,
+} from "./modelContextWindow";
 import { OUTPUT_DETAIL_OPTIONS, outputDetailLabel } from "./outputDetail";
 import { threadTitle } from "./Sidebar";
 import { presentUsageLimits, type UsageLimitEntry, usagePercentLabel } from "./usagePresentation";
@@ -485,6 +492,11 @@ function PreferenceCheckbox(props: {
 
 function GeneralSettings(props: { readonly controller: SettingsDialogController }) {
   const configuration = () => props.controller.config()?.config;
+  const expandedContextModels = createMemo(() =>
+    props.controller
+      .models()
+      .filter((model) => !model.hidden && modelSupportsMaximumContext(model)),
+  );
 
   return (
     <div class="settings-page">
@@ -507,6 +519,66 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
           />
         </SettingsRow>
       </SettingsSection>
+      <Show when={expandedContextModels().length > 0}>
+        <SettingsSection
+          title="Janela de contexto"
+          description="As capacidades são carregadas do catálogo oficial do Codex para a sua conta."
+        >
+          <For each={expandedContextModels()}>
+            {(model) => {
+              const contextWindow = model.contextWindow;
+              const maximumTokens = contextWindow?.maximumTokens ?? null;
+              const preference = () =>
+                modelContextWindowPreference(
+                  configuration()?.modelContextWindowPreferences ?? {},
+                  model.id,
+                );
+              return (
+                <SettingsRow
+                  label={model.displayName}
+                  description={
+                    contextWindow === null || maximumTokens === null
+                      ? "O catálogo não anunciou uma janela configurável."
+                      : `Padrão de ${formatModelContextTokens(contextWindow.tokens)}; máximo de ${formatModelContextTokens(maximumTokens)}. A opção máxima pode aumentar latência e uso de tokens.`
+                  }
+                >
+                  <select
+                    disabled={configuration() === undefined || props.controller.turnBusy()}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      if (value === "default" || value === "maximum") {
+                        void props.controller.updateSetting({
+                          type: "modelContextWindow",
+                          model: model.id,
+                          value,
+                        });
+                      }
+                    }}
+                    value={preference()}
+                  >
+                    <option value="default">
+                      Padrão
+                      {contextWindow === null
+                        ? ""
+                        : ` — ${formatModelContextTokens(contextWindow.tokens)}`}
+                    </option>
+                    <option value="maximum">
+                      Máxima
+                      {maximumTokens === null
+                        ? ""
+                        : ` — ${formatModelContextTokens(maximumTokens)}`}
+                    </option>
+                  </select>
+                </SettingsRow>
+              );
+            }}
+          </For>
+          <div class="settings-note">
+            A preferência é salva por modelo e aplicada a novos turnos. Se o catálogo mudar, o
+            aplicativo usa automaticamente o novo limite anunciado.
+          </div>
+        </SettingsSection>
+      </Show>
       <SettingsSection title="Ferramentas">
         <SettingsRow
           label="Pesquisa na web"

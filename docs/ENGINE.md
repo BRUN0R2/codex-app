@@ -8,7 +8,7 @@ O único backend é `NativeEngine`:
 - provider: `ChatGPT Codex`;
 - autenticação: `ChatGPT OAuth`;
 - armazenamento: `sqlite`;
-- schema IPC: versão `9`.
+- schema IPC: versão `11`.
 
 Não existe variável de ambiente para trocar backend nem execução de binário
 genérico. O único sidecar é o `rg.exe` 15.2.0 fixado por manifesto e hash para a
@@ -123,6 +123,14 @@ Para Work local e Codex:
 - perfil em `https://chatgpt.com/backend-api/wham/profiles/me`;
 - uso em `https://chatgpt.com/backend-api/wham/usage`.
 
+O catálogo Codex da sessão é a fonte autoritativa para `context_window`,
+`max_context_window`, percentual útil e limite de compactação automática. A
+configuração persiste somente a preferência semântica `maximum` por ID de modelo;
+`default` é representado pela ausência de override. Ao selecionar o modelo, o
+Rust resolve os números atuais do catálogo e recalcula proporcionalmente a janela
+útil e o ponto de compactação. Nenhum tamanho ou nome comercial de modelo é
+fixado na interface.
+
 O perfil segue o fluxo do Desktop oficial: `display_name` e
 `profile_picture_url` são buscados depois que a conta local já foi apresentada.
 A chamada tem deadline próprio de cinco segundos, não participa do caminho de
@@ -156,11 +164,14 @@ resultados na ordem original; qualquer ferramenta mutável cria uma barreira.
 
 Uma requisição HTTP transitória possui tentativas rápidas locais com backoff
 exponencial; se ainda falhar, o loop do turno continua retomando transporte,
-timeouts e HTTP 5xx com espera limitada a 60 segundos entre ciclos. Um rate limit
-preserva `Retry-After` ou `resets_in_seconds`, aguarda até sete dias por ciclo e
-consulta novamente; a ausência de delay usa 60 segundos. Não existe contador
-local que encerre um turno apenas por repetição. Cancelamento continua imediato,
-e erro de protocolo/SSE malformado continua terminal.
+timeouts, HTTP 5xx e rejeições SSE transitórias como `server_error`, com espera
+limitada a 60 segundos entre ciclos. Um rate limit preserva `Retry-After` ou
+`resets_in_seconds`, aguarda até sete dias por ciclo e consulta novamente; a
+ausência de delay usa 60 segundos. Não existe contador local que encerre um turno
+apenas por repetição. `server_is_overloaded` permanece uma condição distinta de
+alta demanda e é apresentado como aviso recuperável, não como falha grave.
+Cancelamento continua imediato, e erro de protocolo/SSE malformado continua
+terminal.
 
 Envelopes privados de referência de conteúdo (`U+E200 … U+E201`) pertencem ao
 protocolo do provider e nunca ao texto apresentado. A projeção persistida da
@@ -204,24 +215,29 @@ Antes da primeira amostragem e de toda continuação no mesmo turno, o
   locais posteriores à última saída gerada pelo modelo.
 
 A contagem é saturante e mede JSON com um writer de contagem, sem criar buffers
-serializados temporários para cada item. A compactação começa quando o orçamento
-automático do catálogo ou a janela útil do modelo é atingido. Não há um limite
-de rodadas adicional nem uma cota local arbitrária de tamanho de projeto.
+serializados temporários para cada item. A estimativa local reserva 12% de
+headroom para diferenças de tokenização e envelopes do provider. A compactação
+começa quando o orçamento automático do catálogo ou a janela útil do modelo é
+atingido. Não há um limite de rodadas adicional nem uma cota local arbitrária de
+tamanho de projeto.
 
 O protocolo é Responses Remote Compaction V2. O motor envia
 `compaction_trigger`, exige exatamente um checkpoint `compaction` criptografado
 e só então instala, em uma transação SQLite, as mensagens recentes retidas, o
 checkpoint e o item concluído da timeline. A cópia enviada ao provider pode
-reduzir apenas o sufixo contíguo de saídas de ferramenta quando ele sozinho
-impede a requisição de caber; o histórico durável não é alterado antes do
-checkpoint válido.
+reduzir saídas de ferramenta da mais recente para a mais antiga, mesmo quando
+existem itens de mensagem ou raciocínio entre elas, até a requisição caber no
+menor limite aplicável. O histórico durável não é alterado antes do checkpoint
+válido.
 
 Um `context_length_exceeded` inesperado em uma amostragem comum é preservado
-como `ContextWindowExceeded`. O turno atual falha de forma visível e uma medição
-de janela cheia é persistida. Na próxima submissão, o preflight compacta antes
-de chamar o modelo. A ação recusada nunca é repetida silenciosamente no mesmo
-turno. O frontend somente apresenta os eventos e o estado persistido; política,
-recuperação e atomicidade pertencem integralmente ao Rust.
+como `ContextWindowExceeded`, mas primeiro aciona uma recuperação única dentro
+do mesmo turno: o motor compacta, recarrega o histórico instalado e repete a
+amostragem ativa. Uma resposta concluída libera uma nova recuperação futura. Se
+a própria compactação exceder a janela ou a amostragem falhar novamente sem
+qualquer resposta concluída, o erro se torna terminal e uma medição de janela
+cheia é persistida. O frontend somente apresenta os eventos e o estado
+persistido; política, recuperação e atomicidade pertencem integralmente ao Rust.
 
 ## Ferramentas e permissão
 

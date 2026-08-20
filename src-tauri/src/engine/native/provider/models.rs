@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::engine::CodexModel;
 use crate::engine::ModelContextWindow;
+use crate::engine::ModelContextWindowPreference;
 use crate::engine::ModelServiceTier;
 use crate::engine::ReasoningEffort;
 use crate::engine::ReasoningEffortOption;
@@ -89,6 +90,55 @@ impl SelectedModel {
 
     pub fn context_window(&self) -> Option<ModelContextWindow> {
         self.summary.context_window.clone()
+    }
+
+    pub fn with_context_window_preference(
+        mut self,
+        preference: ModelContextWindowPreference,
+    ) -> Result<Self, AppError> {
+        if preference == ModelContextWindowPreference::Default {
+            return Ok(self);
+        }
+        let Some(default_window) = self.summary.context_window.as_ref() else {
+            return Ok(self);
+        };
+        let Some(maximum_tokens) = default_window
+            .maximum_tokens
+            .filter(|maximum| *maximum > default_window.tokens)
+        else {
+            return Ok(self);
+        };
+        let default_tokens = default_window.tokens;
+        let usable_percent = default_window.usable_percent;
+        let usable_tokens = maximum_tokens
+            .checked_mul(u64::from(usable_percent))
+            .ok_or_else(|| AppError::Provider("context-window calculation overflowed".into()))?
+            / 100;
+        let auto_compact_token_limit = self
+            .auto_compact_token_limit
+            .map(|limit| {
+                limit
+                    .checked_mul(maximum_tokens)
+                    .ok_or_else(|| {
+                        AppError::Provider("auto-compaction calculation overflowed".into())
+                    })?
+                    .checked_div(default_tokens)
+                    .ok_or_else(|| {
+                        AppError::Provider("auto-compaction calculation divided by zero".into())
+                    })
+                    .map(|scaled| scaled.min(usable_tokens))
+            })
+            .transpose()?;
+
+        let context_window = self
+            .summary
+            .context_window
+            .as_mut()
+            .ok_or_else(|| AppError::State("model context metadata disappeared".into()))?;
+        context_window.tokens = maximum_tokens;
+        context_window.usable_tokens = usable_tokens;
+        self.auto_compact_token_limit = auto_compact_token_limit;
+        Ok(self)
     }
 
     pub fn auto_compact_token_limit(&self) -> Option<u64> {
@@ -424,6 +474,17 @@ mod tests {
             catalog.models()[0].auto_compact_token_limit(),
             Some(244_800)
         );
+
+        let maximum = catalog.models()[0]
+            .clone()
+            .with_context_window_preference(crate::engine::ModelContextWindowPreference::Maximum)
+            .expect("maximum context should resolve");
+        let maximum_context = maximum
+            .context_window()
+            .expect("maximum context metadata should be present");
+        assert_eq!(maximum_context.tokens, 400_000);
+        assert_eq!(maximum_context.usable_tokens, 380_000);
+        assert_eq!(maximum.auto_compact_token_limit(), Some(360_000));
     }
 
     #[test]

@@ -60,6 +60,10 @@ fn config_fixture() -> ConfigReadResponse {
             model: Some("gpt-5.6-codex".into()),
             model_reasoning_effort: Some(ReasoningEffort::Medium),
             service_tier: Some("priority".into()),
+            model_context_window_preferences: std::collections::BTreeMap::from([(
+                "gpt-5.6-codex".into(),
+                ModelContextWindowPreference::Maximum,
+            )]),
             permission_profile: PermissionProfile::workspace_write(),
             web_search: WebSearchMode::Live,
             model_verbosity: Some(ModelVerbosity::Medium),

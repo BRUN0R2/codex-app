@@ -24,9 +24,9 @@ use super::text::truncate_utf8;
 use crate::engine::{
     AppConfig, Automation, AutomationListResponse, AutomationRun, AutomationRunStatus,
     AutomationRunTrigger, CompletedTurn, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
-    ConversationMode, DesktopPreferences, OperationAck, OutputReadResponse, ThreadActiveFlag,
-    ThreadItem, ThreadListResponse, ThreadOutput, ThreadStatus, ThreadSummary, TurnStatus,
-    TurnSummary,
+    ConversationMode, DesktopPreferences, ModelContextWindowPreference, OperationAck,
+    OutputReadResponse, ThreadActiveFlag, ThreadItem, ThreadListResponse, ThreadOutput,
+    ThreadStatus, ThreadSummary, TurnStatus, TurnSummary,
 };
 use crate::error::AppError;
 
@@ -61,6 +61,7 @@ const MAX_AUTOMATION_NAME_BYTES: usize = 160;
 const MAX_AUTOMATION_PROMPT_BYTES: usize = 262_144;
 const MAX_AUTOMATION_ERROR_BYTES: usize = 16_384;
 const MAX_AUTOMATION_RUNS_LOADED: i64 = 200;
+const MAX_MODEL_CONTEXT_WINDOW_PREFERENCES: usize = 128;
 const AUTOMATION_SCHEMA_SQL: &str = "
     CREATE TABLE automations (
         id TEXT PRIMARY KEY,
@@ -2472,6 +2473,18 @@ fn apply_config_update(config: &mut AppConfig, update: ConfigUpdate) -> Result<(
             config.model_reasoning_effort = value.reasoning_effort;
             config.service_tier = service_tier;
         }
+        ConfigUpdate::ModelContextWindow { model, value } => {
+            let model = validate_optional_id("model", Some(model))?
+                .ok_or_else(|| AppError::Protocol("model cannot be empty".into()))?;
+            match value {
+                ModelContextWindowPreference::Default => {
+                    config.model_context_window_preferences.remove(&model);
+                }
+                ModelContextWindowPreference::Maximum => {
+                    config.model_context_window_preferences.insert(model, value);
+                }
+            }
+        }
         ConfigUpdate::PermissionProfile { value } => config.permission_profile = value,
         ConfigUpdate::WebSearch { value } => config.web_search = value,
         ConfigUpdate::ModelVerbosity { value } => config.model_verbosity = value,
@@ -2506,6 +2519,23 @@ fn validate_config(config: &AppConfig) -> Result<(), AppError> {
     }
     if let Some(tier) = config.service_tier.as_deref() {
         validate_text("service tier", tier, MAX_IDENTIFIER_BYTES)?;
+    }
+    if config.model_context_window_preferences.len() > MAX_MODEL_CONTEXT_WINDOW_PREFERENCES {
+        return Err(AppError::Protocol(format!(
+            "model context-window preferences exceed {MAX_MODEL_CONTEXT_WINDOW_PREFERENCES} entries"
+        )));
+    }
+    for (model, preference) in &config.model_context_window_preferences {
+        validate_text(
+            "model context-window preference",
+            model,
+            MAX_IDENTIFIER_BYTES,
+        )?;
+        if *preference == ModelContextWindowPreference::Default {
+            return Err(AppError::Protocol(
+                "default model context-window preferences must be omitted".into(),
+            ));
+        }
     }
     if config
         .developer_instructions
@@ -3228,7 +3258,8 @@ mod tests {
     use crate::engine::native::provider::{ResponseContent, ResponseItem};
     use crate::engine::{
         ActivityStatus, AutomationRunStatus, AutomationRunTrigger, ConfigUpdate, ConversationMode,
-        ModelVerbosity, ThreadItem, ThreadOutput, TokenUsage, TurnStatus, UserContent,
+        ModelContextWindowPreference, ModelVerbosity, ThreadItem, ThreadOutput, TokenUsage,
+        TurnStatus, UserContent,
     };
 
     async fn read_complete_output(storage: &NativeStorage, output_id: &str) -> String {
@@ -3728,6 +3759,50 @@ mod tests {
             .await
             .expect("model default should reload");
         assert!(reloaded.config.model_verbosity.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persists_context_window_preferences_per_model() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("context-window-preference.sqlite3"))
+            .await
+            .expect("storage should initialize");
+
+        let initial = storage
+            .read_config()
+            .await
+            .expect("default configuration should load");
+        let maximum = storage
+            .update_config(
+                initial.version,
+                ConfigUpdate::ModelContextWindow {
+                    model: "gpt-5.6-sol".into(),
+                    value: ModelContextWindowPreference::Maximum,
+                },
+            )
+            .await
+            .expect("maximum context preference should persist");
+        assert_eq!(
+            maximum
+                .config
+                .model_context_window_preferences
+                .get("gpt-5.6-sol"),
+            Some(&ModelContextWindowPreference::Maximum)
+        );
+
+        let restored = storage
+            .update_config(
+                maximum.version,
+                ConfigUpdate::ModelContextWindow {
+                    model: "gpt-5.6-sol".into(),
+                    value: ModelContextWindowPreference::Default,
+                },
+            )
+            .await
+            .expect("default context preference should remove the override");
+        assert!(restored.config.model_context_window_preferences.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -1055,6 +1055,48 @@ mod tests {
     }
 
     #[test]
+    fn classifies_stream_server_errors_as_transient() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+        let error = parser
+            .push(
+                br#"data: {"type":"response.failed","response":{"error":{"code":"server_error","message":"temporary failure"}}}
+
+"#,
+                &mut events,
+            )
+            .expect_err("server errors should retry outside the parser");
+
+        assert!(matches!(
+            &error,
+            crate::error::AppError::ProviderTransient { .. }
+        ));
+        assert!(error.is_transient());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn preserves_server_overload_as_a_distinct_user_facing_condition() {
+        let mut parser = SseParser::default();
+        let mut events = VecDeque::new();
+        let error = parser
+            .push(
+                br#"data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"high load"}}}
+
+"#,
+                &mut events,
+            )
+            .expect_err("server overload should end with a warning");
+
+        assert!(matches!(
+            &error,
+            crate::error::AppError::ServerOverloaded { .. }
+        ));
+        assert!(!error.is_transient());
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn preserves_usage_limit_reset_delay_from_sse() {
         let mut parser = SseParser::default();
         let mut events = VecDeque::new();

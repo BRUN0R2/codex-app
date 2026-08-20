@@ -38,6 +38,7 @@ import type {
   LogoutResponse,
   MessagePhase,
   ModelContextWindow,
+  ModelContextWindowPreference,
   ModelListResponse,
   ModelServiceTier,
   ModelVerbosity,
@@ -124,6 +125,7 @@ const MESSAGE_PHASES = ["commentary", "finalAnswer"] as const;
 const IMAGE_DETAILS = ["auto", "high", "low"] as const;
 const WEB_SEARCH_MODES = ["disabled", "live"] as const;
 const MODEL_VERBOSITIES = ["high", "low", "medium"] as const;
+const STORED_MODEL_CONTEXT_WINDOW_PREFERENCES = ["maximum"] as const;
 const PERSONALITIES = ["friendly", "none", "pragmatic"] as const;
 const MOTION_PREFERENCES = ["full", "reduced"] as const;
 const DIFF_DISPLAYS = ["split", "unified"] as const;
@@ -179,7 +181,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [10] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [11] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -1431,6 +1433,7 @@ function decodeAppConfig(value: unknown, path: string): AppConfig {
     "desktop",
     "developerInstructions",
     "model",
+    "modelContextWindowPreferences",
     "modelReasoningEffort",
     "modelVerbosity",
     "permissionProfile",
@@ -1440,6 +1443,10 @@ function decodeAppConfig(value: unknown, path: string): AppConfig {
   ]);
   return {
     model: nullableText(object.model, `${path}.model`),
+    modelContextWindowPreferences: decodeModelContextWindowPreferences(
+      object.modelContextWindowPreferences,
+      `${path}.modelContextWindowPreferences`,
+    ),
     modelReasoningEffort:
       object.modelReasoningEffort === null
         ? null
@@ -1461,6 +1468,23 @@ function decodeAppConfig(value: unknown, path: string): AppConfig {
     ),
     desktop: decodeDesktopPreferences(object.desktop, `${path}.desktop`),
   };
+}
+
+function decodeModelContextWindowPreferences(
+  value: unknown,
+  path: string,
+): Readonly<Record<string, ModelContextWindowPreference>> {
+  const object = record(value, path);
+  const entries = Object.entries(object);
+  if (entries.length > 128) {
+    throw new ContractError(path, "map exceeds 128 entries");
+  }
+  return Object.fromEntries(
+    entries.map(([model, preference]) => [
+      identifier(model, `${path}.${model}`),
+      literal(preference, `${path}.${model}`, STORED_MODEL_CONTEXT_WINDOW_PREFERENCES),
+    ]),
+  );
 }
 
 function decodeDesktopPreferences(value: unknown, path: string): DesktopPreferences {

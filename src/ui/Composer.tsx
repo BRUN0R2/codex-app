@@ -51,6 +51,7 @@ import {
 import { ContextWindowIndicator } from "./ContextWindowIndicator";
 import { Icon } from "./Icon";
 import { ImagePreview } from "./ImagePreview";
+import { modelContextWindowPreference, resolveModelContextWindow } from "./modelContextWindow";
 
 export interface ComposerProps {
   readonly controller: ComposerController;
@@ -110,6 +111,19 @@ export function Composer(props: ComposerProps) {
     resolveChatIntelligence(props.controller.chatModels(), chatSelection()),
   );
   const selectedModel = configuredModel;
+  const selectedContextWindowPreference = createMemo(() => {
+    const selected = selectedModel();
+    if (selected === undefined) {
+      return "default";
+    }
+    return modelContextWindowPreference(
+      props.controller.config()?.config.modelContextWindowPreferences ?? {},
+      selected.id,
+    );
+  });
+  const selectedModelWindow = createMemo(() =>
+    resolveModelContextWindow(selectedModel(), selectedContextWindowPreference()),
+  );
   const selectedChatOption = createMemo(() => chatIntelligence().option);
   const selectedChatLabel = createMemo(() => {
     const option = selectedChatOption();
@@ -658,7 +672,7 @@ export function Composer(props: ComposerProps) {
             </Show>
             <Show when={mode() !== "chat"}>
               <ContextWindowIndicator
-                modelWindow={selectedModel()?.contextWindow ?? null}
+                modelWindow={selectedModelWindow()}
                 usage={props.controller.contextUsage()}
               />
               <div class="composer-menu-anchor model-menu-anchor">

@@ -20,6 +20,7 @@ pub(super) struct ContextWindowStatus {
 }
 
 const BYTES_PER_TOKEN: u64 = 4;
+const REQUEST_ESTIMATE_HEADROOM_PERCENT: u64 = 112;
 const ENCRYPTED_PAYLOAD_OVERHEAD_BYTES: u64 = 650;
 const RESIZED_IMAGE_TOKEN_ESTIMATE: u64 = 1_024;
 const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
@@ -36,7 +37,8 @@ pub(super) fn evaluate_context_window(
     auto_compact_limit: Option<u64>,
     context_window: Option<&ModelContextWindow>,
 ) -> ContextWindowStatus {
-    let estimated_request = estimate_request_tokens(instructions, history, tools);
+    let estimated_request =
+        add_request_estimate_headroom(estimate_request_tokens(instructions, history, tools));
     let measured_with_local_delta =
         snapshot
             .filter(|snapshot| snapshot.model == model_id)
@@ -89,7 +91,7 @@ pub(super) fn prepare_compaction_history(
         .saturating_add(estimate_item_tokens(&ResponseItem::compaction_trigger()));
 
     for index in (0..prepared.len()).rev() {
-        if estimated_tokens <= hard_limit {
+        if add_request_estimate_headroom(estimated_tokens) <= hard_limit {
             break;
         }
         let replacement = match &prepared[index] {
@@ -103,7 +105,7 @@ pub(super) fn prepare_compaction_history(
                     output: COMPACTION_OUTPUT_TRUNCATION.into(),
                 }
             }
-            _ => break,
+            _ => continue,
         };
         estimated_tokens = estimated_tokens
             .saturating_sub(estimate_item_tokens(&prepared[index]))
@@ -209,6 +211,12 @@ impl Write for SerializedByteCounter {
 
 fn estimate_text_tokens(value: &str) -> u64 {
     bytes_to_tokens(usize_to_u64(value.len()))
+}
+
+fn add_request_estimate_headroom(tokens: u64) -> u64 {
+    tokens
+        .saturating_mul(REQUEST_ESTIMATE_HEADROOM_PERCENT)
+        .div_ceil(100)
 }
 
 fn message_text_token_count(item: &ResponseItem) -> usize {
@@ -531,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_only_the_contiguous_tool_output_suffix() {
+    fn rewrites_tool_outputs_when_compaction_needs_headroom() {
         let history = vec![
             text("user", "keep"),
             ResponseItem::FunctionCallOutput {
@@ -553,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn stops_rewriting_at_the_first_non_output_suffix_item() {
+    fn rewrites_older_tool_outputs_past_non_output_items() {
         let history = vec![
             ResponseItem::FunctionCallOutput {
                 call_id: "call-1".into(),
@@ -563,10 +571,33 @@ mod tests {
         ];
         let prepared = prepare_compaction_history("", &history, &[], Some(200));
 
+        assert!(matches!(
+            prepared.first(),
+            Some(ResponseItem::FunctionCallOutput { output, .. })
+                if output == "Output exceeded the available model context and was truncated"
+        ));
         assert_eq!(
-            serde_json::to_string(&history).expect("original history should encode"),
-            serde_json::to_string(&prepared).expect("prepared history should encode")
+            serde_json::to_value(prepared.last()).expect("prepared item should encode"),
+            serde_json::to_value(history.last()).expect("original item should encode")
         );
+    }
+
+    #[test]
+    fn request_estimates_reserve_headroom_for_tokenization_variance() {
+        let history = vec![text("user", &"x".repeat(3_500))];
+        let raw_estimate = estimate_request_tokens("", &history, &[]);
+        let status = evaluate_context_window(
+            "gpt-test",
+            "",
+            &history,
+            &[],
+            None,
+            Some(raw_estimate.saturating_add(1)),
+            None,
+        );
+
+        assert!(status.active_tokens > raw_estimate);
+        assert!(status.should_compact);
     }
 
     #[test]
