@@ -5901,6 +5901,7 @@ pre {
 }
 
 .settings-card.allow-overflow {
+  position: relative;
   overflow: visible;
 }
 
@@ -6125,25 +6126,28 @@ pre {
 }
 
 .application-preference {
-  display: flex;
-  min-height: 74px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 28px;
+  position: relative;
+  display: grid;
+  min-height: 68px;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
   padding: 15px 18px;
   border-bottom: 1px solid rgb(255 255 255 / 8%);
   color: var(--text-soft);
-  transition:
-    background-color 120ms ease,
-    opacity 120ms ease;
+  cursor: pointer;
 }
 
-.application-preference:not(.disabled):hover {
-  background: rgb(255 255 255 / 2.5%);
+.application-preference:not(.disabled):hover .settings-checkbox-box {
+  border-color: rgb(255 255 255 / 42%);
 }
 
 .application-preference.disabled {
-  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.application-preference > .settings-checkbox-control {
+  margin-top: 1px;
 }
 
 .application-preference-copy {
@@ -6163,6 +6167,10 @@ pre {
   color: var(--muted);
   font-size: 0.75rem;
   line-height: 1.5;
+}
+
+.application-preference.disabled .application-preference-copy {
+  opacity: 0.52;
 }
 
 .application-preferences-status {
@@ -6277,6 +6285,10 @@ pre {
   width: 228px;
 }
 
+.output-detail-select.open {
+  z-index: 40;
+}
+
 .output-detail-trigger {
   display: flex;
   width: 100%;
@@ -6325,6 +6337,11 @@ pre {
   box-shadow: 0 14px 38px rgb(0 0 0 / 38%);
 }
 
+.output-detail-select.open-above .output-detail-menu {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
 .output-detail-option {
   display: grid;
   min-height: 44px;
@@ -6367,21 +6384,28 @@ pre {
   color: #ddd;
 }
 
-.settings-switch {
-  position: relative;
+.settings-checkbox {
   display: inline-flex;
-  width: 38px;
-  height: 22px;
-  flex: 0 0 38px;
-  align-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
   cursor: pointer;
 }
 
-.settings-switch.disabled {
+.settings-checkbox.disabled {
   cursor: not-allowed;
 }
 
-.settings-switch input {
+.settings-checkbox-control {
+  position: relative;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  place-items: center;
+}
+
+.settings-checkbox-control input {
   position: absolute;
   z-index: 1;
   inset: 0;
@@ -6392,13 +6416,15 @@ pre {
   cursor: inherit;
 }
 
-.settings-switch-track {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  border: 1px solid rgb(255 255 255 / 14%);
-  border-radius: 999px;
-  background: #3a3a3a;
+.settings-checkbox-box {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 30%);
+  border-radius: 4px;
+  background: #242424;
+  color: #ffffff;
   box-shadow: 0 1px 2px rgb(0 0 0 / 22%) inset;
   transition:
     border-color 140ms ease,
@@ -6406,35 +6432,36 @@ pre {
     box-shadow 140ms ease;
 }
 
-.settings-switch-track::after {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #d7d7d7;
-  box-shadow: 0 1px 3px rgb(0 0 0 / 34%);
-  content: "";
+.settings-checkbox-box svg {
+  opacity: 0;
+  transform: scale(0.72);
   transition:
-    background-color 140ms ease,
+    opacity 100ms ease,
     transform 140ms ease;
 }
 
-.settings-switch input:checked + .settings-switch-track {
-  border-color: rgb(255 255 255 / 72%);
-  background: #ededed;
+.settings-checkbox-control input:checked + .settings-checkbox-box {
+  border-color: #238b82;
+  background: #238b82;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 18%);
+}
+
+.settings-checkbox-control input:checked + .settings-checkbox-box svg {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.settings-checkbox-control input:focus-visible + .settings-checkbox-box {
+  outline: 2px solid rgb(51 156 255 / 78%);
+  outline-offset: 2px;
+}
+
+.settings-checkbox-control input:disabled + .settings-checkbox-box {
+  border-color: rgb(255 255 255 / 14%);
+  background: #202020;
+  color: rgb(255 255 255 / 45%);
   box-shadow: none;
-}
-
-.settings-switch input:checked + .settings-switch-track::after {
-  background: #171717;
-  transform: translateX(16px);
-}
-
-.settings-switch input:focus-visible + .settings-switch-track {
-  outline: 2px solid var(--blue-300);
-  outline-offset: 3px;
+  opacity: 0.64;
 }
 
 .shortcut-row {

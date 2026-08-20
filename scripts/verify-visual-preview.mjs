@@ -10,6 +10,7 @@ const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const VITE_ENTRY = path.join(PROJECT_ROOT, "node_modules", "vite", "bin", "vite.js");
 const PREVIEW_PORT = 1420;
 const SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=general`;
+const SETTINGS_INTERACTION_PREVIEW_URL = `${SETTINGS_PREVIEW_URL}&preferenceDelay=400`;
 const AUTOMATIONS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&surface=automations`;
 const ARTIFACT_DIRECTORY = path.join(PROJECT_ROOT, ".freebuff", "visual-audit");
 const VIEWPORTS = [
@@ -26,6 +27,28 @@ const SCENARIOS = [
       document.querySelectorAll(".application-preference").length === 3`,
     auditExpression: settingsVisualAuditExpression,
     validate: validateSettingsMetrics,
+  },
+  {
+    id: "settings-output-detail",
+    url: SETTINGS_PREVIEW_URL,
+    initialReadyExpression: `document.querySelector(".output-detail-trigger") !== null`,
+    prepareExpression: `document.querySelector(".output-detail-trigger")?.click()`,
+    readyExpression: `document.querySelector(".output-detail-menu") !== null`,
+    auditExpression: outputDetailVisualAuditExpression,
+    validate: validateOutputDetailMetrics,
+  },
+  {
+    id: "settings-interaction",
+    url: SETTINGS_INTERACTION_PREVIEW_URL,
+    initialReadyExpression: `document.querySelectorAll(".application-preference input").length === 3`,
+    prepareExpression: `(() => {
+      const sections = document.querySelectorAll(".settings-section");
+      window.__settingsModelTopBefore = sections[1]?.getBoundingClientRect().top ?? null;
+      document.querySelectorAll(".application-preference input")[2]?.click();
+    })()`,
+    readyExpression: `document.querySelector('.visually-hidden[aria-live="polite"]')?.textContent?.includes("Salvando") === true`,
+    auditExpression: settingsInteractionVisualAuditExpression,
+    validate: validateSettingsInteractionMetrics,
   },
   {
     id: "automations",
@@ -247,11 +270,90 @@ function settingsVisualAuditExpression() {
       chromeOverlapsSettings: overlaps(chrome, overlay),
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
       verticalOverflow: document.documentElement.scrollHeight - innerHeight,
-      switchCount: document.querySelectorAll(".settings-switch input[role=switch]").length,
+      checkboxCount: document.querySelectorAll(
+        '.application-preference input[type="checkbox"]',
+      ).length,
       visibleCards: [...document.querySelectorAll(".settings-card")].filter((element) => {
         const bounds = element.getBoundingClientRect();
         return bounds.bottom > content.top && bounds.top < innerHeight;
       }).length,
+    };
+  })()`;
+}
+
+function outputDetailVisualAuditExpression() {
+  return `(() => {
+    const rectangle = (element, label) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Elemento ausente: " + label);
+      }
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+        overflow: style.overflow,
+      };
+    };
+    const triggerElement = document.querySelector(".output-detail-trigger");
+    const menuElement = document.querySelector(".output-detail-menu");
+    const cardElement = triggerElement?.closest(".settings-card");
+    const options = [...document.querySelectorAll(".output-detail-option")];
+    const visibleOptions = options.filter((option) => {
+      const bounds = option.getBoundingClientRect();
+      const hit = document.elementFromPoint(
+        Math.min(innerWidth - 1, Math.max(0, bounds.left + bounds.width / 2)),
+        Math.min(innerHeight - 1, Math.max(0, bounds.top + bounds.height / 2)),
+      );
+      return hit === option || (hit instanceof Node && option.contains(hit));
+    });
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      trigger: rectangle(triggerElement, ".output-detail-trigger"),
+      menu: rectangle(menuElement, ".output-detail-menu"),
+      card: rectangle(cardElement, ".settings-card"),
+      cardAllowsOverflow: getComputedStyle(cardElement).overflow === "visible",
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      optionCount: options.length,
+      visibleOptionCount: visibleOptions.length,
+      opensAbove: document.querySelector(".output-detail-select")?.classList.contains("open-above"),
+    };
+  })()`;
+}
+
+function settingsInteractionVisualAuditExpression() {
+  return `(() => {
+    const sections = document.querySelectorAll(".settings-section");
+    const currentModelTop = sections[1]?.getBoundingClientRect().top ?? null;
+    const previousModelTop =
+      typeof window.__settingsModelTopBefore === "number"
+        ? window.__settingsModelTopBefore
+        : null;
+    const visibleStatus = [...document.querySelectorAll(".application-preferences-status")].some(
+      (element) => {
+        const bounds = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return bounds.width > 0 && bounds.height > 0 && style.visibility !== "hidden";
+      },
+    );
+    const controls = [...document.querySelectorAll(".application-preference input")];
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      disabledControls: controls.filter((control) => control.disabled).length,
+      modelSectionShift:
+        previousModelTop === null || currentModelTop === null
+          ? null
+          : Math.abs(currentModelTop - previousModelTop),
+      savingAnnounced:
+        document.querySelector('.visually-hidden[aria-live="polite"]')?.textContent?.includes(
+          "Salvando",
+        ) === true,
+      thirdPreferenceChecked: controls[2]?.checked ?? null,
+      visibleStatus,
     };
   })()`;
 }
@@ -374,8 +476,33 @@ function validateSettingsMetrics(metrics, viewport) {
   assert(metrics.page.width >= 500, "o conteúdo de configurações ficou excessivamente estreito");
   assert(Number.parseFloat(metrics.heading.fontSize) >= 21, "o título ficou pequeno demais");
   assert(Number.parseFloat(metrics.firstRowLabel.fontSize) >= 11, "os rótulos ficaram pequenos");
-  assert(metrics.switchCount === 3, "os três controles booleanos não foram renderizados");
+  assert(metrics.checkboxCount === 3, "os três controles booleanos não foram renderizados");
   assert(metrics.visibleCards >= 2, "menos de dois cartões de configurações estão visíveis");
+}
+
+function validateOutputDetailMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "o menu criou overflow horizontal global");
+  assert(metrics.cardAllowsOverflow === true, "o cartão ainda recorta o menu de detalhamento");
+  assert(metrics.optionCount === 4, "as quatro opções de detalhamento não foram renderizadas");
+  assert(
+    metrics.visibleOptionCount === metrics.optionCount,
+    "uma ou mais opções de detalhamento continuam visualmente recortadas",
+  );
+  assert(metrics.menu.left >= -tolerance, "o menu ultrapassa a borda esquerda");
+  assert(metrics.menu.right <= viewport.width + tolerance, "o menu ultrapassa a borda direita");
+  assert(metrics.menu.top >= 34 - tolerance, "o menu invade o titlebar");
+  assert(metrics.menu.bottom <= viewport.height + tolerance, "o menu ultrapassa o viewport");
+}
+
+function validateSettingsInteractionMetrics(metrics) {
+  const tolerance = 1;
+  assert(metrics.disabledControls === 0, "o salvamento desabilitou controles independentes");
+  assert(metrics.modelSectionShift !== null, "não foi possível medir a estabilidade da página");
+  assert(metrics.modelSectionShift <= tolerance, "o salvamento deslocou o conteúdo da página");
+  assert(metrics.savingAnnounced === true, "o salvamento não foi anunciado de forma acessível");
+  assert(metrics.thirdPreferenceChecked === false, "a preferência não foi atualizada de imediato");
+  assert(metrics.visibleStatus === false, "o salvamento exibiu um status que desloca a página");
 }
 
 function validateAutomationsMetrics(metrics, viewport) {

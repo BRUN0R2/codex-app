@@ -58,6 +58,10 @@ type SettingsDialogController = Pick<
 >;
 
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
+import {
+  DEFAULT_APPLICATION_PREFERENCES,
+  mergeApplicationPreferences,
+} from "./applicationPreferences";
 import { formatShortDate } from "./dateFormat";
 import { Icon, type IconName } from "./Icon";
 import {
@@ -337,13 +341,6 @@ function SettingsSection(props: {
   );
 }
 
-const DEFAULT_APPLICATION_PREFERENCES = {
-  schemaVersion: 1,
-  startWithWindows: false,
-  startMinimized: false,
-  closeToTray: false,
-} as const satisfies ApplicationPreferences;
-
 function ApplicationPreferencesSettings(props: { readonly controller: SettingsDialogController }) {
   const desktopRuntime = isDesktopRuntime() || isBrowserPreview();
   const [preferences, setPreferences] = createSignal<ApplicationPreferences>(
@@ -354,6 +351,8 @@ function ApplicationPreferencesSettings(props: { readonly controller: SettingsDi
   const [saving, setSaving] = createSignal(false);
   const [operationError, setOperationError] = createSignal<string | null>(null);
   let confirmedPreferences = DEFAULT_APPLICATION_PREFERENCES as ApplicationPreferences;
+  let saveQueue: Promise<void> = Promise.resolve();
+  let saveRevision = 0;
   let active = true;
 
   onMount(() => {
@@ -382,36 +381,42 @@ function ApplicationPreferencesSettings(props: { readonly controller: SettingsDi
   });
 
   function save(patch: Partial<ApplicationPreferences>): void {
-    if (!loaded() || saving()) {
+    if (!loaded()) {
       return;
     }
 
-    const merged = { ...preferences(), ...patch };
-    const nextPreferences: ApplicationPreferences = merged.startWithWindows
-      ? merged
-      : { ...merged, startMinimized: false };
-    const previousPreferences = confirmedPreferences;
+    const nextPreferences = mergeApplicationPreferences(preferences(), patch);
+    const revision = saveRevision + 1;
+    saveRevision = revision;
     setOperationError(null);
     setPreferences(nextPreferences);
     setSaving(true);
 
-    void updateApplicationPreferences(nextPreferences)
+    const operation = saveQueue.then(() => updateApplicationPreferences(nextPreferences));
+    saveQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    void operation
       .then((storedPreferences) => {
         confirmedPreferences = storedPreferences;
-        if (active) setPreferences(storedPreferences);
+        if (active && revision === saveRevision) {
+          setPreferences(storedPreferences);
+          setOperationError(null);
+        }
       })
       .catch((reason: unknown) => {
-        if (!active) return;
-        setPreferences(previousPreferences);
+        if (!active || revision !== saveRevision) return;
+        setPreferences(confirmedPreferences);
         setOperationError(describeError(reason));
         props.controller.reportError(reason);
       })
       .finally(() => {
-        if (active) setSaving(false);
+        if (active && revision === saveRevision) setSaving(false);
       });
   }
 
-  const controlsDisabled = () => !desktopRuntime || !loaded() || loading() || saving();
+  const controlsDisabled = () => !desktopRuntime || !loaded() || loading();
   const status = () => {
     if (!desktopRuntime) {
       return "Disponível apenas no aplicativo desktop.";
@@ -419,16 +424,13 @@ function ApplicationPreferencesSettings(props: { readonly controller: SettingsDi
     if (loading()) {
       return "Carregando preferências do aplicativo…";
     }
-    if (saving()) {
-      return "Salvando preferências do aplicativo…";
-    }
     return operationError() ?? "";
   };
 
   return (
     <>
       <SettingsSection
-        busy={loading() || saving()}
+        busy={loading()}
         description="Escolha como o Codex App inicia e se comporta ao fechar a janela principal."
         title="Aplicativo"
       >
@@ -454,6 +456,9 @@ function ApplicationPreferencesSettings(props: { readonly controller: SettingsDi
           onChange={(closeToTray) => save({ closeToTray })}
         />
       </SettingsSection>
+      <span aria-live="polite" class="visually-hidden">
+        {saving() ? "Salvando preferências do aplicativo." : ""}
+      </span>
       <Show when={status().length > 0}>
         <p
           aria-live="polite"
@@ -475,18 +480,24 @@ function PreferenceCheckbox(props: {
   readonly onChange: (checked: boolean) => void;
 }) {
   return (
-    <div class="application-preference" classList={{ disabled: props.disabled }}>
+    <label class="application-preference" classList={{ disabled: props.disabled }}>
+      <span class="settings-checkbox-control">
+        <input
+          aria-label={props.label}
+          checked={props.checked}
+          disabled={props.disabled}
+          onChange={(event) => props.onChange(event.currentTarget.checked)}
+          type="checkbox"
+        />
+        <span aria-hidden="true" class="settings-checkbox-box">
+          <Icon name="check" size={14} />
+        </span>
+      </span>
       <span class="application-preference-copy">
         <strong>{props.label}</strong>
         <small>{props.description}</small>
       </span>
-      <SettingsSwitch
-        checked={props.checked}
-        disabled={props.disabled}
-        label={props.label}
-        onChange={props.onChange}
-      />
-    </div>
+    </label>
   );
 }
 
@@ -505,7 +516,7 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
         description="Preferências do aplicativo e padrões usados ao iniciar novos turnos."
       />
       <ApplicationPreferencesSettings controller={props.controller} />
-      <SettingsSection title="Modelo">
+      <SettingsSection allowOverflow title="Modelo">
         <SettingsRow
           label="Detalhamento da saída"
           description="Escolha o nível de detalhe que o Codex inclui nas respostas."
@@ -742,7 +753,7 @@ function AppearanceSettings(props: { readonly controller: SettingsDialogControll
         label="Cursor em botões"
         description="Mostra cursor de ponteiro em controles interativos."
       >
-        <SettingsSwitch
+        <SettingsCheckbox
           checked={desktop()?.pointerCursor ?? true}
           disabled={desktop() === undefined}
           label="Cursor em botões"
@@ -1185,6 +1196,7 @@ function OutputDetailSelect(props: {
   readonly value: ModelVerbosity | null;
 }) {
   const [open, setOpen] = createSignal(false);
+  const [openAbove, setOpenAbove] = createSignal(false);
   let rootElement: HTMLDivElement | undefined;
   let triggerElement: HTMLButtonElement | undefined;
   const optionElements: Array<HTMLButtonElement | undefined> = [];
@@ -1200,9 +1212,34 @@ function OutputDetailSelect(props: {
     queueMicrotask(() => optionElements[normalizedIndex]?.focus());
   }
 
-  function openAndFocusSelected(): void {
+  function shouldOpenAbove(): boolean {
+    const bounds = triggerElement?.getBoundingClientRect();
+    if (bounds === undefined) {
+      return false;
+    }
+    const estimatedMenuHeight = 224;
+    const availableBelow = window.innerHeight - bounds.bottom;
+    return availableBelow < estimatedMenuHeight && bounds.top > availableBelow;
+  }
+
+  function openMenu(focusSelectedOption: boolean): void {
+    setOpenAbove(shouldOpenAbove());
     setOpen(true);
-    focusOption(selectedIndex());
+    if (focusSelectedOption) {
+      focusOption(selectedIndex());
+    }
+  }
+
+  function openAndFocusSelected(): void {
+    openMenu(true);
+  }
+
+  function toggleMenu(): void {
+    if (open()) {
+      setOpen(false);
+      return;
+    }
+    openMenu(false);
   }
 
   function closeAndFocusTrigger(): void {
@@ -1266,11 +1303,27 @@ function OutputDetailSelect(props: {
     }
   }
 
-  onMount(() => document.addEventListener("pointerdown", handleDocumentPointerDown));
-  onCleanup(() => document.removeEventListener("pointerdown", handleDocumentPointerDown));
+  function updatePlacement(): void {
+    if (open()) {
+      setOpenAbove(shouldOpenAbove());
+    }
+  }
+
+  onMount(() => {
+    document.addEventListener("pointerdown", handleDocumentPointerDown);
+    window.addEventListener("resize", updatePlacement);
+  });
+  onCleanup(() => {
+    document.removeEventListener("pointerdown", handleDocumentPointerDown);
+    window.removeEventListener("resize", updatePlacement);
+  });
 
   return (
-    <div class="output-detail-select" ref={rootElement}>
+    <div
+      class="output-detail-select"
+      classList={{ open: open(), "open-above": openAbove() }}
+      ref={rootElement}
+    >
       <button
         aria-controls="output-detail-menu"
         aria-expanded={open()}
@@ -1279,7 +1332,7 @@ function OutputDetailSelect(props: {
         class="output-detail-trigger"
         classList={{ open: open() }}
         disabled={props.disabled}
-        onClick={() => setOpen((value) => !value)}
+        onClick={toggleMenu}
         onKeyDown={handleTriggerKeyDown}
         ref={triggerElement}
         type="button"
@@ -1342,24 +1395,26 @@ function SettingsRow(props: {
   );
 }
 
-function SettingsSwitch(props: {
+function SettingsCheckbox(props: {
   readonly checked: boolean;
   readonly disabled?: boolean;
   readonly label: string;
   readonly onChange: (checked: boolean) => void;
 }) {
   return (
-    <label class="settings-switch" classList={{ disabled: props.disabled }}>
-      <input
-        aria-checked={props.checked}
-        aria-label={props.label}
-        checked={props.checked}
-        disabled={props.disabled}
-        onChange={(event) => props.onChange(event.currentTarget.checked)}
-        role="switch"
-        type="checkbox"
-      />
-      <span aria-hidden="true" class="settings-switch-track" />
+    <label class="settings-checkbox" classList={{ disabled: props.disabled }}>
+      <span class="settings-checkbox-control">
+        <input
+          aria-label={props.label}
+          checked={props.checked}
+          disabled={props.disabled}
+          onChange={(event) => props.onChange(event.currentTarget.checked)}
+          type="checkbox"
+        />
+        <span aria-hidden="true" class="settings-checkbox-box">
+          <Icon name="check" size={14} />
+        </span>
+      </span>
     </label>
   );
 }

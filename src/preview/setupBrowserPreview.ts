@@ -617,9 +617,11 @@ let previewApplicationPreferences: ApplicationPreferences = {
 } satisfies ApplicationPreferences;
 
 export function setupBrowserPreview(): void {
+  const previewParameters = new URLSearchParams(window.location.search);
+  const preferenceUpdateDelay = previewDelay(previewParameters.get("preferenceDelay"));
   document.title = "Codex App · Visualização";
   document.documentElement.setAttribute("data-runtime", "browser-preview");
-  if (new URLSearchParams(window.location.search).get("chrome") === "1") {
+  if (previewParameters.get("chrome") === "1") {
     document.documentElement.setAttribute("data-window-chrome-preview", "true");
   }
   saveProjects(PREVIEW_PROJECTS);
@@ -738,8 +740,15 @@ export function setupBrowserPreview(): void {
           if (preferences === undefined) {
             throw new Error("A atualização de preferências não recebeu um valor.");
           }
-          previewApplicationPreferences = preferences;
-          return previewApplicationPreferences;
+          const applyPreferences = () => {
+            previewApplicationPreferences = preferences;
+            return previewApplicationPreferences;
+          };
+          return preferenceUpdateDelay === 0
+            ? applyPreferences()
+            : new Promise<ApplicationPreferences>((resolve) => {
+                window.setTimeout(() => resolve(applyPreferences()), preferenceUpdateDelay);
+              });
         }
         case "engine_turn_interrupt":
           return { applied: true };
@@ -850,6 +859,14 @@ function readPreviewRequestNumber(args: unknown, key: string): number {
     throw new Error(`O campo ${key} do request de prévia é inválido.`);
   }
   return value;
+}
+
+function previewDelay(value: string | null): number {
+  if (value === null) {
+    return 0;
+  }
+  const delay = Number(value);
+  return Number.isInteger(delay) && delay >= 0 && delay <= 2_000 ? delay : 0;
 }
 
 function createPreviewModel(id: string, displayName: string, isDefault: boolean): CodexModel {
