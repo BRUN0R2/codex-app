@@ -77,7 +77,7 @@ const PREVIEW_CONFIG = {
   config: {
     model: PREVIEW_MODEL_ID,
     modelReasoningEffort: PREVIEW_REASONING_EFFORT,
-    serviceTier: null,
+    serviceTier: "fast",
     modelContextWindowPreferences: { [PREVIEW_MODEL_ID]: "maximum" },
     permissionProfile: PREVIEW_PERMISSION_PROFILE,
     webSearch: "live",

@@ -8,6 +8,7 @@ export type IconName =
   | "barChart"
   | "book"
   | "bot"
+  | "bolt"
   | "brain"
   | "briefcase"
   | "bug"
@@ -132,6 +133,14 @@ function renderIconPath(name: IconName): JSX.Element {
           <rect height="12" rx="3" width="16" x="4" y="8" />
           <path d="M12 4v4M8 13h.01M16 13h.01M9 17h6" />
         </>
+      );
+    case "bolt":
+      return (
+        <path
+          d="M13.2 1.8 4.4 13.1a.75.75 0 0 0 .6 1.2h6.1l-1 7.1a.75.75 0 0 0 1.3.6l8.2-11.2a.75.75 0 0 0-.6-1.2h-5.7l1.2-7.2a.75.75 0 0 0-1.3-.6Z"
+          fill="currentColor"
+          stroke="none"
+        />
       );
     case "calendar":
       return (

@@ -688,9 +688,15 @@ export function Composer(props: ComposerProps) {
                     setModelMenuSection(null);
                     setPermissionMenuOpen(false);
                   }}
-                  title="Modelo e raciocínio"
+                  title="Modelo, raciocínio e velocidade"
                   type="button"
                 >
+                  <Show when={serviceTier() !== null}>
+                    <span class="model-speed-indicator">
+                      <Icon name="bolt" size={13} />
+                      <span class="visually-hidden">Modo rápido ativo</span>
+                    </span>
+                  </Show>
                   <span class="model-button-name">
                     {selectedModel() === undefined
                       ? "Carregando"

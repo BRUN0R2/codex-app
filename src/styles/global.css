@@ -5110,6 +5110,15 @@ pre {
   white-space: nowrap;
 }
 
+.model-speed-indicator {
+  display: inline-grid;
+  width: 13px;
+  height: 16px;
+  flex: 0 0 13px;
+  place-items: center;
+  color: var(--muted-bright);
+}
+
 .model-button-name {
   color: var(--text);
 }

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VITE_ENTRY = path.join(PROJECT_ROOT, "node_modules", "vite", "bin", "vite.js");
 const PREVIEW_PORT = 1420;
+const HOME_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1`;
 const SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=general`;
 const SETTINGS_INTERACTION_PREVIEW_URL = `${SETTINGS_PREVIEW_URL}&preferenceDelay=400`;
 const AUTOMATIONS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&surface=automations`;
@@ -19,6 +20,14 @@ const VIEWPORTS = [
   { width: 1920, height: 1080 },
 ];
 const SCENARIOS = [
+  {
+    id: "composer-fast-mode",
+    url: HOME_PREVIEW_URL,
+    readyExpression: `document.querySelector(".model-speed-indicator") !== null &&
+      document.querySelector(".model-speed-indicator + .model-button-name") !== null`,
+    auditExpression: composerFastModeVisualAuditExpression,
+    validate: validateComposerFastModeMetrics,
+  },
   {
     id: "settings",
     url: SETTINGS_PREVIEW_URL,
@@ -219,6 +228,57 @@ async function waitForPreview(client, readyExpression, scenarioId) {
     await delay(50);
   }
   throw new Error(`A prévia visual de ${scenarioId} não ficou pronta dentro de 15 segundos.`);
+}
+
+function composerFastModeVisualAuditExpression() {
+  return `(() => {
+    const rectangle = (element, label) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Elemento ausente: " + label);
+      }
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+        display: style.display,
+        visibility: style.visibility,
+        fontSize: style.fontSize,
+      };
+    };
+    const chromeElement = document.querySelector(".window-chrome");
+    const contentElement = document.querySelector(".application-frame-content");
+    const controlsElement = document.querySelector(".window-chrome-controls");
+    const indicatorElement = document.querySelector(".model-speed-indicator");
+    const buttonElement = indicatorElement?.closest(".model-button");
+    const nameElement = buttonElement?.querySelector(".model-button-name");
+    const chrome = rectangle(chromeElement, ".window-chrome");
+    const content = rectangle(contentElement, ".application-frame-content");
+    const controls = rectangle(controlsElement, ".window-chrome-controls");
+    const indicator = rectangle(indicatorElement, ".model-speed-indicator");
+    const button = rectangle(buttonElement, ".model-button");
+    const name = rectangle(nameElement, ".model-button-name");
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      chrome,
+      content,
+      controls,
+      indicator,
+      button,
+      name,
+      indicatorCount: document.querySelectorAll(".model-speed-indicator").length,
+      accessibleLabel: buttonElement?.textContent?.includes("Modo rápido ativo") === true,
+      buttonHorizontalOverflow:
+        buttonElement instanceof HTMLElement
+          ? buttonElement.scrollWidth - buttonElement.clientWidth
+          : null,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
 }
 
 function settingsVisualAuditExpression() {
@@ -473,6 +533,31 @@ function automationEditorVisualAuditExpression() {
       switchAriaChecked: switchElement.getAttribute("aria-checked"),
     };
   })()`;
+}
+
+function validateComposerFastModeMetrics(metrics, viewport) {
+  const tolerance = 1;
+  validateChromeMetrics(metrics, viewport);
+  assert(metrics.horizontalOverflow <= tolerance, "o compositor criou overflow horizontal");
+  assert(metrics.buttonHorizontalOverflow <= tolerance, "o seletor do modelo recorta seu conteúdo");
+  assert(metrics.indicatorCount === 1, "o modo rápido não exibe exatamente um indicador");
+  assert(metrics.accessibleLabel === true, "o indicador rápido não possui descrição acessível");
+  assert(
+    metrics.indicator.right <= metrics.name.left + tolerance,
+    "o raio não está à esquerda do nome do modelo",
+  );
+  assert(
+    metrics.name.left - metrics.indicator.right <= 8 + tolerance,
+    "o raio ficou distante demais do nome do modelo",
+  );
+  assert(
+    Math.abs(
+      (metrics.indicator.top + metrics.indicator.bottom) / 2 -
+        (metrics.name.top + metrics.name.bottom) / 2,
+    ) <= tolerance,
+    "o raio não está centralizado com o nome do modelo",
+  );
+  assert(metrics.indicator.width >= 12, "o raio ficou pequeno demais");
 }
 
 function validateSettingsMetrics(metrics, viewport) {
