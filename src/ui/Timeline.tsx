@@ -916,19 +916,19 @@ export function Timeline(props: {
           </section>
           <div
             aria-hidden={!scrollbar().scrollable}
-            class="timeline-scrollbar"
+            class="surface-scrollbar"
             classList={{ "is-hidden": !scrollbar().scrollable }}
           >
             <button
               aria-controls="conversation-timeline"
               aria-label="Rolar conversa para cima"
-              class="timeline-scrollbar-arrow up"
+              class="surface-scrollbar-arrow up"
               disabled={!scrollbar().scrollable || scrollbar().thumbTop <= 0.5}
               onClick={() => scrollTimelineBy(-64)}
               title="Rolar para cima"
               type="button"
             >
-              <span aria-hidden="true" class="timeline-scrollbar-arrow-glyph" />
+              <span aria-hidden="true" class="surface-scrollbar-arrow-glyph" />
             </button>
             <div
               aria-controls="conversation-timeline"
@@ -937,7 +937,7 @@ export function Timeline(props: {
               aria-valuemax={Math.round(scrollbar().maximumScroll)}
               aria-valuemin={0}
               aria-valuenow={Math.round(scrollElement?.scrollTop ?? 0)}
-              class="timeline-scrollbar-track"
+              class="surface-scrollbar-track"
               onKeyDown={handleScrollbarKeyDown}
               onPointerDown={handleScrollbarTrackPointerDown}
               ref={scrollbarTrackElement}
@@ -945,7 +945,7 @@ export function Timeline(props: {
               tabIndex={scrollbar().scrollable ? 0 : -1}
             >
               <div
-                class="timeline-scrollbar-thumb"
+                class="surface-scrollbar-thumb"
                 onPointerDown={handleScrollbarThumbPointerDown}
                 onPointerMove={handleScrollbarThumbPointerMove}
                 onPointerUp={handleScrollbarThumbPointerUp}
@@ -959,7 +959,7 @@ export function Timeline(props: {
             <button
               aria-controls="conversation-timeline"
               aria-label="Rolar conversa para baixo"
-              class="timeline-scrollbar-arrow down"
+              class="surface-scrollbar-arrow down"
               disabled={
                 !scrollbar().scrollable ||
                 scrollbar().thumbTop + scrollbar().thumbHeight >=
@@ -969,7 +969,7 @@ export function Timeline(props: {
               title="Rolar para baixo"
               type="button"
             >
-              <span aria-hidden="true" class="timeline-scrollbar-arrow-glyph" />
+              <span aria-hidden="true" class="surface-scrollbar-arrow-glyph" />
             </button>
           </div>
           <Show when={showScrollToEnd()}>

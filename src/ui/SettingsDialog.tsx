@@ -71,6 +71,7 @@ import {
 } from "./modelContextWindow";
 import { OUTPUT_DETAIL_OPTIONS, outputDetailLabel } from "./outputDetail";
 import { threadTitle } from "./Sidebar";
+import { SurfaceScrollbar } from "./SurfaceScrollbar";
 import { presentUsageLimits, type UsageLimitEntry, usagePercentLabel } from "./usagePresentation";
 
 export type SettingsPage =
@@ -129,6 +130,8 @@ export function SettingsDialog(props: {
   const [query, setQuery] = createSignal("");
   const [developerInstructions, setDeveloperInstructions] = createSignal("");
   let dialogElement: HTMLElement | undefined;
+  let settingsMainContentElement: HTMLDivElement | undefined;
+  let settingsMainElement: HTMLElement | undefined;
   let searchInput: HTMLInputElement | undefined;
   let previouslyFocusedElement: HTMLElement | null = null;
   const visibleNavigation = createMemo(() => {
@@ -231,41 +234,52 @@ export function SettingsDialog(props: {
             </Show>
           </nav>
         </aside>
-        <main class="settings-main">
-          <Switch>
-            <Match when={page() === "general"}>
-              <GeneralSettings controller={props.controller} />
-            </Match>
-            <Match when={page() === "security"}>
-              <SecuritySettings controller={props.controller} />
-            </Match>
-            <Match when={page() === "personalization"}>
-              <PersonalizationSettings
-                controller={props.controller}
-                developerInstructions={developerInstructions()}
-                setDeveloperInstructions={setDeveloperInstructions}
-              />
-            </Match>
-            <Match when={page() === "appearance"}>
-              <AppearanceSettings controller={props.controller} />
-            </Match>
-            <Match when={page() === "profile"}>
-              <ProfileSettings controller={props.controller} />
-            </Match>
-            <Match when={page() === "shortcuts"}>
-              <ShortcutsSettings />
-            </Match>
-            <Match when={page() === "usage"}>
-              <UsageSettings controller={props.controller} />
-            </Match>
-            <Match when={page() === "diagnostics"}>
-              <DiagnosticsSettings controller={props.controller} />
-            </Match>
-            <Match when={page() === "archived"}>
-              <ArchivedChatsSettings controller={props.controller} />
-            </Match>
-          </Switch>
-        </main>
+        <div class="settings-main-frame">
+          <main class="settings-main" id="settings-main-scroll" ref={settingsMainElement}>
+            <div class="settings-main-content" ref={settingsMainContentElement}>
+              <Switch>
+                <Match when={page() === "general"}>
+                  <GeneralSettings controller={props.controller} />
+                </Match>
+                <Match when={page() === "security"}>
+                  <SecuritySettings controller={props.controller} />
+                </Match>
+                <Match when={page() === "personalization"}>
+                  <PersonalizationSettings
+                    controller={props.controller}
+                    developerInstructions={developerInstructions()}
+                    setDeveloperInstructions={setDeveloperInstructions}
+                  />
+                </Match>
+                <Match when={page() === "appearance"}>
+                  <AppearanceSettings controller={props.controller} />
+                </Match>
+                <Match when={page() === "profile"}>
+                  <ProfileSettings controller={props.controller} />
+                </Match>
+                <Match when={page() === "shortcuts"}>
+                  <ShortcutsSettings />
+                </Match>
+                <Match when={page() === "usage"}>
+                  <UsageSettings controller={props.controller} />
+                </Match>
+                <Match when={page() === "diagnostics"}>
+                  <DiagnosticsSettings controller={props.controller} />
+                </Match>
+                <Match when={page() === "archived"}>
+                  <ArchivedChatsSettings controller={props.controller} />
+                </Match>
+              </Switch>
+            </div>
+          </main>
+          <SurfaceScrollbar
+            className="settings-scrollbar"
+            contentElement={() => settingsMainContentElement}
+            controls="settings-main-scroll"
+            label="configurações"
+            scrollElement={() => settingsMainElement}
+          />
+        </div>
       </section>
     </div>
   );
@@ -625,7 +639,10 @@ function SecuritySettings(props: { readonly controller: SettingsDialogController
           {(entry) => (
             <button
               class="permission-option"
-              classList={{ selected: samePermission(entry, profile()) }}
+              classList={{
+                "full-access": entry.sandbox === "danger-full-access",
+                selected: samePermission(entry, profile()),
+              }}
               onClick={() =>
                 void props.controller.updateSetting({ type: "permissionProfile", value: entry })
               }

@@ -75,14 +75,17 @@
   --state-muted: var(--gray-500);
   --state-soft: rgb(255 255 255 / 8%);
   --state-border: rgb(255 255 255 / 18%);
+  --full-access: #fb6a22;
+  --full-access-soft: rgb(251 106 34 / 16%);
+  --full-access-border: rgb(251 106 34 / 28%);
   --red: var(--red-400);
   --red-soft: rgb(250 66 62 / 18%);
   --diff-surface: #1b1b1b;
   --diff-gutter: #161616;
-  --diff-added-background: rgb(255 255 255 / 8%);
-  --diff-deleted-background: rgb(255 255 255 / 3%);
-  --diff-added-foreground: var(--gray-100);
-  --diff-deleted-foreground: var(--gray-500);
+  --diff-added-background: rgb(74 222 128 / 17%);
+  --diff-deleted-background: rgb(250 66 62 / 18%);
+  --diff-added-foreground: #4ade80;
+  --diff-deleted-foreground: #ff6764;
   --radius-sm: 6px;
   --radius: 10px;
   --radius-md: 8px;
@@ -2643,7 +2646,7 @@ pre {
   height: 0;
 }
 
-.timeline-scrollbar {
+.surface-scrollbar {
   position: absolute;
   z-index: 7;
   top: 0;
@@ -2658,12 +2661,12 @@ pre {
   touch-action: none;
 }
 
-.timeline-scrollbar.is-hidden {
+.surface-scrollbar.is-hidden {
   visibility: hidden;
   pointer-events: none;
 }
 
-.timeline-scrollbar-arrow {
+.surface-scrollbar-arrow {
   display: grid;
   width: 18px;
   height: 22px;
@@ -2678,28 +2681,28 @@ pre {
   cursor: default;
 }
 
-.timeline-scrollbar-arrow-glyph {
+.surface-scrollbar-arrow-glyph {
   width: 12px;
   height: 8px;
   background: currentcolor;
   clip-path: polygon(50% 8%, 100% 92%, 0 92%);
 }
 
-.timeline-scrollbar-arrow.down .timeline-scrollbar-arrow-glyph {
+.surface-scrollbar-arrow.down .surface-scrollbar-arrow-glyph {
   transform: rotate(180deg);
 }
 
-.timeline-scrollbar-arrow:hover:not(:disabled) {
+.surface-scrollbar-arrow:hover:not(:disabled) {
   background: rgb(255 255 255 / 5%);
   color: var(--color-token-text-primary);
 }
 
-.timeline-scrollbar-arrow:disabled {
+.surface-scrollbar-arrow:disabled {
   cursor: default;
   opacity: 0.5;
 }
 
-.timeline-scrollbar-track {
+.surface-scrollbar-track {
   position: relative;
   width: 14px;
   min-height: 0;
@@ -2710,7 +2713,7 @@ pre {
   touch-action: none;
 }
 
-.timeline-scrollbar-thumb {
+.surface-scrollbar-thumb {
   width: 100%;
   min-height: 84px;
   border: 3px solid transparent;
@@ -2722,17 +2725,17 @@ pre {
   will-change: transform;
 }
 
-.timeline-scrollbar:hover .timeline-scrollbar-thumb,
-.timeline-scrollbar-track:focus-visible .timeline-scrollbar-thumb {
+.surface-scrollbar:hover .surface-scrollbar-thumb,
+.surface-scrollbar-track:focus-visible .surface-scrollbar-thumb {
   background: rgb(255 255 255 / 52%);
   background-clip: padding-box;
 }
 
-.timeline-scrollbar-thumb:active {
+.surface-scrollbar-thumb:active {
   cursor: grabbing;
 }
 
-.timeline-scrollbar-track:focus-visible {
+.surface-scrollbar-track:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
@@ -3802,7 +3805,7 @@ pre {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: var(--text-soft);
+  color: var(--diff-added-foreground);
 }
 
 .status-failed-text {
@@ -3931,8 +3934,8 @@ pre {
   letter-spacing: 0.025em;
 }
 
-.kind-add { background: var(--state-soft); color: var(--state-strong); }
-.kind-delete { background: rgb(255 255 255 / 3%); color: var(--state-muted); }
+.kind-add { background: var(--diff-added-background); color: var(--diff-added-foreground); }
+.kind-delete { background: var(--diff-deleted-background); color: var(--diff-deleted-foreground); }
 .kind-update { background: rgb(255 255 255 / 5%); color: var(--state); }
 
 .diff-stat {
@@ -5069,8 +5072,9 @@ pre {
 }
 
 .permission-button.elevated {
-  background: var(--surface);
-  color: var(--text);
+  background: var(--full-access-soft);
+  color: var(--full-access);
+  box-shadow: inset 0 0 0 1px var(--full-access-border);
 }
 
 .permission-button span {
@@ -5269,8 +5273,8 @@ pre {
   background: #343434;
 }
 
-.permission-menu-option.selected {
-  color: var(--text);
+.permission-menu-option.full-access.selected {
+  color: var(--full-access);
 }
 
 .permission-menu-option > span {
@@ -5292,8 +5296,8 @@ pre {
   white-space: nowrap;
 }
 
-.permission-menu-option.selected small {
-  color: var(--muted-bright);
+.permission-menu-option.full-access.selected small {
+  color: color-mix(in srgb, var(--full-access) 72%, var(--text-soft));
 }
 
 .model-menu {
@@ -5793,14 +5797,38 @@ pre {
   line-height: 1.5;
 }
 
+.settings-main-frame {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
 .settings-main {
+  width: 100%;
+  height: 100%;
   overflow-y: auto;
   padding:
     calc(var(--app-titlebar-height) + clamp(44px, 6vh, 72px))
     clamp(32px, 7vw, 112px)
     88px;
   background: var(--bg);
-  scrollbar-gutter: stable;
+  scrollbar-width: none;
+}
+
+.settings-main::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.settings-main-content {
+  min-height: 100%;
+}
+
+.settings-scrollbar {
+  top: var(--app-titlebar-height);
 }
 
 .settings-page {
@@ -6473,6 +6501,11 @@ pre {
 .permission-option:hover { border-color: rgb(255 255 255 / 18%); }
 .permission-option.selected { border-color: var(--state-border); background: var(--state-soft); }
 .permission-option.selected > svg { color: var(--muted-bright); }
+.permission-option.full-access.selected {
+  border-color: var(--full-access-border);
+  background: var(--full-access-soft);
+}
+.permission-option.full-access.selected > svg { color: var(--full-access); }
 
 .settings-note {
   margin-top: 16px;
@@ -6688,16 +6721,22 @@ pre {
 }
 
 .project-edit-container {
-  width: min(380px, calc(100vw - 32px));
-  max-width: min(380px, calc(100vw - 32px));
+  display: flex;
+  width: min(600px, calc(100vw - 32px));
+  max-width: min(600px, calc(100vw - 32px));
   max-height: min(88vh, calc(100vh - 32px));
+  align-items: stretch;
+  gap: 12px;
   overflow: hidden;
+  flex-wrap: nowrap;
 }
 
 .project-edit-modal {
   position: relative;
   display: flex;
-  width: 100%;
+  width: min(340px, 100%);
+  min-width: min(340px, 100%);
+  flex: 1 1 340px;
   flex-direction: column;
   gap: 12px;
   padding: 16px;
@@ -6708,6 +6747,143 @@ pre {
   max-height: 100%;
   overflow: hidden;
   min-height: 0;
+}
+
+.project-color-side-panel {
+  display: flex;
+  width: min(220px, 100%);
+  min-width: min(220px, 100%);
+  max-height: 100%;
+  min-height: 0;
+  flex: 1 1 220px;
+  flex-direction: column;
+  gap: 10px;
+  padding: 17px;
+  overflow: hidden;
+  border: 1px solid #4b4b4b;
+  border-radius: 16px;
+  background: #252525;
+  color: var(--text);
+}
+
+.side-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.color-hex-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: #000000;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.inline-color-picker {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hsv-box {
+  position: relative;
+  width: 100%;
+  height: 132px;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 10px;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
+.hsv-sat-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to right, #ffffff, rgb(255 255 255 / 0%));
+}
+
+.hsv-val-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, #000000, rgb(0 0 0 / 0%));
+}
+
+.hsv-cursor {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin-top: -7px;
+  margin-left: -7px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.hue-bar {
+  position: relative;
+  width: 100%;
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(
+    to right,
+    #ff0000 0%,
+    #ffff00 17%,
+    #00ff00 33%,
+    #00ffff 50%,
+    #0000ff 67%,
+    #ff00ff 83%,
+    #ff0000 100%
+  );
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+}
+
+.hue-cursor {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: transparent;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.hex-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid #4a4a4a;
+  border-radius: 8px;
+  background: #1f1f1f;
+}
+
+.hex-hash {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.hex-text-input {
+  flex: 1;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
 }
 
 .project-edit-header {

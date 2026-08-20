@@ -145,7 +145,7 @@ export interface AppController {
   readonly toggleProjectThreadListExpanded: (path: string) => void;
   readonly updateProject: (
     path: string,
-    updates: Partial<Pick<ProjectRecord, "icon" | "name">>,
+    updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
   ) => void;
   readonly updateAutomation: (
     automationId: string,

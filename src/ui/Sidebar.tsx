@@ -720,7 +720,10 @@ function ProjectGroup(props: ProjectGroupProps) {
           title={props.project.path}
           type="button"
         >
-          <span class="project-icon-slot">
+          <span
+            class="project-icon-slot"
+            style={props.project.color ? { color: props.project.color } : undefined}
+          >
             <Icon
               name={(props.project.icon as IconName) ?? (props.expanded ? "folderOpen" : "folder")}
               size={16}
@@ -824,8 +827,8 @@ function ProjectGroup(props: ProjectGroupProps) {
       <Show when={editingProject()}>
         <ProjectEditModal
           onClose={() => setEditingProject(false)}
-          onSave={(name, icon) => {
-            props.controller.updateProject(props.project.path, { icon, name });
+          onSave={(name, icon, color) => {
+            props.controller.updateProject(props.project.path, { color, icon, name });
           }}
           project={props.project}
         />
@@ -1043,13 +1046,14 @@ function remainingUsageLabel(controller: SidebarController): string {
 
 function ProjectEditModal(props: {
   readonly onClose: () => void;
-  readonly onSave: (name: string, icon?: IconName) => void;
+  readonly onSave: (name: string, icon?: IconName, color?: string) => void;
   readonly project: ProjectRecord;
 }) {
   const [name, setName] = createSignal(props.project.name);
   const [icon, setIcon] = createSignal<IconName | undefined>(
     (props.project.icon as IconName | undefined) ?? "folder",
   );
+  const [color, setColor] = createSignal<string>(props.project.color ?? "#4ade80");
 
   const selectedIcon = () => icon() ?? "folder";
 
@@ -1075,7 +1079,7 @@ function ProjectEditModal(props: {
 
             <div class="project-edit-body">
               <div class="project-edit-input-row">
-                <div class="project-icon-preview">
+                <div class="project-icon-preview" style={{ color: color() }}>
                   <Icon name={selectedIcon()} size={20} />
                 </div>
                 <input
@@ -1096,6 +1100,7 @@ function ProjectEditModal(props: {
                         class="icon-grid-button"
                         classList={{ active: selectedIcon() === item }}
                         onClick={() => setIcon(item)}
+                        style={selectedIcon() === item ? { color: color() } : undefined}
                         title={item}
                         type="button"
                       >
@@ -1114,7 +1119,7 @@ function ProjectEditModal(props: {
               <button
                 class="project-edit-save"
                 onClick={() => {
-                  props.onSave(name().trim() || props.project.name, icon());
+                  props.onSave(name().trim() || props.project.name, icon(), color());
                   props.onClose();
                 }}
                 type="button"
@@ -1123,10 +1128,221 @@ function ProjectEditModal(props: {
               </button>
             </footer>
           </div>
+
+          <div class="project-color-side-panel">
+            <header class="side-panel-header">
+              <span class="picker-label">Cor do projeto</span>
+              <div class="color-hex-badge" style={{ background: color() }}>
+                <span>{color().toUpperCase()}</span>
+              </div>
+            </header>
+
+            <InlineColorPicker color={color()} onChange={setColor} />
+          </div>
         </div>
       </div>
     </Portal>
   );
+}
+
+function InlineColorPicker(props: {
+  readonly color: string;
+  readonly onChange: (color: string) => void;
+}) {
+  let boxRef: HTMLDivElement | undefined;
+  let hueRef: HTMLDivElement | undefined;
+
+  const hsv = createMemo(() => hexToHsv(props.color));
+  const hue = () => hsv().h;
+  const sat = () => hsv().s;
+  const val = () => hsv().v;
+
+  const cursorX = () => `calc(7px + (${sat()} / 100) * (100% - 14px))`;
+  const cursorY = () => `calc(7px + (${100 - val()} / 100) * (100% - 14px))`;
+  const hueX = () => `calc(7px + (${hue()} / 360) * (100% - 14px))`;
+
+  function updateFromBox(event: PointerEvent) {
+    if (boxRef === undefined) {
+      return;
+    }
+    const rect = boxRef.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+    const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+    const newSat = Math.round((x / rect.width) * 100);
+    const newVal = Math.round((1 - y / rect.height) * 100);
+    props.onChange(hsvToHex(hue(), newSat, newVal));
+  }
+
+  function handleBoxPointerDown(event: PointerEvent) {
+    event.preventDefault();
+    boxRef?.setPointerCapture(event.pointerId);
+    updateFromBox(event);
+  }
+
+  function handleBoxPointerMove(event: PointerEvent) {
+    if (boxRef?.hasPointerCapture(event.pointerId) === true) {
+      updateFromBox(event);
+    }
+  }
+
+  function updateFromHue(event: PointerEvent) {
+    if (hueRef === undefined) {
+      return;
+    }
+    const rect = hueRef.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+    const newHue = Math.round((x / rect.width) * 360);
+    props.onChange(hsvToHex(newHue, sat(), val()));
+  }
+
+  function handleHuePointerDown(event: PointerEvent) {
+    event.preventDefault();
+    hueRef?.setPointerCapture(event.pointerId);
+    updateFromHue(event);
+  }
+
+  function handleHuePointerMove(event: PointerEvent) {
+    if (hueRef?.hasPointerCapture(event.pointerId) === true) {
+      updateFromHue(event);
+    }
+  }
+
+  return (
+    <div class="inline-color-picker">
+      <div
+        class="hsv-box"
+        onPointerDown={handleBoxPointerDown}
+        onPointerMove={handleBoxPointerMove}
+        ref={boxRef}
+        style={{ "background-color": `hsl(${hue()}, 100%, 50%)` }}
+      >
+        <div class="hsv-sat-overlay" />
+        <div class="hsv-val-overlay" />
+        <div
+          class="hsv-cursor"
+          style={{
+            left: cursorX(),
+            top: cursorY(),
+          }}
+        />
+      </div>
+
+      <div
+        class="hue-bar"
+        onPointerDown={handleHuePointerDown}
+        onPointerMove={handleHuePointerMove}
+        ref={hueRef}
+      >
+        <div class="hue-cursor" style={{ left: hueX() }} />
+      </div>
+
+      <div class="hex-input-wrapper">
+        <span class="hex-hash">#</span>
+        <input
+          class="hex-text-input"
+          maxLength={6}
+          onInput={(event) => {
+            const raw = event.currentTarget.value.trim().replace(/^#/, "");
+            if (/^[0-9A-Fa-f]{6}$/.test(raw)) {
+              props.onChange(`#${raw}`);
+            }
+          }}
+          type="text"
+          value={props.color.replace(/^#/, "").toUpperCase()}
+        />
+      </div>
+    </div>
+  );
+}
+
+function hsvToHex(h: number, s: number, v: number): string {
+  const satRatio = s / 100;
+  const valRatio = v / 100;
+  const i = Math.floor((h / 60) % 6);
+  const f = h / 60 - i;
+  const p = valRatio * (1 - satRatio);
+  const q = valRatio * (1 - f * satRatio);
+  const t = valRatio * (1 - (1 - f) * satRatio);
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  switch (i) {
+    case 0:
+      r = valRatio;
+      g = t;
+      b = p;
+      break;
+    case 1:
+      r = q;
+      g = valRatio;
+      b = p;
+      break;
+    case 2:
+      r = p;
+      g = valRatio;
+      b = t;
+      break;
+    case 3:
+      r = p;
+      g = q;
+      b = valRatio;
+      break;
+    case 4:
+      r = t;
+      g = p;
+      b = valRatio;
+      break;
+    case 5:
+      r = valRatio;
+      g = p;
+      b = q;
+      break;
+  }
+  const toHex = (value: number) =>
+    Math.round(value * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function hexToHsv(hex: string): { h: number; s: number; v: number } {
+  let color = hex.replace(/^#/, "");
+  if (color.length === 3) {
+    color = color
+      .split("")
+      .map((character) => character + character)
+      .join("");
+  }
+  if (color.length !== 6) {
+    return { h: 140, s: 66, v: 87 };
+  }
+  const red = Number.parseInt(color.substring(0, 2), 16) / 255;
+  const green = Number.parseInt(color.substring(2, 4), 16) / 255;
+  const blue = Number.parseInt(color.substring(4, 6), 16) / 255;
+  const maximum = Math.max(red, green, blue);
+  const minimum = Math.min(red, green, blue);
+  const delta = maximum - minimum;
+  let hue = 0;
+  const saturation = maximum === 0 ? 0 : delta / maximum;
+  if (maximum !== minimum) {
+    switch (maximum) {
+      case red:
+        hue = (green - blue) / delta + (green < blue ? 6 : 0);
+        break;
+      case green:
+        hue = (blue - red) / delta + 2;
+        break;
+      case blue:
+        hue = (red - green) / delta + 4;
+        break;
+    }
+    hue /= 6;
+  }
+  return {
+    h: Math.round(hue * 360),
+    s: Math.round(saturation * 100),
+    v: Math.round(maximum * 100),
+  };
 }
 
 const SELECTABLE_ICONS_LIST: readonly IconName[] = [

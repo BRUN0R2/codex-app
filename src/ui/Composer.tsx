@@ -583,6 +583,7 @@ export function Composer(props: ComposerProps) {
                           )}
                           class="permission-menu-option"
                           classList={{
+                            "full-access": profile.sandbox === "danger-full-access",
                             selected: samePermission(
                               profile,
                               props.controller.config()?.config.permissionProfile,

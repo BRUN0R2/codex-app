@@ -29,10 +29,26 @@ const SCENARIOS = [
     validate: validateComposerFastModeMetrics,
   },
   {
+    id: "project-color-editor",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `document.querySelector(".project-context-menu") !== null`,
+    prepareExpression: `(() => {
+      const editButton = [...document.querySelectorAll(".project-context-menu button")].find(
+        (button) => button.textContent?.includes("Editar projeto"),
+      );
+      editButton?.click();
+    })()`,
+    readyExpression: `document.querySelector(".project-color-side-panel") !== null &&
+      document.querySelector(".inline-color-picker") !== null`,
+    auditExpression: projectColorEditorVisualAuditExpression,
+    validate: validateProjectColorEditorMetrics,
+  },
+  {
     id: "settings",
     url: SETTINGS_PREVIEW_URL,
     readyExpression: `document.querySelector(".settings-dialog") !== null &&
       document.querySelector(".window-chrome-controls") !== null &&
+      document.querySelector(".settings-scrollbar:not(.is-hidden)") !== null &&
       document.querySelectorAll(".application-preference").length === 3`,
     auditExpression: settingsVisualAuditExpression,
     validate: validateSettingsMetrics,
@@ -256,6 +272,9 @@ function composerFastModeVisualAuditExpression() {
     const indicatorElement = document.querySelector(".model-speed-indicator");
     const buttonElement = indicatorElement?.closest(".model-button");
     const nameElement = buttonElement?.querySelector(".model-button-name");
+    const fullAccessElement = document.querySelector(".permission-button.elevated");
+    const coloredProjectIcon = document.querySelector(".project-icon-slot[style]");
+    const rootStyle = getComputedStyle(document.documentElement);
     const chrome = rectangle(chromeElement, ".window-chrome");
     const content = rectangle(contentElement, ".application-frame-content");
     const controls = rectangle(controlsElement, ".window-chrome-controls");
@@ -272,11 +291,52 @@ function composerFastModeVisualAuditExpression() {
       name,
       indicatorCount: document.querySelectorAll(".model-speed-indicator").length,
       accessibleLabel: buttonElement?.textContent?.includes("Modo rápido ativo") === true,
+      fullAccessColor:
+        fullAccessElement instanceof HTMLElement ? getComputedStyle(fullAccessElement).color : null,
+      projectIconColor:
+        coloredProjectIcon instanceof HTMLElement ? getComputedStyle(coloredProjectIcon).color : null,
+      diffAddedColor: rootStyle.getPropertyValue("--diff-added-foreground").trim(),
+      diffDeletedColor: rootStyle.getPropertyValue("--diff-deleted-foreground").trim(),
       buttonHorizontalOverflow:
         buttonElement instanceof HTMLElement
           ? buttonElement.scrollWidth - buttonElement.clientWidth
           : null,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function projectColorEditorVisualAuditExpression() {
+  return `(() => {
+    const rectangle = (selector) => {
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Elemento ausente: " + selector);
+      }
+      const bounds = element.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    const preview = document.querySelector(".project-icon-preview");
+    const hexInput = document.querySelector(".hex-text-input");
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      container: rectangle(".project-edit-container"),
+      modal: rectangle(".project-edit-modal"),
+      colorPanel: rectangle(".project-color-side-panel"),
+      picker: rectangle(".inline-color-picker"),
+      hueBar: rectangle(".hue-bar"),
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      verticalOverflow: document.documentElement.scrollHeight - innerHeight,
+      dialogCount: document.querySelectorAll('.project-edit-container[role="dialog"]').length,
+      previewColor: preview instanceof HTMLElement ? getComputedStyle(preview).color : null,
+      hexValue: hexInput instanceof HTMLInputElement ? hexInput.value : null,
     };
   })()`;
 }
@@ -314,6 +374,8 @@ function settingsVisualAuditExpression() {
     const navigation = rectangle(".settings-nav");
     const back = rectangle(".settings-back");
     const main = rectangle(".settings-main");
+    const scrollbar = rectangle(".settings-scrollbar");
+    const scrollbarThumb = rectangle(".settings-scrollbar .surface-scrollbar-thumb");
     const page = rectangle(".settings-page");
     const heading = rectangle(".settings-heading h2");
     const firstRowLabel = rectangle(".application-preference-copy strong");
@@ -326,11 +388,16 @@ function settingsVisualAuditExpression() {
       navigation,
       back,
       main,
+      scrollbar,
+      scrollbarThumb,
       page,
       heading,
       firstRowLabel,
       chromeText: document.querySelector(".window-chrome")?.textContent?.trim() ?? null,
       chromeOverlapsSettings: overlaps(chrome, overlay),
+      nativeScrollbarWidth: getComputedStyle(
+        document.querySelector(".settings-main"),
+      ).scrollbarWidth,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
       verticalOverflow: document.documentElement.scrollHeight - innerHeight,
       checkboxCount: document.querySelectorAll(
@@ -558,6 +625,28 @@ function validateComposerFastModeMetrics(metrics, viewport) {
     "o raio não está centralizado com o nome do modelo",
   );
   assert(metrics.indicator.width >= 12, "o raio ficou pequeno demais");
+  assert(metrics.fullAccessColor === "rgb(251, 106, 34)", "Acesso completo perdeu o laranja");
+  assert(metrics.projectIconColor === "rgb(74, 222, 128)", "a cor do ícone do projeto não foi aplicada");
+  assert(metrics.diffAddedColor === "#4ade80", "adições não usam o verde-limão semântico");
+  assert(metrics.diffDeletedColor === "#ff6764", "remoções não usam o vermelho semântico");
+}
+
+function validateProjectColorEditorMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "o editor de projeto criou overflow horizontal");
+  assert(metrics.verticalOverflow <= tolerance, "o editor de projeto criou overflow vertical");
+  assert(metrics.dialogCount === 1, "o editor de projeto não expõe um único diálogo");
+  assert(metrics.container.left >= 0, "o editor de projeto ultrapassa a borda esquerda");
+  assert(
+    metrics.container.right <= viewport.width + tolerance,
+    "o editor de projeto ultrapassa a borda direita",
+  );
+  assert(metrics.modal.right <= metrics.colorPanel.left, "os painéis do editor se sobrepõem");
+  assert(metrics.colorPanel.width >= 200, "o painel de cores ficou estreito");
+  assert(metrics.picker.width <= metrics.colorPanel.width, "o seletor ultrapassa o painel de cores");
+  assert(metrics.hueBar.height >= 14, "a faixa de matiz ficou baixa demais");
+  assert(metrics.previewColor === "rgb(74, 222, 128)", "a prévia não reflete a cor do projeto");
+  assert(metrics.hexValue === "4ADE80", "o campo HEX não preserva a cor do projeto");
 }
 
 function validateSettingsMetrics(metrics, viewport) {
@@ -575,6 +664,17 @@ function validateSettingsMetrics(metrics, viewport) {
   );
   assert(metrics.back.top >= metrics.chrome.bottom, "a ação de voltar invade a área de arraste");
   assert(metrics.heading.top >= metrics.chrome.bottom, "o título das configurações invade o chrome");
+  assert(
+    Math.abs(metrics.scrollbar.top - metrics.chrome.bottom) <= tolerance,
+    "o scrollbar de configurações não começa abaixo do chrome",
+  );
+  assert(
+    Math.abs(metrics.scrollbar.right - viewport.width) <= tolerance &&
+      Math.abs(metrics.scrollbar.width - 18) <= tolerance,
+    "o scrollbar de configurações não segue a geometria da tela principal",
+  );
+  assert(metrics.scrollbarThumb.width >= 12, "o thumb das configurações ficou estreito demais");
+  assert(metrics.nativeScrollbarWidth === "none", "o scrollbar nativo continua visível");
   assert(metrics.horizontalOverflow <= tolerance, "a página possui overflow horizontal");
   assert(metrics.navigation.width >= 248, "a navegação de configurações ficou estreita");
   assert(metrics.main.width >= 600, "o painel principal de configurações ficou estreito");

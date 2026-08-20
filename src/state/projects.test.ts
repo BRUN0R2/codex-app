@@ -66,7 +66,7 @@ describe("project storage", () => {
     expect(loadProjects()).toEqual(projects);
   });
 
-  it("discards legacy project colors from local storage", () => {
+  it("preserves project icon colors from local storage", () => {
     localStorage.setItem(
       PROFILE_STORAGE_KEYS.projects,
       JSON.stringify({
@@ -84,6 +84,7 @@ describe("project storage", () => {
 
     expect(loadProjects()).toEqual([
       {
+        color: "#4ade80",
         icon: "folder",
         name: "project",
         path: "D:\\code\\project",

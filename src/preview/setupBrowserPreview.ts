@@ -43,6 +43,7 @@ function previewOutput(id: string, preview: string): ThreadOutput {
 
 const PREVIEW_PROJECTS = [
   {
+    color: "#4ade80",
     name: "codex-app",
     path: "D:\\ARQUIVOS IMPORTANTES\\REPOSITORIOS\\Tools\\codex-app",
   },
