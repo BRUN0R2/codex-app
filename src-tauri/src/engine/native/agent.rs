@@ -250,6 +250,7 @@ pub(super) async fn run_turn(
             {
                 return Ok(RunCompletion::Interrupted);
             }
+            let sampled_through_sequence = history.last_sequence();
             let request = ResponseRequest::new(
                 run.model.id(),
                 &instructions,
@@ -590,7 +591,12 @@ pub(super) async fn run_turn(
                 ));
             }
             if !inner
-                .should_continue_turn(&run.thread_id, &run.turn_id, !pending_tools.is_empty())
+                .should_continue_turn(
+                    &run.thread_id,
+                    &run.turn_id,
+                    sampled_through_sequence,
+                    !pending_tools.is_empty(),
+                )
                 .await?
             {
                 return Ok(RunCompletion::Completed);
@@ -825,7 +831,7 @@ async fn recover_from_context_window(
         run,
         context.instructions,
         provider_state,
-        &history.items,
+        history,
         context.tools,
     )
     .await
@@ -874,7 +880,7 @@ pub(super) async fn run_compaction(
         &mut run,
         &instructions,
         &mut provider_state,
-        &history.items,
+        &history,
         &tools,
     )
     .await?
@@ -917,6 +923,7 @@ pub(super) async fn load_prompt_history(
         .storage
         .provider_history_snapshot(thread_id.into())
         .await?;
+    let normalized_through_sequence = history.last_sequence();
     let normalized = normalize_provider_history(std::mem::take(&mut history.items))?;
     if !normalized.changed() {
         history.items = normalized.items;
@@ -925,7 +932,11 @@ pub(super) async fn load_prompt_history(
 
     inner
         .storage
-        .replace_provider_history(thread_id.into(), normalized.items.clone())
+        .rewrite_provider_history_prefix(
+            thread_id.into(),
+            normalized_through_sequence,
+            normalized.items.clone(),
+        )
         .await?;
     inner.emit_diagnostic(
         app,
@@ -975,7 +986,7 @@ async fn prepare_sampling_input(
         run,
         context.instructions,
         provider_state,
-        &history.items,
+        history,
         context.tools,
     )
     .await?

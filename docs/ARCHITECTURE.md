@@ -267,5 +267,10 @@ não pode invalidar os turnos seguintes.
 Durante um turno, o snapshot normalizado permanece em memória com o último
 `sequence` SQLite observado. Cada rodada incorpora somente as linhas novas —
 inclusive steers persistidos concorrentemente — e mantém os mesmos limites
-globais de bytes e itens. Compactação substitui o histórico em transação e
-recarrega um snapshot completo, tornando a troca explícita e previsível.
+globais de bytes e itens. A amostragem registra esse `sequence` como watermark:
+somente um steer aceito depois dele exige outra rodada; ferramentas pendentes
+continuam o loop sem deixar uma pendência sintética para a resposta seguinte.
+Normalização e compactação substituem apenas o prefixo coberto pelo snapshot e
+reaplicam, na mesma transação, as linhas posteriores. Depois, o agente recarrega
+um snapshot completo, tornando a troca explícita e previsível sem perder entradas
+concorrentes.

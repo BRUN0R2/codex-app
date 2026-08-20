@@ -139,6 +139,10 @@ pub(super) struct TurnSettlement {
 }
 
 impl ProviderHistorySnapshot {
+    pub(super) fn last_sequence(&self) -> i64 {
+        self.last_sequence
+    }
+
     fn extend(&mut self, page: ProviderHistoryPage) -> Result<(), AppError> {
         let total_items = self
             .items
@@ -1071,7 +1075,7 @@ impl NativeStorage {
         turn_id: String,
         user_item: ThreadItem,
         provider_item: ResponseItem,
-    ) -> Result<(), AppError> {
+    ) -> Result<i64, AppError> {
         validate_user_item(&user_item)?;
         let item_id = user_item.id().to_string();
         let item_payload = encode_bounded(&user_item, MAX_ITEM_BYTES, "steered thread item")?;
@@ -1113,13 +1117,15 @@ impl NativeStorage {
                     params![thread_id, provider_payload],
                 )
                 .map_err(storage_error)?;
+            let provider_sequence = transaction.last_insert_rowid();
             transaction
                 .execute(
                     "UPDATE threads SET updated_at = ?1 WHERE id = ?2",
                     params![unix_timestamp()?, thread_id],
                 )
                 .map_err(storage_error)?;
-            transaction.commit().map_err(storage_error)
+            transaction.commit().map_err(storage_error)?;
+            Ok(provider_sequence)
         })
         .await
     }
@@ -1220,9 +1226,10 @@ impl NativeStorage {
         snapshot.extend(page)
     }
 
-    pub async fn replace_provider_history(
+    pub async fn rewrite_provider_history_prefix(
         &self,
         thread_id: String,
+        replaced_through_sequence: i64,
         items: Vec<ResponseItem>,
     ) -> Result<(), AppError> {
         let payloads = encode_provider_history(items)?;
@@ -1242,7 +1249,12 @@ impl NativeStorage {
                     "thread does not exist or is archived".into(),
                 ));
             }
-            replace_provider_history_rows(&transaction, &thread_id, &payloads)?;
+            rewrite_provider_history_rows(
+                &transaction,
+                &thread_id,
+                replaced_through_sequence,
+                &payloads,
+            )?;
             transaction.commit().map_err(storage_error)
         })
         .await
@@ -1252,6 +1264,7 @@ impl NativeStorage {
         &self,
         thread_id: String,
         turn_id: String,
+        compacted_through_sequence: i64,
         items: Vec<ResponseItem>,
         compaction_id: String,
     ) -> Result<(), AppError> {
@@ -1286,7 +1299,12 @@ impl NativeStorage {
                 ));
             }
 
-            replace_provider_history_rows(&transaction, &thread_id, &payloads)?;
+            rewrite_provider_history_rows(
+                &transaction,
+                &thread_id,
+                compacted_through_sequence,
+                &payloads,
+            )?;
             transaction
                 .execute(
                     "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
@@ -2278,18 +2296,62 @@ fn encode_provider_history(items: Vec<ResponseItem>) -> Result<Vec<String>, AppE
     Ok(payloads)
 }
 
-fn replace_provider_history_rows(
+fn rewrite_provider_history_rows(
     transaction: &Transaction<'_>,
     thread_id: &str,
+    replaced_through_sequence: i64,
     payloads: &[String],
 ) -> Result<(), AppError> {
+    let mut total_items = payloads.len();
+    let mut total_bytes = payloads.iter().try_fold(0usize, |total, payload| {
+        total
+            .checked_add(payload.len())
+            .ok_or_else(|| AppError::Storage("provider history size overflowed".into()))
+    })?;
+    let retained_payloads = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT payload
+                 FROM provider_items
+                 WHERE thread_id = ?1 AND sequence > ?2
+                 ORDER BY sequence",
+            )
+            .map_err(storage_error)?;
+        let rows = statement
+            .query_map(params![thread_id, replaced_through_sequence], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_error)?;
+        let mut retained_payloads = Vec::new();
+        for row in rows {
+            let payload = row.map_err(storage_error)?;
+            total_items = total_items.checked_add(1).ok_or_else(|| {
+                AppError::Storage("provider history item count overflowed".into())
+            })?;
+            if total_items > MAX_HISTORY_ITEMS {
+                return Err(AppError::Storage(format!(
+                    "provider history exceeds {MAX_HISTORY_ITEMS} items while preserving concurrent input"
+                )));
+            }
+            total_bytes = total_bytes
+                .checked_add(payload.len())
+                .ok_or_else(|| AppError::Storage("provider history size overflowed".into()))?;
+            if total_bytes > MAX_HISTORY_BYTES {
+                return Err(AppError::Storage(format!(
+                    "provider history exceeds {MAX_HISTORY_BYTES} bytes while preserving concurrent input"
+                )));
+            }
+            retained_payloads.push(payload);
+        }
+        retained_payloads
+    };
     transaction
         .execute(
             "DELETE FROM provider_items WHERE thread_id = ?1",
             [thread_id],
         )
         .map_err(storage_error)?;
-    for payload in payloads {
+    for payload in payloads.iter().chain(&retained_payloads) {
         transaction
             .execute(
                 "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
@@ -4225,9 +4287,15 @@ mod tests {
             )
             .await
             .expect("usage should persist");
+        let replaced_through_sequence = storage
+            .provider_history_snapshot(thread.id.clone())
+            .await
+            .expect("provider history snapshot should load")
+            .last_sequence();
         storage
-            .replace_provider_history(
+            .rewrite_provider_history_prefix(
                 thread.id.clone(),
+                replaced_through_sequence,
                 vec![ResponseItem::user_content(vec![
                     ResponseContent::InputText {
                         text: "replacement".into(),
@@ -4304,10 +4372,16 @@ mod tests {
             )
             .await
             .expect("turn should begin");
+        let compacted_through_sequence = storage
+            .provider_history_snapshot(thread.id.clone())
+            .await
+            .expect("provider history snapshot should load")
+            .last_sequence();
         storage
             .install_compacted_history(
                 thread.id.clone(),
                 turn.id,
+                compacted_through_sequence,
                 vec![ResponseItem::Compaction {
                     id: Some("checkpoint-atomic".into()),
                     encrypted_content: "encrypted".into(),
@@ -4341,6 +4415,91 @@ mod tests {
                 .expect("context state should load")
                 .is_none()
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_preserves_steers_appended_after_its_snapshot() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("concurrent-steer-compaction.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "user-before-compaction".into(),
+                    content: vec![UserContent::Text {
+                        text: "before compaction".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "before compaction".into(),
+                }]),
+                "before compaction".into(),
+            )
+            .await
+            .expect("turn should begin");
+        let compacted_through_sequence = storage
+            .provider_history_snapshot(thread.id.clone())
+            .await
+            .expect("provider history snapshot should load")
+            .last_sequence();
+        let steer_sequence = storage
+            .append_turn_input(
+                thread.id.clone(),
+                turn.id.clone(),
+                ThreadItem::UserMessage {
+                    id: "user-during-compaction".into(),
+                    content: vec![UserContent::Text {
+                        text: "steer after snapshot".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "steer after snapshot".into(),
+                }]),
+            )
+            .await
+            .expect("concurrent steer should persist");
+        assert!(steer_sequence > compacted_through_sequence);
+
+        storage
+            .install_compacted_history(
+                thread.id.clone(),
+                turn.id,
+                compacted_through_sequence,
+                vec![ResponseItem::Compaction {
+                    id: Some("checkpoint-with-tail".into()),
+                    encrypted_content: "encrypted".into(),
+                    internal_chat_message_metadata_passthrough: None,
+                }],
+                "compaction-with-tail".into(),
+            )
+            .await
+            .expect("compaction should preserve the concurrent steer");
+
+        let history = storage
+            .provider_history(thread.id.clone())
+            .await
+            .expect("compacted history should load");
+        assert!(matches!(
+            history.first(),
+            Some(ResponseItem::Compaction { id: Some(id), .. }) if id == "checkpoint-with-tail"
+        ));
+        let encoded = serde_json::to_string(&history).expect("history should encode");
+        assert!(encoded.contains("steer after snapshot"));
+        assert!(!encoded.contains("before compaction"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4387,11 +4546,17 @@ mod tests {
             )
             .await
             .expect("duplicate fixture should persist");
+        let compacted_through_sequence = storage
+            .provider_history_snapshot(thread.id.clone())
+            .await
+            .expect("provider history snapshot should load")
+            .last_sequence();
 
         let result = storage
             .install_compacted_history(
                 thread.id.clone(),
                 turn.id,
+                compacted_through_sequence,
                 vec![ResponseItem::Compaction {
                     id: Some("replacement-checkpoint".into()),
                     encrypted_content: "replacement".into(),
@@ -4450,8 +4615,9 @@ mod tests {
             .await
             .expect("initial provider history should load");
         assert_eq!(incremental_history.items.len(), 1);
+        let initial_sequence = incremental_history.last_sequence();
 
-        storage
+        let steer_sequence = storage
             .append_turn_input(
                 thread.id.clone(),
                 turn.id.clone(),
@@ -4467,11 +4633,13 @@ mod tests {
             )
             .await
             .expect("steer should append");
+        assert!(steer_sequence > initial_sequence);
         storage
             .refresh_provider_history(thread.id.clone(), &mut incremental_history)
             .await
             .expect("incremental provider history should refresh");
         assert_eq!(incremental_history.items.len(), 2);
+        assert_eq!(incremental_history.last_sequence(), steer_sequence);
         storage
             .refresh_provider_history(thread.id.clone(), &mut incremental_history)
             .await

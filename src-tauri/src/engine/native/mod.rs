@@ -106,7 +106,7 @@ struct ActiveTurn {
     turn_id: String,
     cancellation: watch::Sender<bool>,
     accepting_steers: bool,
-    steer_pending: bool,
+    latest_steer_sequence: Option<i64>,
     pending_deletion: Option<oneshot::Sender<Result<OperationAck, AppError>>>,
     deletion_in_progress: bool,
 }
@@ -121,16 +121,24 @@ impl ActiveTurn {
         !*self.cancellation.borrow() && self.accepting_steers
     }
 
-    fn queue_steer(&mut self) {
-        self.steer_pending = true;
+    fn record_steer(&mut self, provider_sequence: i64) {
+        debug_assert!(provider_sequence > 0);
+        self.latest_steer_sequence = Some(
+            self.latest_steer_sequence
+                .map_or(provider_sequence, |current| current.max(provider_sequence)),
+        );
     }
 
-    fn should_continue_after_response(&mut self, has_pending_tools: bool) -> bool {
-        if has_pending_tools {
-            return true;
-        }
-        if self.steer_pending {
-            self.steer_pending = false;
+    fn should_continue_after_response(
+        &mut self,
+        sampled_through_sequence: i64,
+        has_pending_tools: bool,
+    ) -> bool {
+        if has_pending_tools
+            || self
+                .latest_steer_sequence
+                .is_some_and(|sequence| sequence > sampled_through_sequence)
+        {
             return true;
         }
         self.accepting_steers = false;
@@ -1090,7 +1098,8 @@ impl NativeEngine {
                     "active turn is already completing and cannot accept more input".into(),
                 ));
             }
-            self.inner
+            let provider_sequence = self
+                .inner
                 .storage
                 .append_turn_input(
                     request.thread_id.clone(),
@@ -1099,7 +1108,7 @@ impl NativeEngine {
                     prepared.provider_item,
                 )
                 .await?;
-            active.queue_steer();
+            active.record_steer(provider_sequence);
         }
 
         if let Err(error) = self.inner.emit_notification(
@@ -1435,6 +1444,7 @@ impl NativeEngineInner {
         &self,
         thread_id: &str,
         turn_id: &str,
+        sampled_through_sequence: i64,
         has_pending_tools: bool,
     ) -> Result<bool, AppError> {
         let mut active_turns = self.active_turns.lock().await;
@@ -1446,7 +1456,7 @@ impl NativeEngineInner {
                 "active-turn ownership changed during execution".into(),
             ));
         }
-        Ok(active.should_continue_after_response(has_pending_tools))
+        Ok(active.should_continue_after_response(sampled_through_sequence, has_pending_tools))
     }
 
     async fn finalize_turn(
@@ -1636,7 +1646,7 @@ impl NativeEngineInner {
                         turn_id: turn.id.clone(),
                         cancellation,
                         accepting_steers,
-                        steer_pending: false,
+                        latest_steer_sequence: None,
                         pending_deletion: None,
                         deletion_in_progress: false,
                     });
@@ -1791,7 +1801,7 @@ mod tests {
             turn_id: "turn-1".into(),
             cancellation,
             accepting_steers: true,
-            steer_pending: false,
+            latest_steer_sequence: None,
             pending_deletion: None,
             deletion_in_progress: false,
         }
@@ -1803,22 +1813,46 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_steer_forces_exactly_one_follow_up_sampling_round() {
+    fn a_steer_after_the_sampling_snapshot_forces_one_follow_up_round() {
         let mut active = active_turn();
-        active.queue_steer();
+        active.record_steer(12);
 
-        assert!(active.should_continue_after_response(false));
+        assert!(active.should_continue_after_response(11, false));
         assert!(active.can_accept_steer());
-        assert!(!active.should_continue_after_response(false));
+        assert!(!active.should_continue_after_response(12, false));
         assert!(!active.can_accept_steer());
     }
 
     #[test]
-    fn pending_tools_keep_the_steer_window_open() {
+    fn a_steer_already_in_the_sampling_snapshot_does_not_add_an_empty_round() {
         let mut active = active_turn();
+        active.record_steer(12);
 
-        assert!(active.should_continue_after_response(true));
+        assert!(!active.should_continue_after_response(12, false));
+        assert!(!active.can_accept_steer());
+    }
+
+    #[test]
+    fn the_latest_of_multiple_steers_controls_the_follow_up_watermark() {
+        let mut active = active_turn();
+        active.record_steer(12);
+        active.record_steer(14);
+
+        assert!(active.should_continue_after_response(13, false));
         assert!(active.can_accept_steer());
+        assert!(!active.should_continue_after_response(14, false));
+        assert!(!active.can_accept_steer());
+    }
+
+    #[test]
+    fn tool_continuation_does_not_leave_an_included_steer_pending() {
+        let mut active = active_turn();
+        active.record_steer(12);
+
+        assert!(active.should_continue_after_response(11, true));
+        assert!(active.can_accept_steer());
+        assert!(!active.should_continue_after_response(12, false));
+        assert!(!active.can_accept_steer());
     }
 
     #[test]

@@ -9,6 +9,7 @@ use super::agent::{
 };
 use super::context_window::{build_compacted_history, prepare_compaction_history};
 use super::provider::{ResponseEvent, ResponseItem, ResponseRequest, ResponseRequestSettings};
+use super::storage::ProviderHistorySnapshot;
 use crate::engine::ThreadItem;
 use crate::error::AppError;
 
@@ -18,7 +19,7 @@ pub(super) async fn compact_context(
     run: &mut TurnRun,
     instructions: &str,
     provider_state: &mut TurnProviderState,
-    history: &[ResponseItem],
+    history: &ProviderHistorySnapshot,
     tools: &[serde_json::Value],
 ) -> Result<bool, AppError> {
     if *run.cancellation.borrow() {
@@ -33,7 +34,7 @@ pub(super) async fn compact_context(
     .flatten()
     .min();
     let mut compaction_input =
-        prepare_compaction_history(instructions, history, tools, compaction_limit);
+        prepare_compaction_history(instructions, &history.items, tools, compaction_limit);
     compaction_input.push(ResponseItem::compaction_trigger());
 
     let compaction_id = Uuid::now_v7().to_string();
@@ -207,12 +208,13 @@ pub(super) async fn compact_context(
         };
         break 'request checkpoint;
     };
-    let compacted = build_compacted_history(history, checkpoint);
+    let compacted = build_compacted_history(&history.items, checkpoint);
     inner
         .storage
         .install_compacted_history(
             run.thread_id.clone(),
             run.turn_id.clone(),
+            history.last_sequence(),
             compacted,
             compaction_id,
         )

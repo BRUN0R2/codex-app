@@ -246,7 +246,7 @@ impl RateLimitWindowWire {
         RateLimitWindow {
             used_percent: self.used_percent,
             window_duration_mins: self.limit_window_seconds.map(|seconds| seconds / 60),
-            resets_at: self.reset_at,
+            resets_at: self.reset_at.map(to_js_timestamp_ms),
         }
     }
 }
@@ -295,8 +295,16 @@ impl SpendLimitWire {
             limit: self.limit.clone(),
             used: self.used.clone(),
             remaining_percent: self.remaining_percent,
-            resets_at: self.reset_at,
+            resets_at: to_js_timestamp_ms(self.reset_at),
         }
+    }
+}
+
+fn to_js_timestamp_ms(value: i64) -> i64 {
+    if (0..=9_999_999_999).contains(&value) {
+        value * 1_000
+    } else {
+        value
     }
 }
 
@@ -405,5 +413,56 @@ mod tests {
             response.rate_limits.rate_limit_reached_type,
             Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached)
         ));
+    }
+
+    #[test]
+    fn normalizes_reset_timestamps_to_unix_milliseconds() {
+        let payload = serde_json::from_str::<UsagePayload>(
+            r#"{
+                "plan_type": "pro",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 100,
+                        "limit_window_seconds": 300,
+                        "reset_at": 1734000000
+                    },
+                    "secondary_window": {
+                        "used_percent": 50,
+                        "limit_window_seconds": 604800,
+                        "reset_at": 1734000000000
+                    }
+                },
+                "spend_control": {
+                    "reached": false,
+                    "individual_limit": {
+                        "limit": "100",
+                        "used": "25",
+                        "remaining_percent": 75,
+                        "reset_at": 1735000000
+                    }
+                }
+            }"#,
+        )
+        .expect("the usage payload should decode");
+
+        let response = payload
+            .into_domain()
+            .expect("the decoded usage payload should be valid");
+        let primary = response
+            .rate_limits
+            .primary
+            .expect("a primary window must be present");
+        let secondary = response
+            .rate_limits
+            .secondary
+            .expect("a secondary window must be present");
+        let individual_limit = response
+            .rate_limits
+            .individual_limit
+            .expect("an individual spend limit must be present");
+
+        assert_eq!(primary.resets_at, Some(1_734_000_000_000));
+        assert_eq!(secondary.resets_at, Some(1_734_000_000_000));
+        assert_eq!(individual_limit.resets_at, 1_735_000_000_000);
     }
 }
