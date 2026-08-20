@@ -30,7 +30,9 @@ function DesktopWindowChrome(props: WindowChromeProps) {
   const appWindow = getCurrentWindow();
   const [maximized, setMaximized] = createSignal(false);
   let controlsReference: HTMLDivElement | undefined;
+  let hoverResetFrame: number | undefined;
   let resizeFrame: number | undefined;
+  let unlistenFocusChanged: (() => void) | undefined;
   let disposed = false;
 
   function reportControlFailure(operation: string, reason: unknown): void {
@@ -59,15 +61,38 @@ function DesktopWindowChrome(props: WindowChromeProps) {
     });
   }
 
-  function blurFocusedWindowControl(): void {
+  function suppressControlHover(): void {
+    if (controlsReference === undefined) {
+      return;
+    }
+    controlsReference.setAttribute("data-suppress-hover", "true");
     const activeElement = document.activeElement;
-    if (
-      controlsReference !== undefined &&
-      activeElement instanceof HTMLElement &&
-      controlsReference.contains(activeElement)
-    ) {
+    if (activeElement instanceof HTMLElement && controlsReference.contains(activeElement)) {
       activeElement.blur();
     }
+  }
+
+  function scheduleControlHoverRestoration(): void {
+    const controls = controlsReference;
+    if (controls === undefined) {
+      return;
+    }
+    if (hoverResetFrame !== undefined) {
+      window.cancelAnimationFrame(hoverResetFrame);
+    }
+    hoverResetFrame = window.requestAnimationFrame(() => {
+      hoverResetFrame = window.requestAnimationFrame(() => {
+        hoverResetFrame = undefined;
+        if (!disposed) {
+          controls.removeAttribute("data-suppress-hover");
+        }
+      });
+    });
+  }
+
+  function clearStuckControlHover(): void {
+    suppressControlHover();
+    scheduleControlHoverRestoration();
   }
 
   function runControlAction(
@@ -75,7 +100,7 @@ function DesktopWindowChrome(props: WindowChromeProps) {
     action: () => Promise<void>,
     refreshMaximizedState = false,
   ): void {
-    blurFocusedWindowControl();
+    suppressControlHover();
     void action()
       .then(() => {
         if (refreshMaximizedState) {
@@ -83,17 +108,36 @@ function DesktopWindowChrome(props: WindowChromeProps) {
         }
         return undefined;
       })
-      .catch((reason: unknown) => reportControlFailure(operation, reason));
+      .catch((reason: unknown) => reportControlFailure(operation, reason))
+      .finally(scheduleControlHoverRestoration);
   }
 
   onMount(() => {
     void synchronizeMaximizedState();
     window.addEventListener("resize", scheduleMaximizedStateSynchronization);
+    void appWindow
+      .onFocusChanged(({ payload: focused }) => {
+        if (focused) {
+          clearStuckControlHover();
+        }
+      })
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          unlistenFocusChanged = unlisten;
+        }
+      })
+      .catch((reason: unknown) => reportControlFailure("acompanhar o foco da janela", reason));
   });
 
   onCleanup(() => {
     disposed = true;
+    unlistenFocusChanged?.();
     window.removeEventListener("resize", scheduleMaximizedStateSynchronization);
+    if (hoverResetFrame !== undefined) {
+      window.cancelAnimationFrame(hoverResetFrame);
+    }
     if (resizeFrame !== undefined) {
       window.cancelAnimationFrame(resizeFrame);
     }
@@ -131,9 +175,7 @@ function WindowChromeLayout(props: WindowChromeLayoutProps) {
         onDblClick={props.onToggleMaximize}
         tabIndex={-1}
         type="button"
-      >
-        <span class="window-chrome-title">Codex App</span>
-      </button>
+      ></button>
       <div
         aria-hidden={props.interactive ? undefined : "true"}
         class="window-chrome-controls"

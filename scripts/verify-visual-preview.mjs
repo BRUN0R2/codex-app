@@ -252,6 +252,7 @@ function settingsVisualAuditExpression() {
     const controls = rectangle(".window-chrome-controls");
     const overlay = rectangle(".settings-overlay");
     const navigation = rectangle(".settings-nav");
+    const back = rectangle(".settings-back");
     const main = rectangle(".settings-main");
     const page = rectangle(".settings-page");
     const heading = rectangle(".settings-heading h2");
@@ -263,10 +264,12 @@ function settingsVisualAuditExpression() {
       controls,
       overlay,
       navigation,
+      back,
       main,
       page,
       heading,
       firstRowLabel,
+      chromeText: document.querySelector(".window-chrome")?.textContent?.trim() ?? null,
       chromeOverlapsSettings: overlaps(chrome, overlay),
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
       verticalOverflow: document.documentElement.scrollHeight - innerHeight,
@@ -382,6 +385,9 @@ function automationsVisualAuditExpression() {
     const chrome = rectangle(".window-chrome");
     const content = rectangle(".application-frame-content");
     const controls = rectangle(".window-chrome-controls");
+    const sidebar = rectangle(".sidebar");
+    const sidebarTitlebar = rectangle(".sidebar-titlebar");
+    const primaryNavigation = rectangle(".sidebar-primary-nav");
     const surface = rectangle(".automations-view");
     const header = rectangle(".automations-header");
     const heading = rectangle(".automations-header h1");
@@ -396,6 +402,9 @@ function automationsVisualAuditExpression() {
       chrome,
       content,
       controls,
+      sidebar,
+      sidebarTitlebar,
+      primaryNavigation,
       surface,
       header,
       heading,
@@ -469,7 +478,18 @@ function automationEditorVisualAuditExpression() {
 function validateSettingsMetrics(metrics, viewport) {
   const tolerance = 1;
   validateChromeMetrics(metrics, viewport);
-  assert(metrics.chromeOverlapsSettings === false, "as configurações cobrem o titlebar");
+  assert(metrics.chromeOverlapsSettings === true, "o chrome não está sobreposto às configurações");
+  assert(metrics.chromeText === "", "o chrome ainda exibe um título textual");
+  assert(
+    Math.abs(metrics.navigation.top - metrics.content.top) <= tolerance,
+    "a superfície da navegação de configurações não chega ao topo",
+  );
+  assert(
+    Math.abs(metrics.main.top - metrics.content.top) <= tolerance,
+    "a superfície principal de configurações não chega ao topo",
+  );
+  assert(metrics.back.top >= metrics.chrome.bottom, "a ação de voltar invade a área de arraste");
+  assert(metrics.heading.top >= metrics.chrome.bottom, "o título das configurações invade o chrome");
   assert(metrics.horizontalOverflow <= tolerance, "a página possui overflow horizontal");
   assert(metrics.navigation.width >= 248, "a navegação de configurações ficou estreita");
   assert(metrics.main.width >= 600, "o painel principal de configurações ficou estreito");
@@ -514,8 +534,21 @@ function validateAutomationsMetrics(metrics, viewport) {
     "a superfície de Automações possui overflow horizontal",
   );
   assert(
-    Math.abs(metrics.surface.top - metrics.content.top) <= tolerance,
-    "Automações não começa no topo do conteúdo",
+    Math.abs(metrics.surface.top - metrics.chrome.bottom) <= tolerance,
+    "Automações não começa imediatamente abaixo do chrome",
+  );
+  assert(
+    Math.abs(metrics.sidebar.top - metrics.content.top) <= tolerance &&
+      Math.abs(metrics.sidebar.bottom - metrics.content.bottom) <= tolerance,
+    "a superfície lateral não ocupa toda a altura da aplicação",
+  );
+  assert(
+    metrics.primaryNavigation.top >= metrics.chrome.bottom,
+    "a navegação lateral invade a área de arraste",
+  );
+  assert(
+    Math.abs(metrics.sidebarTitlebar.bottom - metrics.primaryNavigation.top) <= tolerance,
+    "o espaçamento superior da navegação lateral ficou inconsistente",
   );
   assert(metrics.surface.width > 500, "a superfície de Automações ficou estreita");
   assert(metrics.header.width <= metrics.surface.width, "o cabeçalho ultrapassa a superfície");
@@ -539,10 +572,10 @@ function validateAutomationEditorMetrics(metrics, viewport) {
     "o conteúdo do editor possui overflow horizontal",
   );
   assert(
-    Math.abs(metrics.backdrop.top - metrics.content.top) <= tolerance,
-    "o backdrop do editor cobre ou se afasta do início do conteúdo",
+    Math.abs(metrics.backdrop.top - metrics.chrome.bottom) <= tolerance,
+    "o backdrop do editor não acompanha o início da superfície de conteúdo",
   );
-  assert(metrics.editor.top >= metrics.content.top, "o editor ficou acima do conteúdo");
+  assert(metrics.editor.top >= metrics.chrome.bottom, "o editor ficou acima do conteúdo");
   assert(metrics.editor.bottom <= viewport.height + tolerance, "o editor ultrapassa o viewport");
   assert(metrics.editor.width >= 500, "o editor ficou excessivamente estreito");
   assert(Number.parseFloat(metrics.heading.fontSize) >= 17, "o título do editor ficou pequeno");
@@ -562,8 +595,12 @@ function validateChromeMetrics(metrics, viewport) {
   assert(Math.abs(metrics.chrome.top) <= tolerance, "o titlebar não começa no topo");
   assert(Math.abs(metrics.chrome.height - 34) <= tolerance, "o titlebar não mede 34 px");
   assert(
-    Math.abs(metrics.content.top - metrics.chrome.bottom) <= tolerance,
-    "o conteúdo não começa imediatamente abaixo do titlebar",
+    Math.abs(metrics.content.top - metrics.chrome.top) <= tolerance,
+    "a superfície da aplicação não continua sob o chrome",
+  );
+  assert(
+    Math.abs(metrics.content.bottom - viewport.height) <= tolerance,
+    "a superfície da aplicação não ocupa toda a altura do viewport",
   );
   assert(metrics.controls.top >= 0, "os controles da janela ficaram acima do viewport");
   assert(

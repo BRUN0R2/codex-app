@@ -112,7 +112,6 @@ interface StarterSuggestion {
   readonly icon: IconName;
   readonly label: string;
   readonly prompt: string;
-  readonly tone: "blue" | "green" | "orange" | "violet";
 }
 
 const STARTER_SUGGESTIONS: readonly StarterSuggestion[] = [
@@ -121,28 +120,24 @@ const STARTER_SUGGESTIONS: readonly StarterSuggestion[] = [
     label: "Explore e entenda código",
     prompt:
       "Explore este projeto e explique sua arquitetura, os fluxos principais e os riscos técnicos mais importantes.",
-    tone: "blue",
   },
   {
     icon: "hammer",
     label: "Crie um novo recurso, aplicativo ou ferramenta",
     prompt:
       "Implemente um novo recurso neste projeto. Primeiro identifique a melhor integração arquitetural e então faça a alteração completa com validação.",
-    tone: "violet",
   },
   {
     icon: "syncCheck",
     label: "Revisar código e sugerir mudanças",
     prompt:
       "Revise as alterações atuais do projeto, priorize bugs, riscos e regressões e proponha correções objetivas.",
-    tone: "green",
   },
   {
     icon: "bug",
     label: "Corrigir problemas e falhas",
     prompt:
       "Investigue os problemas atuais do projeto, encontre a causa raiz e implemente uma correção completa e verificável.",
-    tone: "orange",
   },
 ];
 
@@ -1504,11 +1499,7 @@ function EmptyConversation(props: {
           <legend class="visually-hidden">Sugestões para começar</legend>
           <For each={STARTER_SUGGESTIONS}>
             {(suggestion) => (
-              <button
-                data-tone={suggestion.tone}
-                onClick={() => props.onSelectSuggestion(suggestion.prompt)}
-                type="button"
-              >
+              <button onClick={() => props.onSelectSuggestion(suggestion.prompt)} type="button">
                 <Icon name={suggestion.icon} size={22} strokeWidth={2} />
                 <span>{suggestion.label}</span>
               </button>

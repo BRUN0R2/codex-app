@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 import { addProject, loadProjects, saveProjects } from "./projects";
 
 class MemoryStorage implements Storage {
@@ -63,5 +64,30 @@ describe("project storage", () => {
     saveProjects(projects);
 
     expect(loadProjects()).toEqual(projects);
+  });
+
+  it("discards legacy project colors from local storage", () => {
+    localStorage.setItem(
+      PROFILE_STORAGE_KEYS.projects,
+      JSON.stringify({
+        version: 1,
+        projects: [
+          {
+            color: "#4ade80",
+            icon: "folder",
+            name: "project",
+            path: "D:\\code\\project",
+          },
+        ],
+      }),
+    );
+
+    expect(loadProjects()).toEqual([
+      {
+        icon: "folder",
+        name: "project",
+        path: "D:\\code\\project",
+      },
+    ]);
   });
 });

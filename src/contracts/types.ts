@@ -718,5 +718,4 @@ export interface ProjectRecord {
   readonly name: string;
   readonly path: string;
   readonly icon?: string | undefined;
-  readonly color?: string | undefined;
 }

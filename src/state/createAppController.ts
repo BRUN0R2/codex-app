@@ -2312,7 +2312,7 @@ export function createAppController(): AppController {
 
   function updateProject(
     path: string,
-    updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
+    updates: Partial<Pick<ProjectRecord, "icon" | "name">>,
   ): void {
     setProjects((current) => {
       const next = updateProjectsList(current, path, updates);

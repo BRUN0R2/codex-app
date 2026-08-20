@@ -63,7 +63,7 @@ export function pathsEqual(left: string | null, right: string | null): boolean {
 export function updateProject(
   projects: readonly ProjectRecord[],
   path: string,
-  updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
+  updates: Partial<Pick<ProjectRecord, "icon" | "name">>,
 ): readonly ProjectRecord[] {
   const normalized = normalizeProjectPath(path);
   return projects.map((project) => {
@@ -72,7 +72,6 @@ export function updateProject(
         ...project,
         ...(updates.name !== undefined ? { name: updates.name } : {}),
         ...(updates.icon !== undefined ? { icon: updates.icon } : {}),
-        ...(updates.color !== undefined ? { color: updates.color } : {}),
       };
     }
     return project;
@@ -103,20 +102,19 @@ function decodeStoredProjects(value: unknown): StoredProjects {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
       throw new Error(`O projeto ${index + 1} é inválido.`);
     }
-    const project = entry as Record<"color" | "icon" | "name" | "path", unknown>;
+    const project = entry as Record<"icon" | "name" | "path", unknown>;
     const path = validatePath(project.path);
     const name = project.name;
     if (typeof name !== "string" || name.length === 0 || name.length > MAX_NAME_CHARACTERS) {
       throw new Error(`O nome do projeto ${index + 1} é inválido.`);
     }
     const icon = typeof project.icon === "string" ? (project.icon as IconName) : undefined;
-    const color = typeof project.color === "string" ? project.color : undefined;
     const comparison = normalizeForComparison(path);
     if (seen.has(comparison)) {
       throw new Error(`O projeto ${index + 1} está duplicado.`);
     }
     seen.add(comparison);
-    return { name, path, ...(icon ? { icon } : {}), ...(color ? { color } : {}) };
+    return { name, path, ...(icon ? { icon } : {}) };
   });
   return { version: 1, projects };
 }
