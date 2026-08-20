@@ -708,8 +708,8 @@ pre {
   display: flex;
   height: calc(var(--app-titlebar-height) + var(--height-toolbar));
   flex: 0 0 calc(var(--app-titlebar-height) + var(--height-toolbar));
-  align-items: center;
-  padding: var(--app-titlebar-height) var(--padding-row-x) 0;
+  align-items: flex-start;
+  padding: calc(var(--app-titlebar-height) + 4px) var(--padding-row-x) 0;
 }
 
 .sidebar-brand {

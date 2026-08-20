@@ -514,6 +514,7 @@ function automationsVisualAuditExpression() {
     const controls = rectangle(".window-chrome-controls");
     const sidebar = rectangle(".sidebar");
     const sidebarTitlebar = rectangle(".sidebar-titlebar");
+    const sidebarBrand = rectangle(".sidebar-brand");
     const primaryNavigation = rectangle(".sidebar-primary-nav");
     const surface = rectangle(".automations-view");
     const header = rectangle(".automations-header");
@@ -531,6 +532,7 @@ function automationsVisualAuditExpression() {
       controls,
       sidebar,
       sidebarTitlebar,
+      sidebarBrand,
       primaryNavigation,
       surface,
       header,
@@ -730,6 +732,11 @@ function validateAutomationsMetrics(metrics, viewport) {
   assert(
     metrics.primaryNavigation.top >= metrics.chrome.bottom,
     "a navegação lateral invade a área de arraste",
+  );
+  assert(
+    metrics.sidebarBrand.top >= metrics.chrome.bottom &&
+      metrics.sidebarBrand.top - metrics.chrome.bottom <= 6 + tolerance,
+    "a marca Codex não está alinhada próxima ao chrome",
   );
   assert(
     Math.abs(metrics.sidebarTitlebar.bottom - metrics.primaryNavigation.top) <= tolerance,
