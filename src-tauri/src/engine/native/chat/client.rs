@@ -4,9 +4,7 @@ use std::time::Duration;
 
 use reqwest::Method;
 use reqwest::Response;
-use reqwest::header::{
-    ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER, USER_AGENT,
-};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -19,6 +17,7 @@ use super::models::ModelsWire;
 use super::stream::ChatStream;
 use crate::engine::native::auth::AuthSession;
 use crate::engine::native::diagnostics::RuntimeDiagnostics;
+use crate::engine::native::provider_error::decode_provider_response_failure;
 use crate::engine::{ChatThinkingEffort, RuntimeDiagnosticSubsystem};
 use crate::error::AppError;
 
@@ -29,8 +28,6 @@ const PREPARE_URL: &str = "https://chatgpt.com/backend-api/f/conversation/prepar
 const CONVERSATION_URL: &str = "https://chatgpt.com/backend-api/f/conversation";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_ERROR_BYTES: usize = 65_536;
-const MAX_PUBLIC_ERROR_CHARACTERS: usize = 2_000;
 const DEVICE_ID_FILE_NAME: &str = "chatgpt-consumer-device-id";
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
@@ -456,95 +453,7 @@ async fn decode_json<T: DeserializeOwned>(
 }
 
 async fn response_error(response: Response) -> AppError {
-    let status = response.status().as_u16();
-    let retry_after_header = response
-        .headers()
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0);
-    let decoded = match read_limited(response, MAX_ERROR_BYTES).await {
-        Ok(bytes) if bytes.is_empty() => DecodedChatError {
-            code: None,
-            message: "the provider returned an empty error body".into(),
-            retry_after_seconds: None,
-        },
-        Ok(bytes) => decode_error(&bytes),
-        Err(error) => DecodedChatError {
-            code: None,
-            message: format!("the provider error body could not be read: {error}"),
-            retry_after_seconds: None,
-        },
-    };
-    AppError::from_provider_rejection(
-        Some(status),
-        decoded.code.as_deref(),
-        decoded.message,
-        decoded.retry_after_seconds.or(retry_after_header),
-    )
-}
-
-struct DecodedChatError {
-    code: Option<String>,
-    message: String,
-    retry_after_seconds: Option<u64>,
-}
-
-fn decode_error(bytes: &[u8]) -> DecodedChatError {
-    let body = String::from_utf8_lossy(bytes);
-    let value = serde_json::from_slice::<Value>(bytes).ok();
-    let error = value
-        .as_ref()
-        .and_then(|value| value.get("error").or(Some(value)));
-    let message = error
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or(body.trim());
-    let code = error
-        .and_then(|error| {
-            error
-                .get("code")
-                .or_else(|| error.get("type"))
-                .and_then(Value::as_str)
-        })
-        .map(bounded_error_text)
-        .filter(|code| !code.is_empty());
-    let retry_after_seconds = error
-        .and_then(|error| error.get("resets_in_seconds"))
-        .and_then(Value::as_u64)
-        .filter(|seconds| *seconds > 0);
-    DecodedChatError {
-        code,
-        message: bounded_error_text(message),
-        retry_after_seconds,
-    }
-}
-
-fn bounded_error_text(value: &str) -> String {
-    let mut output = String::new();
-    let mut previous_was_space = false;
-    for character in value.trim().chars().take(MAX_PUBLIC_ERROR_CHARACTERS) {
-        let character = if character.is_control() {
-            ' '
-        } else {
-            character
-        };
-        if character.is_whitespace() {
-            if previous_was_space {
-                continue;
-            }
-            output.push(' ');
-            previous_was_space = true;
-        } else {
-            output.push(character);
-            previous_was_space = false;
-        }
-    }
-    if output.is_empty() {
-        "the provider rejected the ChatGPT request".into()
-    } else {
-        output
-    }
+    decode_provider_response_failure(response).await.error
 }
 
 async fn read_limited(response: Response, maximum_bytes: usize) -> Result<Vec<u8>, AppError> {
@@ -566,9 +475,8 @@ async fn read_limited(response: Response, maximum_bytes: usize) -> Result<Vec<u8
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatConversationRequest, decode_error, validate_device_id};
+    use super::{ChatConversationRequest, validate_device_id};
     use crate::engine::ChatThinkingEffort;
-    use crate::error::AppError;
 
     #[test]
     fn consumer_request_uses_thinking_effort_and_never_reasoning_mode() {
@@ -599,27 +507,5 @@ mod tests {
             "018f22ec-a65c-7b33-98b1-3f66dc79dfef"
         );
         assert!(validate_device_id("not-a-device-id").is_err());
-    }
-
-    #[test]
-    fn usage_limit_error_preserves_code_and_reset_delay() {
-        let decoded = decode_error(
-            br#"{"error":{"type":"usage_limit_reached","message":"limit reached","resets_in_seconds":7200}}"#,
-        );
-
-        assert_eq!(decoded.code.as_deref(), Some("usage_limit_reached"));
-        assert_eq!(decoded.retry_after_seconds, Some(7_200));
-        assert!(matches!(
-            AppError::from_provider_rejection(
-                Some(429),
-                decoded.code.as_deref(),
-                decoded.message,
-                decoded.retry_after_seconds,
-            ),
-            AppError::RateLimited {
-                retry_after_seconds: Some(7_200),
-                ..
-            }
-        ));
     }
 }

@@ -149,7 +149,7 @@ describe("decodificação dos contratos nativos", () => {
           "scheduledAutomations",
         ],
       },
-      schemaVersion: 11,
+      schemaVersion: 12,
       config: configFixture(),
       diagnosticLogPath: "C:\\Users\\Bruno\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
@@ -176,7 +176,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 11,
+        schemaVersion: 12,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",
@@ -310,6 +310,7 @@ describe("decodificação dos contratos nativos", () => {
             command: "cargo check",
             cwd: "C:\\workspace",
             processId: null,
+            startedAt: 1_000,
             source: "agent",
             status: "completed",
             aggregatedOutput: null,

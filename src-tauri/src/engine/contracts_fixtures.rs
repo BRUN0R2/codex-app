@@ -288,6 +288,7 @@ fn thread_item_fixtures() -> Vec<EngineNotification> {
             command: "cargo test".into(),
             cwd: "C:\\workspace\\codex-app".into(),
             process_id: Some("4242".into()),
+            started_at: Some(1_755_000_115_200),
             source: CommandSource::Agent,
             status: ActivityStatus::Completed,
             aggregated_output: Some(ThreadOutput {

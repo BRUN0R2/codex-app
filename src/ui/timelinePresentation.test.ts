@@ -10,6 +10,7 @@ import {
   toolOutputText,
   turnDurationLabel,
   userMessageMarkerWidth,
+  visibleCommandDurationMs,
 } from "./timelinePresentation";
 
 describe("timeline presentation", () => {
@@ -43,6 +44,13 @@ describe("timeline presentation", () => {
     );
     expect(commandActivityTitle("rg --files src", "inProgress", true)).toBe("Executando comando");
     expect(toolActivityTitle("Validar interface", "inProgress", false)).toBe("Validar interface");
+  });
+
+  it("shows command duration only after the long-running threshold", () => {
+    expect(visibleCommandDurationMs("inProgress", 1_000, null, 10_999)).toBeNull();
+    expect(visibleCommandDurationMs("inProgress", 1_000, null, 11_000)).toBe(10_000);
+    expect(visibleCommandDurationMs("completed", 1_000, 9_999, 50_000)).toBeNull();
+    expect(visibleCommandDurationMs("completed", 1_000, 10_000, 50_000)).toBe(10_000);
   });
 
   it("summarizes file edits with a concise activity heading", () => {

@@ -1,6 +1,7 @@
 import type { ActivityStatus, TurnStatus } from "../contracts/types";
 
 export type ThinkingPresentation = "activity" | "none" | "standalone";
+export const LONG_COMMAND_DURATION_THRESHOLD_MS = 10_000;
 
 export function thinkingPresentation(
   status: TurnStatus,
@@ -59,6 +60,21 @@ export function commandActivityTitle(
     return status === "completed" ? `Executou ${command}` : activityFailureTitle(command, status);
   }
   return activityStateTitle("comando", status);
+}
+
+export function visibleCommandDurationMs(
+  status: ActivityStatus,
+  startedAt: number | null,
+  durationMs: number | null,
+  now: number,
+): number | null {
+  const elapsed =
+    status === "inProgress"
+      ? startedAt === null
+        ? null
+        : Math.max(0, now - startedAt)
+      : durationMs;
+  return elapsed !== null && elapsed >= LONG_COMMAND_DURATION_THRESHOLD_MS ? elapsed : null;
 }
 
 export function toolActivityTitle(

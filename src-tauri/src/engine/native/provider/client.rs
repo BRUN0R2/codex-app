@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -8,18 +7,17 @@ use parking_lot::RwLock;
 use reqwest::Method;
 use reqwest::Response;
 use reqwest::cookie::CookieStore;
+use reqwest::cookie::Jar;
 use reqwest::header::ACCEPT;
 use reqwest::header::AUTHORIZATION;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderValue;
-use reqwest::header::RETRY_AFTER;
 use reqwest::header::USER_AGENT;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use super::super::text::format_duration;
+use super::super::provider_error::decode_provider_response_failure;
 use super::models::ModelCatalog;
 use super::responses::ResponseRequest;
 use super::responses::ResponseStream;
@@ -31,24 +29,27 @@ const MODEL_CATALOG_COMPATIBILITY_VERSION: &str = "0.146.0";
 pub const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_ERROR_BYTES: usize = 65_536;
-const MAX_PUBLIC_ERROR_CHARACTERS: usize = 2_000;
 const MAX_REQUEST_ATTEMPTS: usize = 8;
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const ORIGINATOR: &str = "codex_desktop_next";
 
 #[derive(Default)]
 pub struct ProviderClient {
-    client: OnceLock<reqwest::Client>,
+    state: OnceLock<ProviderClientState>,
+}
+
+struct ProviderClientState {
+    client: reqwest::Client,
+    cookies: Arc<CloudflareCookieStore>,
 }
 
 impl ProviderClient {
     pub fn initialize(&self) -> Result<(), AppError> {
-        if self.client.get().is_some() {
+        if self.state.get().is_some() {
             return Ok(());
         }
-        let client = build_client()?;
-        if self.client.set(client).is_err() && self.client.get().is_none() {
+        let state = build_client()?;
+        if self.state.set(state).is_err() && self.state.get().is_none() {
             return Err(AppError::State(
                 "provider client initialization raced without producing a client".into(),
             ));
@@ -102,6 +103,17 @@ impl ProviderClient {
                 last_error = Some(format!("HTTP {}", response.status().as_u16()));
                 retry_delay(attempt).await;
                 continue;
+            }
+            if !response.status().is_success() {
+                let failure = decode_provider_response_failure(response).await;
+                if failure.edge_blocked {
+                    self.clear_cloudflare_cookies()?;
+                    if attempt + 1 < MAX_REQUEST_ATTEMPTS {
+                        retry_delay(attempt).await;
+                        continue;
+                    }
+                }
+                return Err(failure.error);
             }
             return decode_json(response, operation, maximum_bytes).await;
         }
@@ -172,7 +184,20 @@ impl ProviderClient {
                 }
                 continue;
             }
-            return open_response_stream(response).await;
+            if !response.status().is_success() {
+                let failure = decode_provider_response_failure(response).await;
+                if failure.edge_blocked {
+                    self.clear_cloudflare_cookies()?;
+                    if attempt + 1 < MAX_REQUEST_ATTEMPTS {
+                        if retry_delay_or_cancel(attempt, cancellation).await {
+                            return Err(AppError::Cancelled("response retry was cancelled".into()));
+                        }
+                        continue;
+                    }
+                }
+                return Err(failure.error);
+            }
+            return open_response_stream(response);
         }
         Err(AppError::Transport(
             "response connection exhausted its retry budget".into(),
@@ -189,20 +214,32 @@ impl ProviderClient {
             .map_err(|_| AppError::Auth("the access token cannot be encoded as a header".into()))?;
         let account = HeaderValue::from_str(session.account_id())
             .map_err(|_| AppError::Auth("the account id cannot be encoded as a header".into()))?;
-        let client = self
-            .client
+        let state = self
+            .state
             .get()
             .ok_or_else(|| AppError::State("provider client is not initialized".into()))?;
-        Ok(client
+        Ok(state
+            .client
             .request(method, url)
             .header(AUTHORIZATION, bearer)
             .header("ChatGPT-Account-ID", account))
     }
+
+    fn clear_cloudflare_cookies(&self) -> Result<(), AppError> {
+        let state = self
+            .state
+            .get()
+            .ok_or_else(|| AppError::State("provider client is not initialized".into()))?;
+        state.cookies.clear();
+        Ok(())
+    }
 }
 
-async fn open_response_stream(response: Response) -> Result<ResponseStream, AppError> {
+fn open_response_stream(response: Response) -> Result<ResponseStream, AppError> {
     if !response.status().is_success() {
-        return Err(response_error(response).await);
+        return Err(AppError::State(
+            "provider stream was opened from an unsuccessful HTTP response".into(),
+        ));
     }
     // Successful ChatGPT streams may omit Content-Type. The SSE parser is the
     // authoritative protocol boundary and rejects malformed or unbounded input.
@@ -220,7 +257,7 @@ fn model_catalog_url() -> String {
     format!("{CODEX_BASE_URL}/models?client_version={MODEL_CATALOG_COMPATIBILITY_VERSION}")
 }
 
-fn build_client() -> Result<reqwest::Client, AppError> {
+fn build_client() -> Result<ProviderClientState, AppError> {
     let user_agent = format!("codex-desktop-next/{}", env!("CARGO_PKG_VERSION"));
     let cookies = Arc::new(CloudflareCookieStore::default());
     let mut headers = reqwest::header::HeaderMap::new();
@@ -230,12 +267,13 @@ fn build_client() -> Result<reqwest::Client, AppError> {
         HeaderValue::from_str(&user_agent)
             .map_err(|error| AppError::Provider(error.to_string()))?,
     );
-    reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
-        .cookie_provider(cookies)
+        .cookie_provider(Arc::clone(&cookies))
         .default_headers(headers)
         .build()
-        .map_err(|error| AppError::Provider(format!("could not build HTTP client: {error}")))
+        .map_err(|error| AppError::Provider(format!("could not build HTTP client: {error}")))?;
+    Ok(ProviderClientState { client, cookies })
 }
 
 async fn decode_json<T: DeserializeOwned>(
@@ -244,134 +282,11 @@ async fn decode_json<T: DeserializeOwned>(
     maximum_bytes: usize,
 ) -> Result<T, AppError> {
     if !response.status().is_success() {
-        return Err(response_error(response).await);
+        return Err(decode_provider_response_failure(response).await.error);
     }
     let bytes = read_limited(response, maximum_bytes).await?;
     serde_json::from_slice(&bytes)
         .map_err(|error| AppError::Provider(format!("invalid {operation} response: {error}")))
-}
-
-async fn response_error(response: Response) -> AppError {
-    let status = response.status().as_u16();
-    let retry_after_header = response
-        .headers()
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0);
-    let decoded = match read_limited(response, MAX_ERROR_BYTES).await {
-        Ok(bytes) if bytes.is_empty() => DecodedProviderError {
-            code: None,
-            message: "the provider returned an empty error body".into(),
-            retry_after_seconds: None,
-        },
-        Ok(bytes) => decode_provider_error_body(bytes),
-        Err(error) => DecodedProviderError {
-            code: None,
-            message: format!("the provider error body could not be read: {error}"),
-            retry_after_seconds: None,
-        },
-    };
-    AppError::from_provider_rejection(
-        Some(status),
-        decoded.code.as_deref(),
-        decoded.message,
-        decoded.retry_after_seconds.or(retry_after_header),
-    )
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct DecodedProviderError {
-    code: Option<String>,
-    message: String,
-    retry_after_seconds: Option<u64>,
-}
-
-fn decode_provider_error_body(bytes: Vec<u8>) -> DecodedProviderError {
-    let body = match String::from_utf8(bytes) {
-        Ok(body) if !body.trim().is_empty() => body,
-        Ok(_) => {
-            return DecodedProviderError {
-                code: None,
-                message: "the provider returned a blank error body".into(),
-                retry_after_seconds: None,
-            };
-        }
-        Err(error) => {
-            return DecodedProviderError {
-                code: None,
-                message: format!("the provider returned a non-UTF-8 error body: {error}"),
-                retry_after_seconds: None,
-            };
-        }
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&body) else {
-        return DecodedProviderError {
-            code: None,
-            message: bounded_error_text(&body),
-            retry_after_seconds: None,
-        };
-    };
-    let error = value.get("error").unwrap_or(&value);
-    let message = error
-        .get("message")
-        .and_then(Value::as_str)
-        .map(bounded_error_text)
-        .filter(|message| !message.is_empty())
-        .unwrap_or_else(|| "the provider rejected the request".into());
-    let kind = error
-        .get("type")
-        .and_then(Value::as_str)
-        .or_else(|| error.get("code").and_then(Value::as_str));
-    let code = error
-        .get("code")
-        .and_then(Value::as_str)
-        .or_else(|| error.get("type").and_then(Value::as_str))
-        .map(bounded_error_text)
-        .filter(|code| !code.is_empty());
-    let reset_seconds = error
-        .get("resets_in_seconds")
-        .and_then(Value::as_u64)
-        .filter(|seconds| *seconds > 0);
-
-    let mut formatted = message;
-    if let Some(reset) = reset_seconds.map(format_duration) {
-        formatted.push_str("; reset in approximately ");
-        formatted.push_str(&reset);
-    }
-    if let Some(kind) = kind {
-        formatted.push_str(" (provider type: ");
-        formatted.push_str(&bounded_error_text(kind));
-        formatted.push(')');
-    }
-    DecodedProviderError {
-        code,
-        message: bounded_error_text(&formatted),
-        retry_after_seconds: reset_seconds,
-    }
-}
-
-fn bounded_error_text(value: &str) -> String {
-    let mut output = String::new();
-    let mut previous_was_space = false;
-    for character in value.trim().chars().take(MAX_PUBLIC_ERROR_CHARACTERS) {
-        let character = if character.is_control() {
-            ' '
-        } else {
-            character
-        };
-        if character.is_whitespace() {
-            if previous_was_space {
-                continue;
-            }
-            output.push(' ');
-            previous_was_space = true;
-        } else {
-            output.push(character);
-            previous_was_space = false;
-        }
-    }
-    output
 }
 
 async fn read_limited(response: Response, maximum_bytes: usize) -> Result<Vec<u8>, AppError> {
@@ -398,7 +313,13 @@ async fn retry_delay(attempt: usize) {
 
 #[derive(Debug, Default)]
 struct CloudflareCookieStore {
-    cookies: RwLock<BTreeMap<String, String>>,
+    jar: RwLock<Jar>,
+}
+
+impl CloudflareCookieStore {
+    fn clear(&self) {
+        *self.jar.write() = Jar::default();
+    }
 }
 
 impl CookieStore for CloudflareCookieStore {
@@ -406,44 +327,49 @@ impl CookieStore for CloudflareCookieStore {
         if !is_chatgpt_url(url) {
             return;
         }
-        let mut cookies = self.cookies.write();
-        for header in headers {
-            let Some((name, value)) = header
-                .to_str()
-                .ok()
-                .and_then(|header| header.split(';').next())
-                .and_then(|pair| pair.split_once('='))
-            else {
-                continue;
-            };
-            let name = name.trim();
-            if allowed_cloudflare_cookie(name) {
-                cookies.insert(name.into(), value.trim().into());
-            }
-        }
+        let mut allowed_headers =
+            headers.filter(|header| allowed_cloudflare_set_cookie_header(header));
+        self.jar.read().set_cookies(&mut allowed_headers, url);
     }
 
     fn cookies(&self, url: &reqwest::Url) -> Option<HeaderValue> {
         if !is_chatgpt_url(url) {
             return None;
         }
-        let cookies = self.cookies.read();
-        if cookies.is_empty() {
-            return None;
-        }
-        HeaderValue::from_str(
-            &cookies
-                .iter()
-                .map(|(name, value)| format!("{name}={value}"))
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
-        .ok()
+        self.jar
+            .read()
+            .cookies(url)
+            .and_then(only_cloudflare_cookies)
     }
 }
 
 fn is_chatgpt_url(url: &reqwest::Url) -> bool {
     url.scheme() == "https" && url.host_str() == Some("chatgpt.com")
+}
+
+fn allowed_cloudflare_set_cookie_header(header: &HeaderValue) -> bool {
+    header
+        .to_str()
+        .ok()
+        .and_then(|header| header.split_once('=').map(|(name, _)| name.trim()))
+        .is_some_and(allowed_cloudflare_cookie)
+}
+
+fn only_cloudflare_cookies(header: HeaderValue) -> Option<HeaderValue> {
+    let cookies = header
+        .to_str()
+        .ok()?
+        .split(';')
+        .filter_map(|cookie| {
+            let cookie = cookie.trim();
+            let name = cookie.split_once('=')?.0.trim();
+            allowed_cloudflare_cookie(name).then_some(cookie)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    (!cookies.is_empty())
+        .then(|| HeaderValue::from_str(&cookies).ok())
+        .flatten()
 }
 
 fn allowed_cloudflare_cookie(name: &str) -> bool {
@@ -472,11 +398,9 @@ mod tests {
 
     use super::CloudflareCookieStore;
     use super::MODEL_CATALOG_COMPATIBILITY_VERSION;
-    use super::decode_provider_error_body;
     use super::model_catalog_url;
     use super::open_response_stream;
     use crate::engine::native::provider::responses::ResponseEvent;
-    use crate::error::AppError;
 
     #[tokio::test]
     async fn accepts_a_headerless_successful_sse_stream() {
@@ -520,7 +444,6 @@ mod tests {
                 .is_none()
         );
         let mut stream = open_response_stream(response)
-            .await
             .expect("a successful SSE body does not require Content-Type");
         let (_cancellation_sender, mut cancellation) = watch::channel(false);
         let event = stream
@@ -566,61 +489,35 @@ mod tests {
     }
 
     #[test]
-    fn provider_errors_are_bounded_and_human_readable() {
-        let usage = decode_provider_error_body(
-            br#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":511936}}"#
-                .to_vec(),
+    fn cookie_store_honors_path_expiry_and_explicit_reset() {
+        let store = CloudflareCookieStore::default();
+        let models = reqwest::Url::parse("https://chatgpt.com/backend-api/codex/models")
+            .expect("models URL should parse");
+        let responses = reqwest::Url::parse("https://chatgpt.com/backend-api/codex/responses")
+            .expect("responses URL should parse");
+        let scoped = HeaderValue::from_static(
+            "__cflb=west; Path=/backend-api/codex/models; Max-Age=3600; Secure",
         );
-        assert_eq!(
-            usage.message,
-            "The usage limit has been reached; reset in approximately 5d 22h (provider type: usage_limit_reached)"
-        );
-        assert_eq!(usage.code.as_deref(), Some("usage_limit_reached"));
-        assert_eq!(usage.retry_after_seconds, Some(511_936));
-        assert!(matches!(
-            AppError::from_provider_rejection(
-                Some(429),
-                usage.code.as_deref(),
-                usage.message.clone(),
-                usage.retry_after_seconds,
-            ),
-            AppError::RateLimited {
-                retry_after_seconds: Some(511_936),
-                ..
-            }
-        ));
+        store.set_cookies(&mut std::iter::once(&scoped), &models);
 
-        let invalid = decode_provider_error_body(
-            br#"{"error":{"message":"No tool output found","type":"invalid_request_error"}}"#
-                .to_vec(),
-        );
         assert_eq!(
-            invalid.message,
-            "No tool output found (provider type: invalid_request_error)"
+            store
+                .cookies(&models)
+                .and_then(|value| value.to_str().ok().map(str::to_string)),
+            Some("__cflb=west".into())
         );
-        assert_eq!(invalid.code.as_deref(), Some("invalid_request_error"));
-    }
+        assert!(store.cookies(&responses).is_none());
 
-    #[test]
-    fn provider_error_body_preserves_context_code() {
-        let decoded = decode_provider_error_body(
-            br#"{"error":{"code":"context_length_exceeded","type":"invalid_request_error","message":"too large"}}"#
-                .to_vec(),
-        );
+        let expired =
+            HeaderValue::from_static("__cflb=; Path=/backend-api/codex/models; Max-Age=0; Secure");
+        store.set_cookies(&mut std::iter::once(&expired), &models);
+        assert!(store.cookies(&models).is_none());
 
-        assert_eq!(decoded.code.as_deref(), Some("context_length_exceeded"));
-        assert_eq!(
-            decoded.message,
-            "too large (provider type: invalid_request_error)"
-        );
-        assert!(matches!(
-            AppError::from_provider_rejection(
-                Some(400),
-                decoded.code.as_deref(),
-                decoded.message,
-                decoded.retry_after_seconds,
-            ),
-            AppError::ContextWindowExceeded(_)
-        ));
+        let shared = HeaderValue::from_static("__cf_bm=value; Path=/; Max-Age=3600; Secure");
+        store.set_cookies(&mut std::iter::once(&shared), &models);
+        assert!(store.cookies(&responses).is_some());
+        store.clear();
+        assert!(store.cookies(&models).is_none());
+        assert!(store.cookies(&responses).is_none());
     }
 }

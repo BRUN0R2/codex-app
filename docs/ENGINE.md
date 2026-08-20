@@ -8,7 +8,7 @@ O único backend é `NativeEngine`:
 - provider: `ChatGPT Codex`;
 - autenticação: `ChatGPT OAuth`;
 - armazenamento: `sqlite`;
-- schema IPC: versão `11`.
+- schema IPC: versão `12`.
 
 Não existe variável de ambiente para trocar backend nem execução de binário
 genérico. O único sidecar é o `rg.exe` 15.2.0 fixado por manifesto e hash para a
@@ -145,10 +145,14 @@ chamada em voo por revisão de sessão, e respostas de conta antiga nunca
 atualizam a interface.
 
 Headers de conta e sessão são montados somente no Rust. Tokens, cookies e
-respostas brutas não são expostos ao frontend. O parser consumer negocia e
-aplica patches `v1`; o parser Codex aceita apenas os eventos Responses
-implementados. Novidades em qualquer protocolo exigem mudança explícita do
-contrato.
+respostas brutas não são expostos ao frontend. Cookies de infraestrutura
+Cloudflare passam por allowlist e por um cookie jar que respeita host, path,
+expiração e remoção. Uma página HTML de bloqueio nunca é persistida como mensagem
+pública: no transporte Codex ela invalida o estado de borda e recebe tentativas
+locais limitadas; se persistir, torna-se uma falha tipada e acionável. O parser
+consumer negocia e aplica patches `v1`; o parser Codex aceita apenas os eventos
+Responses implementados. Novidades em qualquer protocolo exigem mudança
+explícita do contrato.
 
 Antes de cada requisição, o histórico garante a mesma invariável do Desktop
 oficial: toda chamada de ferramenta possui exatamente uma saída compatível e
@@ -251,8 +255,11 @@ persistido; política, recuperação e atomicidade pertencem integralmente ao Ru
 
 Todos os paths de ferramenta são relativos ao workspace. Escritas são atômicas,
 arquivos são UTF-8 e comandos são não interativos. Cada chamada pode declarar
-`timeout_seconds`; o padrão é uma hora e o máximo é sete dias, sempre
-cancelável.
+`timeout_seconds`; o agente escolhe o orçamento pelo pior caso esperado do
+comando, usa `null` para o padrão seguro de uma hora e pode solicitar até sete
+dias, sempre com cancelamento. A timeline não mostra cronômetro para operações
+curtas; após dez segundos, comandos ativos exibem duração atualizada a cada
+segundo e preservam a duração terminal.
 `stdout` e `stderr` são drenados concorrentemente para arquivos temporários,
 normalizados em streaming e persistidos em blocos UTF-8 de 64 KiB, sem corte de
 tamanho agregado imposto pelo aplicativo. O item do turno contém somente ID,

@@ -50,6 +50,9 @@ const THREAD_PAGE_SIZE: usize = 50;
 const MAX_CURSOR_BYTES: usize = 20;
 const MAX_OUTPUT_CURSOR_BYTES: usize = 20;
 const MAX_ITEM_BYTES: usize = 2 * 1_048_576;
+// A valid turn accepts up to 16 MiB of raw input. An all-image turn expands to
+// less than 22 MiB as Base64; the remaining space covers the JSON envelope.
+const MAX_PROVIDER_ITEM_BYTES: usize = 24 * 1_048_576;
 const MAX_HISTORY_BYTES: usize = 32 * 1_048_576;
 const MAX_HISTORY_ITEMS: usize = 20_000;
 const MAX_THREAD_NAME_BYTES: usize = 256;
@@ -928,7 +931,7 @@ impl NativeStorage {
         validate_user_item(&user_item)?;
         let item_id = user_item.id().to_string();
         let item_payload = encode_bounded(&user_item, MAX_ITEM_BYTES, "thread item")?;
-        let provider_payload = encode_bounded(&provider_item, MAX_ITEM_BYTES, "provider item")?;
+        let provider_payload = encode_provider_item(&provider_item, "provider item")?;
         let preview = truncate_utf8(preview.trim(), MAX_PREVIEW_BYTES);
         let owner_id = self.owner_id.clone();
         let pool = self.pool().await?;
@@ -1079,8 +1082,7 @@ impl NativeStorage {
         validate_user_item(&user_item)?;
         let item_id = user_item.id().to_string();
         let item_payload = encode_bounded(&user_item, MAX_ITEM_BYTES, "steered thread item")?;
-        let provider_payload =
-            encode_bounded(&provider_item, MAX_ITEM_BYTES, "steered provider item")?;
+        let provider_payload = encode_provider_item(&provider_item, "steered provider item")?;
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
@@ -1135,7 +1137,7 @@ impl NativeStorage {
         thread_id: String,
         item: &ResponseItem,
     ) -> Result<(), AppError> {
-        let payload = encode_bounded(&item, MAX_ITEM_BYTES, "provider item")?;
+        let payload = encode_provider_item(item, "provider item")?;
         let pool = self.pool().await?;
         run_blocking(move || {
             let connection = pool.get().map_err(pool_error)?;
@@ -1160,7 +1162,7 @@ impl NativeStorage {
     ) -> Result<ThreadItem, AppError> {
         let item_id = thread_item.id().to_string();
         prepare_thread_item_output(&mut thread_item, output.as_ref())?;
-        let provider_payload = encode_bounded(provider_item, MAX_ITEM_BYTES, "provider item")?;
+        let provider_payload = encode_provider_item(provider_item, "provider item")?;
         let thread_payload = encode_bounded(&thread_item, MAX_ITEM_BYTES, "thread item")?;
         let pool = self.pool().await?;
         run_blocking(move || {
@@ -2282,7 +2284,7 @@ fn encode_provider_history(items: Vec<ResponseItem>) -> Result<Vec<String>, AppE
     let mut total_bytes = 0usize;
     let mut payloads = Vec::with_capacity(items.len());
     for item in items {
-        let payload = encode_bounded(&item, MAX_ITEM_BYTES, "provider history item")?;
+        let payload = encode_provider_item(&item, "provider history item")?;
         total_bytes = total_bytes
             .checked_add(payload.len())
             .ok_or_else(|| AppError::Provider("provider history size overflowed".into()))?;
@@ -2418,11 +2420,8 @@ fn read_provider_history_page(
                 "stored provider history exceeds {MAX_HISTORY_ITEMS} items"
             )));
         }
-        page.items.push(decode_bounded(
-            &payload,
-            MAX_ITEM_BYTES,
-            "provider history",
-        )?);
+        page.items
+            .push(decode_provider_item(&payload, "provider history")?);
         page.last_sequence = sequence;
     }
     Ok(page)
@@ -2936,6 +2935,10 @@ fn encode_bounded<T: Serialize>(
     Ok(payload)
 }
 
+fn encode_provider_item(value: &ResponseItem, label: &str) -> Result<String, AppError> {
+    encode_bounded(value, MAX_PROVIDER_ITEM_BYTES, label)
+}
+
 fn decode_bounded<T: DeserializeOwned>(
     payload: &str,
     maximum_bytes: usize,
@@ -2948,6 +2951,10 @@ fn decode_bounded<T: DeserializeOwned>(
     }
     serde_json::from_str(payload)
         .map_err(|error| AppError::Storage(format!("stored {label} is invalid: {error}")))
+}
+
+fn decode_provider_item(payload: &str, label: &str) -> Result<ResponseItem, AppError> {
+    decode_bounded(payload, MAX_PROVIDER_ITEM_BYTES, label)
 }
 
 fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
@@ -3312,17 +3319,30 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, NativeStorage, encode_bounded,
-        initialize_database,
+        DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, MAX_ITEM_BYTES, NativeStorage,
+        encode_bounded, encode_provider_item, initialize_database,
     };
     use crate::engine::native::automation::{AutomationDraft, AutomationUpdate};
     use crate::engine::native::output::OutputSource;
     use crate::engine::native::provider::{ResponseContent, ResponseItem};
     use crate::engine::{
         ActivityStatus, AutomationRunStatus, AutomationRunTrigger, ConfigUpdate, ConversationMode,
-        ModelContextWindowPreference, ModelVerbosity, ThreadItem, ThreadOutput, TokenUsage,
-        TurnStatus, UserContent,
+        ImageDetail, ModelContextWindowPreference, ModelVerbosity, ThreadItem, ThreadOutput,
+        TokenUsage, TurnStatus, UserContent,
     };
+
+    #[test]
+    fn provider_item_limit_accepts_valid_inline_images_above_the_thread_item_limit() {
+        let image_url = format!("data:image/png;base64,{}", "A".repeat(4_600_000));
+        let item = ResponseItem::user_content(vec![ResponseContent::InputImage {
+            image_url,
+            detail: Some(ImageDetail::Auto),
+        }]);
+        let encoded =
+            encode_provider_item(&item, "provider item").expect("valid image input should encode");
+
+        assert!(encoded.len() > MAX_ITEM_BYTES);
+    }
 
     async fn read_complete_output(storage: &NativeStorage, output_id: &str) -> String {
         let mut content = String::new();

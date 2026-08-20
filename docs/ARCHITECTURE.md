@@ -33,7 +33,8 @@ O engine nativo divide ownership assim:
 - `auth/`: fluxo OAuth, callback, tokens e envelope criptografado privado;
 - `chat/`: catálogo consumer, Sentinel, prepare/conduit, deltas `v1` e stream de
   conversa do ChatGPT;
-- `provider/`: catálogo Codex, Responses, cookies restritos e stream do agente;
+- `provider/`: catálogo Codex, Responses, cookies Cloudflare restritos com
+  semântica completa de expiração/escopo e stream do agente;
 - `agent.rs`: composição das instruções, rodadas e ciclo das ferramentas;
 - `automation.rs`: agenda, limites e transições determinísticas das Automações;
 - `tools/`: contratos e orquestração das ferramentas (`mod.rs`), operações de
@@ -84,6 +85,9 @@ são roteados por `threadId`, e uma tarefa em segundo plano não altera a conver
 visível. Configurações usam uma fila serial explícita e modelo, esforço e tier são
 gravados atomicamente. Login duplicado é coalescido e qualquer falha de contrato
 entra nos diagnósticos e no alerta visível.
+O composer mantém rascunhos efêmeros com ownership por `thread_id`; telas de
+nova conversa usam uma chave separada por modo e workspace. Trocar de tarefa
+salva e restaura somente o rascunho correspondente, incluindo anexos.
 
 A inicialização possui uma revisão monotônica que impede tentativas antigas de
 sobrescrever estado novo. Falhas transitórias de registro de eventos, timeout ou
@@ -245,13 +249,16 @@ mantém um recurso por item em `output_resources` e o texto integral em
 bytes e cursor de continuação. Fork cria IDs e blocos independentes, e exclusão
 usa as chaves estrangeiras para remover somente os recursos daquele thread.
 
-O SQLite limita cada payload de metadados e cada página materializada, mas não o
-total persistido do histórico nem o tamanho agregado de um recurso de saída. O
-frontend limita diagnósticos, projetos, anexos e o tamanho individual de cada
-mensagem enfileirada; não impõe teto de quantidade às filas ou aprovações
-pendentes. A capacidade do disco, a quota do armazenamento do WebView e os
-limites do provider continuam externos ao aplicativo. Quando um limite de
-segurança é atingido, a operação falha com motivo explícito.
+O SQLite limita cada payload e cada página materializada, mas separa itens
+visuais da timeline dos itens enviados ao provider. O limite do provider cobre o
+pior caso Base64 aceito pela validação de anexos, portanto uma imagem válida não
+pode ser aceita na entrada e rejeitada depois pelo storage. Saídas grandes
+continuam fora dos itens e usam recursos paginados. O frontend limita
+diagnósticos, projetos, anexos e o tamanho individual de cada mensagem
+enfileirada; não impõe teto de quantidade às filas ou aprovações pendentes. A
+capacidade do disco, a quota do armazenamento do WebView e os limites do provider
+continuam externos ao aplicativo. Quando um limite de segurança é atingido, a
+operação falha com motivo explícito.
 
 Falhas operacionais do Rust e do frontend são gravadas como JSONL limitado e
 também publicadas na interface. Exceções do frontend preservam a stack limitada

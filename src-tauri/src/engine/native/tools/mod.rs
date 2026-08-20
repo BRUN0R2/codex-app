@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -65,6 +66,7 @@ pub struct PreparedTool {
     name: &'static str,
     description: String,
     operation: ToolOperation,
+    started_at_ms: OnceLock<i64>,
 }
 
 #[derive(Debug)]
@@ -267,7 +269,7 @@ impl ToolRegistry {
                             "type": ["integer", "null"],
                             "minimum": 1,
                             "maximum": MAX_COMMAND_TIMEOUT_SECONDS,
-                            "description": "Command lifetime in seconds. Use null for the one-hour default; it can be extended to seven days for long-running work."
+                            "description": "Execution budget in seconds, chosen by the agent from the command's expected worst-case duration. Use null for the safe one-hour default. Do not guess short limits for recursive searches, builds, tests, installs, or external tools; long-running work can request up to seven days."
                         }
                     },
                     "required": ["command", "cwd", "reason", "timeout_seconds"],
@@ -402,6 +404,7 @@ impl ToolRegistry {
             name,
             description,
             operation,
+            started_at_ms: OnceLock::new(),
         })
     }
 
@@ -427,6 +430,7 @@ impl ToolRegistry {
                     name: "apply_patch",
                     description: format!("Apply patch to {file_count} {noun}"),
                     operation: ToolOperation::ApplyPatch(patch),
+                    started_at_ms: OnceLock::new(),
                 })
             }
             _ => Err(AppError::Tool(format!("unknown custom tool `{name}`"))),
@@ -474,6 +478,7 @@ impl PreparedTool {
                 command: args.command.clone(),
                 cwd: display_workspace_path(workspace, &args.cwd),
                 process_id: None,
+                started_at: Some(self.started_at_ms()),
                 source: CommandSource::Agent,
                 status: ActivityStatus::InProgress,
                 aggregated_output: None,
@@ -752,6 +757,7 @@ impl PreparedTool {
                 command: args.command.clone(),
                 cwd: display_workspace_path(workspace, &args.cwd),
                 process_id: None,
+                started_at: Some(self.started_at_ms()),
                 source: CommandSource::Agent,
                 status,
                 aggregated_output: None,
@@ -813,6 +819,12 @@ impl PreparedTool {
             completed_item: self.finish_item(workspace, status, exit_code, duration_ms),
             display_output,
         }
+    }
+
+    fn started_at_ms(&self) -> i64 {
+        *self
+            .started_at_ms
+            .get_or_init(|| chrono::Utc::now().timestamp_millis())
     }
 
     fn can_own_stored_output(&self) -> bool {
@@ -1176,6 +1188,14 @@ mod tests {
         assert_eq!(
             parameters["properties"]["timeout_seconds"]["type"],
             serde_json::json!(["integer", "null"])
+        );
+        assert!(
+            parameters["properties"]["timeout_seconds"]["description"]
+                .as_str()
+                .is_some_and(|description| {
+                    description.contains("expected worst-case duration")
+                        && description.contains("safe one-hour default")
+                })
         );
 
         ToolRegistry

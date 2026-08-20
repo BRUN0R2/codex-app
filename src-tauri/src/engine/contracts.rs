@@ -765,6 +765,8 @@ pub enum ThreadItem {
         cwd: String,
         #[serde(rename = "processId")]
         process_id: Option<String>,
+        #[serde(default, rename = "startedAt")]
+        started_at: Option<i64>,
         source: CommandSource,
         status: ActivityStatus,
         #[serde(rename = "aggregatedOutput")]

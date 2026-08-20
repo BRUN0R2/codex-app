@@ -181,7 +181,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [11] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [12] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -1257,6 +1257,7 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
         "id",
         "processId",
         "source",
+        "startedAt",
         "status",
         "type",
       ]);
@@ -1266,6 +1267,10 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
         command: text(item.command, `${path}.command`, 16_384),
         cwd: text(item.cwd, `${path}.cwd`, 4_096),
         processId: nullableText(item.processId, `${path}.processId`),
+        startedAt:
+          item.startedAt === null
+            ? null
+            : integer(item.startedAt, `${path}.startedAt`, 0, Number.MAX_SAFE_INTEGER),
         source: literal(item.source, `${path}.source`, ["agent"] as const),
         status: literal(item.status, `${path}.status`, ACTIVITY_STATUSES),
         aggregatedOutput: nullableThreadOutput(item.aggregatedOutput, `${path}.aggregatedOutput`),

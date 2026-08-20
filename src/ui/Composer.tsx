@@ -1,5 +1,14 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  on,
+  onCleanup,
+  onMount,
+  Show,
+} from "solid-js";
 
 import type {
   Attachment,
@@ -9,6 +18,12 @@ import type {
   ReasoningEffort,
 } from "../contracts/types";
 import type { AppController } from "../state/appController";
+import {
+  type ComposerDraftState,
+  ComposerDraftStore,
+  composerDraftKey,
+  sameComposerDraft,
+} from "../state/composerDrafts";
 
 type ComposerController = Pick<
   AppController,
@@ -17,6 +32,7 @@ type ComposerController = Pick<
   | "config"
   | "contextUsage"
   | "conversationMode"
+  | "currentThread"
   | "deleteQueuedMessage"
   | "engine"
   | "enqueueMessage"
@@ -97,6 +113,8 @@ export function Composer(props: ComposerProps) {
   const [modelMenuSection, setModelMenuSection] = createSignal<ModelMenuSection | null>(null);
   const [permissionMenuOpen, setPermissionMenuOpen] = createSignal(false);
   const [addMenuOpen, setAddMenuOpen] = createSignal(false);
+  const draftStore = new ComposerDraftStore();
+  let activeDraftKey = currentDraftKey();
   let composerElement: HTMLFormElement | undefined;
   let textArea: HTMLTextAreaElement | undefined;
 
@@ -158,6 +176,24 @@ export function Composer(props: ComposerProps) {
     setServiceTier(configured.serviceTier ?? nextModel?.defaultServiceTier ?? null);
   });
 
+  createEffect(
+    on(
+      currentDraftKey,
+      (nextDraftKey, previousDraftKey) => {
+        if (previousDraftKey !== undefined) {
+          draftStore.write(previousDraftKey, currentDraft());
+        }
+        activeDraftKey = nextDraftKey;
+        const nextDraft = draftStore.read(nextDraftKey);
+        setText(nextDraft.text);
+        setAttachments(nextDraft.attachments);
+        setAttachmentError(null);
+        queueMicrotask(() => resizeTextArea(textArea));
+      },
+      { defer: true },
+    ),
+  );
+
   createEffect(() => {
     const request = props.draftRequest;
     if (request === null) {
@@ -197,7 +233,10 @@ export function Composer(props: ComposerProps) {
   }
 
   onMount(() => document.addEventListener("pointerdown", handleDocumentPointerDown));
-  onCleanup(() => document.removeEventListener("pointerdown", handleDocumentPointerDown));
+  onCleanup(() => {
+    draftStore.write(activeDraftKey, currentDraft());
+    document.removeEventListener("pointerdown", handleDocumentPointerDown);
+  });
 
   function selectNextModel(value: string): void {
     setModel(value);
@@ -279,16 +318,18 @@ export function Composer(props: ComposerProps) {
       return;
     }
     const selectedChatIntelligence = mode() === "chat" ? chatIntelligence() : null;
+    const submittedDraftKey = activeDraftKey;
+    const submittedDraft = currentDraft();
     const input = {
-      text: text(),
-      attachments: attachments(),
+      text: submittedDraft.text,
+      attachments: submittedDraft.attachments,
       model: mode() === "chat" ? (selectedChatIntelligence?.option?.id ?? null) : model(),
       effort: mode() === "chat" ? null : effort(),
       serviceTier: mode() === "chat" ? null : serviceTier(),
     };
     if (props.controller.turnBusy() && queueingEnabled()) {
       if (props.controller.enqueueMessage(input)) {
-        clearDraft();
+        clearDraft(submittedDraftKey, submittedDraft);
       }
       return;
     }
@@ -296,18 +337,44 @@ export function Composer(props: ComposerProps) {
     try {
       const succeeded = await props.controller.sendMessage(input);
       if (succeeded) {
-        clearDraft();
+        clearDraft(submittedDraftKey, submittedDraft);
       }
     } finally {
       setSending(false);
     }
   }
 
-  function clearDraft(): void {
+  function clearDraft(
+    draftKey = activeDraftKey,
+    expectedDraft: ComposerDraftState | null = null,
+  ): void {
+    const existingDraft = draftKey === activeDraftKey ? currentDraft() : draftStore.read(draftKey);
+    if (expectedDraft !== null && !sameComposerDraft(existingDraft, expectedDraft)) {
+      return;
+    }
+    draftStore.clear(draftKey);
+    if (draftKey !== activeDraftKey) {
+      return;
+    }
     setText("");
     setAttachments([]);
     setAttachmentError(null);
     resizeTextArea(textArea);
+  }
+
+  function currentDraft(): ComposerDraftState {
+    return {
+      attachments: attachments(),
+      text: text(),
+    };
+  }
+
+  function currentDraftKey(): string {
+    return composerDraftKey(
+      props.controller.currentThread()?.id ?? null,
+      props.controller.conversationMode(),
+      props.controller.workspace(),
+    );
   }
 
   function editQueuedMessage(messageId: string): void {

@@ -11,6 +11,7 @@ mod diagnostics;
 mod output;
 mod output_compaction;
 mod provider;
+mod provider_error;
 mod storage;
 mod stream_notifications;
 mod terminal_output;
@@ -56,7 +57,7 @@ use crate::engine::{
 };
 use crate::error::AppError;
 
-pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 11;
+pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 12;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTOMATION_SCHEDULER_MAX_SLEEP: Duration = Duration::from_secs(15 * 60);

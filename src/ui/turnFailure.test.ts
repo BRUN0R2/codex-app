@@ -38,6 +38,30 @@ describe("turn failure presentation", () => {
     expect(failure.tone).toBe("warning");
   });
 
+  it("turns an OpenAI edge HTML block into an actionable warning", () => {
+    const failure = presentTurnFailure(
+      "provider returned HTTP 403: <html><head><style>.blocked-icon{color:#ef4444}</style></head><body>Unable to load site</body></html>",
+    );
+
+    expect(failure).toEqual({
+      title: "Conexão bloqueada pela borda da OpenAI",
+      detail:
+        "A camada de segurança da OpenAI bloqueou a conexão antes de a solicitação chegar ao modelo. Tente novamente; se persistir, desative VPN ou proxy e confirme que o ChatGPT abre normalmente nessa rede.",
+      technical: "HTTP 403",
+      tone: "warning",
+    });
+  });
+
+  it("preserves the edge request id without exposing the HTML response", () => {
+    const failure = presentTurnFailure(
+      "provider returned HTTP 403: OpenAI edge blocked the request before it reached the provider API; edge request ID 8f1234-IAD (provider type: edge_access_blocked)",
+    );
+
+    expect(failure.detail).not.toContain("<html");
+    expect(failure.technical).toBe("HTTP 403 · edge_access_blocked · Ray 8f1234-IAD");
+    expect(failure.tone).toBe("warning");
+  });
+
   it("presents provider overload as a concise warning", () => {
     const failure = presentTurnFailure(
       "provider request failed: server_is_overloaded: Our servers are currently overloaded. Please try again later.",

@@ -3,7 +3,7 @@
 ## Snapshot estudado
 
 O diretório local ignorado `.reference/openai-codex` aponta para o commit
-`ee0247f95a6fe2b094ba2253d82cae2a2b4c2dff`, de 1 de agosto de 2026, do
+`9894a14c81e50bbd845a337e4f77293f1cbc2633`, de 20 de agosto de 2026, do
 repositório [openai/codex](https://github.com/openai/codex).
 
 A referência serve para confirmar protocolos e semântica. Nenhum crate, pacote,
@@ -19,6 +19,8 @@ runtime deste aplicativo.
 - cliente de modelos: endpoint e forma autoritativa `{ "models": [...] }`;
 - cliente Responses: request, eventos SSE e itens de mensagem, raciocínio,
   função e pesquisa web;
+- cliente HTTP: allowlist de cookies de infraestrutura Cloudflare delegada ao
+  `reqwest::cookie::Jar`, incluindo escopo, expiração e remoção;
 - leitura de limites da conta: endpoint e semântica das janelas de uso;
 - políticas e ferramentas: inspiração para limites, aprovações e cancelamento.
 

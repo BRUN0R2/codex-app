@@ -43,7 +43,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 11;
+  readonly schemaVersion: 12;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -250,6 +250,7 @@ export type ThreadItem =
       readonly command: string;
       readonly cwd: string;
       readonly processId: string | null;
+      readonly startedAt: number | null;
       readonly source: "agent";
       readonly status: ActivityStatus;
       readonly aggregatedOutput: ThreadOutput | null;

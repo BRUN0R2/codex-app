@@ -85,6 +85,7 @@ import {
   toolActivityTitle,
   toolOutputText,
   turnDurationLabel,
+  visibleCommandDurationMs,
 } from "./timelinePresentation";
 import {
   calculateTimelineScrollbar,
@@ -1138,6 +1139,7 @@ function ConversationTurn(props: {
               readTimelineValue(presentationBlocksByKey(), blockKey, "bloco projetado do turno")
             }
             blockIndex={index()}
+            clock={props.clock}
             diffDisplay={props.diffDisplay}
             disclosure={disclosure}
             firstWorkBlockIndex={presentation().firstWorkBlockIndex}
@@ -1157,6 +1159,7 @@ function ConversationTurn(props: {
         <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
           <TurnWorkBlock
             activeThinkingPresentation="standalone"
+            clock={props.clock}
             diffDisplay={props.diffDisplay}
             items={[]}
             reasoningHeading={latestReasoningHeading()}
@@ -1187,6 +1190,7 @@ function TurnPresentationBlockView(props: {
   readonly activeThinkingPresentation: "activity" | "none" | "standalone";
   readonly block: () => TurnPresentationBlock;
   readonly blockIndex: number;
+  readonly clock: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly disclosure: TimelineDisclosureBinding;
   readonly firstWorkBlockIndex: number | null;
@@ -1207,6 +1211,7 @@ function TurnPresentationBlockView(props: {
               props.status === "inProgress" &&
               props.trailingAgentMessageBlockIndex === props.blockIndex
             }
+            clock={props.clock}
             diffDisplay={props.diffDisplay}
             item={messageBlock().item}
             streaming={
@@ -1230,6 +1235,7 @@ function TurnPresentationBlockView(props: {
               <TimelineDisclosureContext.Provider value={props.disclosure.descendantContext}>
                 <TurnWorkBlock
                   activeThinkingPresentation={props.activeThinkingPresentation}
+                  clock={props.clock}
                   diffDisplay={props.diffDisplay}
                   items={workBlock().items}
                   reasoningHeading={props.reasoningHeading}
@@ -1277,6 +1283,7 @@ function TurnHeader(props: {
 
 function TurnWorkBlock(props: {
   readonly activeThinkingPresentation: "activity" | "none" | "standalone";
+  readonly clock: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly items: readonly TurnWorkItem[];
   readonly reasoningHeading: string | null;
@@ -1295,6 +1302,7 @@ function TurnWorkBlock(props: {
         <For each={workUnitIdentities()}>
           {(unitIdentity, index) => (
             <WorkTimelineUnit
+              clock={props.clock}
               diffDisplay={props.diffDisplay}
               isCurrent={
                 index() === workUnits().length - 1 &&
@@ -1330,6 +1338,7 @@ function TurnWorkBlock(props: {
 }
 
 function WorkTimelineUnit(props: {
+  readonly clock: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly isCurrent: boolean;
   readonly reasoningHeading: string | null;
@@ -1342,6 +1351,7 @@ function WorkTimelineUnit(props: {
       <Match when={asAgentActivityGroup(unit())}>
         {(group) => (
           <AgentActivityGroup
+            clock={props.clock}
             diffDisplay={props.diffDisplay}
             disclosureKey={group().key}
             isCurrent={props.isCurrent}
@@ -1354,6 +1364,7 @@ function WorkTimelineUnit(props: {
         {(itemUnit) => (
           <TimelineItem
             active={props.isCurrent}
+            clock={props.clock}
             diffDisplay={props.diffDisplay}
             item={itemUnit().item}
           />
@@ -1376,6 +1387,7 @@ function asAgentActivityItem(
 }
 
 function AgentActivityGroup(props: {
+  readonly clock: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly disclosureKey: string;
   readonly isCurrent: boolean;
@@ -1398,13 +1410,28 @@ function AgentActivityGroup(props: {
   const iconKind = createMemo(() =>
     props.isCurrent ? activeActivity()?.kind : summaries()[0]?.kind,
   );
+  const activeCommandDuration = createMemo(() => {
+    if (!props.isCurrent || activeActivity()?.kind !== "commands") {
+      return null;
+    }
+    for (let index = props.items.length - 1; index >= 0; index -= 1) {
+      const item = props.items[index];
+      if (item?.type !== "commandExecution" || item.status !== "inProgress") {
+        continue;
+      }
+      return commandDurationLabel(item, props.clock);
+    }
+    return null;
+  });
 
   return (
     <Show
       when={shouldRenderAgentActivityGroup(props.items, props.isCurrent, disclosure.isOpen())}
       fallback={
         <Show when={props.items[0]}>
-          {(item) => <TimelineItem diffDisplay={props.diffDisplay} item={item()} />}
+          {(item) => (
+            <TimelineItem clock={props.clock} diffDisplay={props.diffDisplay} item={item()} />
+          )}
         </Show>
       }
     >
@@ -1422,6 +1449,9 @@ function AgentActivityGroup(props: {
             )}
           </Show>
           <ActivityHeadline active={props.isCurrent} text={title()} />
+          <Show when={activeCommandDuration()}>
+            {(duration) => <span class="activity-elapsed">· {duration()}</span>}
+          </Show>
           <span class="activity-chevron">
             <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
           </span>
@@ -1433,6 +1463,7 @@ function AgentActivityGroup(props: {
                 <For each={itemIdentities()}>
                   {(itemIdentity) => (
                     <TimelineItem
+                      clock={props.clock}
                       diffDisplay={props.diffDisplay}
                       item={readTimelineValue(
                         itemsByIdentity(),
@@ -1513,6 +1544,7 @@ function EmptyConversation(props: {
 
 interface TimelineItemProps {
   readonly active?: boolean | undefined;
+  readonly clock?: number | undefined;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly item: VisibleThreadItem;
   readonly streaming?: boolean | undefined;
@@ -1525,6 +1557,7 @@ function TimelineItem(props: TimelineItemProps) {
       {(_identity) => (
         <TimelineItemContent
           active={props.active}
+          clock={props.clock}
           diffDisplay={props.diffDisplay}
           item={props.item}
           streaming={props.streaming}
@@ -1552,7 +1585,9 @@ function TimelineItemContent(props: TimelineItemProps) {
     case "plan":
       return null;
     case "commandExecution":
-      return <CommandItem item={props.item} variant={props.variant} />;
+      return (
+        <CommandItem clock={props.clock ?? Date.now()} item={props.item} variant={props.variant} />
+      );
     case "fileChange":
       return (
         <FileChangeItem diffDisplay={props.diffDisplay} item={props.item} variant={props.variant} />
@@ -1596,6 +1631,7 @@ function ActivityHeadline(props: {
 }
 
 function CommandItem(props: {
+  readonly clock: number;
   readonly item: Extract<ThreadItem, { type: "commandExecution" }>;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
@@ -1607,6 +1643,10 @@ function CommandItem(props: {
       props.variant === "grouped" ? false : disclosure.isOpen(),
     );
   const output = () => props.item.aggregatedOutput;
+  const duration = () =>
+    props.variant === "grouped" && props.item.status === "inProgress"
+      ? null
+      : commandDurationLabel(props.item, props.clock);
 
   return (
     <details
@@ -1620,6 +1660,9 @@ function CommandItem(props: {
           <Icon name="terminal" size={13} />
         </span>
         <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
+        <Show when={duration()}>
+          {(visibleDuration) => <span class="activity-elapsed">· {visibleDuration()}</span>}
+        </Show>
         <span class="activity-chevron">
           <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
         </span>
@@ -1649,6 +1692,14 @@ function CommandItem(props: {
       </Show>
     </details>
   );
+}
+
+function commandDurationLabel(
+  item: Extract<ThreadItem, { type: "commandExecution" }>,
+  clock: number,
+): string | null {
+  const duration = visibleCommandDurationMs(item.status, item.startedAt, item.durationMs, clock);
+  return duration === null ? null : formatElapsedSeconds(Math.floor(duration / 1_000));
 }
 
 function ToolItem(props: {

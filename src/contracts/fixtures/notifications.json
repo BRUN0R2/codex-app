@@ -323,6 +323,7 @@
         "command": "cargo test",
         "cwd": "C:\\workspace\\codex-app",
         "processId": "4242",
+        "startedAt": 1755000115200,
         "source": "agent",
         "status": "completed",
         "aggregatedOutput": {

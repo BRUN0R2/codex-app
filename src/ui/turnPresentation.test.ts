@@ -159,6 +159,7 @@ function command(id: string): Extract<VisibleThreadItem, { readonly type: "comma
     command: "pnpm verify",
     cwd: ".",
     processId: null,
+    startedAt: null,
     source: "agent",
     status: "completed",
     aggregatedOutput: null,

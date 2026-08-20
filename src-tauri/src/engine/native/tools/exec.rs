@@ -112,9 +112,10 @@ pub(super) async fn execute_command(
                     "command timed out and could not be terminated safely: {error}"
                 ))
             })?;
-            return Err(AppError::Timeout {
-                operation: "command execution",
-            });
+            return Err(AppError::Tool(format!(
+                "command execution exceeded its {}-second time limit; retry with a larger timeout_seconds value or null when more time is needed",
+                command_timeout.as_secs()
+            )));
         }
         tokio::select! {
             changed = cancellation.changed() => {

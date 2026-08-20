@@ -198,6 +198,7 @@ function command(id: string): Extract<AgentActivityItem, { type: "commandExecuti
     command: "rtk rg --files",
     cwd: "C:\\repo",
     processId: null,
+    startedAt: null,
     source: "agent",
     status: "completed",
     aggregatedOutput: null,

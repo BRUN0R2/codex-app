@@ -3685,6 +3685,15 @@ pre {
   font-weight: 500;
 }
 
+.activity-elapsed {
+  flex: 0 0 auto;
+  color: var(--color-token-text-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .activity-chevron {
   display: inline-flex;
   align-items: center;

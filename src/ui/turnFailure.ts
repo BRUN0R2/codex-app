@@ -5,6 +5,9 @@ const CONTEXT_WINDOW_PATTERN =
   /^model context window exceeded:\s*(?:([a-z][a-z0-9_]*):\s*)?([\s\S]*)$/iu;
 const REQUEST_ID_PATTERN =
   /(?:request ID|ID da solicitação)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/iu;
+const EDGE_REQUEST_ID_PATTERN =
+  /(?:Cloudflare Ray ID|Ray ID|edge request ID)\s*:?\s*([a-z0-9][a-z0-9._:-]{2,255})/iu;
+const HTML_DOCUMENT_PATTERN = /<(?:!doctype\s+html|html|head|body)\b/iu;
 const MAX_VISIBLE_FAILURE_CHARACTERS = 2_000;
 
 export interface TurnFailurePresentation {
@@ -53,6 +56,19 @@ export function presentTurnFailure(message: string): TurnFailurePresentation {
 function presentProviderHttpFailure(status: number, body: string): TurnFailurePresentation {
   const details = providerErrorDetails(body);
   const technical = providerTechnical(`HTTP ${status}`, details.kind, details.message);
+
+  if (
+    status === 403 &&
+    (details.kind === "edge_access_blocked" || HTML_DOCUMENT_PATTERN.test(body))
+  ) {
+    return {
+      detail:
+        "A camada de segurança da OpenAI bloqueou a conexão antes de a solicitação chegar ao modelo. Tente novamente; se persistir, desative VPN ou proxy e confirme que o ChatGPT abre normalmente nessa rede.",
+      technical,
+      title: "Conexão bloqueada pela borda da OpenAI",
+      tone: "warning",
+    };
+  }
 
   if (status === 429 || details.kind === "usage_limit_reached") {
     return {
@@ -140,9 +156,13 @@ function providerTechnical(
   message: string,
 ): string | null {
   const requestId = REQUEST_ID_PATTERN.exec(message)?.[1] ?? null;
-  const parts = [primary, kind, requestId === null ? null : `ID ${requestId}`].filter(
-    (part): part is string => part !== null && part.length > 0,
-  );
+  const edgeRequestId = EDGE_REQUEST_ID_PATTERN.exec(message)?.[1] ?? null;
+  const parts = [
+    primary,
+    kind,
+    requestId === null ? null : `ID ${requestId}`,
+    edgeRequestId === null ? null : `Ray ${edgeRequestId}`,
+  ].filter((part): part is string => part !== null && part.length > 0);
   return parts.length === 0 ? null : parts.join(" · ");
 }
 
