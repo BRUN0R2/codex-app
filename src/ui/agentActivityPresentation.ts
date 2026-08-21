@@ -10,6 +10,7 @@ export type AgentActivityKind =
   | "fileChanges"
   | "exploration"
   | "commands"
+  | "terminalRead"
   | "webSearch";
 
 export type AgentActivityRenderUnit =
@@ -37,6 +38,7 @@ export interface ActiveAgentActivity {
 
 const EXPLORATION_TOOLS = new Set(["code_search", "list_files", "read_file", "search_text"]);
 const COMMAND_TOOLS = new Set(["run_shell", "shell"]);
+const TERMINAL_READ_TOOLS = new Set(["read_output", "read_thread_terminal"]);
 const WEB_TOOLS = new Set(["web_fetch", "web_search"]);
 
 export class AgentActivityProjectionStore {
@@ -125,10 +127,12 @@ export function summarizeAgentActivity(
   let calledTools = 0;
   let commands = 0;
   let exploration = 0;
+  let terminalReads = 0;
   let webSearch = 0;
   let calledToolsRunning = false;
   let commandsRunning = false;
   let explorationRunning = false;
+  let terminalReadsRunning = false;
   let webSearchRunning = false;
   const changedPaths = new Set<string>();
   let fileChangesRunning = false;
@@ -151,6 +155,9 @@ export function summarizeAgentActivity(
     if (WEB_TOOLS.has(name)) {
       webSearch += 1;
       webSearchRunning ||= item.status === "inProgress";
+    } else if (TERMINAL_READ_TOOLS.has(name)) {
+      terminalReads += 1;
+      terminalReadsRunning ||= item.status === "inProgress";
     } else if (EXPLORATION_TOOLS.has(name)) {
       exploration += 1;
       explorationRunning ||= item.status === "inProgress";
@@ -188,6 +195,13 @@ export function summarizeAgentActivity(
       running: commandsRunning,
     });
   }
+  if (terminalReads > 0) {
+    summaries.push({
+      kind: "terminalRead",
+      label: "Leu o terminal do chat",
+      running: terminalReadsRunning,
+    });
+  }
   if (webSearch > 0) {
     summaries.push({ kind: "webSearch", label: "Pesquisou na web", running: webSearchRunning });
   }
@@ -220,6 +234,9 @@ export function activeAgentActivity(
     if (WEB_TOOLS.has(name)) {
       return { kind: "webSearch", label: webSearchActivityTitle(item.description, item.status) };
     }
+    if (TERMINAL_READ_TOOLS.has(name)) {
+      return { kind: "terminalRead", label: "Lendo terminal do chat" };
+    }
     if (EXPLORATION_TOOLS.has(name)) {
       return { kind: "exploration", label: "Lendo arquivos" };
     }
@@ -232,6 +249,10 @@ export function activeAgentActivity(
     };
   }
   return null;
+}
+
+export function isTerminalReadTool(name: string): boolean {
+  return TERMINAL_READ_TOOLS.has(name.toLowerCase());
 }
 
 export function webSearchActivityTitle(

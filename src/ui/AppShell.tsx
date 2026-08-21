@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 
-import { openExternalUrl } from "../infrastructure/codexClient";
+import { openExternalUrl, openLocalPath } from "../infrastructure/codexClient";
 import { isBrowserPreview } from "../platform/DesktopRuntime";
 import type { AppController } from "../state/appController";
 
@@ -9,6 +9,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { AutomationsView } from "./AutomationsView";
 import { applyDesktopAppearance } from "./appearance";
 import { Composer, type ComposerDraftRequest } from "./Composer";
+import { ConversationToolbar } from "./ConversationToolbar";
 import { formatShortDate } from "./dateFormat";
 import { HomeComposerModeToggle } from "./HomeComposerModeToggle";
 import { Icon } from "./Icon";
@@ -74,6 +75,17 @@ export function AppShell(props: { readonly controller: AppController }) {
   function requestDraft(text: string): void {
     nextDraftRequestId += 1;
     setDraftRequest({ id: nextDraftRequestId, text });
+  }
+
+  async function openWorkspace(path: string): Promise<void> {
+    if (isBrowserPreview()) {
+      return;
+    }
+    try {
+      await openLocalPath(path);
+    } catch (reason) {
+      props.controller.reportError(reason);
+    }
   }
 
   function synchronizeChatDockInset(): void {
@@ -164,11 +176,25 @@ export function AppShell(props: { readonly controller: AppController }) {
               "chatgpt-empty":
                 props.controller.product() === "chatgpt" &&
                 props.controller.currentThread() === null,
+              "has-conversation-toolbar":
+                props.controller.product() === "codex" && props.controller.currentThread() !== null,
               "work-surface": props.controller.conversationMode() === "work",
             }}
             hidden={activeSurface() !== "chat"}
             ref={chatPageElement}
           >
+            <Show
+              when={
+                props.controller.product() === "codex" ? props.controller.currentThread() : null
+              }
+            >
+              {(thread) => (
+                <ConversationToolbar
+                  onOpenWorkspace={(path) => void openWorkspace(path)}
+                  thread={thread()}
+                />
+              )}
+            </Show>
             <Timeline controller={props.controller} onSelectSuggestion={requestDraft} />
             <div class="chat-dock" ref={chatDockElement}>
               <Show when={props.controller.activePlan()}>

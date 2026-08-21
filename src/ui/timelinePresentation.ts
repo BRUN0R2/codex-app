@@ -53,13 +53,19 @@ export function commandActivityTitle(
   status: ActivityStatus,
   expanded: boolean,
 ): string {
-  if (status === "inProgress") {
-    return expanded ? "Executando comando" : `Executando ${command}`;
+  if (expanded) {
+    return activityStateTitle("comando", status);
   }
-  if (!expanded) {
-    return status === "completed" ? `Executou ${command}` : activityFailureTitle(command, status);
+  switch (status) {
+    case "completed":
+      return `Comando executado: ${command}`;
+    case "declined":
+      return `Comando recusado: ${command}`;
+    case "failed":
+      return `Falha ao executar comando: ${command}`;
+    case "inProgress":
+      return `Executando comando: ${command}`;
   }
-  return activityStateTitle("comando", status);
 }
 
 export function visibleCommandDurationMs(
@@ -91,6 +97,19 @@ export function toolActivityTitle(
       : activityFailureTitle(description, status);
   }
   return activityStateTitle("ferramenta", status);
+}
+
+export function terminalReadActivityTitle(status: ActivityStatus): string {
+  switch (status) {
+    case "completed":
+      return "Terminal do chat lido";
+    case "declined":
+      return "Leitura do terminal do chat recusada";
+    case "failed":
+      return "Falha ao ler o terminal do chat";
+    case "inProgress":
+      return "Lendo terminal do chat";
+  }
 }
 
 export function fileChangeActivityTitle(

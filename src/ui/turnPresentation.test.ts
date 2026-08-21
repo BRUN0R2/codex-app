@@ -23,22 +23,20 @@ describe("turn presentation", () => {
       ),
     ).toEqual([
       "userMessage:user-1",
-      "agentMessage:commentary-1",
-      "work:command-1",
+      "work:commentary-1,command-1",
       "userMessage:user-2",
-      "agentMessage:commentary-2",
+      "work:commentary-2",
       "userMessage:user-3",
       "agentMessage:answer-1",
     ]);
-    expect(presentation.firstWorkBlockIndex).toBe(2);
-    expect(presentation.lastWorkBlockIndex).toBe(2);
-    expect(presentation.trailingAgentMessageBlockIndex).toBe(6);
+    expect(presentation.firstWorkBlockIndex).toBe(1);
+    expect(presentation.lastWorkBlockIndex).toBe(3);
+    expect(presentation.trailingAgentMessageBlockIndex).toBe(5);
     expect(presentation.blocks.map((block) => block.key)).toEqual([
       "message:userMessage:user-1",
-      "message:agentMessage:commentary-1",
-      "work-after:agentMessage:commentary-1",
+      "work-after:userMessage:user-1",
       "message:userMessage:user-2",
-      "message:agentMessage:commentary-2",
+      "work-after:userMessage:user-2",
       "message:userMessage:user-3",
       "message:agentMessage:answer-1",
     ]);
@@ -57,16 +55,12 @@ describe("turn presentation", () => {
       agentMessage("commentary-1", "Comentário", "commentary"),
     ]);
 
-    expect(presentation.blocks).toHaveLength(3);
+    expect(presentation.blocks).toHaveLength(2);
     expect(presentation.blocks[1]).toMatchObject({
       kind: "work",
-      items: [{ id: "command-1" }],
+      items: [{ id: "command-1" }, { id: "commentary-1" }],
     });
-    expect(presentation.blocks[2]).toMatchObject({
-      kind: "message",
-      item: { id: "commentary-1" },
-    });
-    expect(presentation.trailingAgentMessageBlockIndex).toBe(2);
+    expect(presentation.trailingAgentMessageBlockIndex).toBeNull();
   });
 
   it("reuses unchanged blocks while a trailing message streams", () => {
@@ -79,8 +73,7 @@ describe("turn presentation", () => {
 
     expect(next).not.toBe(first);
     expect(next.blocks[0]).toBe(first.blocks[0]);
-    expect(next.blocks[1]).toBe(first.blocks[1]);
-    expect(next.blocks[2]).not.toBe(first.blocks[2]);
+    expect(next.blocks[1]).not.toBe(first.blocks[1]);
   });
 
   it("returns the same projection when only ignored plan data changes", () => {

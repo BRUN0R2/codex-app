@@ -10,6 +10,7 @@ const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const VITE_ENTRY = path.join(PROJECT_ROOT, "node_modules", "vite", "bin", "vite.js");
 const PREVIEW_PORT = 1420;
 const HOME_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1`;
+const CHAT_REFERENCE_PREVIEW_URL = `${HOME_PREVIEW_URL}&chatReference=1`;
 const SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=general`;
 const SETTINGS_INTERACTION_PREVIEW_URL = `${SETTINGS_PREVIEW_URL}&preferenceDelay=400`;
 const AUTOMATIONS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&surface=automations`;
@@ -27,6 +28,100 @@ const SCENARIOS = [
       document.querySelector(".model-speed-indicator + .model-button-name") !== null`,
     auditExpression: composerFastModeVisualAuditExpression,
     validate: validateComposerFastModeMetrics,
+  },
+  {
+    id: "chat-reference",
+    url: CHAT_REFERENCE_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Audit project against RULES.md"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Audit project against RULES.md"),
+      );
+      threadButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const turnButton = document.querySelector(".turn-header-button");
+        if (turnButton?.getAttribute("aria-expanded") !== "true") {
+          turnButton?.click();
+        }
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const groups = [...document.querySelectorAll(".agent-activity-summary")];
+          const finalGroup = groups.at(-1);
+          if (finalGroup?.closest("details")?.open !== true) {
+            finalGroup?.click();
+          }
+          const timeline = document.querySelector(".timeline");
+          if (timeline instanceof HTMLElement) {
+            timeline.scrollTop = 0;
+          }
+        }));
+      }));
+    })()`,
+    readyExpression: `document.querySelector(".turn-header-button")?.getAttribute("aria-expanded") === "true" &&
+      document.querySelectorAll(".agent-activity-summary").length === 2 &&
+      document.querySelectorAll(".agent-activity-group[open]").length === 1 &&
+      [...document.querySelectorAll(".activity-title")].some(
+        (element) => element.textContent?.trim() === "Terminal do chat lido",
+      )`,
+    auditExpression: chatReferenceVisualAuditExpression,
+    validate: validateChatReferenceMetrics,
+  },
+  {
+    id: "chat-open-menu",
+    url: CHAT_REFERENCE_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Audit project against RULES.md"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Audit project against RULES.md"),
+      );
+      threadButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        document.querySelector(".conversation-open-menu > summary")?.click();
+      }));
+    })()`,
+    readyExpression: `document.querySelector(".conversation-open-menu[open]") !== null &&
+      document.querySelector(".conversation-open-menu-popover [role='menuitem']") !== null`,
+    auditExpression: chatOpenMenuVisualAuditExpression,
+    validate: validateChatOpenMenuMetrics,
+  },
+  {
+    id: "chat-menu-dismiss",
+    url: CHAT_REFERENCE_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Audit project against RULES.md"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Audit project against RULES.md"),
+      );
+      threadButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const trigger = document.querySelector(".conversation-open-menu > summary");
+        const menu = document.querySelector(".conversation-open-menu");
+        trigger?.click();
+        requestAnimationFrame(() => {
+          document.querySelector(".timeline")?.dispatchEvent(
+            new PointerEvent("pointerdown", { bubbles: true, pointerId: 1 }),
+          );
+          window.__chatMenuOutsideDismissed =
+            menu instanceof HTMLDetailsElement && menu.open === false;
+          trigger?.click();
+          requestAnimationFrame(() => {
+            document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+            window.__chatMenuEscapeDismissed =
+              menu instanceof HTMLDetailsElement && menu.open === false;
+          });
+        });
+      }));
+    })()`,
+    readyExpression: `window.__chatMenuOutsideDismissed === true &&
+      window.__chatMenuEscapeDismissed === true &&
+      document.activeElement === document.querySelector(".conversation-open-menu > summary")`,
+    auditExpression: chatMenuDismissVisualAuditExpression,
+    validate: validateChatMenuDismissMetrics,
   },
   {
     id: "project-color-editor",
@@ -243,7 +338,22 @@ async function waitForPreview(client, readyExpression, scenarioId) {
     }
     await delay(50);
   }
-  throw new Error(`A prévia visual de ${scenarioId} não ficou pronta dentro de 15 segundos.`);
+  const diagnostics = await client
+    .evaluate(
+      `({
+        title: document.title,
+        body: document.body?.innerText?.slice(0, 4000) ?? "",
+        failures: [...document.querySelectorAll(
+          ".bootstrap-failure, .render-failure, .frontend-failure, [role='alert']",
+        )].map((element) => element.textContent?.trim() ?? ""),
+      })`,
+      false,
+    )
+    .catch(() => null);
+  throw new Error(
+    `A prévia visual de ${scenarioId} não ficou pronta dentro de 15 segundos.\n` +
+      `Diagnóstico: ${JSON.stringify(diagnostics)}`,
+  );
 }
 
 function composerFastModeVisualAuditExpression() {
@@ -301,6 +411,184 @@ function composerFastModeVisualAuditExpression() {
         buttonElement instanceof HTMLElement
           ? buttonElement.scrollWidth - buttonElement.clientWidth
           : null,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function chatReferenceVisualAuditExpression() {
+  return `(() => {
+    const rectangle = (element, label) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Elemento ausente: " + label);
+      }
+      const bounds = element.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    const styles = (element, label) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Elemento ausente: " + label);
+      }
+      const style = getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        borderRadius: style.borderRadius,
+        borderTopWidth: style.borderTopWidth,
+        color: style.color,
+        fontFamily: style.fontFamily,
+        fontSize: style.fontSize,
+        fontWeight: style.fontWeight,
+        lineHeight: style.lineHeight,
+        paddingTop: style.paddingTop,
+        paddingRight: style.paddingRight,
+        paddingBottom: style.paddingBottom,
+        paddingLeft: style.paddingLeft,
+      };
+    };
+    const toolbarElement = document.querySelector(".conversation-toolbar");
+    const toolbarTitleElement = document.querySelector(".conversation-toolbar-title strong");
+    const openMenuTriggerElement = document.querySelector(".conversation-open-menu > summary");
+    const timeline = document.querySelector(".timeline");
+    const timelineInnerElement = document.querySelector(".timeline-inner");
+    const userBubbleElement = document.querySelector(".user-message-bubble");
+    const durationElement = document.querySelector(".turn-duration-label");
+    const dividerElement = document.querySelector(".turn-header-line");
+    const commentaryElements = [...document.querySelectorAll(
+      ".agent-message-row.commentary .markdown",
+    )];
+    const firstCommentaryElement = commentaryElements[0];
+    const firstCommandElement = document.querySelector(
+      ".command-activity-card:not(.grouped-activity-item) .activity-title",
+    );
+    const groupSummaryElements = [...document.querySelectorAll(
+      ".agent-activity-summary .activity-title",
+    )];
+    const terminalReadElement = [...document.querySelectorAll(".activity-title")].find(
+      (element) => element.textContent?.trim() === "Terminal do chat lido",
+    );
+    const finalAnswerElement = document.querySelector(
+      ".agent-message-row:not(.commentary) .agent-message-markdown",
+    );
+    const rootStyle = getComputedStyle(document.documentElement);
+    const userBubble = rectangle(userBubbleElement, ".user-message-bubble");
+    const duration = rectangle(durationElement, ".turn-duration-label");
+    const firstCommentary = rectangle(
+      firstCommentaryElement,
+      ".agent-message-row.commentary .markdown",
+    );
+    const firstCommand = rectangle(firstCommandElement, "primeiro comando");
+    const terminalRead = rectangle(terminalReadElement, "Terminal do chat lido");
+    const finalAnswer = rectangle(finalAnswerElement, "resposta final");
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      toolbar: rectangle(toolbarElement, ".conversation-toolbar"),
+      toolbarStyle: styles(toolbarElement, ".conversation-toolbar"),
+      toolbarTitle: toolbarTitleElement?.textContent?.trim() ?? null,
+      openMenuLabel: openMenuTriggerElement?.textContent?.replace(/\\s+/g, " ").trim() ?? null,
+      openMenuAriaLabel: openMenuTriggerElement?.getAttribute("aria-label") ?? null,
+      timelineInner: rectangle(timelineInnerElement, ".timeline-inner"),
+      userBubble,
+      userBubbleStyle: styles(userBubbleElement, ".user-message-bubble"),
+      duration,
+      durationStyle: styles(durationElement, ".turn-duration-label"),
+      divider: rectangle(dividerElement, ".turn-header-line"),
+      dividerStyle: styles(dividerElement, ".turn-header-line"),
+      firstCommentary,
+      commentaryStyle: styles(firstCommentaryElement, "primeiro commentary"),
+      firstCommand,
+      firstCommandText: firstCommandElement?.textContent?.trim() ?? null,
+      activityStyle: styles(firstCommandElement, "primeiro comando"),
+      terminalRead,
+      terminalReadText: terminalReadElement?.textContent?.trim() ?? null,
+      finalAnswer,
+      groupSummaries: groupSummaryElements.map((element) => element.textContent?.trim() ?? ""),
+      commentaryCount: commentaryElements.length,
+      commandRowCount: document.querySelectorAll(".command-activity-card").length,
+      activityGroupCount: document.querySelectorAll(".agent-activity-group").length,
+      openActivityGroupCount: document.querySelectorAll(".agent-activity-group[open]").length,
+      turnExpanded:
+        document.querySelector(".turn-header-button")?.getAttribute("aria-expanded") === "true",
+      timelineAriaLabel: timeline?.getAttribute("aria-label") ?? null,
+      articleCount: document.querySelectorAll(".conversation-turn article.message-row").length,
+      detailsCount: document.querySelectorAll(".conversation-turn details").length,
+      bodyText:
+        document.querySelector(".conversation-turn")?.textContent?.replace(/\\s+/g, " ").trim() ??
+        "",
+      workOrderIsCorrect:
+        userBubble.bottom < duration.top &&
+        duration.bottom <= firstCommentary.top &&
+        firstCommentary.top < firstCommand.top &&
+        firstCommand.top < terminalRead.top &&
+        terminalRead.top < finalAnswer.top,
+      threadContentMaxWidth: rootStyle
+        .getPropertyValue("--thread-content-max-width")
+        .trim(),
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      timelineHorizontalOverflow:
+        timeline instanceof HTMLElement ? timeline.scrollWidth - timeline.clientWidth : null,
+    };
+  })()`;
+}
+
+function chatOpenMenuVisualAuditExpression() {
+  return `(() => {
+    const rectangle = (selector) => {
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Elemento ausente: " + selector);
+      }
+      const bounds = element.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    const menu = document.querySelector(".conversation-open-menu");
+    const popover = document.querySelector(".conversation-open-menu-popover");
+    const menuItem = document.querySelector(
+      ".conversation-open-menu-popover [role='menuitem']",
+    );
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      toolbar: rectangle(".conversation-toolbar"),
+      trigger: rectangle(".conversation-open-menu > summary"),
+      popover: rectangle(".conversation-open-menu-popover"),
+      menuItem: rectangle(".conversation-open-menu-popover [role='menuitem']"),
+      menuOpen: menu instanceof HTMLDetailsElement && menu.open,
+      menuRole: popover?.getAttribute("role") ?? null,
+      menuItemRole: menuItem?.getAttribute("role") ?? null,
+      menuItemText: menuItem?.textContent?.replace(/\\s+/g, " ").trim() ?? null,
+      menuItemCount: document.querySelectorAll(
+        ".conversation-open-menu-popover [role='menuitem']",
+      ).length,
+      popoverBackground:
+        popover instanceof HTMLElement ? getComputedStyle(popover).backgroundColor : null,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function chatMenuDismissVisualAuditExpression() {
+  return `(() => {
+    const menu = document.querySelector(".conversation-open-menu");
+    const trigger = document.querySelector(".conversation-open-menu > summary");
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      menuOpen: menu instanceof HTMLDetailsElement && menu.open,
+      outsideDismissed: window.__chatMenuOutsideDismissed === true,
+      escapeDismissed: window.__chatMenuEscapeDismissed === true,
+      triggerFocused: document.activeElement === trigger,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
@@ -602,6 +890,156 @@ function automationEditorVisualAuditExpression() {
       switchAriaChecked: switchElement.getAttribute("aria-checked"),
     };
   })()`;
+}
+
+function validateChatReferenceMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no chat em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o chat criou overflow horizontal global");
+  assert(
+    metrics.timelineHorizontalOverflow <= tolerance,
+    "a timeline criou overflow horizontal",
+  );
+  assert(Math.abs(metrics.toolbar.top - 34) <= tolerance, "a toolbar não começa após o titlebar");
+  assert(Math.abs(metrics.toolbar.height - 64) <= tolerance, "a toolbar não mede 64px");
+  assert(
+    metrics.toolbarStyle.backgroundColor === "rgb(24, 24, 24)",
+    "a toolbar não usa a superfície #181818",
+  );
+  assert(
+    metrics.toolbarTitle === "Audit project against RULES.md",
+    "o título da tarefa não foi renderizado na toolbar",
+  );
+  assert(metrics.openMenuLabel === "Abrir em", "a ação Abrir em está incorreta");
+  assert(
+    metrics.openMenuAriaLabel === "Escolher onde abrir o workspace",
+    "a ação Abrir em perdeu seu nome acessível",
+  );
+  assert(
+    metrics.userBubble.top - metrics.toolbar.bottom >= 20 &&
+      metrics.userBubble.top - metrics.toolbar.bottom <= 24,
+    "o início da conversa não respeita o inset oficial após a toolbar",
+  );
+  assert(
+    metrics.threadContentMaxWidth === "768px",
+    "a largura física oficial equivalente a 48rem foi alterada",
+  );
+  assert(
+    metrics.timelineInner.width <= 768 + tolerance && metrics.timelineInner.width >= 560,
+    "a coluna da conversa saiu da largura oficial responsiva",
+  );
+  assert(
+    metrics.userBubbleStyle.backgroundColor === "rgb(34, 34, 34)",
+    "a bolha do usuário não usa #222222",
+  );
+  assert(metrics.userBubbleStyle.borderRadius === "12px", "o raio da bolha não mede 12px");
+  assert(metrics.userBubbleStyle.borderTopWidth === "0px", "a bolha ganhou borda indevida");
+  assert(
+    metrics.userBubbleStyle.paddingTop === "9px" &&
+      metrics.userBubbleStyle.paddingRight === "12px" &&
+      metrics.userBubbleStyle.paddingBottom === "9px" &&
+      metrics.userBubbleStyle.paddingLeft === "12px",
+    "o padding da bolha do usuário divergiu da referência",
+  );
+  assert(metrics.durationStyle.fontSize === "14px", "a duração não usa tipografia de 14px");
+  assert(metrics.durationStyle.fontWeight === "400", "a duração ficou pesada demais");
+  assert(
+    metrics.durationStyle.color === "rgb(144, 144, 144)",
+    "a duração não usa o cinza #909090",
+  );
+  assert(metrics.divider.height <= 1 + tolerance, "o divisor do turno ficou espesso");
+  assert(
+    metrics.dividerStyle.backgroundColor === "rgb(45, 45, 45)",
+    "o divisor do turno não usa #2d2d2d",
+  );
+  assert(metrics.commentaryStyle.fontSize === "14px", "o commentary não usa 14px");
+  assert(metrics.commentaryStyle.lineHeight === "22.4px", "o commentary não usa line-height 1.6");
+  assert(
+    metrics.commentaryStyle.color === "rgb(223, 223, 223)",
+    "o commentary não usa #dfdfdf",
+  );
+  assert(
+    metrics.commentaryStyle.fontFamily.includes("OpenAI Sans"),
+    "o chat deixou de priorizar OpenAI Sans",
+  );
+  assert(metrics.activityStyle.fontSize === "14px", "a atividade não usa 14px");
+  assert(metrics.activityStyle.fontWeight === "400", "a atividade ficou pesada demais");
+  assert(
+    metrics.activityStyle.color === "rgb(144, 144, 144)",
+    "a atividade não usa #909090",
+  );
+  assert(
+    metrics.firstCommandText?.startsWith("Comando executado: Get-Content -Raw docs/RULES.md"),
+    "o primeiro comando não usa a semântica oficial",
+  );
+  assert(metrics.terminalReadText === "Terminal do chat lido", "a leitura de terminal está incorreta");
+  assert(
+    JSON.stringify(metrics.groupSummaries) ===
+      JSON.stringify(["Executou comandos", "Executou comandos e leu o terminal do chat"]),
+    "os resumos semânticos das atividades divergiram",
+  );
+  assert(metrics.commentaryCount === 3, "o cenário não renderizou os três commentaries");
+  assert(metrics.commandRowCount === 7, "a expansão não renderizou os comandos esperados");
+  assert(metrics.activityGroupCount === 2, "a timeline não criou os dois grupos oficiais");
+  assert(metrics.openActivityGroupCount === 1, "mais de um grupo ficou expandido");
+  assert(metrics.turnExpanded === true, "o trabalho do turno não ficou expandido");
+  assert(metrics.timelineAriaLabel === "Conversa", "a timeline perdeu seu nome acessível");
+  assert(metrics.articleCount === 5, "as mensagens deixaram de usar artigos semânticos");
+  assert(metrics.detailsCount >= 9, "os disclosures de atividade ficaram incompletos");
+  assert(metrics.workOrderIsCorrect === true, "a ordem visual do turno foi alterada");
+  assert(
+    metrics.bodyText.includes("Trabalhou por 1 min 34 s") &&
+      metrics.bodyText.includes("Auditoria rápida concluída"),
+    "o turno de referência ficou incompleto",
+  );
+}
+
+function validateChatOpenMenuMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no menu em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o menu Abrir em criou overflow horizontal");
+  assert(metrics.menuOpen === true, "o disclosure Abrir em não abriu");
+  assert(metrics.menuRole === "menu", "o popover Abrir em não expõe role menu");
+  assert(metrics.menuItemRole === "menuitem", "a ação do popover não expõe role menuitem");
+  assert(metrics.menuItemCount === 1, "o menu Abrir em possui ações inesperadas");
+  assert(
+    metrics.menuItemText === "Explorador de Arquivos",
+    "a ação do menu Abrir em está incorreta",
+  );
+  assert(
+    metrics.popover.top >= metrics.trigger.bottom &&
+      metrics.popover.right <= viewport.width + tolerance,
+    "o popover Abrir em saiu da toolbar ou do viewport",
+  );
+  assert(
+    metrics.menuItem.left >= metrics.popover.left &&
+      metrics.menuItem.right <= metrics.popover.right + tolerance,
+    "a ação Abrir em ultrapassa o popover",
+  );
+  assert(
+    metrics.popoverBackground === "rgb(40, 40, 40)",
+    "o popover Abrir em não usa a superfície elevada",
+  );
+  assert(Math.abs(metrics.toolbar.height - 64) <= tolerance, "a toolbar mudou com o menu aberto");
+}
+
+function validateChatMenuDismissMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no fechamento do menu em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o fechamento do menu criou overflow");
+  assert(metrics.outsideDismissed === true, "o clique externo não fechou o menu Abrir em");
+  assert(metrics.escapeDismissed === true, "Escape não fechou o menu Abrir em");
+  assert(metrics.menuOpen === false, "o menu Abrir em permaneceu aberto");
+  assert(metrics.triggerFocused === true, "Escape não devolveu foco ao gatilho Abrir em");
 }
 
 function validateComposerFastModeMetrics(metrics, viewport) {
@@ -972,7 +1410,12 @@ class CdpClient {
       returnByValue: true,
     });
     if (response.exceptionDetails !== undefined) {
-      throw new Error(response.exceptionDetails.text ?? "Falha ao avaliar a prévia.");
+      const description =
+        response.exceptionDetails.exception?.description ??
+        response.exceptionDetails.exception?.value ??
+        response.exceptionDetails.text ??
+        "Falha ao avaliar a prévia.";
+      throw new Error(String(description));
     }
     return response.result.value;
   }

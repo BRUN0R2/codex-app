@@ -14,6 +14,8 @@ export function toolIconName(name: string): IconName {
       return "globe";
     case "shell":
     case "run_shell":
+    case "read_output":
+    case "read_thread_terminal":
       return "terminal";
     case "apply_patch":
     case "edit_file":
@@ -37,6 +39,9 @@ export function toolLabel(name: string): string {
       return "Pesquisa na web";
     case "view_image":
       return "Visualização de imagem";
+    case "read_output":
+    case "read_thread_terminal":
+      return "Terminal do chat";
     default:
       return name;
   }

@@ -34,6 +34,27 @@ describe("agent activity presentation", () => {
     expect(agentActivitySummaryLabel(items)).toBe("Executou comandos e pesquisou na web");
   });
 
+  it("presents stored output reads as chat-terminal activity", () => {
+    const items = [
+      command("command-1"),
+      tool("terminal-read-1", "read_output", "Read stored output output-1"),
+    ];
+
+    expect(agentActivitySummaryLabel(items)).toBe("Executou um comando e leu o terminal do chat");
+    expect(summarizeAgentActivity(items).map(({ kind }) => kind)).toEqual([
+      "commands",
+      "terminalRead",
+    ]);
+    expect(
+      activeAgentActivity([
+        {
+          ...tool("terminal-read-2", "read_output", "Read stored output output-2"),
+          status: "inProgress",
+        },
+      ]),
+    ).toEqual({ kind: "terminalRead", label: "Lendo terminal do chat" });
+  });
+
   it("joins all supported categories in a concise Portuguese list", () => {
     const items = [
       tool("tool-1", "custom_tool"),

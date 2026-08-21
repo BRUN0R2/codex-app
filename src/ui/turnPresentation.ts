@@ -5,10 +5,7 @@ export type TurnMessageItem = Extract<
   { readonly type: "agentMessage" | "userMessage" }
 >;
 
-export type TurnWorkItem = Exclude<
-  VisibleThreadItem,
-  { readonly type: "agentMessage" | "plan" | "userMessage" }
->;
+export type TurnWorkItem = Exclude<VisibleThreadItem, { readonly type: "plan" | "userMessage" }>;
 
 export type TurnPresentationBlock =
   | {
@@ -144,5 +141,7 @@ function sameReferences<T>(left: readonly T[], right: readonly T[]): boolean {
 }
 
 function isVisibleMessage(item: VisibleThreadItem): item is TurnMessageItem {
-  return item.type === "agentMessage" || item.type === "userMessage";
+  return (
+    item.type === "userMessage" || (item.type === "agentMessage" && item.phase !== "commentary")
+  );
 }

@@ -102,7 +102,8 @@
   --padding-row-y: calc(var(--spacing) * 1);
   --padding-row-x: calc(var(--spacing) * 2);
   --padding-toolbar: calc(var(--spacing) * 4);
-  --thread-content-max-width: 54rem;
+  /* O desktop oficial usa 48rem com raiz de 16px; aqui a raiz é configurável. */
+  --thread-content-max-width: 768px;
   --thread-content-inline-padding: 16px;
   --composer-inline-overhang: calc(var(--spacing) * 6);
   --home-composer-inline-inset: calc(var(--spacing) * 3.25);
@@ -117,9 +118,12 @@
   --font-caption: 12px;
   --font-small: 13px;
   --font-base: 14px;
-  --codex-chat-font-size: max(15px, 1rem);
-  --codex-chat-code-font-size: max(13px, calc(1rem - 1px));
+  --codex-chat-font-size: var(--font-base);
+  --codex-chat-code-font-size: var(--font-small);
   --codex-chat-line-height: 1.6;
+  --codex-chat-text: #dfdfdf;
+  --codex-chat-muted: #909090;
+  --codex-chat-user-surface: #222222;
   --font-control: var(--font-base);
   --font-prominent-control: 14px;
   --font-body: var(--codex-chat-font-size);
@@ -2569,11 +2573,125 @@ pre {
 
 .chat-page {
   --chat-dock-height: 0px;
+  --chat-toolbar-height: 0px;
 
   position: relative;
   min-width: 0;
   min-height: 0;
   flex: 1;
+}
+
+.chat-page.has-conversation-toolbar {
+  --chat-toolbar-height: 64px;
+}
+
+.conversation-toolbar {
+  position: absolute;
+  z-index: 10;
+  top: 0;
+  right: 0;
+  left: 0;
+  display: flex;
+  height: var(--chat-toolbar-height);
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 20px;
+  background: var(--bg);
+}
+
+.conversation-toolbar-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--codex-chat-text);
+}
+
+.conversation-toolbar-title strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--font-base);
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-toolbar-project-icon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+  color: var(--codex-chat-muted);
+}
+
+.conversation-open-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.conversation-open-menu > summary {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  color: var(--codex-chat-muted);
+  font-size: var(--font-small);
+  font-weight: 500;
+  cursor: pointer;
+  list-style: none;
+}
+
+.conversation-open-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.conversation-open-menu > summary:hover,
+.conversation-open-menu > summary:focus-visible,
+.conversation-open-menu[open] > summary {
+  background: var(--surface-hover);
+  color: var(--codex-chat-text);
+}
+
+.conversation-open-menu-popover {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  right: 0;
+  width: max-content;
+  min-width: 190px;
+  padding: 5px;
+  border: 1px solid var(--border-heavy);
+  border-radius: 9px;
+  background: var(--surface-elevated);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 32%);
+}
+
+.conversation-open-menu-popover button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: var(--font-small);
+  text-align: left;
+}
+
+.conversation-open-menu-popover button:hover,
+.conversation-open-menu-popover button:focus-visible {
+  background: var(--surface-hover);
+  color: var(--text);
 }
 
 .chat-dock {
@@ -2626,7 +2744,7 @@ pre {
 
 .timeline-frame {
   position: absolute;
-  inset: 0;
+  inset: var(--chat-toolbar-height) 0 0;
   display: flex;
   min-height: 0;
 }
@@ -2755,6 +2873,10 @@ pre {
     calc(var(--chat-dock-height) + 32px);
   /* Virtualizer applies the only anchor correction; native scroll anchoring would double it. */
   overflow-anchor: none;
+}
+
+.chat-page.has-conversation-toolbar .timeline-inner {
+  padding-top: 22px;
 }
 
 .timeline-history-button {
@@ -3012,7 +3134,7 @@ pre {
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  margin: 0 0 16px;
+  margin: 0 0 13px;
 }
 
 .message-content {
@@ -3022,6 +3144,7 @@ pre {
 
 .user-message-row {
   justify-content: flex-end;
+  margin-bottom: 24px;
 }
 
 .user-message-row .message-content {
@@ -3054,11 +3177,11 @@ pre {
 .user-message-bubble {
   position: relative;
   min-width: 0;
-  padding: 9px 13px;
-  border: 1px solid rgb(255 255 255 / 10%);
-  border-radius: 16px;
-  background: rgb(255 255 255 / 8%);
-  box-shadow: 0 4px 16px rgb(0 0 0 / 10%);
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--codex-chat-user-surface);
+  box-shadow: none;
 }
 
 .user-message-bubble.clamped {
@@ -3096,7 +3219,7 @@ pre {
 .message-text {
   margin: 0;
   overflow-wrap: anywhere;
-  color: var(--text);
+  color: var(--codex-chat-text);
   font-family: var(--font-openai-sans);
   font-size: var(--codex-chat-font-size);
   font-weight: 400;
@@ -3105,17 +3228,13 @@ pre {
 }
 
 .user-message-row .message-text {
-  color: var(--text);
-}
-
-.agent-message-row.commentary .markdown {
-  color: rgb(255 255 255 / 92%);
+  color: var(--codex-chat-text);
 }
 
 .markdown {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: var(--text);
+  color: var(--codex-chat-text);
   font-family: var(--font-openai-sans);
   font-size: var(--codex-chat-font-size);
   font-weight: 400;
@@ -3231,10 +3350,10 @@ pre {
 }
 
 .markdown code {
-  padding: 2px 4px;
-  border-radius: 4px;
-  background: rgb(255 255 255 / 8%);
-  color: var(--text);
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: #2e2e2e;
+  color: var(--codex-chat-text);
   font-size: 0.88em;
 }
 
@@ -3433,7 +3552,7 @@ pre {
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  margin: 0 0 6px;
+  margin: 0 0 12px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -3455,36 +3574,37 @@ pre {
   min-width: 0;
   max-width: 100%;
   flex-direction: column;
-  margin: 0 0 6px;
+  gap: 8px;
+  margin: 0 0 13px;
 }
 
 .turn-active-status {
   display: flex;
   min-width: 0;
-  min-height: 26px;
+  min-height: 21px;
   align-items: center;
-  margin: 0 0 3px;
-  padding: 2px 0;
-  color: var(--color-token-text-secondary);
-  font-size: max(14px, 0.95rem);
-  font-weight: 500;
-  line-height: 1.45;
+  margin: 0;
+  padding: 0;
+  color: var(--codex-chat-muted);
+  font-size: var(--codex-chat-font-size);
+  font-weight: 400;
+  line-height: 1.5;
 }
 
 .turn-header-button {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 3px;
   align-self: flex-start;
-  padding: 2px 0;
+  padding: 0;
   border: 0;
   background: transparent;
-  color: var(--color-token-text-secondary);
-  font-size: max(14px, 0.95rem);
-  font-weight: 500;
+  color: var(--codex-chat-muted);
+  font-size: var(--codex-chat-font-size);
+  font-weight: 400;
   cursor: pointer;
   user-select: none;
-  line-height: 1.4;
+  line-height: 1.5;
   transition: color 120ms ease;
 }
 
@@ -3493,14 +3613,15 @@ pre {
 }
 
 .turn-duration-label {
-  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
 }
 
 .turn-header-line {
   width: 100%;
   height: 1px;
-  margin-top: 4px;
-  background: var(--color-token-border);
+  margin: 0;
+  background: #2d2d2d;
 }
 
 .turn-body {
@@ -3509,7 +3630,7 @@ pre {
   min-width: 0;
   max-width: 100%;
   flex-direction: column;
-  gap: 4px;
+  gap: 0;
 }
 
 .context-compaction-row {
@@ -3542,25 +3663,12 @@ pre {
   min-width: 0;
   max-width: 100%;
   align-items: center;
-  gap: 8px;
-  min-height: 30px;
-  padding: 3px 0;
+  gap: 7px;
+  min-height: 28px;
+  padding: 2px 0;
   cursor: pointer;
   user-select: none;
   list-style: none;
-}
-
-.commentary-message-text {
-  min-width: 0;
-  max-width: 100%;
-  margin: 0;
-  overflow-wrap: anywhere;
-  color: rgb(255 255 255 / 92%);
-  font-family: var(--font-openai-sans);
-  font-size: var(--codex-chat-font-size);
-  font-weight: 450;
-  line-height: var(--codex-chat-line-height);
-  white-space: pre-wrap;
 }
 
 .commentary-content {
@@ -3572,7 +3680,7 @@ pre {
 }
 
 .commentary-content .markdown {
-  color: rgb(255 255 255 / 92%);
+  color: var(--codex-chat-text);
 }
 
 .commentary-content .markdown > :last-child {
@@ -3584,7 +3692,7 @@ pre {
 }
 
 .agent-activity-group {
-  margin-bottom: 5px;
+  margin-bottom: 12px;
 }
 
 .agent-activity-summary {
@@ -3627,8 +3735,8 @@ pre {
 .grouped-activity-item > .activity-summary,
 .tool-activity-row.grouped-activity-item {
   width: 100%;
-  min-height: 28px;
-  padding: 2px 0;
+  min-height: 26px;
+  padding: 1px 0;
 }
 
 .grouped-activity-item .activity-chevron {
@@ -3663,7 +3771,7 @@ pre {
   flex: 0 0 16px;
   border: 0;
   background: transparent;
-  color: var(--color-token-text-tertiary);
+  color: var(--codex-chat-muted);
 }
 
 .activity-title {
@@ -3671,9 +3779,9 @@ pre {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
-  color: var(--color-token-text-secondary);
-  font-size: max(14px, 0.95rem);
-  font-weight: 450;
+  color: var(--codex-chat-muted);
+  font-size: var(--codex-chat-font-size);
+  font-weight: 400;
   line-height: 1.45;
   letter-spacing: -0.01em;
   text-overflow: ellipsis;
@@ -3681,7 +3789,7 @@ pre {
 }
 
 .activity-title.is-running {
-  color: var(--color-token-text-primary);
+  color: var(--codex-chat-text);
   font-weight: 500;
 }
 
@@ -3701,7 +3809,7 @@ pre {
   width: 14px;
   height: 14px;
   flex: 0 0 14px;
-  color: var(--color-token-text-tertiary);
+  color: var(--codex-chat-muted);
 }
 
 .command-card-inner {
@@ -3828,8 +3936,8 @@ pre {
 .message-text code {
   padding: 2px 6px;
   border-radius: 5px;
-  background: var(--gray-750);
-  color: var(--gray-100);
+  background: #2e2e2e;
+  color: var(--codex-chat-text);
   font-family: var(--font-mono-default);
   font-size: 12px;
   font-weight: 400;

@@ -41,6 +41,26 @@ function previewOutput(id: string, preview: string): ThreadOutput {
   };
 }
 
+function previewCommand(
+  id: string,
+  command: string,
+  durationMs = 24,
+): Extract<VisibleThreadItem, { readonly type: "commandExecution" }> {
+  return {
+    type: "commandExecution",
+    id,
+    command,
+    cwd: PREVIEW_WORKSPACE,
+    processId: null,
+    startedAt: null,
+    source: "agent",
+    status: "completed",
+    aggregatedOutput: null,
+    exitCode: 0,
+    durationMs,
+  };
+}
+
 const PREVIEW_PROJECTS = [
   {
     color: "#4ade80",
@@ -549,6 +569,108 @@ const PREVIEW_CONTEXT_THREAD = {
   ],
 } as const satisfies CodexThread;
 
+const PREVIEW_CHAT_REFERENCE_THREAD = {
+  id: "preview-chat-reference-thread",
+  mode: "codex",
+  preview: "Audit project against RULES.md",
+  name: "Audit project against RULES.md",
+  cwd: PREVIEW_WORKSPACE,
+  projectPath: PREVIEW_WORKSPACE,
+  createdAt: 1_787_000_000,
+  updatedAt: 1_787_000_094,
+  recencyAt: 1_787_000_094,
+  status: { type: "active", activeFlags: [] },
+  turns: [
+    {
+      id: "preview-chat-reference-turn",
+      status: "completed",
+      error: null,
+      createdAt: 1_787_000_000,
+      updatedAt: 1_787_000_094,
+      items: [
+        {
+          type: "userMessage",
+          id: "preview-chat-reference-user",
+          content: [
+            {
+              type: "text",
+              text: "Estude de forma rápida e entenda esse projeto, veja se ele segue fielmente todas as regras em docs/RULES.md, de forma limpa, enxuta, moderna, robusta, tipagem extremamente forte, organizada, semântica, bem estruturada, modular, dinâmica, abstrata, elegante, totalmente previsível e com boas práticas modernas sem exceção.",
+            },
+          ],
+        },
+        {
+          type: "agentMessage",
+          id: "preview-chat-reference-commentary-1",
+          text: "Vou fazer uma auditoria objetiva: primeiro leio `docs/RULES.md` e o mapa do projeto, depois cruzo as regras com a implementação e executo as verificações disponíveis. Entrego os achados priorizados, com evidências em arquivos/linhas e sem alterar nada.",
+          phase: "commentary",
+        },
+        previewCommand(
+          "preview-chat-reference-command-1",
+          "Get-Content -Raw docs/RULES.md; Write-Output \"`n---FILES---\"; rg --files -g '!node_modules/**'",
+        ),
+        {
+          type: "agentMessage",
+          id: "preview-chat-reference-commentary-2",
+          text: "O documento define um padrão alto e também algumas regras verificáveis automaticamente (edition 2024, TypeScript estrito, ausência de `unwrap` / `expect` operacional, contratos explícitos, checks e TODO). Agora vou separar conformidade objetiva de julgamento arquitetural, para não tratar estilo como violação sem evidência.",
+          phase: "commentary",
+        },
+        previewCommand("preview-chat-reference-command-2", "pnpm typecheck", 1_240),
+        previewCommand("preview-chat-reference-command-3", "pnpm biome check src", 910),
+        previewCommand("preview-chat-reference-command-4", "cargo fmt -- --check", 420),
+        {
+          type: "agentMessage",
+          id: "preview-chat-reference-commentary-3",
+          text: "Os checks rápidos já passaram: `typecheck`, Biome e `cargo fmt --check`. Os processos mais pesados ainda estão executando em paralelo; há contenção normal do cache/build do Cargo, então vou aguardar os resultados antes de concluir.",
+          phase: "commentary",
+        },
+        {
+          type: "toolExecution",
+          id: "preview-chat-reference-terminal-read",
+          name: "read_output",
+          description: "Read stored output preview-chat-terminal",
+          status: "completed",
+          output: previewOutput(
+            "preview-chat-terminal-output",
+            "Os processos terminaram sem erros.\n",
+          ),
+        },
+        previewCommand(
+          "preview-chat-reference-command-5",
+          "cargo check --locked --manifest-path src-tauri/Cargo.toml",
+          4_850,
+        ),
+        previewCommand(
+          "preview-chat-reference-command-6",
+          "pnpm test:frontend -- --reporter=dot",
+          3_120,
+        ),
+        previewCommand("preview-chat-reference-command-7", "pnpm clippy", 5_240),
+        previewCommand(
+          "preview-chat-reference-command-8",
+          'git log -5 --oneline; Write-Output "---TODO---"; Get-Content -Raw docs/TODO.md',
+          38,
+        ),
+        previewCommand(
+          "preview-chat-reference-command-9",
+          'Write-Output "---STATUS---"; git status --short',
+          18,
+        ),
+        previewCommand(
+          "preview-chat-reference-command-10",
+          "$f='src-tauri/src/process.rs'; $lines=Get-Content $f; for($i=45;$i -le 90;$i++){\"$i`: $($lines[$i-1])\"}",
+          26,
+        ),
+        {
+          type: "agentMessage",
+          id: "preview-chat-reference-answer",
+          text: "Auditoria rápida concluída. O projeto está em bom nível e os checks atuais passam, mas não segue 100% todas as regras de `docs/RULES.md`.\n\nResultados objetivos:\n\n- `typecheck`: passou.\n- Biome lint: passou em 144 arquivos.\n- Frontend: 50 arquivos de teste, 236 testes, todos passaram.\n- `cargo check --locked`: passou.\n- `cargo clippy -D warnings`: passou.",
+          phase: "finalAnswer",
+        },
+      ],
+    },
+  ],
+} as const satisfies CodexThread;
+
 const PREVIEW_THREADS = {
   data: [previewThreadSummary(PREVIEW_CONTEXT_THREAD)],
   nextCursor: null,
@@ -630,6 +752,17 @@ let previewApplicationPreferences: ApplicationPreferences = {
 export function setupBrowserPreview(): void {
   const previewParameters = new URLSearchParams(window.location.search);
   const preferenceUpdateDelay = previewDelay(previewParameters.get("preferenceDelay"));
+  const previewThread =
+    previewParameters.get("chatReference") === "1"
+      ? PREVIEW_CHAT_REFERENCE_THREAD
+      : PREVIEW_CONTEXT_THREAD;
+  const previewThreads =
+    previewThread === PREVIEW_CONTEXT_THREAD
+      ? PREVIEW_THREADS
+      : ({
+          data: [previewThreadSummary(previewThread)],
+          nextCursor: null,
+        } as const satisfies ThreadListResponse);
   document.title = "Codex App · Visualização";
   document.documentElement.setAttribute("data-runtime", "browser-preview");
   if (previewParameters.get("chrome") === "1") {
@@ -654,7 +787,7 @@ export function setupBrowserPreview(): void {
         case "engine_chat_model_list":
           return PREVIEW_CHAT_MODEL_CATALOG;
         case "engine_thread_list":
-          return PREVIEW_THREADS;
+          return previewThreads;
         case "engine_automation_list":
           return {
             data: previewAutomations,
@@ -738,8 +871,8 @@ export function setupBrowserPreview(): void {
         }
         case "engine_thread_resume":
           return {
-            thread: PREVIEW_CONTEXT_THREAD,
-            cwd: PREVIEW_CONTEXT_THREAD.cwd,
+            thread: previewThread,
+            cwd: previewThread.cwd,
             nextCursor: null,
           };
         case "engine_account_rate_limits_read":

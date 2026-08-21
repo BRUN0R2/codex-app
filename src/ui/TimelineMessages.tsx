@@ -122,14 +122,9 @@ export function CommentaryMessage(props: {
       <article class="message-row agent-message-row commentary">
         <div class="message-content">
           <span class="visually-hidden">Codex disse:</span>
-          <Show
-            when={presentation().multiline}
-            fallback={<p class="commentary-message-text">{presentation().text}</p>}
-          >
-            <div class="commentary-content">
-              <Markdown streaming={props.streaming} text={presentation().text} />
-            </div>
-          </Show>
+          <div class="commentary-content">
+            <Markdown streaming={props.streaming} text={presentation().text} />
+          </div>
         </div>
       </article>
     </Show>

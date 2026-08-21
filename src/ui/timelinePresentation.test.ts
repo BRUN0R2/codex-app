@@ -5,6 +5,7 @@ import {
   commandOutputText,
   fileChangeActivityTitle,
   reasoningTitle,
+  terminalReadActivityTitle,
   thinkingPresentation,
   toolActivityTitle,
   toolOutputText,
@@ -36,14 +37,20 @@ describe("timeline presentation", () => {
 
   it("changes an expanded command title according to its live state", () => {
     expect(commandActivityTitle("rg --files src", "completed", false)).toBe(
-      "Executou rg --files src",
+      "Comando executado: rg --files src",
     );
     expect(commandActivityTitle("rg --files src", "completed", true)).toBe("Comando executado");
     expect(commandActivityTitle("rg --files src", "inProgress", false)).toBe(
-      "Executando rg --files src",
+      "Executando comando: rg --files src",
     );
     expect(commandActivityTitle("rg --files src", "inProgress", true)).toBe("Executando comando");
     expect(toolActivityTitle("Validar interface", "inProgress", false)).toBe("Validar interface");
+  });
+
+  it("uses the official chat-terminal labels for stored output reads", () => {
+    expect(terminalReadActivityTitle("inProgress")).toBe("Lendo terminal do chat");
+    expect(terminalReadActivityTitle("completed")).toBe("Terminal do chat lido");
+    expect(terminalReadActivityTitle("failed")).toBe("Falha ao ler o terminal do chat");
   });
 
   it("shows command duration only after the long-running threshold", () => {

@@ -41,6 +41,7 @@ import {
   activeAgentActivity,
   agentActivityRenderUnitIdentity,
   agentActivitySummaryLabel,
+  isTerminalReadTool,
   shouldRenderAgentActivityGroup,
   summarizeAgentActivity,
   webSearchActivityTitle,
@@ -81,6 +82,7 @@ import {
   commandOutputText,
   fileChangeActivityTitle,
   reasoningTitle,
+  terminalReadActivityTitle,
   thinkingPresentation,
   toolActivityTitle,
   toolOutputText,
@@ -1490,6 +1492,7 @@ function agentActivityIcon(kind: AgentActivityKind | undefined): IconName {
     case "exploration":
       return "file";
     case "commands":
+    case "terminalRead":
       return "terminal";
     case "webSearch":
       return "globe";
@@ -1709,13 +1712,16 @@ function ToolItem(props: {
   const disclosure = useTimelineDisclosure(() => `tool:${props.item.id}`);
   const description = () => props.item.description || toolLabel(props.item.name);
   const isWebSearch = () => props.item.name === "web_search" || props.item.name === "web_fetch";
+  const isTerminalRead = () => isTerminalReadTool(props.item.name);
   const output = () => props.item.output;
   const hasDetails = () =>
     output() !== null || props.item.status === "failed" || props.item.status === "declined";
   const title = () =>
-    isWebSearch()
-      ? webSearchActivityTitle(description(), props.item.status)
-      : toolActivityTitle(description(), props.item.status, disclosure.isOpen());
+    isTerminalRead()
+      ? terminalReadActivityTitle(props.item.status)
+      : isWebSearch()
+        ? webSearchActivityTitle(description(), props.item.status)
+        : toolActivityTitle(description(), props.item.status, disclosure.isOpen());
 
   const headline = () => (
     <>
