@@ -180,7 +180,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [13] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [14] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),

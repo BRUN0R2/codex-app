@@ -43,7 +43,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 13;
+  readonly schemaVersion: 14;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];

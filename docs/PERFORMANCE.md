@@ -407,8 +407,8 @@ causa e não distingue rede, modelo, ferramenta e disputa de estado.
 ### Chat oficial, ferramentas e release isolada — 21 de agosto de 2026
 
 O chat foi comparado com o build oficial `26.818.3698.0`. A auditoria visual
-agora executa dez cenários em `920 × 640`, `1280 × 820` e `1920 × 1080`,
-produzindo trinta capturas. Três cenários são específicos da conversa:
+agora executa onze cenários em `920 × 640`, `1280 × 820` e `1920 × 1080`,
+produzindo trinta e três capturas. Três cenários são específicos da conversa:
 
 - reprodução do turno de referência, incluindo usuário, duração, três
   commentaries, comandos, leitura do terminal e resposta final, começando
@@ -425,11 +425,11 @@ menu da conta conserva uso, configurações e saída. A ação do menu de projet
 abre diretamente seu caminho persistido no Explorer, sem reutilizar o seletor
 de workspace.
 
-O gate integral aprovou 50 arquivos e 238 testes frontend, além de 209 testes
+O gate integral aprovou 50 arquivos e 238 testes frontend, além de 210 testes
 Rust; quatro benchmarks nativos continuam ignorados no fluxo comum e foram
 executados separadamente quando aplicável. O build Vite produziu:
 
-- app principal: `409,00 KiB`, `121,65 KiB` gzip;
+- app principal: `408,97 KiB`, `121,65 KiB` gzip;
 - chunk auxiliar: `20,46 KiB`, `8,14 KiB` gzip;
 - CSS: `115,54 KiB`, `21,31 KiB` gzip;
 - worker Markdown: `45,51 KiB`.
@@ -438,11 +438,11 @@ Medições sintéticas após o porte:
 
 | Operação | Resultado |
 | --- | ---: |
-| batching de 1.200 deltas sobre 20.000 itens | `178,164×` mais rápido |
+| batching de 1.200 deltas sobre 20.000 itens | `186,028×` mais rápido |
 | turnos simultaneamente montados em histórico de 100.000 | `8` |
-| 5.000 blocos Markdown incrementais | `82,947 ms` |
-| 20.000 projeções de atividade | `129,082 ms` |
-| 20.000 projeções de turno | `148,900 ms` |
+| 5.000 blocos Markdown incrementais | `91,931 ms` |
+| 20.000 projeções de atividade | `146,101 ms` |
+| 20.000 projeções de turno | `162,892 ms` |
 | highlight da janela visível de diff | `0,391 ms` |
 | redução de linhas de diff montadas | `2.054,808×` |
 | decode da página inicial de histórico | `0,229 ms` |

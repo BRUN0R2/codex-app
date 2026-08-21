@@ -107,6 +107,29 @@ const SCENARIOS = [
     validate: validateChatReferenceMetrics,
   },
   {
+    id: "project-open-workspace",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".project-group")].some(
+      (project) => project.textContent?.includes("codex-app"),
+    )`,
+    prepareExpression: `(() => {
+      const project = [...document.querySelectorAll(".project-group")].find(
+        (entry) => entry.textContent?.includes("codex-app"),
+      );
+      project?.querySelector(".thread-menu-control > summary")?.click();
+      requestAnimationFrame(() => {
+        const openButton = [...(project?.querySelectorAll(".project-context-menu button") ?? [])].find(
+          (button) => button.textContent?.includes("Abrir no Explorador de Arquivos"),
+        );
+        openButton?.click();
+      });
+    })()`,
+    readyExpression: `typeof window.__previewOpenedWorkspace === "string" &&
+      window.__previewOpenedWorkspace.length > 0`,
+    auditExpression: projectOpenWorkspaceVisualAuditExpression,
+    validate: validateProjectOpenWorkspaceMetrics,
+  },
+  {
     id: "project-color-editor",
     url: HOME_PREVIEW_URL,
     initialReadyExpression: `document.querySelector(".project-context-menu") !== null`,
@@ -449,6 +472,19 @@ function singleFileChangeVisualAuditExpression() {
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
+}
+
+function projectOpenWorkspaceVisualAuditExpression() {
+  return `(() => ({
+    viewport: { width: innerWidth, height: innerHeight },
+    openedWorkspace:
+      typeof window.__previewOpenedWorkspace === "string"
+        ? window.__previewOpenedWorkspace
+        : null,
+    dialogOpen: document.querySelector('[role="dialog"]') !== null,
+    projectEditorOpen: document.querySelector(".project-edit-container") !== null,
+    horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+  }))()`;
 }
 
 function chatReferenceVisualAuditExpression() {
@@ -1017,6 +1053,21 @@ function validateSingleFileChangeMetrics(metrics, viewport) {
   assert(metrics.open === true, "a alteração única não abriu diretamente");
   assert(metrics.aggregateContainerCount === 0, "a alteração única ainda criou um agrupador");
   assert(metrics.directDiffVisible === true, "o diff do arquivo único não ficou visível");
+}
+
+function validateProjectOpenWorkspaceMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado ao abrir projeto em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "abrir projeto criou overflow horizontal");
+  assert(
+    /[\\/]codex-app$/u.test(metrics.openedWorkspace ?? ""),
+    "a ação não encaminhou o caminho persistido do projeto",
+  );
+  assert(metrics.dialogOpen === false, "a ação abriu um seletor ou diálogo indevido");
+  assert(metrics.projectEditorOpen === false, "a ação abriu o editor do projeto");
 }
 
 function validateProjectColorEditorMetrics(metrics, viewport) {

@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use tauri::{AppHandle, State};
+use tauri_plugin_opener::OpenerExt as _;
 
 use crate::attachments::{AttachmentKind, inspect_path};
 use crate::command_validation::{
@@ -54,6 +55,12 @@ pub struct ThreadReadRequest {
 pub struct OutputReadRequest {
     output_id: String,
     cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenWorkspaceRequest {
+    path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +204,22 @@ pub fn engine_runtime_diagnostic_report(
     engine
         .persist_runtime_error(RuntimeDiagnosticSubsystem::Frontend, &message)
         .map_err(CommandError::from)?;
+    Ok(OperationAck { applied: true })
+}
+
+#[tauri::command]
+pub async fn application_workspace_open(
+    app: AppHandle,
+    request: OpenWorkspaceRequest,
+) -> CommandResult<OperationAck> {
+    let workspace = validate_workspace(&request.path).await?;
+    app.opener()
+        .open_path(workspace, None::<&str>)
+        .map_err(|error| {
+            CommandError::from(AppError::FileSystem(format!(
+                "could not open workspace directory: {error}"
+            )))
+        })?;
     Ok(OperationAck { applied: true })
 }
 

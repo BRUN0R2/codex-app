@@ -179,6 +179,7 @@ pub fn run() {
             attachments::attachment_save_pasted_image,
             desktop_integration::preferences::application_preferences_read,
             desktop_integration::preferences::application_preferences_update,
+            commands::application_workspace_open,
             commands::engine_start,
             commands::engine_runtime_diagnostic_report,
             commands::engine_account_read,

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
   decodeAccountProfileResponse,
@@ -391,8 +391,10 @@ export function openExternalUrl(url: string): Promise<void> {
   return openUrl(url);
 }
 
-export function openLocalPath(path: string): Promise<void> {
-  return openPath(path);
+export function openWorkspaceDirectory(path: string): Promise<OperationAck> {
+  return invokeDecoded("application_workspace_open", decodeOperationAck, {
+    request: { path },
+  });
 }
 
 async function invokeDecoded<T>(

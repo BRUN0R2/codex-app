@@ -12,7 +12,7 @@ ociosa. As versões exatas estão travadas em `package.json` e `src-tauri/Cargo.
 | `solid-js` | Reactivity e renderização da UI |
 | `@tauri-apps/api` | Ponte `invoke`/eventos com o backend nativo |
 | `@tauri-apps/plugin-dialog` | Diálogos nativos de arquivo para anexos e workspace |
-| `@tauri-apps/plugin-opener` | Abertura de links externos e arquivos no SO |
+| `@tauri-apps/plugin-opener` | Links externos no WebView e abertura nativa de diretórios já validados |
 | `marked` | Parse de Markdown das mensagens |
 | `dompurify` | Sanitização do HTML renderizado antes do DOM |
 

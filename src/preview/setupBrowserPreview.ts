@@ -132,7 +132,7 @@ const PREVIEW_ENGINE = {
       "scheduledAutomations",
     ],
   },
-  schemaVersion: 13,
+  schemaVersion: 14,
   config: PREVIEW_CONFIG,
   diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
   permissionProfiles: [
@@ -893,6 +893,15 @@ export function setupBrowserPreview(): void {
             : new Promise<ApplicationPreferences>((resolve) => {
                 window.setTimeout(() => resolve(applyPreferences()), preferenceUpdateDelay);
               });
+        }
+        case "application_workspace_open": {
+          const request = (args as { request?: { path?: string } }).request;
+          (
+            window as Window & {
+              __previewOpenedWorkspace?: string;
+            }
+          ).__previewOpenedWorkspace = request?.path ?? "";
+          return { applied: true };
         }
         case "engine_turn_interrupt":
           return { applied: true };

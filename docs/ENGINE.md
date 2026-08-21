@@ -8,7 +8,7 @@ O único backend é `NativeEngine`:
 - provider: `ChatGPT Codex`;
 - autenticação: `ChatGPT OAuth`;
 - armazenamento: `sqlite`;
-- schema IPC: versão `13`.
+- schema IPC: versão `14`.
 
 Não existe variável de ambiente para trocar backend nem execução de binário
 genérico. O único sidecar é o `rg.exe` 15.2.0 fixado por manifesto e hash para a
@@ -28,12 +28,18 @@ integração.
 | turnos | `engine_turn_start`, `engine_turn_steer`, `engine_turn_interrupt` |
 | automações | `engine_automation_list`, `engine_automation_create`, `engine_automation_update`, `engine_automation_delete`, `engine_automation_run_now`, `engine_automation_run_mark_reviewed` |
 | preferências | `application_preferences_read`, `application_preferences_update` |
+| integração desktop | `application_workspace_open` |
 | configuração | `engine_config_update`, `engine_model_list`, `engine_chat_model_list` |
 | aprovação | `engine_server_request_respond` |
 | anexos | `attachment_inspect`, `attachment_read_image`, `attachment_save_pasted_image` |
 
 Cada comando tem request e response próprios. Não há método genérico que aceite
 nome de RPC ou JSON arbitrário.
+
+`application_workspace_open` canonicaliza o path, exige que seja absoluto,
+existente e diretório, e somente então usa a API Rust do opener. O WebView não
+possui `opener:allow-open-path`, portanto não pode abrir arquivos ou caminhos
+arbitrários diretamente.
 
 ## Eventos
 

@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 
-import { openExternalUrl, openLocalPath } from "../infrastructure/codexClient";
+import { openExternalUrl, openWorkspaceDirectory } from "../infrastructure/codexClient";
 import { isBrowserPreview } from "../platform/DesktopRuntime";
 import type { AppController } from "../state/appController";
 
@@ -77,11 +77,8 @@ export function AppShell(props: { readonly controller: AppController }) {
   }
 
   async function openWorkspace(path: string): Promise<void> {
-    if (isBrowserPreview()) {
-      return;
-    }
     try {
-      await openLocalPath(path);
+      await openWorkspaceDirectory(path);
     } catch (reason) {
       props.controller.reportError(reason);
     }

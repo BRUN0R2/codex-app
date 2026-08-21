@@ -99,10 +99,14 @@ pub fn validate_diagnostic_message(value: String) -> CommandResult<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use serde_json::json;
+    use tempfile::TempDir;
 
     use super::{
         normalize_windows_canonical_path, validate_diagnostic_message, validate_protocol_id,
+        validate_workspace,
     };
 
     #[test]
@@ -127,6 +131,26 @@ mod tests {
                 .is_err()
         );
         assert!(validate_protocol_id("thread id", "   ").is_err());
+    }
+
+    #[tokio::test]
+    async fn workspace_validation_accepts_only_existing_absolute_directories() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let validated = validate_workspace(&directory.path().display().to_string())
+            .await
+            .expect("absolute directory should validate");
+        assert!(Path::new(&validated).is_absolute());
+
+        let file = directory.path().join("not-a-directory.txt");
+        tokio::fs::write(&file, b"test")
+            .await
+            .expect("fixture file should be written");
+        assert!(
+            validate_workspace(&file.display().to_string())
+                .await
+                .is_err()
+        );
+        assert!(validate_workspace("relative-workspace").await.is_err());
     }
 
     #[test]
