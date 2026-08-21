@@ -137,7 +137,9 @@ não ao tamanho integral da conversa:
   avançar em paralelo e pares provider/timeline são gravados numa transação;
 - durante uma execução, o agente conserva o histórico decodificado em memória,
   lê do SQLite apenas itens posteriores ao cursor e serializa requests por
-  referência. Steers continuam entrando na ordem transacional do banco.
+  referência. Steers usam uma fila SQLite separada e são promovidos em lote
+  antes da próxima amostragem, preservando ordem causal sem reserializar o
+  histórico completo.
 
 #### Busca nativa de código — 18 de agosto de 2026
 

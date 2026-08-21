@@ -38,12 +38,13 @@ mod history;
 use self::history::{StoredThreadPage, parse_history_cursor, read_thread_page as load_thread_page};
 
 const DATABASE_FILE_NAME: &str = "native-state-profile-v2.sqlite3";
-const DATABASE_SCHEMA_VERSION: i64 = 3;
+const DATABASE_SCHEMA_VERSION: i64 = 4;
 const DATABASE_APPLICATION_ID: i64 = 1_128_552_527;
-const DATABASE_TABLES: &str = "app_config,automation_runs,automations,chat_conversations,output_chunks,output_resources,provider_items,thread_items,threads,turns";
+const DATABASE_TABLES: &str = "app_config,automation_runs,automations,chat_conversations,output_chunks,output_resources,pending_turn_inputs,provider_items,thread_items,threads,turns";
 const THREAD_COLUMNS: &str = "id,cwd,name,preview,archived,created_at,updated_at,project_path,mode";
 const TURN_COLUMNS: &str =
     "id,thread_id,owner_id,status,model,reasoning_effort,error,created_at,updated_at";
+const PENDING_TURN_INPUT_COLUMNS: &str = "sequence,turn_id,item_id,payload";
 const AUTOMATION_COLUMNS: &str = "id,name,prompt,project_path,enabled,interval_minutes,timezone,timezone_offset_min,next_run_at,last_run_at,version,created_at,updated_at";
 const AUTOMATION_RUN_COLUMNS: &str = "id,automation_id,trigger,status,thread_id,turn_id,error,reviewed,created_at,started_at,completed_at";
 const THREAD_PAGE_SIZE: usize = 50;
@@ -107,6 +108,17 @@ const AUTOMATION_SCHEMA_SQL: &str = "
         ON automation_runs(reviewed, completed_at DESC, created_at DESC);
     CREATE INDEX automation_runs_automation_created
         ON automation_runs(automation_id, created_at DESC, id DESC);
+";
+const PENDING_TURN_INPUT_SCHEMA_SQL: &str = "
+    CREATE TABLE pending_turn_inputs (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        UNIQUE(turn_id, item_id)
+    );
+    CREATE INDEX pending_turn_inputs_turn_sequence
+        ON pending_turn_inputs(turn_id, sequence);
 ";
 
 type SqlitePool = Pool<SqliteConnectionManager>;
@@ -235,6 +247,10 @@ impl NativeStorage {
                     }
                     if current_version == 2 {
                         migrate_database_v2_to_v3(&mut connection)?;
+                        current_version = 3;
+                    }
+                    if current_version == 3 {
+                        migrate_database_v3_to_v4(&mut connection)?;
                     }
                 }
                 let migrated_version: i64 = connection
@@ -247,6 +263,7 @@ impl NativeStorage {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage_error)?;
             let now = unix_timestamp()?;
+            promote_all_pending_turn_inputs(&transaction)?;
             transaction
                 .execute(
                     "UPDATE turns SET status = 'interrupted', updated_at = ?1
@@ -1086,7 +1103,9 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
             let active: bool = transaction
                 .query_row(
                     "SELECT EXISTS(
@@ -1113,13 +1132,16 @@ impl NativeStorage {
                     params![turn_id, item_id, item_payload],
                 )
                 .map_err(storage_error)?;
+            // Timeline order follows wall-clock delivery. Provider order is promoted at the
+            // next sampling boundary, after the response that could not have observed this steer.
             transaction
                 .execute(
-                    "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
-                    params![thread_id, provider_payload],
+                    "INSERT INTO pending_turn_inputs (turn_id, item_id, payload)
+                     VALUES (?1, ?2, ?3)",
+                    params![turn_id, item_id, provider_payload],
                 )
                 .map_err(storage_error)?;
-            let provider_sequence = transaction.last_insert_rowid();
+            let pending_sequence = transaction.last_insert_rowid();
             transaction
                 .execute(
                     "UPDATE threads SET updated_at = ?1 WHERE id = ?2",
@@ -1127,7 +1149,45 @@ impl NativeStorage {
                 )
                 .map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
-            Ok(provider_sequence)
+            Ok(pending_sequence)
+        })
+        .await
+    }
+
+    pub(super) async fn promote_pending_turn_inputs(
+        &self,
+        thread_id: String,
+        turn_id: String,
+    ) -> Result<Option<i64>, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM turns
+                         JOIN threads ON threads.id = turns.thread_id
+                         WHERE turns.id = ?1
+                           AND turns.thread_id = ?2
+                           AND turns.status = 'inProgress'
+                           AND threads.archived = 0
+                     )",
+                    params![turn_id, thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !active {
+                return Err(AppError::State(
+                    "turn is no longer active or does not belong to the thread".into(),
+                ));
+            }
+            let promoted = promote_pending_turn_inputs_rows(&transaction, &thread_id, &turn_id)?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(promoted)
         })
         .await
     }
@@ -1420,6 +1480,7 @@ impl NativeStorage {
                 )
                 .map_err(storage_error)?;
             require_changed(changed, "active turn")?;
+            promote_pending_turn_inputs_rows(&transaction, &thread_id, &turn_id)?;
             transaction
                 .execute(
                     "UPDATE threads SET updated_at = ?1 WHERE id = ?2",
@@ -2275,6 +2336,64 @@ fn bounded_automation_error(error: String) -> String {
     truncate_utf8(error, MAX_AUTOMATION_ERROR_BYTES)
 }
 
+fn promote_pending_turn_inputs_rows(
+    transaction: &Transaction<'_>,
+    thread_id: &str,
+    turn_id: &str,
+) -> Result<Option<i64>, AppError> {
+    let latest_sequence = transaction
+        .query_row(
+            "SELECT MAX(sequence) FROM pending_turn_inputs WHERE turn_id = ?1",
+            [turn_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(storage_error)?;
+    let Some(latest_sequence) = latest_sequence else {
+        return Ok(None);
+    };
+    transaction
+        .execute(
+            "INSERT INTO provider_items (thread_id, payload)
+             SELECT ?1, payload
+             FROM pending_turn_inputs
+             WHERE turn_id = ?2
+             ORDER BY sequence",
+            params![thread_id, turn_id],
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "DELETE FROM pending_turn_inputs WHERE turn_id = ?1",
+            [turn_id],
+        )
+        .map_err(storage_error)?;
+    Ok(Some(latest_sequence))
+}
+
+fn promote_all_pending_turn_inputs(transaction: &Transaction<'_>) -> Result<(), AppError> {
+    let pending_turns = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT DISTINCT turns.thread_id, pending_turn_inputs.turn_id
+                 FROM pending_turn_inputs
+                 JOIN turns ON turns.id = pending_turn_inputs.turn_id
+                 ORDER BY pending_turn_inputs.turn_id",
+            )
+            .map_err(storage_error)?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_error)?
+    };
+    for (thread_id, turn_id) in pending_turns {
+        promote_pending_turn_inputs_rows(transaction, &thread_id, &turn_id)?;
+    }
+    Ok(())
+}
+
 fn encode_provider_history(items: Vec<ResponseItem>) -> Result<Vec<String>, AppError> {
     if items.is_empty() || items.len() > MAX_HISTORY_ITEMS {
         return Err(AppError::Provider(format!(
@@ -3042,6 +3161,9 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
         .execute_batch(AUTOMATION_SCHEMA_SQL)
         .map_err(storage_error)?;
     transaction
+        .execute_batch(PENDING_TURN_INPUT_SCHEMA_SQL)
+        .map_err(storage_error)?;
+    transaction
         .execute(
             "INSERT INTO app_config (singleton, version, payload) VALUES (1, 1, ?1)",
             [default_payload],
@@ -3158,6 +3280,17 @@ fn migrate_database_v2_to_v3(connection: &mut Connection) -> Result<(), AppError
         .execute_batch(AUTOMATION_SCHEMA_SQL)
         .map_err(storage_error)?;
     transaction
+        .pragma_update(None, "user_version", 3_i64)
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_database_v3_to_v4(connection: &mut Connection) -> Result<(), AppError> {
+    let transaction = connection.transaction().map_err(storage_error)?;
+    transaction
+        .execute_batch(PENDING_TURN_INPUT_SCHEMA_SQL)
+        .map_err(storage_error)?;
+    transaction
         .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
         .map_err(storage_error)?;
     transaction.commit().map_err(storage_error)
@@ -3189,6 +3322,12 @@ fn validate_database(
     if columns != TURN_COLUMNS {
         return Err(AppError::Storage(format!(
             "turn columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
+        )));
+    }
+    let columns = pending_turn_input_columns(connection)?;
+    if columns != PENDING_TURN_INPUT_COLUMNS {
+        return Err(AppError::Storage(format!(
+            "pending turn input columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
         )));
     }
     let integrity: String = connection
@@ -3246,6 +3385,17 @@ fn turn_columns(connection: &Connection) -> Result<String, AppError> {
         .query_row(
             "SELECT COALESCE(group_concat(name, ','), '')
              FROM (SELECT name FROM pragma_table_info('turns') ORDER BY cid)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
+fn pending_turn_input_columns(connection: &Connection) -> Result<String, AppError> {
+    connection
+        .query_row(
+            "SELECT COALESCE(group_concat(name, ','), '')
+             FROM (SELECT name FROM pragma_table_info('pending_turn_inputs') ORDER BY cid)",
             [],
             |row| row.get(0),
         )
@@ -4000,6 +4150,7 @@ mod tests {
             .execute_batch(
                 "DROP TABLE automation_runs;
                  DROP TABLE automations;
+                 DROP TABLE pending_turn_inputs;
                  PRAGMA user_version = 2;",
             )
             .expect("fixture should become schema two");
@@ -4031,6 +4182,44 @@ mod tests {
             .expect("automation tables should be readable");
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
         assert_eq!(automation_tables, 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn migrates_schema_three_to_persistent_pending_turn_inputs() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("schema-three.sqlite3");
+        let mut connection = Connection::open(&database_path).expect("database should open");
+        initialize_database(&mut connection).expect("current fixture should initialize");
+        connection
+            .execute_batch(
+                "DROP TABLE pending_turn_inputs;
+                 PRAGMA user_version = 3;",
+            )
+            .expect("fixture should become schema three");
+        drop(connection);
+
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(database_path.clone())
+            .await
+            .expect("schema three should migrate");
+
+        let connection = Connection::open(database_path).expect("database should reopen");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version should be readable");
+        let pending_table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_schema
+                     WHERE type = 'table' AND name = 'pending_turn_inputs'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pending input table should be readable");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+        assert!(pending_table_exists);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4119,6 +4308,7 @@ mod tests {
             .execute_batch(
                 "DROP TABLE automation_runs;
                  DROP TABLE automations;
+                 DROP TABLE pending_turn_inputs;
                  DROP TABLE output_chunks;
                  DROP TABLE output_resources;
                  PRAGMA user_version = 1;",
@@ -4492,12 +4682,11 @@ mod tests {
             )
             .await
             .expect("concurrent steer should persist");
-        assert!(steer_sequence > compacted_through_sequence);
 
         storage
             .install_compacted_history(
                 thread.id.clone(),
-                turn.id,
+                turn.id.clone(),
                 compacted_through_sequence,
                 vec![ResponseItem::Compaction {
                     id: Some("checkpoint-with-tail".into()),
@@ -4509,14 +4698,23 @@ mod tests {
             .await
             .expect("compaction should preserve the concurrent steer");
 
-        let history = storage
+        let compacted_history = storage
             .provider_history(thread.id.clone())
             .await
             .expect("compacted history should load");
         assert!(matches!(
-            history.first(),
-            Some(ResponseItem::Compaction { id: Some(id), .. }) if id == "checkpoint-with-tail"
+            compacted_history.as_slice(),
+            [ResponseItem::Compaction { id: Some(id), .. }] if id == "checkpoint-with-tail"
         ));
+        let promoted = storage
+            .promote_pending_turn_inputs(thread.id.clone(), turn.id)
+            .await
+            .expect("steer should promote after compaction");
+        assert_eq!(promoted, Some(steer_sequence));
+        let history = storage
+            .provider_history(thread.id.clone())
+            .await
+            .expect("history with promoted steer should load");
         let encoded = serde_json::to_string(&history).expect("history should encode");
         assert!(encoded.contains("steer after snapshot"));
         assert!(!encoded.contains("before compaction"));
@@ -4597,7 +4795,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn appends_steered_input_to_the_active_turn_and_provider_history_atomically() {
+    async fn promotes_steered_input_after_the_response_that_did_not_sample_it() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let storage = NativeStorage::default();
         storage
@@ -4653,29 +4851,74 @@ mod tests {
             )
             .await
             .expect("steer should append");
-        assert!(steer_sequence > initial_sequence);
         storage
             .refresh_provider_history(thread.id.clone(), &mut incremental_history)
             .await
             .expect("incremental provider history should refresh");
-        assert_eq!(incremental_history.items.len(), 2);
-        assert_eq!(incremental_history.last_sequence(), steer_sequence);
-        storage
-            .refresh_provider_history(thread.id.clone(), &mut incremental_history)
-            .await
-            .expect("an unchanged provider history should remain refreshable");
-        assert_eq!(incremental_history.items.len(), 2);
+        assert_eq!(incremental_history.items.len(), 1);
+        assert_eq!(incremental_history.last_sequence(), initial_sequence);
 
         let loaded = storage
             .read_thread(thread.id.clone())
             .await
             .expect("thread should load");
+        assert_eq!(loaded.turns[0].items.len(), 2);
+
+        storage
+            .append_provider_item(
+                thread.id.clone(),
+                &ResponseItem::Message {
+                    id: Some("assistant-before-steer".into()),
+                    role: "assistant".into(),
+                    content: vec![ResponseContent::OutputText {
+                        text: "response before steer".into(),
+                    }],
+                    phase: None,
+                },
+            )
+            .await
+            .expect("response should persist");
+        let promoted = storage
+            .promote_pending_turn_inputs(thread.id.clone(), turn.id.clone())
+            .await
+            .expect("pending steer should promote");
+        assert_eq!(promoted, Some(steer_sequence));
+
+        storage
+            .refresh_provider_history(thread.id.clone(), &mut incremental_history)
+            .await
+            .expect("promoted history should refresh");
+        assert_eq!(incremental_history.items.len(), 3);
+        assert!(matches!(
+            &incremental_history.items[1],
+            ResponseItem::Message { role, content, .. }
+                if role == "assistant"
+                    && matches!(
+                        content.first(),
+                        Some(ResponseContent::OutputText { text })
+                            if text == "response before steer"
+                    )
+        ));
+        assert!(matches!(
+            &incremental_history.items[2],
+            ResponseItem::Message { role, content, .. }
+                if role == "user"
+                    && matches!(
+                        content.first(),
+                        Some(ResponseContent::InputText { text }) if text == "steer"
+                    )
+        ));
+        storage
+            .refresh_provider_history(thread.id.clone(), &mut incremental_history)
+            .await
+            .expect("an unchanged provider history should remain refreshable");
+        assert_eq!(incremental_history.items.len(), 3);
+
         let history = storage
             .provider_history(thread.id.clone())
             .await
             .expect("provider history should load");
-        assert_eq!(loaded.turns[0].items.len(), 2);
-        assert_eq!(history.len(), 2);
+        assert_eq!(history.len(), 3);
 
         storage
             .complete_turn(
@@ -4704,6 +4947,206 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_settlement_preserves_an_unpromoted_steer_causally() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("settled-steer.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "initial-user".into(),
+                    content: vec![UserContent::Text {
+                        text: "initial".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "initial".into(),
+                }]),
+                "initial".into(),
+            )
+            .await
+            .expect("turn should begin");
+        storage
+            .append_turn_input(
+                thread.id.clone(),
+                turn.id.clone(),
+                ThreadItem::UserMessage {
+                    id: "pending-user".into(),
+                    content: vec![UserContent::Text {
+                        text: "pending after interruption".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "pending after interruption".into(),
+                }]),
+            )
+            .await
+            .expect("steer should queue");
+        storage
+            .append_provider_item(
+                thread.id.clone(),
+                &ResponseItem::Message {
+                    id: Some("partial-assistant".into()),
+                    role: "assistant".into(),
+                    content: vec![ResponseContent::OutputText {
+                        text: "partial response".into(),
+                    }],
+                    phase: None,
+                },
+            )
+            .await
+            .expect("partial response should persist");
+
+        storage
+            .complete_turn(thread.id.clone(), turn.id, TurnStatus::Interrupted, None)
+            .await
+            .expect("turn should settle");
+
+        let history = storage
+            .provider_history(thread.id.clone())
+            .await
+            .expect("provider history should load");
+        assert_eq!(history.len(), 3);
+        assert!(matches!(
+            &history[1],
+            ResponseItem::Message { role, content, .. }
+                if role == "assistant"
+                    && matches!(
+                        content.first(),
+                        Some(ResponseContent::OutputText { text }) if text == "partial response"
+                    )
+        ));
+        assert!(matches!(
+            &history[2],
+            ResponseItem::Message { role, content, .. }
+                if role == "user"
+                    && matches!(
+                        content.first(),
+                        Some(ResponseContent::InputText { text })
+                            if text == "pending after interruption"
+                    )
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_recovery_promotes_pending_steers_before_interrupting_turns() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("recovered-steer.sqlite3");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(database_path.clone())
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "initial-user".into(),
+                    content: vec![UserContent::Text {
+                        text: "initial".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "initial".into(),
+                }]),
+                "initial".into(),
+            )
+            .await
+            .expect("turn should begin");
+        storage
+            .append_turn_input(
+                thread.id.clone(),
+                turn.id,
+                ThreadItem::UserMessage {
+                    id: "pending-user".into(),
+                    content: vec![UserContent::Text {
+                        text: "pending across restart".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "pending across restart".into(),
+                }]),
+            )
+            .await
+            .expect("steer should queue");
+        storage
+            .append_provider_item(
+                thread.id.clone(),
+                &ResponseItem::Message {
+                    id: Some("assistant-before-restart".into()),
+                    role: "assistant".into(),
+                    content: vec![ResponseContent::OutputText {
+                        text: "response before restart".into(),
+                    }],
+                    phase: None,
+                },
+            )
+            .await
+            .expect("response should persist");
+        drop(storage);
+
+        let recovered = NativeStorage::default();
+        recovered
+            .initialize_at(database_path)
+            .await
+            .expect("storage should recover");
+        let loaded = recovered
+            .read_thread(thread.id.clone())
+            .await
+            .expect("recovered thread should load");
+        assert_eq!(loaded.turns[0].status, TurnStatus::Interrupted);
+        let history = recovered
+            .provider_history(thread.id.clone())
+            .await
+            .expect("recovered provider history should load");
+        assert_eq!(history.len(), 3);
+        assert!(matches!(
+            &history[1],
+            ResponseItem::Message { role, content, .. }
+                if role == "assistant"
+                    && matches!(
+                        content.first(),
+                        Some(ResponseContent::OutputText { text })
+                            if text == "response before restart"
+                    )
+        ));
+        assert!(matches!(
+            &history[2],
+            ResponseItem::Message { role, content, .. }
+                if role == "user"
+                    && matches!(
+                        content.first(),
+                        Some(ResponseContent::InputText { text })
+                            if text == "pending across restart"
+                    )
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

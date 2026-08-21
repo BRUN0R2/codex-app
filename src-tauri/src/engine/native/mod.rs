@@ -112,6 +112,12 @@ struct ActiveTurn {
     deletion_in_progress: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TurnContinuation {
+    Complete,
+    Continue { pending_steer_sequence: Option<i64> },
+}
+
 struct AutomationSchedulerTask {
     shutdown: watch::Sender<bool>,
     handle: JoinHandle<()>,
@@ -122,28 +128,29 @@ impl ActiveTurn {
         !*self.cancellation.borrow() && self.accepting_steers
     }
 
-    fn record_steer(&mut self, provider_sequence: i64) {
-        debug_assert!(provider_sequence > 0);
+    fn record_steer(&mut self, pending_sequence: i64) {
+        debug_assert!(pending_sequence > 0);
         self.latest_steer_sequence = Some(
             self.latest_steer_sequence
-                .map_or(provider_sequence, |current| current.max(provider_sequence)),
+                .map_or(pending_sequence, |current| current.max(pending_sequence)),
         );
     }
 
-    fn should_continue_after_response(
+    fn continuation_after_response(
         &mut self,
-        sampled_through_sequence: i64,
+        sampled_through_steer_sequence: i64,
         has_pending_tools: bool,
-    ) -> bool {
-        if has_pending_tools
-            || self
-                .latest_steer_sequence
-                .is_some_and(|sequence| sequence > sampled_through_sequence)
-        {
-            return true;
+    ) -> TurnContinuation {
+        let pending_steer_sequence = self
+            .latest_steer_sequence
+            .filter(|sequence| *sequence > sampled_through_steer_sequence);
+        if has_pending_tools || pending_steer_sequence.is_some() {
+            return TurnContinuation::Continue {
+                pending_steer_sequence,
+            };
         }
         self.accepting_steers = false;
-        false
+        TurnContinuation::Complete
     }
 
     fn request_deletion(
@@ -1099,7 +1106,7 @@ impl NativeEngine {
                     "active turn is already completing and cannot accept more input".into(),
                 ));
             }
-            let provider_sequence = self
+            let pending_sequence = self
                 .inner
                 .storage
                 .append_turn_input(
@@ -1109,7 +1116,7 @@ impl NativeEngine {
                     prepared.provider_item,
                 )
                 .await?;
-            active.record_steer(provider_sequence);
+            active.record_steer(pending_sequence);
         }
 
         if let Err(error) = self.inner.emit_notification(
@@ -1441,13 +1448,13 @@ impl NativeEngineInner {
         self.diagnostics.emit(app, subsystem, message);
     }
 
-    pub(super) async fn should_continue_turn(
+    pub(super) async fn turn_continuation(
         &self,
         thread_id: &str,
         turn_id: &str,
-        sampled_through_sequence: i64,
+        sampled_through_steer_sequence: i64,
         has_pending_tools: bool,
-    ) -> Result<bool, AppError> {
+    ) -> Result<TurnContinuation, AppError> {
         let mut active_turns = self.active_turns.lock().await;
         let active = active_turns
             .get_mut(thread_id)
@@ -1457,7 +1464,7 @@ impl NativeEngineInner {
                 "active-turn ownership changed during execution".into(),
             ));
         }
-        Ok(active.should_continue_after_response(sampled_through_sequence, has_pending_tools))
+        Ok(active.continuation_after_response(sampled_through_steer_sequence, has_pending_tools))
     }
 
     async fn finalize_turn(
@@ -1793,7 +1800,7 @@ fn descriptor() -> EngineDescriptor {
 mod tests {
     use tokio::sync::watch;
 
-    use super::{ActiveTurn, NativeEngine};
+    use super::{ActiveTurn, NativeEngine, TurnContinuation};
     use crate::engine::OperationAck;
 
     fn active_turn() -> ActiveTurn {
@@ -1818,9 +1825,17 @@ mod tests {
         let mut active = active_turn();
         active.record_steer(12);
 
-        assert!(active.should_continue_after_response(11, false));
+        assert_eq!(
+            active.continuation_after_response(11, false),
+            TurnContinuation::Continue {
+                pending_steer_sequence: Some(12),
+            }
+        );
         assert!(active.can_accept_steer());
-        assert!(!active.should_continue_after_response(12, false));
+        assert_eq!(
+            active.continuation_after_response(12, false),
+            TurnContinuation::Complete
+        );
         assert!(!active.can_accept_steer());
     }
 
@@ -1829,7 +1844,10 @@ mod tests {
         let mut active = active_turn();
         active.record_steer(12);
 
-        assert!(!active.should_continue_after_response(12, false));
+        assert_eq!(
+            active.continuation_after_response(12, false),
+            TurnContinuation::Complete
+        );
         assert!(!active.can_accept_steer());
     }
 
@@ -1839,9 +1857,17 @@ mod tests {
         active.record_steer(12);
         active.record_steer(14);
 
-        assert!(active.should_continue_after_response(13, false));
+        assert_eq!(
+            active.continuation_after_response(13, false),
+            TurnContinuation::Continue {
+                pending_steer_sequence: Some(14),
+            }
+        );
         assert!(active.can_accept_steer());
-        assert!(!active.should_continue_after_response(14, false));
+        assert_eq!(
+            active.continuation_after_response(14, false),
+            TurnContinuation::Complete
+        );
         assert!(!active.can_accept_steer());
     }
 
@@ -1850,9 +1876,17 @@ mod tests {
         let mut active = active_turn();
         active.record_steer(12);
 
-        assert!(active.should_continue_after_response(11, true));
+        assert_eq!(
+            active.continuation_after_response(11, true),
+            TurnContinuation::Continue {
+                pending_steer_sequence: Some(12),
+            }
+        );
         assert!(active.can_accept_steer());
-        assert!(!active.should_continue_after_response(12, false));
+        assert_eq!(
+            active.continuation_after_response(12, false),
+            TurnContinuation::Complete
+        );
         assert!(!active.can_accept_steer());
     }
 

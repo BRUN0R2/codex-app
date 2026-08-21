@@ -71,6 +71,20 @@ falha e duração não dependem da chegada posterior de `thread.updated`. Essa
 notificação posterior apenas reconcilia o snapshot completo de forma
 idempotente; uma segunda conclusão conflitante é erro de contrato.
 
+`engine_turn_steer` confirma a entrada somente depois de gravar, na mesma
+transação, a mensagem visual em `thread_items` e o payload causal em
+`pending_turn_inputs`. O payload não entra em `provider_items` enquanto uma
+resposta que não o amostrou ainda está sendo produzida. Antes da rodada seguinte,
+o engine promove a fila em ordem para depois da resposta e dos resultados de
+ferramenta já persistidos. A decisão de continuar carrega o `sequence` pendente
+exato; iniciar a rodada sem promovê-lo é erro de estado, não fallback.
+
+Ao concluir ou interromper um turno, a mesma transação promove qualquer steer
+restante antes de gravar o estado terminal. No boot, a recuperação faz essa
+promoção antes de marcar turnos abandonados como interrompidos. Portanto uma
+queda do processo não perde a entrada nem a reposiciona antes de uma resposta que
+foi gerada sem vê-la.
+
 `engine_thread_delete` também é a operação completa para tarefas ativas. O motor
 registra um único solicitante, cancela o turno, impede nova aquisição do mesmo
 `thread_id` e responde somente depois da exclusão transacional. Se a persistência

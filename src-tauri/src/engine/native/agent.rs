@@ -9,7 +9,6 @@ use tauri::AppHandle;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use super::NativeEngineInner;
 use super::compaction::compact_context;
 use super::content_references::strip_content_reference_markers;
 use super::context_window::{ContextUsageSnapshot, evaluate_context_window, full_context_usage};
@@ -25,6 +24,7 @@ use super::tools::{
     MAX_PROVIDER_ITEM_BYTES, PreparedTool, ReadToolCache, ToolExecutionContext,
     ToolExecutionResult, ToolRegistry,
 };
+use super::{NativeEngineInner, TurnContinuation};
 use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
 use crate::engine::{
     ActivityStatus, AppConfig, ConversationMode, DiagnosticStream, ImageDetail, ItemNotification,
@@ -212,6 +212,8 @@ pub(super) async fn run_turn(
         .latest_context_usage(run.thread_id.clone())
         .await?;
     let mut history_requires_refresh = false;
+    let mut promoted_through_steer_sequence = 0i64;
+    let mut required_pending_steer_sequence = None;
     let mut transient_failure_count = 0u32;
     let mut context_recovery_attempts = 0u8;
     let stream_deltas = StreamNotificationBatcher::new(
@@ -226,6 +228,23 @@ pub(super) async fn run_turn(
             if *run.cancellation.borrow() {
                 stream_deltas.flush().await?;
                 return Ok(RunCompletion::Interrupted);
+            }
+            // Steers accepted during the previous sample are staged outside provider history
+            // so they can be appended after that response and any tool outputs it produced.
+            let promoted = inner
+                .storage
+                .promote_pending_turn_inputs(run.thread_id.clone(), run.turn_id.clone())
+                .await?;
+            if let Some(sequence) = promoted {
+                promoted_through_steer_sequence = promoted_through_steer_sequence.max(sequence);
+                history_requires_refresh = true;
+            }
+            if let Some(required_sequence) = required_pending_steer_sequence.take()
+                && promoted.is_none_or(|sequence| sequence < required_sequence)
+            {
+                return Err(AppError::State(
+                    "a pending steer was not promoted before the follow-up request".into(),
+                ));
             }
             if history_requires_refresh {
                 inner
@@ -250,7 +269,7 @@ pub(super) async fn run_turn(
             {
                 return Ok(RunCompletion::Interrupted);
             }
-            let sampled_through_sequence = history.last_sequence();
+            let sampled_through_steer_sequence = promoted_through_steer_sequence;
             let request = ResponseRequest::new(
                 run.model.id(),
                 &instructions,
@@ -590,16 +609,21 @@ pub(super) async fn run_turn(
                     "response stream ended before response.completed".into(),
                 ));
             }
-            if !inner
-                .should_continue_turn(
+            match inner
+                .turn_continuation(
                     &run.thread_id,
                     &run.turn_id,
-                    sampled_through_sequence,
+                    sampled_through_steer_sequence,
                     !pending_tools.is_empty(),
                 )
                 .await?
             {
-                return Ok(RunCompletion::Completed);
+                TurnContinuation::Complete => return Ok(RunCompletion::Completed),
+                TurnContinuation::Continue {
+                    pending_steer_sequence,
+                } => {
+                    required_pending_steer_sequence = pending_steer_sequence;
+                }
             }
 
             let allow_parallel_reads = run.model.supports_parallel_tool_calls();

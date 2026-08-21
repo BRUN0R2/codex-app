@@ -116,6 +116,15 @@ permanece na posição persistida, inclusive steers enviados durante um turno;
 somente comandos, ferramentas, raciocínio e alterações entram nos blocos
 recolhíveis de trabalho.
 
+A ordem visual da timeline e a ordem causal do provider são domínios distintos.
+Um steer é gravado imediatamente em `thread_items`, portanto aparece no instante
+em que o usuário o enviou, mas seu payload do provider entra primeiro em
+`pending_turn_inputs`. A promoção para `provider_items` ocorre
+transacionalmente antes da próxima amostragem, depois da resposta e dos
+resultados de ferramenta que estavam em andamento. Assim, uma rodada exigida por
+steer termina causalmente em entrada de usuário, nunca em uma resposta anterior
+do agente.
+
 A timeline mantém uma janela explícita de turnos montados e expande o histórico
 sob demanda sem alterar ordem, identificadores ou posição de leitura. Cada
 componente é identificado pelo turno persistido e nunca é reciclado pela posição
@@ -240,8 +249,9 @@ Antes da persistência, sequências ANSI/OSC, carriage return de progresso,
 backspace e controles invisíveis são normalizados em streaming e não chegam ao
 contrato visual. A migração transacional do schema SQLite 1 para o 2 normaliza
 também saídas de comando antigas ao externalizá-las. A migração 2 para 3 cria
-Automações e execuções de forma atômica; um schema incompleto ou não versionado é
-rejeitado em vez de ser reparado silenciosamente.
+Automações e execuções de forma atômica. A migração 3 para 4 cria a fila
+persistente de steers; um schema incompleto ou não versionado é rejeitado em vez
+de ser reparado silenciosamente.
 
 Saídas de ferramentas e comandos não ficam dentro de `thread_items`. O SQLite
 mantém um recurso por item em `output_resources` e o texto integral em
@@ -272,12 +282,17 @@ visível. Assim, uma interrupção ou encerramento no meio de um lote de ferrame
 não pode invalidar os turnos seguintes.
 
 Durante um turno, o snapshot normalizado permanece em memória com o último
-`sequence` SQLite observado. Cada rodada incorpora somente as linhas novas —
-inclusive steers persistidos concorrentemente — e mantém os mesmos limites
-globais de bytes e itens. A amostragem registra esse `sequence` como watermark:
-somente um steer aceito depois dele exige outra rodada; ferramentas pendentes
-continuam o loop sem deixar uma pendência sintética para a resposta seguinte.
-Normalização e compactação substituem apenas o prefixo coberto pelo snapshot e
-reaplicam, na mesma transação, as linhas posteriores. Depois, o agente recarrega
-um snapshot completo, tornando a troca explícita e previsível sem perder entradas
-concorrentes.
+`sequence` de `provider_items` observado. Cada rodada promove primeiro os steers
+pendentes, atualiza o snapshot apenas com as linhas novas e mantém os mesmos
+limites globais de bytes e itens. O turno ativo registra separadamente o último
+`sequence` de `pending_turn_inputs` aceito e o último já incluído numa
+amostragem. Somente um steer posterior exige outra rodada; a continuação carrega
+o watermark exato que deve ser promovido e falha explicitamente se essa promoção
+não ocorrer.
+
+Ferramentas pendentes continuam o loop sem criar entrada sintética. Normalização
+e compactação substituem apenas o prefixo coberto pelo snapshot; steers ainda
+pendentes ficam fora desse prefixo e são promovidos depois do checkpoint ou dos
+resultados de ferramenta. Conclusão, interrupção e recuperação de inicialização
+também promovem qualquer entrada restante antes de tornar o turno terminal,
+preservando o texto do usuário após falha ou reinício.
