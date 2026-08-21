@@ -113,6 +113,10 @@ export function shouldRenderAgentActivityGroup(
   isCurrent: boolean,
   expanded = false,
 ): boolean {
+  const onlyItem = items.length === 1 ? items[0] : undefined;
+  if (onlyItem?.type === "fileChange" && onlyItem.changes.length === 1) {
+    return false;
+  }
   return (
     expanded ||
     isCurrent ||

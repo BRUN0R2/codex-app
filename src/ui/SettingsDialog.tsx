@@ -15,10 +15,7 @@ import type {
   AccountPlanType,
   ApplicationPreferences,
   CreditsSnapshot,
-  DesktopPreferences,
   ModelVerbosity,
-  MotionPreference,
-  PermissionProfile,
   Personality,
   SpendControlLimitSnapshot,
   WebSearchMode,
@@ -75,13 +72,11 @@ import { SurfaceScrollbar } from "./SurfaceScrollbar";
 import { presentUsageLimits, type UsageLimitEntry, usagePercentLabel } from "./usagePresentation";
 
 export type SettingsPage =
-  | "appearance"
   | "archived"
   | "diagnostics"
   | "general"
   | "personalization"
   | "profile"
-  | "security"
   | "shortcuts"
   | "usage";
 
@@ -102,7 +97,6 @@ const SETTINGS_NAVIGATION: readonly SettingsNavigationSection[] = [
     items: [
       { icon: "settings", label: "Geral", page: "general" },
       { icon: "user", label: "Perfil", page: "profile" },
-      { icon: "sun", label: "Aparência", page: "appearance" },
       { icon: "sparkles", label: "Personalização", page: "personalization" },
       { icon: "keyboard", label: "Atalhos de teclado", page: "shortcuts" },
       { icon: "creditCard", label: "Uso e faturamento", page: "usage" },
@@ -110,10 +104,7 @@ const SETTINGS_NAVIGATION: readonly SettingsNavigationSection[] = [
   },
   {
     label: "Sistema",
-    items: [
-      { icon: "shield", label: "Segurança e permissões", page: "security" },
-      { icon: "bug", label: "Diagnósticos", page: "diagnostics" },
-    ],
+    items: [{ icon: "bug", label: "Diagnósticos", page: "diagnostics" }],
   },
   {
     label: "Arquivadas",
@@ -241,18 +232,12 @@ export function SettingsDialog(props: {
                 <Match when={page() === "general"}>
                   <GeneralSettings controller={props.controller} />
                 </Match>
-                <Match when={page() === "security"}>
-                  <SecuritySettings controller={props.controller} />
-                </Match>
                 <Match when={page() === "personalization"}>
                   <PersonalizationSettings
                     controller={props.controller}
                     developerInstructions={developerInstructions()}
                     setDeveloperInstructions={setDeveloperInstructions}
                   />
-                </Match>
-                <Match when={page() === "appearance"}>
-                  <AppearanceSettings controller={props.controller} />
                 </Match>
                 <Match when={page() === "profile"}>
                   <ProfileSettings controller={props.controller} />
@@ -626,46 +611,6 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
   );
 }
 
-function SecuritySettings(props: { readonly controller: SettingsDialogController }) {
-  const profile = () => props.controller.config()?.config.permissionProfile;
-  return (
-    <div class="settings-page">
-      <SettingsHeading
-        title="Permissões"
-        description="Perfis fechados e previsíveis, aplicados pelo backend nativo."
-      />
-      <div class="permission-grid">
-        <For each={props.controller.engine()?.permissionProfiles ?? []}>
-          {(entry) => (
-            <button
-              class="permission-option"
-              classList={{
-                "full-access": entry.sandbox === "danger-full-access",
-                selected: samePermission(entry, profile()),
-              }}
-              onClick={() =>
-                void props.controller.updateSetting({ type: "permissionProfile", value: entry })
-              }
-              type="button"
-            >
-              <Icon name="shield" size={18} />
-              <strong>{permissionName(entry)}</strong>
-              <span>{permissionDescription(entry)}</span>
-              <code>
-                {entry.sandbox} · {entry.approvals}
-              </code>
-            </button>
-          )}
-        </For>
-      </div>
-      <div class="settings-note">
-        Comandos pedem aprovação no perfil Projeto. Leitura e escrita continuam confinadas ao
-        diretório selecionado.
-      </div>
-    </div>
-  );
-}
-
 function PersonalizationSettings(props: {
   readonly controller: SettingsDialogController;
   readonly developerInstructions: string;
@@ -722,76 +667,6 @@ function PersonalizationSettings(props: {
           Salvar instruções
         </button>
       </div>
-    </div>
-  );
-}
-
-function AppearanceSettings(props: { readonly controller: SettingsDialogController }) {
-  const desktop = () => props.controller.config()?.config.desktop;
-
-  function save(patch: Partial<DesktopPreferences>): void {
-    const current = desktop();
-    if (current !== undefined) {
-      void props.controller.updateSetting({ type: "desktop", value: { ...current, ...patch } });
-    }
-  }
-
-  return (
-    <div class="settings-page">
-      <SettingsHeading
-        title="Aparência"
-        description="Preferências locais, aplicadas imediatamente."
-      />
-      <SettingsRow label="Tamanho da interface" description={`${desktop()?.uiFontSize ?? 15}px`}>
-        <input
-          max="24"
-          min="12"
-          onChange={(event) => {
-            const value = Number(event.currentTarget.value);
-            if (Number.isInteger(value) && value >= 12 && value <= 24) save({ uiFontSize: value });
-          }}
-          type="range"
-          value={desktop()?.uiFontSize ?? 15}
-        />
-      </SettingsRow>
-      <SettingsRow label="Movimento" description="Reduza transições e rolagem animada.">
-        <select
-          onChange={(event) => {
-            const value = parseMotion(event.currentTarget.value);
-            if (value !== undefined) save({ motion: value });
-          }}
-          value={desktop()?.motion ?? "full"}
-        >
-          <option value="full">Completo</option>
-          <option value="reduced">Reduzido</option>
-        </select>
-      </SettingsRow>
-      <SettingsRow
-        label="Cursor em botões"
-        description="Mostra cursor de ponteiro em controles interativos."
-      >
-        <SettingsCheckbox
-          checked={desktop()?.pointerCursor ?? true}
-          disabled={desktop() === undefined}
-          label="Cursor em botões"
-          onChange={(pointerCursor) => save({ pointerCursor })}
-        />
-      </SettingsRow>
-      <SettingsRow
-        label="Diferenças"
-        description="Visualização padrão para alterações em arquivos."
-      >
-        <select
-          onChange={(event) => {
-            const value = event.currentTarget.value;
-            if (value === "split" || value === "unified") save({ diffDisplay: value });
-          }}
-          value={desktop()?.diffDisplay ?? "unified"}
-        >
-          <option value="unified">Unificada</option>
-          <option value="split">Lado a lado</option>
-        </select>
-      </SettingsRow>
     </div>
   );
 }
@@ -1412,66 +1287,10 @@ function SettingsRow(props: {
   );
 }
 
-function SettingsCheckbox(props: {
-  readonly checked: boolean;
-  readonly disabled?: boolean;
-  readonly label: string;
-  readonly onChange: (checked: boolean) => void;
-}) {
-  return (
-    <label class="settings-checkbox" classList={{ disabled: props.disabled }}>
-      <span class="settings-checkbox-control">
-        <input
-          aria-label={props.label}
-          checked={props.checked}
-          disabled={props.disabled}
-          onChange={(event) => props.onChange(event.currentTarget.checked)}
-          type="checkbox"
-        />
-        <span aria-hidden="true" class="settings-checkbox-box">
-          <Icon name="check" size={14} />
-        </span>
-      </span>
-    </label>
-  );
-}
-
 function parseWebSearch(value: string): WebSearchMode | undefined {
   return value === "disabled" || value === "live" ? value : undefined;
 }
 
 function parsePersonality(value: string): Personality | undefined {
   return value === "friendly" || value === "none" || value === "pragmatic" ? value : undefined;
-}
-
-function parseMotion(value: string): MotionPreference | undefined {
-  return value === "full" || value === "reduced" ? value : undefined;
-}
-
-function samePermission(left: PermissionProfile, right: PermissionProfile | undefined): boolean {
-  return (
-    right !== undefined && left.sandbox === right.sandbox && left.approvals === right.approvals
-  );
-}
-
-function permissionName(profile: PermissionProfile): string {
-  switch (profile.sandbox) {
-    case "read-only":
-      return "Somente leitura";
-    case "workspace-write":
-      return "Projeto";
-    case "danger-full-access":
-      return "Acesso completo";
-  }
-}
-
-function permissionDescription(profile: PermissionProfile): string {
-  switch (profile.sandbox) {
-    case "read-only":
-      return "Lê o projeto; bloqueia escrita e comandos.";
-    case "workspace-write":
-      return "Edita o projeto e pede aprovação para comandos.";
-    case "danger-full-access":
-      return "Executa comandos sem aprovação. Use conscientemente.";
-  }
 }

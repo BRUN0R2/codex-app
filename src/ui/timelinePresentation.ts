@@ -126,22 +126,8 @@ export function terminalReadActivityTitle(status: ActivityStatus): string {
   }
 }
 
-export function fileChangeActivityTitle(
-  changes: readonly { readonly kind: { readonly type: "add" | "delete" | "update" } }[],
-): string {
-  if (changes.length !== 1) {
-    return `${changes.length} arquivos alterados`;
-  }
-  switch (changes[0]?.kind.type) {
-    case "add":
-      return "Arquivo criado";
-    case "delete":
-      return "Arquivo excluído";
-    case "update":
-      return "Arquivo editado";
-    default:
-      return "Arquivo alterado";
-  }
+export function fileChangeGroupTitle(changeCount: number): string {
+  return `${changeCount} arquivos alterados`;
 }
 
 export function commandOutputText(output: string | null | undefined): string | null {

@@ -13,7 +13,6 @@ import {
   decodeEngineStartResponse,
   decodeModelListResponse,
   decodeOutputReadResponse,
-  decodeThreadCompactStartResponse,
   decodeThreadReadResponse,
 } from "./decode";
 
@@ -149,7 +148,7 @@ describe("decodificação dos contratos nativos", () => {
           "scheduledAutomations",
         ],
       },
-      schemaVersion: 12,
+      schemaVersion: 13,
       config: configFixture(),
       diagnosticLogPath: "C:\\Users\\Bruno\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
@@ -176,7 +175,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 12,
+        schemaVersion: 13,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",
@@ -527,11 +526,6 @@ describe("decodificação dos contratos nativos", () => {
       throw new Error("A notificação decodificada mudou de método.");
     }
     expect(decoded.params.item).toEqual({ type: "contextCompaction", id: "compaction-1" });
-  });
-
-  it("mantém a resposta de compactação manual estritamente vazia", () => {
-    expect(decodeThreadCompactStartResponse({})).toEqual({});
-    expect(() => decodeThreadCompactStartResponse({ turn: {} })).toThrow(ContractError);
   });
 
   it("decodifica o lifecycle explícito de tarefas", () => {

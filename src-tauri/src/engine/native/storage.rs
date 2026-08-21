@@ -1010,57 +1010,6 @@ impl NativeStorage {
         .await
     }
 
-    pub async fn begin_compaction_turn(
-        &self,
-        thread_id: String,
-        model: String,
-        reasoning_effort: Option<String>,
-    ) -> Result<TurnSummary, AppError> {
-        let owner_id = self.owner_id.clone();
-        let pool = self.pool().await?;
-        run_blocking(move || {
-            let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(storage_error)?;
-            require_available_thread(&transaction, &thread_id)?;
-            let active: bool = transaction
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM turns WHERE thread_id = ?1 AND status = 'inProgress')",
-                    [&thread_id],
-                    |row| row.get(0),
-                )
-                .map_err(storage_error)?;
-            if active {
-                return Err(AppError::State("the thread already has an active turn".into()));
-            }
-            let turn_id = Uuid::now_v7().to_string();
-            let now = unix_timestamp()?;
-            transaction
-                .execute(
-                    "INSERT INTO turns
-                         (id, thread_id, owner_id, status, model, reasoning_effort, error, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, 'inProgress', ?4, ?5, NULL, ?6, ?6)",
-                    params![turn_id, thread_id, owner_id, model, reasoning_effort, now],
-                )
-                .map_err(storage_error)?;
-            transaction
-                .execute(
-                    "UPDATE threads SET updated_at = ?1 WHERE id = ?2",
-                    params![now, thread_id],
-                )
-                .map_err(storage_error)?;
-            transaction.commit().map_err(storage_error)?;
-            Ok(TurnSummary {
-                id: turn_id,
-                status: TurnStatus::InProgress,
-                created_at: now,
-                updated_at: now,
-            })
-        })
-        .await
-    }
-
     pub async fn append_thread_item(
         &self,
         turn_id: String,
@@ -3782,7 +3731,21 @@ mod tests {
             .await
             .expect("run should link to its thread");
         let turn = storage
-            .begin_compaction_turn(thread.id.clone(), "gpt-test".into(), None)
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "automation-user".into(),
+                    content: vec![UserContent::Text {
+                        text: "run automation".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "run automation".into(),
+                }]),
+                "run automation".into(),
+            )
             .await
             .expect("turn should begin");
         storage
@@ -4370,7 +4333,21 @@ mod tests {
             .await
             .expect("thread should persist");
         let turn = storage
-            .begin_compaction_turn(thread.id.clone(), "gpt-test".into(), None)
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "completed-user".into(),
+                    content: vec![UserContent::Text {
+                        text: "complete this turn".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "complete this turn".into(),
+                }]),
+                "complete this turn".into(),
+            )
             .await
             .expect("turn should begin");
         let created_at = storage
@@ -4407,45 +4384,6 @@ mod tests {
 
         let storage = NativeStorage::default();
         assert!(storage.initialize_at(database_path).await.is_err());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn begins_manual_compaction_without_synthesizing_user_history() {
-        let directory = TempDir::new().expect("temporary directory should be created");
-        let storage = NativeStorage::default();
-        storage
-            .initialize_at(directory.path().join("manual-compaction.sqlite3"))
-            .await
-            .expect("storage should initialize");
-        let thread = storage
-            .create_thread(
-                directory.path().display().to_string(),
-                Some(directory.path().display().to_string()),
-                ConversationMode::Codex,
-            )
-            .await
-            .expect("thread should persist");
-
-        let turn = storage
-            .begin_compaction_turn(thread.id.clone(), "gpt-test".into(), Some("medium".into()))
-            .await
-            .expect("compaction turn should begin");
-        let loaded = storage
-            .read_thread(thread.id.clone())
-            .await
-            .expect("thread should load");
-        let history = storage
-            .provider_history(thread.id.clone())
-            .await
-            .expect("provider history should load");
-        assert_eq!(loaded.turns.len(), 1);
-        assert!(loaded.turns[0].items.is_empty());
-        assert!(history.is_empty());
-
-        storage
-            .complete_turn(thread.id.clone(), turn.id, TurnStatus::Completed, None)
-            .await
-            .expect("compaction turn should complete");
     }
 
     #[tokio::test(flavor = "current_thread")]

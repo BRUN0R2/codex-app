@@ -58,7 +58,6 @@ import type {
   RuntimeStatus,
   SandboxMode,
   SpendControlLimitSnapshot,
-  ThreadCompactStartResponse,
   ThreadForkResponse,
   ThreadItem,
   ThreadListResponse,
@@ -181,7 +180,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [12] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [13] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -327,11 +326,6 @@ export function decodeThreadForkResponse(value: unknown): ThreadForkResponse {
 export function decodeThreadUnarchiveResponse(value: unknown): ThreadUnarchiveResponse {
   const object = exactRecord(value, "$", ["nextCursor", "thread"]);
   return decodeThreadPage(object);
-}
-
-export function decodeThreadCompactStartResponse(value: unknown): ThreadCompactStartResponse {
-  exactRecord(value, "$", []);
-  return {};
 }
 
 export function decodeThreadListResponse(value: unknown): ThreadListResponse {

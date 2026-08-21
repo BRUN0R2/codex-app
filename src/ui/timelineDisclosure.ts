@@ -38,8 +38,12 @@ export function createTimelineDisclosureStore(): TimelineDisclosureStore {
           next.delete(currentKey);
         }
         if (next === undefined) {
-          return current;
+          if (current.get(key) === false) {
+            return current;
+          }
+          next = new Map(current);
         }
+        next.set(key, false);
         return next;
       });
     },

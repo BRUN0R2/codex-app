@@ -29,7 +29,6 @@ import type {
 import {
   archiveThread as archiveThreadCommand,
   cancelLogin as cancelLoginCommand,
-  compactThread as compactThreadCommand,
   createAutomation as createAutomationCommand,
   deleteAutomation as deleteAutomationCommand,
   deleteThread as deleteThreadCommand,
@@ -409,10 +408,6 @@ export function createAppController(): AppController {
   const busy = createMemo(() => turnBusy() || pendingOperations() > 0);
   const unreadAutomationRuns = createMemo(() => readUnreadAutomationRuns(automationRuns()));
   const projectSectionExpanded = createMemo(() => projectSidebarState().projectsExpanded);
-  const currentThreadTitle = createMemo(() => {
-    const thread = currentThread();
-    return thread?.name ?? thread?.preview ?? "Nova tarefa";
-  });
   const lastTurnFailure = createMemo(() => {
     const thread = currentThread();
     return thread === null ? null : readLatestTurnFailure(thread);
@@ -1738,16 +1733,6 @@ export function createAppController(): AppController {
     }
   }
 
-  async function compactThread(threadId: string): Promise<boolean> {
-    try {
-      await withPending(() => compactThreadCommand(threadId));
-      return true;
-    } catch (reason) {
-      reportError(reason);
-      return false;
-    }
-  }
-
   async function forkThread(threadId: string): Promise<boolean> {
     try {
       const response = await withPending(() => forkThreadCommand(threadId));
@@ -2337,7 +2322,6 @@ export function createAppController(): AppController {
     config,
     contextUsage,
     currentThread,
-    currentThreadTitle,
     hasOlderHistory,
     historyLoading,
     product,
@@ -2375,7 +2359,6 @@ export function createAppController(): AppController {
     cancelLogin,
     chooseWorkspace,
     clearError: () => setError(null),
-    compactThread,
     createAutomation,
     deleteAutomation,
     deleteThread,

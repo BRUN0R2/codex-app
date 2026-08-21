@@ -8,7 +8,7 @@ O único backend é `NativeEngine`:
 - provider: `ChatGPT Codex`;
 - autenticação: `ChatGPT OAuth`;
 - armazenamento: `sqlite`;
-- schema IPC: versão `12`.
+- schema IPC: versão `13`.
 
 Não existe variável de ambiente para trocar backend nem execução de binário
 genérico. O único sidecar é o `rg.exe` 15.2.0 fixado por manifesto e hash para a
@@ -23,7 +23,7 @@ integração.
 | lifecycle | `engine_start` |
 | diagnóstico | `engine_runtime_diagnostic_report` |
 | conta | `engine_account_read`, `engine_account_profile_read`, `engine_account_rate_limits_read`, `engine_login_chatgpt`, `engine_login_cancel`, `engine_logout` |
-| tarefas | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive`, `engine_thread_unarchive`, `engine_thread_delete`, `engine_thread_fork`, `engine_thread_compact_start` |
+| tarefas | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive`, `engine_thread_unarchive`, `engine_thread_delete`, `engine_thread_fork` |
 | saídas | `engine_output_read` |
 | turnos | `engine_turn_start`, `engine_turn_steer`, `engine_turn_interrupt` |
 | automações | `engine_automation_list`, `engine_automation_create`, `engine_automation_update`, `engine_automation_delete`, `engine_automation_run_now`, `engine_automation_run_mark_reviewed` |
@@ -238,6 +238,11 @@ headroom para diferenças de tokenização e envelopes do provider. A compactaç
 começa quando o orçamento automático do catálogo ou a janela útil do modelo é
 atingido. Não há um limite de rodadas adicional nem uma cota local arbitrária de
 tamanho de projeto.
+
+A compactação é exclusivamente automática. Não existe comando IPC, ação de menu
+ou turno vazio para iniciá-la manualmente; o mesmo caminho transacional é
+acionado somente pela política de contexto ou pela recuperação de
+`context_length_exceeded`.
 
 O protocolo é Responses Remote Compaction V2. O motor envia
 `compaction_trigger`, exige exatamente um checkpoint `compaction` criptografado

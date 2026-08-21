@@ -116,6 +116,10 @@ permanece na posição persistida, inclusive steers enviados durante um turno;
 somente comandos, ferramentas, raciocínio e alterações entram nos blocos
 recolhíveis de trabalho.
 
+Um `fileChange` com exatamente um arquivo não cria um segundo agrupador: o bloco
+do próprio arquivo é a superfície principal e inicia expandido. Somente itens
+com duas ou mais alterações exibem o contêiner agregado e sua lista de arquivos.
+
 A ordem visual da timeline e a ordem causal do provider são domínios distintos.
 Um steer é gravado imediatamente em `thread_items`, portanto aparece no instante
 em que o usuário o enviou, mas seu payload do provider entra primeiro em

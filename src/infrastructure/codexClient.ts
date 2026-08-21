@@ -26,7 +26,6 @@ import {
   decodeOutputReadResponse,
   decodeRuntimeDiagnostic,
   decodeRuntimeStatus,
-  decodeThreadCompactStartResponse,
   decodeThreadForkResponse,
   decodeThreadListResponse,
   decodeThreadReadResponse,
@@ -63,7 +62,6 @@ import type {
   ReasoningEffort,
   RuntimeDiagnostic,
   RuntimeStatus,
-  ThreadCompactStartResponse,
   ThreadForkResponse,
   ThreadListResponse,
   ThreadReadResponse,
@@ -221,12 +219,6 @@ export function deleteThread(threadId: string): Promise<OperationAck> {
 
 export function forkThread(threadId: string): Promise<ThreadForkResponse> {
   return invokeDecoded("engine_thread_fork", decodeThreadForkResponse, {
-    request: { threadId },
-  });
-}
-
-export function compactThread(threadId: string): Promise<ThreadCompactStartResponse> {
-  return invokeDecoded("engine_thread_compact_start", decodeThreadCompactStartResponse, {
     request: { threadId },
   });
 }

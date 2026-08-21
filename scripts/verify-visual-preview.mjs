@@ -30,6 +30,45 @@ const SCENARIOS = [
     validate: validateComposerFastModeMetrics,
   },
   {
+    id: "active-activity-reflection",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      threadButton?.click();
+    })()`,
+    readyExpression: `document.querySelector(".activity-title.is-running .activity-title-sweep") !== null`,
+    auditExpression: activeActivityReflectionVisualAuditExpression,
+    validate: validateActiveActivityReflectionMetrics,
+  },
+  {
+    id: "single-file-change",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      threadButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        document.querySelectorAll(".agent-activity-group:not([open]) > summary").forEach(
+          (summary) => summary.click(),
+        );
+      }));
+    })()`,
+    readyExpression: `[...document.querySelectorAll(".diff-block[open] .diff-file-identity code")].some(
+      (element) => element.textContent?.trim() === "setupBrowserPreview.ts",
+    )`,
+    auditExpression: singleFileChangeVisualAuditExpression,
+    validate: validateSingleFileChangeMetrics,
+  },
+  {
     id: "chat-reference",
     url: CHAT_REFERENCE_PREVIEW_URL,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
@@ -66,62 +105,6 @@ const SCENARIOS = [
       )`,
     auditExpression: chatReferenceVisualAuditExpression,
     validate: validateChatReferenceMetrics,
-  },
-  {
-    id: "chat-open-menu",
-    url: CHAT_REFERENCE_PREVIEW_URL,
-    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
-      (button) => button.textContent?.includes("Audit project against RULES.md"),
-    )`,
-    prepareExpression: `(() => {
-      const threadButton = [...document.querySelectorAll(".thread-main")].find(
-        (button) => button.textContent?.includes("Audit project against RULES.md"),
-      );
-      threadButton?.click();
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        document.querySelector(".conversation-open-menu > summary")?.click();
-      }));
-    })()`,
-    readyExpression: `document.querySelector(".conversation-open-menu[open]") !== null &&
-      document.querySelector(".conversation-open-menu-popover [role='menuitem']") !== null`,
-    auditExpression: chatOpenMenuVisualAuditExpression,
-    validate: validateChatOpenMenuMetrics,
-  },
-  {
-    id: "chat-menu-dismiss",
-    url: CHAT_REFERENCE_PREVIEW_URL,
-    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
-      (button) => button.textContent?.includes("Audit project against RULES.md"),
-    )`,
-    prepareExpression: `(() => {
-      const threadButton = [...document.querySelectorAll(".thread-main")].find(
-        (button) => button.textContent?.includes("Audit project against RULES.md"),
-      );
-      threadButton?.click();
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        const trigger = document.querySelector(".conversation-open-menu > summary");
-        const menu = document.querySelector(".conversation-open-menu");
-        trigger?.click();
-        requestAnimationFrame(() => {
-          document.querySelector(".timeline")?.dispatchEvent(
-            new PointerEvent("pointerdown", { bubbles: true, pointerId: 1 }),
-          );
-          window.__chatMenuOutsideDismissed =
-            menu instanceof HTMLDetailsElement && menu.open === false;
-          trigger?.click();
-          requestAnimationFrame(() => {
-            document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-            window.__chatMenuEscapeDismissed =
-              menu instanceof HTMLDetailsElement && menu.open === false;
-          });
-        });
-      }));
-    })()`,
-    readyExpression: `window.__chatMenuOutsideDismissed === true &&
-      window.__chatMenuEscapeDismissed === true &&
-      document.activeElement === document.querySelector(".conversation-open-menu > summary")`,
-    auditExpression: chatMenuDismissVisualAuditExpression,
-    validate: validateChatMenuDismissMetrics,
   },
   {
     id: "project-color-editor",
@@ -416,6 +399,58 @@ function composerFastModeVisualAuditExpression() {
   })()`;
 }
 
+function activeActivityReflectionVisualAuditExpression() {
+  return `(() => {
+    const title = document.querySelector(".activity-title.is-running");
+    const base = title?.querySelector(".activity-title-base");
+    const sweep = title?.querySelector(".activity-title-sweep");
+    const highlight = title?.querySelector(".activity-title-highlight");
+    if (
+      !(title instanceof HTMLElement) ||
+      !(base instanceof HTMLElement) ||
+      !(sweep instanceof HTMLElement) ||
+      !(highlight instanceof HTMLElement)
+    ) {
+      throw new Error("Camadas da reflexão da atividade ativa estão ausentes.");
+    }
+    const sweepStyle = getComputedStyle(sweep);
+    const highlightStyle = getComputedStyle(highlight);
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      titleText: title.textContent?.trim() ?? null,
+      baseText: base.textContent?.trim() ?? null,
+      highlightText: highlight.textContent?.trim() ?? null,
+      animationName: sweepStyle.animationName,
+      animationDuration: sweepStyle.animationDuration,
+      highlightAnimationName: highlightStyle.animationName,
+      maskImage: sweepStyle.maskImage || sweepStyle.webkitMaskImage,
+      pointerEvents: sweepStyle.pointerEvents,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function singleFileChangeVisualAuditExpression() {
+  return `(() => {
+    const file = [...document.querySelectorAll(".diff-block .diff-file-identity code")].find(
+      (element) => element.textContent?.trim() === "setupBrowserPreview.ts",
+    );
+    const block = file?.closest(".diff-block");
+    if (!(file instanceof HTMLElement) || !(block instanceof HTMLDetailsElement)) {
+      throw new Error("Bloco direto da alteração única está ausente.");
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      fileName: file.textContent?.trim() ?? null,
+      open: block.open,
+      aggregateContainerCount: document.querySelectorAll(".file-change-card").length,
+      directDiffVisible:
+        block.querySelector(".diff-viewport, .diff-empty-state") instanceof HTMLElement,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
 function chatReferenceVisualAuditExpression() {
   return `(() => {
     const rectangle = (element, label) => {
@@ -452,9 +487,6 @@ function chatReferenceVisualAuditExpression() {
         paddingLeft: style.paddingLeft,
       };
     };
-    const toolbarElement = document.querySelector(".conversation-toolbar");
-    const toolbarTitleElement = document.querySelector(".conversation-toolbar-title strong");
-    const openMenuTriggerElement = document.querySelector(".conversation-open-menu > summary");
     const timeline = document.querySelector(".timeline");
     const timelineInnerElement = document.querySelector(".timeline-inner");
     const userBubbleElement = document.querySelector(".user-message-bubble");
@@ -488,11 +520,6 @@ function chatReferenceVisualAuditExpression() {
     const finalAnswer = rectangle(finalAnswerElement, "resposta final");
     return {
       viewport: { width: innerWidth, height: innerHeight },
-      toolbar: rectangle(toolbarElement, ".conversation-toolbar"),
-      toolbarStyle: styles(toolbarElement, ".conversation-toolbar"),
-      toolbarTitle: toolbarTitleElement?.textContent?.trim() ?? null,
-      openMenuLabel: openMenuTriggerElement?.textContent?.replace(/\\s+/g, " ").trim() ?? null,
-      openMenuAriaLabel: openMenuTriggerElement?.getAttribute("aria-label") ?? null,
       timelineInner: rectangle(timelineInnerElement, ".timeline-inner"),
       userBubble,
       userBubbleStyle: styles(userBubbleElement, ".user-message-bubble"),
@@ -533,63 +560,6 @@ function chatReferenceVisualAuditExpression() {
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
       timelineHorizontalOverflow:
         timeline instanceof HTMLElement ? timeline.scrollWidth - timeline.clientWidth : null,
-    };
-  })()`;
-}
-
-function chatOpenMenuVisualAuditExpression() {
-  return `(() => {
-    const rectangle = (selector) => {
-      const element = document.querySelector(selector);
-      if (!(element instanceof HTMLElement)) {
-        throw new Error("Elemento ausente: " + selector);
-      }
-      const bounds = element.getBoundingClientRect();
-      return {
-        top: bounds.top,
-        right: bounds.right,
-        bottom: bounds.bottom,
-        left: bounds.left,
-        width: bounds.width,
-        height: bounds.height,
-      };
-    };
-    const menu = document.querySelector(".conversation-open-menu");
-    const popover = document.querySelector(".conversation-open-menu-popover");
-    const menuItem = document.querySelector(
-      ".conversation-open-menu-popover [role='menuitem']",
-    );
-    return {
-      viewport: { width: innerWidth, height: innerHeight },
-      toolbar: rectangle(".conversation-toolbar"),
-      trigger: rectangle(".conversation-open-menu > summary"),
-      popover: rectangle(".conversation-open-menu-popover"),
-      menuItem: rectangle(".conversation-open-menu-popover [role='menuitem']"),
-      menuOpen: menu instanceof HTMLDetailsElement && menu.open,
-      menuRole: popover?.getAttribute("role") ?? null,
-      menuItemRole: menuItem?.getAttribute("role") ?? null,
-      menuItemText: menuItem?.textContent?.replace(/\\s+/g, " ").trim() ?? null,
-      menuItemCount: document.querySelectorAll(
-        ".conversation-open-menu-popover [role='menuitem']",
-      ).length,
-      popoverBackground:
-        popover instanceof HTMLElement ? getComputedStyle(popover).backgroundColor : null,
-      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
-    };
-  })()`;
-}
-
-function chatMenuDismissVisualAuditExpression() {
-  return `(() => {
-    const menu = document.querySelector(".conversation-open-menu");
-    const trigger = document.querySelector(".conversation-open-menu > summary");
-    return {
-      viewport: { width: innerWidth, height: innerHeight },
-      menuOpen: menu instanceof HTMLDetailsElement && menu.open,
-      outsideDismissed: window.__chatMenuOutsideDismissed === true,
-      escapeDismissed: window.__chatMenuEscapeDismissed === true,
-      triggerFocused: document.activeElement === trigger,
-      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
 }
@@ -691,6 +661,9 @@ function settingsVisualAuditExpression() {
       checkboxCount: document.querySelectorAll(
         '.application-preference input[type="checkbox"]',
       ).length,
+      navigationLabels: [...document.querySelectorAll(".settings-nav nav button")].map(
+        (button) => button.textContent?.trim() ?? "",
+      ),
       visibleCards: [...document.querySelectorAll(".settings-card")].filter((element) => {
         const bounds = element.getBoundingClientRect();
         return bounds.bottom > content.top && bounds.top < innerHeight;
@@ -903,25 +876,10 @@ function validateChatReferenceMetrics(metrics, viewport) {
     metrics.timelineHorizontalOverflow <= tolerance,
     "a timeline criou overflow horizontal",
   );
-  assert(Math.abs(metrics.toolbar.top - 34) <= tolerance, "a toolbar não começa após o titlebar");
-  assert(Math.abs(metrics.toolbar.height - 64) <= tolerance, "a toolbar não mede 64px");
   assert(
-    metrics.toolbarStyle.backgroundColor === "rgb(24, 24, 24)",
-    "a toolbar não usa a superfície #181818",
-  );
-  assert(
-    metrics.toolbarTitle === "Audit project against RULES.md",
-    "o título da tarefa não foi renderizado na toolbar",
-  );
-  assert(metrics.openMenuLabel === "Abrir em", "a ação Abrir em está incorreta");
-  assert(
-    metrics.openMenuAriaLabel === "Escolher onde abrir o workspace",
-    "a ação Abrir em perdeu seu nome acessível",
-  );
-  assert(
-    metrics.userBubble.top - metrics.toolbar.bottom >= 20 &&
-      metrics.userBubble.top - metrics.toolbar.bottom <= 24,
-    "o início da conversa não respeita o inset oficial após a toolbar",
+    metrics.userBubble.top - metrics.timelineInner.top >= 28 &&
+      metrics.userBubble.top - metrics.timelineInner.top <= 36,
+    "o início da conversa não respeita o espaçamento superior enxuto",
   );
   assert(
     metrics.threadContentMaxWidth === "768px",
@@ -997,51 +955,6 @@ function validateChatReferenceMetrics(metrics, viewport) {
   );
 }
 
-function validateChatOpenMenuMetrics(metrics, viewport) {
-  const tolerance = 1;
-  assert(
-    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no menu em ${viewport.width}x${viewport.height}`,
-  );
-  assert(metrics.horizontalOverflow <= tolerance, "o menu Abrir em criou overflow horizontal");
-  assert(metrics.menuOpen === true, "o disclosure Abrir em não abriu");
-  assert(metrics.menuRole === "menu", "o popover Abrir em não expõe role menu");
-  assert(metrics.menuItemRole === "menuitem", "a ação do popover não expõe role menuitem");
-  assert(metrics.menuItemCount === 1, "o menu Abrir em possui ações inesperadas");
-  assert(
-    metrics.menuItemText === "Explorador de Arquivos",
-    "a ação do menu Abrir em está incorreta",
-  );
-  assert(
-    metrics.popover.top >= metrics.trigger.bottom &&
-      metrics.popover.right <= viewport.width + tolerance,
-    "o popover Abrir em saiu da toolbar ou do viewport",
-  );
-  assert(
-    metrics.menuItem.left >= metrics.popover.left &&
-      metrics.menuItem.right <= metrics.popover.right + tolerance,
-    "a ação Abrir em ultrapassa o popover",
-  );
-  assert(
-    metrics.popoverBackground === "rgb(40, 40, 40)",
-    "o popover Abrir em não usa a superfície elevada",
-  );
-  assert(Math.abs(metrics.toolbar.height - 64) <= tolerance, "a toolbar mudou com o menu aberto");
-}
-
-function validateChatMenuDismissMetrics(metrics, viewport) {
-  const tolerance = 1;
-  assert(
-    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no fechamento do menu em ${viewport.width}x${viewport.height}`,
-  );
-  assert(metrics.horizontalOverflow <= tolerance, "o fechamento do menu criou overflow");
-  assert(metrics.outsideDismissed === true, "o clique externo não fechou o menu Abrir em");
-  assert(metrics.escapeDismissed === true, "Escape não fechou o menu Abrir em");
-  assert(metrics.menuOpen === false, "o menu Abrir em permaneceu aberto");
-  assert(metrics.triggerFocused === true, "Escape não devolveu foco ao gatilho Abrir em");
-}
-
 function validateComposerFastModeMetrics(metrics, viewport) {
   const tolerance = 1;
   validateChromeMetrics(metrics, viewport);
@@ -1069,6 +982,41 @@ function validateComposerFastModeMetrics(metrics, viewport) {
   assert(metrics.projectIconColor === "rgb(74, 222, 128)", "a cor do ícone do projeto não foi aplicada");
   assert(metrics.diffAddedColor === "#4ade80", "adições não usam o verde-limão semântico");
   assert(metrics.diffDeletedColor === "#ff6764", "remoções não usam o vermelho semântico");
+}
+
+function validateActiveActivityReflectionMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado na reflexão em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "a reflexão criou overflow horizontal");
+  assert(metrics.titleText === metrics.baseText + metrics.highlightText, "as camadas perderam texto");
+  assert(metrics.baseText === metrics.highlightText, "a reflexão não replica o título ativo");
+  assert(
+    metrics.animationName === "activity-reflection-sweep",
+    "a varredura luminosa não está animada",
+  );
+  assert(
+    metrics.highlightAnimationName === "activity-reflection-text",
+    "o texto luminoso não acompanha a varredura",
+  );
+  assert(metrics.animationDuration === "4s", "a velocidade da reflexão foi alterada");
+  assert(metrics.maskImage !== "none", "a reflexão perdeu a máscara luminosa");
+  assert(metrics.pointerEvents === "none", "a reflexão passou a interceptar interação");
+}
+
+function validateSingleFileChangeMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no arquivo único em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o arquivo único criou overflow horizontal");
+  assert(metrics.fileName === "setupBrowserPreview.ts", "o arquivo direto mudou de identidade");
+  assert(metrics.open === true, "a alteração única não abriu diretamente");
+  assert(metrics.aggregateContainerCount === 0, "a alteração única ainda criou um agrupador");
+  assert(metrics.directDiffVisible === true, "o diff do arquivo único não ficou visível");
 }
 
 function validateProjectColorEditorMetrics(metrics, viewport) {
@@ -1123,6 +1071,12 @@ function validateSettingsMetrics(metrics, viewport) {
   assert(Number.parseFloat(metrics.firstRowLabel.fontSize) >= 11, "os rótulos ficaram pequenos");
   assert(metrics.checkboxCount === 3, "os três controles booleanos não foram renderizados");
   assert(metrics.visibleCards >= 2, "menos de dois cartões de configurações estão visíveis");
+  assert(
+    !metrics.navigationLabels.includes("Aparência") &&
+      !metrics.navigationLabels.includes("Segurança e permissões"),
+    "a navegação ainda expõe páginas removidas",
+  );
+  assert(metrics.navigationLabels.includes("Perfil"), "a página Perfil deixou as configurações");
 }
 
 function validateOutputDetailMetrics(metrics, viewport) {

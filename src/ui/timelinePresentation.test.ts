@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   commandActivityTitle,
   commandOutputText,
-  fileChangeActivityTitle,
+  fileChangeGroupTitle,
   formatElapsedSeconds,
   reasoningTitle,
   terminalReadActivityTitle,
@@ -70,12 +70,9 @@ describe("timeline presentation", () => {
     expect(visibleCommandDurationMs("completed", 1_000, 10_000, 50_000)).toBe(10_000);
   });
 
-  it("summarizes file edits with a concise activity heading", () => {
-    expect(fileChangeActivityTitle([{ kind: { type: "update" } }])).toBe("Arquivo editado");
-    expect(fileChangeActivityTitle([{ kind: { type: "add" } }])).toBe("Arquivo criado");
-    expect(
-      fileChangeActivityTitle([{ kind: { type: "update" } }, { kind: { type: "delete" } }]),
-    ).toBe("2 arquivos alterados");
+  it("summarizes grouped file edits with a concise activity heading", () => {
+    expect(fileChangeGroupTitle(2)).toBe("2 arquivos alterados");
+    expect(fileChangeGroupTitle(4)).toBe("4 arquivos alterados");
   });
 
   it("presents command stdout without leaking the provider envelope", () => {

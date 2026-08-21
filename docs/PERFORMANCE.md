@@ -411,35 +411,38 @@ agora executa dez cenários em `920 × 640`, `1280 × 820` e `1920 × 1080`,
 produzindo trinta capturas. Três cenários são específicos da conversa:
 
 - reprodução do turno de referência, incluindo usuário, duração, três
-  commentaries, comandos, leitura do terminal e resposta final;
-- menu **Abrir em** expandido, com `menu`/`menuitem` e geometria confinada;
-- fechamento do menu por clique externo e `Escape`, com retorno de foco.
+  commentaries, comandos, leitura do terminal e resposta final, começando
+  diretamente abaixo do titlebar sem título duplicado;
+- atividade em andamento com as camadas `activity-title-base`,
+  `activity-title-sweep` e `activity-title-highlight`, máscara luminosa e os
+  keyframes sincronizados `activity-reflection-*`;
+- alteração de um único arquivo renderizada diretamente e já expandida, sem o
+  contêiner agregado reservado a mudanças com múltiplos arquivos.
 
-No cenário `1920 × 1080`, os marcos verticais locais/oficiais foram,
-respectivamente: usuário `135/135`, duração `278/278`, commentary `321/321`,
-comando `404/404`, segundo commentary `441/441`, resumo `524/524` e resumo
-final `644/644`. O recorte alinhado da conversa apresentou erro absoluto médio
-de `6,966/255` por canal; a diferença remanescente concentra-se nos glifos,
-porque a OpenAI Sans oficial não possui licença de redistribuição declarada.
+A auditoria também rejeita as páginas removidas **Aparência** e **Segurança e
+permissões**. O perfil permanece somente dentro de Configurações, enquanto o
+menu da conta conserva uso, configurações e saída. A ação do menu de projeto
+abre diretamente seu caminho persistido no Explorer, sem reutilizar o seletor
+de workspace.
 
-O gate integral aprovou 50 arquivos e 239 testes frontend, além de 207 testes
+O gate integral aprovou 50 arquivos e 238 testes frontend, além de 209 testes
 Rust; quatro benchmarks nativos continuam ignorados no fluxo comum e foram
 executados separadamente quando aplicável. O build Vite produziu:
 
-- app principal: `415,42 KiB`, `123,28 KiB` gzip;
+- app principal: `409,00 KiB`, `121,65 KiB` gzip;
 - chunk auxiliar: `20,46 KiB`, `8,14 KiB` gzip;
-- CSS: `117,78 KiB`, `21,53 KiB` gzip;
+- CSS: `115,54 KiB`, `21,31 KiB` gzip;
 - worker Markdown: `45,51 KiB`.
 
 Medições sintéticas após o porte:
 
 | Operação | Resultado |
 | --- | ---: |
-| batching de 1.200 deltas sobre 20.000 itens | `213,625×` mais rápido |
+| batching de 1.200 deltas sobre 20.000 itens | `178,164×` mais rápido |
 | turnos simultaneamente montados em histórico de 100.000 | `8` |
-| 5.000 blocos Markdown incrementais | `87,956 ms` |
-| 20.000 projeções de atividade | `135,999 ms` |
-| 20.000 projeções de turno | `153,576 ms` |
+| 5.000 blocos Markdown incrementais | `82,947 ms` |
+| 20.000 projeções de atividade | `129,082 ms` |
+| 20.000 projeções de turno | `148,900 ms` |
 | highlight da janela visível de diff | `0,391 ms` |
 | redução de linhas de diff montadas | `2.054,808×` |
 | decode da página inicial de histórico | `0,229 ms` |

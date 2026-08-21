@@ -163,14 +163,6 @@ impl EngineManager {
         self.engine.thread_fork(app, thread_id).await
     }
 
-    pub async fn thread_compact_start(
-        &self,
-        app: &AppHandle,
-        thread_id: String,
-    ) -> Result<ThreadCompactStartResponse, AppError> {
-        self.engine.thread_compact_start(app, thread_id).await
-    }
-
     pub async fn turn_start(
         &self,
         app: &AppHandle,

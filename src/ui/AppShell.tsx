@@ -9,7 +9,6 @@ import { ApprovalCard } from "./ApprovalCard";
 import { AutomationsView } from "./AutomationsView";
 import { applyDesktopAppearance } from "./appearance";
 import { Composer, type ComposerDraftRequest } from "./Composer";
-import { ConversationToolbar } from "./ConversationToolbar";
 import { formatShortDate } from "./dateFormat";
 import { HomeComposerModeToggle } from "./HomeComposerModeToggle";
 import { Icon } from "./Icon";
@@ -158,6 +157,7 @@ export function AppShell(props: { readonly controller: AppController }) {
           setReviewOpen(false);
           setActiveSurface("automations");
         }}
+        onOpenWorkspace={(path) => void openWorkspace(path)}
         onOpenSettings={openSettings}
         onShowChat={() => setActiveSurface("chat")}
       />
@@ -176,25 +176,11 @@ export function AppShell(props: { readonly controller: AppController }) {
               "chatgpt-empty":
                 props.controller.product() === "chatgpt" &&
                 props.controller.currentThread() === null,
-              "has-conversation-toolbar":
-                props.controller.product() === "codex" && props.controller.currentThread() !== null,
               "work-surface": props.controller.conversationMode() === "work",
             }}
             hidden={activeSurface() !== "chat"}
             ref={chatPageElement}
           >
-            <Show
-              when={
-                props.controller.product() === "codex" ? props.controller.currentThread() : null
-              }
-            >
-              {(thread) => (
-                <ConversationToolbar
-                  onOpenWorkspace={(path) => void openWorkspace(path)}
-                  thread={thread()}
-                />
-              )}
-            </Show>
             <Timeline controller={props.controller} onSelectSuggestion={requestDraft} />
             <div class="chat-dock" ref={chatDockElement}>
               <Show when={props.controller.activePlan()}>
@@ -263,13 +249,11 @@ export function AppShell(props: { readonly controller: AppController }) {
 }
 
 const SETTINGS_PAGES = new Set<SettingsPage>([
-  "appearance",
   "archived",
   "diagnostics",
   "general",
   "personalization",
   "profile",
-  "security",
   "shortcuts",
   "usage",
 ]);

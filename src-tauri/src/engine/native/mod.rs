@@ -49,15 +49,15 @@ use crate::engine::{
     ItemNotification, ModelContextWindowPreference, ModelListResponse, NOTIFICATION_EVENT,
     OperationAck, OperationFailure, OutputReadResponse, PermissionProfile, RUNTIME_STATUS_EVENT,
     ReasoningEffort, RuntimeDiagnosticSubsystem, RuntimeState, RuntimeStatus, ServerResponse,
-    ThreadArchivedNotification, ThreadCompactStartResponse, ThreadDeletedNotification,
-    ThreadForkResponse, ThreadItem, ThreadListResponse, ThreadNotification, ThreadReadResponse,
-    ThreadResumeResponse, ThreadStartResponse, ThreadSummary, ThreadUnarchiveResponse,
-    ThreadUnarchivedNotification, TurnCompletedNotification, TurnInput, TurnNotification,
-    TurnStartResponse, TurnStatus, TurnSummary,
+    ThreadArchivedNotification, ThreadDeletedNotification, ThreadForkResponse, ThreadItem,
+    ThreadListResponse, ThreadNotification, ThreadReadResponse, ThreadResumeResponse,
+    ThreadStartResponse, ThreadSummary, ThreadUnarchiveResponse, ThreadUnarchivedNotification,
+    TurnCompletedNotification, TurnInput, TurnNotification, TurnStartResponse, TurnStatus,
+    TurnSummary,
 };
 use crate::error::AppError;
 
-pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 12;
+pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 13;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTOMATION_SCHEDULER_MAX_SLEEP: Duration = Duration::from_secs(15 * 60);
@@ -777,90 +777,6 @@ impl NativeEngine {
             thread: page.thread,
             next_cursor: page.next_cursor,
         })
-    }
-
-    pub async fn thread_compact_start(
-        &self,
-        app: &AppHandle,
-        thread_id: String,
-    ) -> Result<ThreadCompactStartResponse, AppError> {
-        self.ensure_started()?;
-        self.reap_finished_tasks(app).await;
-        let thread = self
-            .inner
-            .storage
-            .read_thread_summary(thread_id.clone())
-            .await?;
-        if thread.mode == ConversationMode::Chat {
-            return Err(AppError::Protocol(
-                "ChatGPT consumer threads are compacted by ChatGPT and cannot be compacted by the Codex engine"
-                    .into(),
-            ));
-        }
-        let config = self.inner.storage.read_config().await?.config;
-        let model = self
-            .inner
-            .provider
-            .select_model(app, &self.inner.auth, config.model.as_deref())
-            .await?;
-        let context_preference = config
-            .model_context_window_preferences
-            .get(model.id())
-            .copied()
-            .unwrap_or(ModelContextWindowPreference::Default);
-        let model = model.with_context_window_preference(context_preference)?;
-        let reasoning_effort = config
-            .model_reasoning_effort
-            .or_else(|| model.default_reasoning_effort());
-        if let Some(reasoning_effort) = reasoning_effort
-            && !model.supports_reasoning_effort(reasoning_effort)
-        {
-            return Err(AppError::Protocol(format!(
-                "reasoning effort `{}` is not supported by model `{}`",
-                reasoning_effort.as_str(),
-                model.id()
-            )));
-        }
-        let service_tier = model.select_service_tier(None)?;
-        let lifecycle_guard = self.inner.thread_lifecycle_gate.lock().await;
-        let turn = self
-            .inner
-            .storage
-            .begin_compaction_turn(
-                thread_id.clone(),
-                model.id().into(),
-                reasoning_effort.map(|effort| effort.as_str().to_string()),
-            )
-            .await?;
-        let cancellation = self
-            .inner
-            .claim_active_turn(&thread_id, &turn, false)
-            .await?;
-        drop(lifecycle_guard);
-
-        self.inner
-            .announce_turn_start(app, &thread_id, &turn, None)
-            .await?;
-
-        let run = TurnRun {
-            thread_id,
-            turn_id: turn.id.clone(),
-            workspace: thread.cwd.into(),
-            mode: thread.mode,
-            model,
-            config,
-            reasoning_effort,
-            service_tier,
-            cancellation,
-        };
-        let task_inner = Arc::clone(&self.inner);
-        let app_handle = app.clone();
-        self.spawn_turn_task(app, &turn.id, async move {
-            agent::run_compaction(task_inner, app_handle, run).await
-        })
-        .await;
-
-        Ok(ThreadCompactStartResponse {})
     }
 
     pub async fn turn_start(

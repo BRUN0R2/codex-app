@@ -39,7 +39,7 @@ describe("golden contract fixtures gerados pelo engine Rust", () => {
   it("decodifica o payload de inicialização do engine", () => {
     const response = decodeEngineStartResponse(engineStartFixture);
 
-    expect(response.schemaVersion).toBe(12);
+    expect(response.schemaVersion).toBe(13);
     expect(response.engine.id).toBe("native-engine");
     expect(response.engine.capabilities).toContain("scheduledAutomations");
     expect(response.config.config.desktop.uiFontSize).toBe(15);

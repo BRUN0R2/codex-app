@@ -158,6 +158,7 @@ describe("agent activity presentation", () => {
 
   it("only keeps a lone completed row grouped while it owns the current activity heading", () => {
     const single = splitAgentActivityUnits([command("command-1")]);
+    const singleFileChange = splitAgentActivityUnits([fileChange("change-1", "src/App.tsx")]);
     const multipleChanges = splitAgentActivityUnits([
       fileChange("change-1", "src/App.tsx", {
         path: "src/main.tsx",
@@ -187,6 +188,11 @@ describe("agent activity presentation", () => {
         ? shouldRenderAgentActivityGroup(multipleChanges[0].items, false)
         : false,
     ).toBe(true);
+    expect(
+      singleFileChange[0]?.kind === "activityGroup"
+        ? shouldRenderAgentActivityGroup(singleFileChange[0].items, true, true)
+        : true,
+    ).toBe(false);
   });
 
   it("uses a concise active label for the latest running activity", () => {

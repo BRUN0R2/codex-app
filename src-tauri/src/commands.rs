@@ -12,9 +12,8 @@ use crate::engine::{
     ConfigUpdate, ConfigUpdateResponse, ConversationMode, CreateAutomation, EngineManager,
     EngineStartResponse, LoginResponse, LogoutResponse, ModelListResponse, OperationAck,
     OutputReadResponse, ReasoningEffort, RuntimeDiagnosticSubsystem, ServerResponse, StartTurn,
-    SteerTurn, ThreadCompactStartResponse, ThreadForkResponse, ThreadListResponse,
-    ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse, ThreadUnarchiveResponse,
-    TurnInput, TurnStartResponse, UpdateAutomation,
+    SteerTurn, ThreadForkResponse, ThreadListResponse, ThreadReadResponse, ThreadResumeResponse,
+    ThreadStartResponse, ThreadUnarchiveResponse, TurnInput, TurnStartResponse, UpdateAutomation,
 };
 use crate::error::{AppError, CommandError, CommandResult};
 
@@ -381,19 +380,6 @@ pub async fn engine_thread_fork(
     validate_protocol_id("thread id", &request.thread_id)?;
     engine
         .thread_fork(&app, request.thread_id)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn engine_thread_compact_start(
-    app: AppHandle,
-    engine: State<'_, EngineManager>,
-    request: ThreadIdRequest,
-) -> CommandResult<ThreadCompactStartResponse> {
-    validate_protocol_id("thread id", &request.thread_id)?;
-    engine
-        .thread_compact_start(&app, request.thread_id)
         .await
         .map_err(Into::into)
 }

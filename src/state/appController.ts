@@ -63,7 +63,6 @@ export interface AppController {
   readonly currentThread: Accessor<CodexThread | null>;
   readonly hasOlderHistory: Accessor<boolean>;
   readonly historyLoading: Accessor<boolean>;
-  readonly currentThreadTitle: Accessor<string>;
   readonly product: Accessor<AppProduct>;
   readonly chatGptMode: Accessor<ChatGptMode>;
   readonly chatModels: Accessor<readonly ChatModelOption[]>;
@@ -99,7 +98,6 @@ export interface AppController {
   readonly cancelLogin: () => Promise<void>;
   readonly chooseWorkspace: () => Promise<string | null>;
   readonly clearError: () => void;
-  readonly compactThread: (threadId: string) => Promise<boolean>;
   readonly createAutomation: (input: AutomationInput) => Promise<boolean>;
   readonly deleteAutomation: (automationId: string) => Promise<boolean>;
   readonly deleteThread: (threadId: string) => Promise<boolean>;

@@ -8,7 +8,7 @@ import {
 } from "./timelineDisclosureContext";
 
 describe("timeline disclosure state", () => {
-  it("uses a live fallback without persisting it after the running phase", () => {
+  it("lets an explicit choice override the live fallback", () => {
     createRoot((dispose) => {
       const disclosures = createTimelineDisclosureStore();
       const turnKey = timelineDisclosureStorageKey("thread:test", "turn:1");
@@ -20,7 +20,7 @@ describe("timeline disclosure state", () => {
       expect(disclosures.read(turnKey, false)).toBe(true);
 
       disclosures.setOpen(turnKey, false);
-      expect(disclosures.read(turnKey, false)).toBe(false);
+      expect(disclosures.read(turnKey, true)).toBe(false);
       dispose();
     });
   });
@@ -36,7 +36,7 @@ describe("timeline disclosure state", () => {
       disclosures.setOpen(changeKey, false);
 
       expect(disclosures.read(commandKey)).toBe(true);
-      expect(disclosures.read(changeKey, true)).toBe(true);
+      expect(disclosures.read(changeKey, true)).toBe(false);
       expect(disclosures.read(otherCommandKey)).toBe(false);
       dispose();
     });

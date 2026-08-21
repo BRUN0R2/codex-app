@@ -886,35 +886,6 @@ async fn recover_from_context_window(
     Ok(ContextWindowRecovery::Retry)
 }
 
-pub(super) async fn run_compaction(
-    inner: Arc<NativeEngineInner>,
-    app: AppHandle,
-    mut run: TurnRun,
-) -> Result<RunCompletion, AppError> {
-    let instructions = compose_instructions(&run.model, &run.workspace, &run.config, run.mode)?;
-    let mut provider_state = TurnProviderState::default();
-    if *run.cancellation.borrow() {
-        return Ok(RunCompletion::Interrupted);
-    }
-    let history = load_prompt_history(&inner, &app, &run.thread_id).await?;
-    let tools = provider_tools(&inner, &run.config, run.mode);
-    if compact_context(
-        &inner,
-        &app,
-        &mut run,
-        &instructions,
-        &mut provider_state,
-        &history,
-        &tools,
-    )
-    .await?
-    {
-        Ok(RunCompletion::Completed)
-    } else {
-        Ok(RunCompletion::Interrupted)
-    }
-}
-
 pub(super) fn provider_tools(
     inner: &NativeEngineInner,
     config: &AppConfig,

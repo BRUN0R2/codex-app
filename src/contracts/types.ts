@@ -43,7 +43,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 12;
+  readonly schemaVersion: 13;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -329,8 +329,6 @@ export interface ThreadUnarchiveResponse {
   readonly thread: CodexThread;
   readonly nextCursor: string | null;
 }
-
-export type ThreadCompactStartResponse = Record<string, never>;
 
 export interface ThreadListResponse {
   readonly data: readonly ThreadSummary[];

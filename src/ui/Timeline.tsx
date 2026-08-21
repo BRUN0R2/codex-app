@@ -80,7 +80,7 @@ import {
 import {
   commandActivityTitle,
   commandOutputText,
-  fileChangeActivityTitle,
+  fileChangeGroupTitle,
   formatElapsedSeconds,
   reasoningTitle,
   terminalReadActivityTitle,
@@ -1629,7 +1629,12 @@ function ActivityHeadline(props: {
       class={props.class ?? "activity-title"}
       classList={{ "is-running": props.active === true }}
     >
-      {props.text}
+      <span class="activity-title-base">{props.text}</span>
+      <Show when={props.active === true}>
+        <span aria-hidden="true" class="activity-title-sweep">
+          <span class="activity-title-highlight">{props.text}</span>
+        </span>
+      </Show>
     </span>
   );
 }
@@ -1787,8 +1792,39 @@ function FileChangeItem(props: {
   readonly item: Extract<ThreadItem, { type: "fileChange" }>;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
+  const singleChange = () => (props.item.changes.length === 1 ? props.item.changes[0] : undefined);
+
+  return (
+    <Show
+      when={singleChange()}
+      fallback={
+        <FileChangeGroup
+          diffDisplay={props.diffDisplay}
+          item={props.item}
+          variant={props.variant}
+        />
+      }
+    >
+      {(change) => (
+        <Change
+          change={change()}
+          diffDisplay={props.diffDisplay}
+          disclosureKey={`change:${props.item.id}:${timelineFileChangeIdentity(change(), 0)}`}
+          initialOpen
+          variant={props.variant}
+        />
+      )}
+    </Show>
+  );
+}
+
+function FileChangeGroup(props: {
+  readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly item: Extract<ThreadItem, { type: "fileChange" }>;
+  readonly variant?: "default" | "grouped" | undefined;
+}) {
   const disclosure = useTimelineDisclosure(() => `file-change:${props.item.id}`);
-  const title = () => fileChangeActivityTitle(props.item.changes);
+  const title = () => fileChangeGroupTitle(props.item.changes.length);
   const changeEntries = createMemo(() => createTimelineFileChangeEntries(props.item.changes));
   const changeIdentities = createMemo(() => changeEntries().map((entry) => entry.identity));
   const changesByIdentity = createMemo(
@@ -1796,57 +1832,42 @@ function FileChangeItem(props: {
   );
 
   return (
-    <Show
-      when={props.variant === "grouped" && props.item.changes.length === 1}
-      fallback={
-        <details
-          class="activity-card file-change-card"
-          classList={{ "grouped-activity-item": props.variant === "grouped" }}
-          onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
-          open={disclosure.isOpen()}
-        >
-          <summary class="activity-summary" data-timeline-disclosure="">
-            <span class="activity-icon">
-              <Icon name="edit" size={13} />
-            </span>
-            <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
-            <span class="activity-chevron">
-              <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-            </span>
-          </summary>
-          <Show when={disclosure.isOpen()}>
-            <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
-              <div class="file-change-list">
-                <For each={changeIdentities()}>
-                  {(changeIdentity) => (
-                    <Change
-                      change={readTimelineValue(
-                        changesByIdentity(),
-                        changeIdentity,
-                        "alteração de arquivo",
-                      )}
-                      diffDisplay={props.diffDisplay}
-                      disclosureKey={`change:${props.item.id}:${changeIdentity}`}
-                      variant={props.variant}
-                    />
-                  )}
-                </For>
-              </div>
-            </TimelineDisclosureContext.Provider>
-          </Show>
-        </details>
-      }
+    <details
+      class="activity-card file-change-card"
+      classList={{ "grouped-activity-item": props.variant === "grouped" }}
+      onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
+      open={disclosure.isOpen()}
     >
-      <Change
-        change={props.item.changes[0] as FileChange}
-        diffDisplay={props.diffDisplay}
-        disclosureKey={`change:${props.item.id}:${timelineFileChangeIdentity(
-          props.item.changes[0] as FileChange,
-          0,
-        )}`}
-        variant="grouped"
-      />
-    </Show>
+      <summary class="activity-summary" data-timeline-disclosure="">
+        <span class="activity-icon">
+          <Icon name="edit" size={13} />
+        </span>
+        <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
+        <span class="activity-chevron">
+          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+        </span>
+      </summary>
+      <Show when={disclosure.isOpen()}>
+        <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
+          <div class="file-change-list">
+            <For each={changeIdentities()}>
+              {(changeIdentity) => (
+                <Change
+                  change={readTimelineValue(
+                    changesByIdentity(),
+                    changeIdentity,
+                    "alteração de arquivo",
+                  )}
+                  diffDisplay={props.diffDisplay}
+                  disclosureKey={`change:${props.item.id}:${changeIdentity}`}
+                  variant={props.variant}
+                />
+              )}
+            </For>
+          </div>
+        </TimelineDisclosureContext.Provider>
+      </Show>
+    </details>
   );
 }
 
@@ -1854,9 +1875,13 @@ function Change(props: {
   readonly change: FileChange;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly disclosureKey: string;
+  readonly initialOpen?: boolean | undefined;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
-  const disclosure = useTimelineDisclosure(() => props.disclosureKey);
+  const disclosure = useTimelineDisclosure(
+    () => props.disclosureKey,
+    () => props.initialOpen === true,
+  );
   const diff = createMemo(() => props.change.diff);
   const kind = createMemo(() => props.change.kind.type);
   const path = createMemo(() => props.change.path);

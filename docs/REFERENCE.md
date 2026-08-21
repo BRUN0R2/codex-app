@@ -68,11 +68,11 @@ O contrato visual observado no viewport nativo maximizado inclui:
 - grupos semânticos independentes, com apenas os detalhes escolhidos pelo
   usuário expandidos.
 
-O cenário local determinístico reproduz as posições verticais oficiais com
-diferença de no máximo `1 px` nos marcos principais da captura:
-mensagem do usuário `135`, duração `278`, primeiro commentary `321`, primeiro
-comando `404`, segundo commentary `441`, primeiro resumo `524` e resumo final
-`644`.
+A implementação local adota deliberadamente uma superfície mais enxuta: não
+repete o preview da primeira mensagem como título no topo e não mantém a toolbar
+**Abrir em**. A conversa começa diretamente abaixo do titlebar com `32 px` de
+respiro. A abertura do workspace fica na ação **Abrir no Explorador de
+Arquivos** do menu do projeto, usando diretamente o caminho persistido.
 
 O bundle oficial também contém `OpenAISans-Regular` e `OpenAISans-Medium`.
 Esses arquivos são ativos de primeira parte e não possuem autorização de
@@ -222,7 +222,7 @@ produto. O estado atual é:
 | Turno incremental com raciocínio, ferramentas, aprovação e interrupção | implementada |
 | Histórico persistido, anexos, pesquisa web e falhas visíveis | implementada |
 | Troca de tarefa e múltiplos turnos simultâneos em background | implementada por runtime isolado por tarefa |
-| Compactação automática/manual e direcionamento de turno ativo | implementada |
+| Compactação automática e direcionamento de turno ativo | implementada |
 | Fork, arquivamento, desarquivamento e exclusão de tarefa | implementada |
 | Markdown sanitizado, scroll medido e janela de contexto | implementada |
 | Automações recorrentes, execução manual, pausa, histórico e fila de revisão | implementada |

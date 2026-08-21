@@ -18,7 +18,6 @@ type SidebarController = Pick<
   | "account"
   | "archiveThread"
   | "chooseWorkspace"
-  | "compactThread"
   | "currentThread"
   | "deleteThread"
   | "forkThread"
@@ -70,6 +69,7 @@ export interface SidebarProps {
   readonly controller: SidebarController;
   readonly inert: boolean;
   readonly onOpenAutomations: () => void;
+  readonly onOpenWorkspace: (path: string) => void;
   readonly onOpenSettings: (page?: SettingsPage) => void;
   readonly onShowChat: () => void;
 }
@@ -380,6 +380,7 @@ export function Sidebar(props: SidebarProps) {
                       controller={props.controller}
                       expanded={isProjectExpanded(project)}
                       onBeginRename={beginRename}
+                      onOpenWorkspace={props.onOpenWorkspace}
                       onShowChat={props.onShowChat}
                       onSubmitRename={submitRename}
                       onToggleExpanded={() => props.controller.toggleProjectExpanded(project.path)}
@@ -456,6 +457,7 @@ export function Sidebar(props: SidebarProps) {
                   controller={props.controller}
                   expanded={isProjectExpanded(group.project)}
                   onBeginRename={beginRename}
+                  onOpenWorkspace={props.onOpenWorkspace}
                   onShowChat={props.onShowChat}
                   onSubmitRename={submitRename}
                   onToggleExpanded={() =>
@@ -580,17 +582,6 @@ export function Sidebar(props: SidebarProps) {
             <button
               onClick={() => {
                 setAccountMenuOpen(false);
-                props.onOpenSettings("profile");
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <Icon name="user" size={15} />
-              <span>Perfil</span>
-            </button>
-            <button
-              onClick={() => {
-                setAccountMenuOpen(false);
                 props.onOpenSettings();
               }}
               role="menuitem"
@@ -677,6 +668,7 @@ interface ProjectGroupProps {
   readonly controller: SidebarController;
   readonly expanded: boolean;
   readonly onBeginRename: (thread: ThreadSummary) => void;
+  readonly onOpenWorkspace: (path: string) => void;
   readonly onShowChat: () => void;
   readonly onSubmitRename: (event: SubmitEvent) => Promise<void>;
   readonly onToggleExpanded: () => void;
@@ -770,7 +762,7 @@ function ProjectGroup(props: ProjectGroupProps) {
                     if (menu !== undefined) {
                       menu.open = false;
                     }
-                    void props.controller.chooseWorkspace();
+                    props.onOpenWorkspace(props.project.path);
                   }}
                   role="menuitem"
                   type="button"
@@ -976,20 +968,6 @@ function ThreadButton(props: ThreadButtonProps) {
                 type="button"
               >
                 <Icon name="layers" size={14} /> Criar fork
-              </button>
-              <button
-                disabled={
-                  props.controller.isThreadActive(props.thread.id) ||
-                  props.thread.preview.length === 0
-                }
-                onClick={() => {
-                  closeMenu();
-                  void props.controller.compactThread(props.thread.id);
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <Icon name="reset" size={14} /> Compactar contexto
               </button>
               <button
                 disabled={props.controller.isThreadActive(props.thread.id)}

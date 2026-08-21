@@ -197,7 +197,6 @@ pub fn run() {
             commands::engine_thread_unarchive,
             commands::engine_thread_delete,
             commands::engine_thread_fork,
-            commands::engine_thread_compact_start,
             commands::engine_turn_start,
             commands::engine_turn_steer,
             commands::engine_turn_interrupt,

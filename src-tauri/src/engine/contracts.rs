@@ -882,9 +882,6 @@ pub struct ThreadUnarchiveResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ThreadCompactStartResponse {}
-
-#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadListResponse {
     pub data: Vec<ThreadSummary>,
