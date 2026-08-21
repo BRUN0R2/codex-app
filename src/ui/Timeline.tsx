@@ -81,6 +81,7 @@ import {
   commandActivityTitle,
   commandOutputText,
   fileChangeActivityTitle,
+  formatElapsedSeconds,
   reasoningTitle,
   terminalReadActivityTitle,
   thinkingPresentation,
@@ -1924,23 +1925,6 @@ function groupedChangeAction(kind: FileChange["kind"]["type"]): string {
     case "update":
       return "Edição";
   }
-}
-
-function formatElapsedSeconds(seconds: number): string {
-  if (seconds < 1) {
-    return "0 s";
-  }
-  if (seconds < 60) {
-    return `${seconds} s`;
-  }
-  if (seconds < 3_600) {
-    const minutes = Math.floor(seconds / 60);
-    const remainder = seconds % 60;
-    return remainder === 0 ? `${minutes} min` : `${minutes} min ${remainder} s`;
-  }
-  const hours = Math.floor(seconds / 3_600);
-  const minutes = Math.floor((seconds % 3_600) / 60);
-  return minutes === 0 ? `${hours} h` : `${hours} h ${minutes} min`;
 }
 
 function sameScrollbarMetrics(left: ScrollbarMetrics, right: ScrollbarMetrics): boolean {

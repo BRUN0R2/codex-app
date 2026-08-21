@@ -27,6 +27,20 @@ export function turnDurationLabel(status: TurnStatus, duration: string): string 
   }
 }
 
+export function formatElapsedSeconds(seconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  if (totalSeconds < 60) {
+    return `${totalSeconds} s`;
+  }
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const remainder = totalSeconds % 60;
+  if (hours === 0) {
+    return `${minutes} min ${remainder} s`;
+  }
+  return `${hours} h ${minutes} min ${remainder} s`;
+}
+
 export function reasoningTitle(summary: readonly string[], content: readonly string[]): string {
   const source = lastNonEmpty(summary) ?? lastNonEmpty(content);
   if (source === null) {

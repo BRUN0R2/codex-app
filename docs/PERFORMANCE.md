@@ -420,13 +420,13 @@ final `644/644`. O recorte alinhado da conversa apresentou erro absoluto médio
 de `6,966/255` por canal; a diferença remanescente concentra-se nos glifos,
 porque a OpenAI Sans oficial não possui licença de redistribuição declarada.
 
-O gate integral aprovou 50 arquivos e 238 testes frontend, além de 207 testes
+O gate integral aprovou 50 arquivos e 239 testes frontend, além de 207 testes
 Rust; quatro benchmarks nativos continuam ignorados no fluxo comum e foram
 executados separadamente quando aplicável. O build Vite produziu:
 
-- app principal: `415,47 KiB`, `123,32 KiB` gzip;
+- app principal: `415,42 KiB`, `123,28 KiB` gzip;
 - chunk auxiliar: `20,46 KiB`, `8,14 KiB` gzip;
-- CSS: `117,82 KiB`, `21,54 KiB` gzip;
+- CSS: `117,78 KiB`, `21,53 KiB` gzip;
 - worker Markdown: `45,51 KiB`.
 
 Medições sintéticas após o porte:

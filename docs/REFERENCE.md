@@ -56,6 +56,8 @@ O contrato visual observado no viewport nativo maximizado inclui:
 - toolbar de conversa com `64 px`, título e ação **Abrir em**;
 - coluna lógica de `48rem`, equivalente a `768 px` na raiz oficial;
 - texto e Markdown de `14 px`, código de `13 px` e line-height de `1.6`;
+- duração com precisão de segundos em todas as escalas, incluindo
+  `1 h 29 min 25 s`;
 - fundo da conversa `#181818`, bolha do usuário `#222222`, texto principal
   `#dfdfdf`, atividade/duração `#909090` e divisor `#2d2d2d`;
 - commentary dentro da área recolhível de trabalho, entre o divisor de duração

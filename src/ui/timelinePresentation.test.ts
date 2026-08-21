@@ -4,6 +4,7 @@ import {
   commandActivityTitle,
   commandOutputText,
   fileChangeActivityTitle,
+  formatElapsedSeconds,
   reasoningTitle,
   terminalReadActivityTitle,
   thinkingPresentation,
@@ -25,6 +26,15 @@ describe("timeline presentation", () => {
   it("uses the official running and completed turn semantics", () => {
     expect(turnDurationLabel("inProgress", "18 min 15 s")).toBe("Processando há 18 min 15 s");
     expect(turnDurationLabel("completed", "18 min 15 s")).toBe("Trabalhou por 18 min 15 s");
+  });
+
+  it("keeps second-level precision for minute and hour durations", () => {
+    expect(formatElapsedSeconds(0)).toBe("0 s");
+    expect(formatElapsedSeconds(59.9)).toBe("59 s");
+    expect(formatElapsedSeconds(60)).toBe("1 min 0 s");
+    expect(formatElapsedSeconds(3_599)).toBe("59 min 59 s");
+    expect(formatElapsedSeconds(3_600)).toBe("1 h 0 min 0 s");
+    expect(formatElapsedSeconds(5_365)).toBe("1 h 29 min 25 s");
   });
 
   it("uses the latest streamed reasoning heading without exposing completed markdown", () => {
