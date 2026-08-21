@@ -34,12 +34,50 @@ do protocolo estudado e é independente da versão comercial do aplicativo.
 
 ## Desktop oficial e limites do agente
 
-O aplicativo oficial para Windows validado é o build `26.727.6591.0`. Seu
-processo Electron `ChatGPT.exe` inicia o executável embarcado como
-`codex.exe -c features.code_mode_host=true app-server
---analytics-default-enabled` e também inicia `codex-code-mode-host.exe`. A
-versão embarcada reporta `codex-cli 0.146.0-alpha.9.2`. Portanto, o Desktop usa
-o `app-server` e o core como engine; ele não executa o fluxo interativo da CLI.
+O aplicativo oficial para Windows foi revalidado em 21 de agosto de 2026 no
+build `26.818.3698.0`. Seu processo Electron `ChatGPT.exe` inicia o executável
+embarcado como `codex.exe -c features.code_mode_host=true app-server
+--analytics-default-enabled` e também inicia `codex-code-mode-host.exe`.
+Portanto, o Desktop usa o `app-server` e o core como engine; ele não executa o
+fluxo interativo da CLI. O build anterior `26.727.6591.0` reportava
+`codex-cli 0.146.0-alpha.9.2`; a versão interna atual não foi inferida porque o
+binário protegido não publica esse metadado.
+
+## Referência visual da conversa
+
+O bundle `app.asar` do build `26.818.3698.0` foi analisado somente como
+referência. Os módulos relevantes incluem `agent-activity-item`,
+`command-execution-command`, `exec-shell-container` e `conversation-markdown`.
+A janela oficial em execução foi capturada sem interação e medida por OCR
+nativo do Windows.
+
+O contrato visual observado no viewport nativo maximizado inclui:
+
+- toolbar de conversa com `64 px`, título e ação **Abrir em**;
+- coluna lógica de `48rem`, equivalente a `768 px` na raiz oficial;
+- texto e Markdown de `14 px`, código de `13 px` e line-height de `1.6`;
+- fundo da conversa `#181818`, bolha do usuário `#222222`, texto principal
+  `#dfdfdf`, atividade/duração `#909090` e divisor `#2d2d2d`;
+- commentary dentro da área recolhível de trabalho, entre o divisor de duração
+  e a resposta final;
+- comandos individuais no formato **Comando executado: ...**;
+- `read_thread_terminal` apresentado como **Lendo terminal do chat**,
+  **Terminal do chat lido** e, em resumo composto, **leu o terminal do chat**;
+- grupos semânticos independentes, com apenas os detalhes escolhidos pelo
+  usuário expandidos.
+
+O cenário local determinístico reproduz as posições verticais oficiais com
+diferença de no máximo `1 px` nos marcos principais da captura:
+mensagem do usuário `135`, duração `278`, primeiro commentary `321`, primeiro
+comando `404`, segundo commentary `441`, primeiro resumo `524` e resumo final
+`644`.
+
+O bundle oficial também contém `OpenAISans-Regular` e `OpenAISans-Medium`.
+Esses arquivos são ativos de primeira parte e não possuem autorização de
+redistribuição no `THIRD_PARTY_NOTICES.txt`; por isso não participam deste
+repositório. A interface prioriza `OpenAI Sans` quando instalada e usa a pilha
+de fontes do sistema como fallback. Incorporar os binários oficiais exige uma
+licença ou arquivo autorizado fornecido separadamente.
 
 Nem o snapshot da referência nem os binários oficiais contêm os limites fixos
 `MAX_AGENT_ROUNDS = 128` ou `MAX_TOOL_CALLS_PER_TURN = 512`. O loop oficial

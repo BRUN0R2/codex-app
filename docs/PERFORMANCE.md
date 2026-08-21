@@ -401,3 +401,67 @@ Em novas medições, “demora para responder” deve ser decomposta em pelo men
 quatro intervalos: aceitação de `turn_start`, primeira rodada, espera de
 ferramentas e rodadas subsequentes. Somar tudo em um único cronômetro esconde a
 causa e não distingue rede, modelo, ferramenta e disputa de estado.
+
+### Chat oficial, ferramentas e release isolada — 21 de agosto de 2026
+
+O chat foi comparado com o build oficial `26.818.3698.0`. A auditoria visual
+agora executa dez cenários em `920 × 640`, `1280 × 820` e `1920 × 1080`,
+produzindo trinta capturas. Três cenários são específicos da conversa:
+
+- reprodução do turno de referência, incluindo usuário, duração, três
+  commentaries, comandos, leitura do terminal e resposta final;
+- menu **Abrir em** expandido, com `menu`/`menuitem` e geometria confinada;
+- fechamento do menu por clique externo e `Escape`, com retorno de foco.
+
+No cenário `1920 × 1080`, os marcos verticais locais/oficiais foram,
+respectivamente: usuário `135/135`, duração `278/278`, commentary `321/321`,
+comando `404/404`, segundo commentary `441/441`, resumo `524/524` e resumo
+final `644/644`. O recorte alinhado da conversa apresentou erro absoluto médio
+de `6,966/255` por canal; a diferença remanescente concentra-se nos glifos,
+porque a OpenAI Sans oficial não possui licença de redistribuição declarada.
+
+O gate integral aprovou 50 arquivos e 238 testes frontend, além de 207 testes
+Rust; quatro benchmarks nativos continuam ignorados no fluxo comum e foram
+executados separadamente quando aplicável. O build Vite produziu:
+
+- app principal: `415,47 KiB`, `123,32 KiB` gzip;
+- chunk auxiliar: `20,46 KiB`, `8,14 KiB` gzip;
+- CSS: `117,82 KiB`, `21,54 KiB` gzip;
+- worker Markdown: `45,51 KiB`.
+
+Medições sintéticas após o porte:
+
+| Operação | Resultado |
+| --- | ---: |
+| batching de 1.200 deltas sobre 20.000 itens | `213,625×` mais rápido |
+| turnos simultaneamente montados em histórico de 100.000 | `8` |
+| 5.000 blocos Markdown incrementais | `87,956 ms` |
+| 20.000 projeções de atividade | `135,999 ms` |
+| 20.000 projeções de turno | `153,576 ms` |
+| highlight da janela visível de diff | `0,391 ms` |
+| redução de linhas de diff montadas | `2.054,808×` |
+| decode da página inicial de histórico | `0,229 ms` |
+| redução de heap da página inicial | `99,527%` |
+
+As ferramentas nativas em release mediram:
+
+| Ferramenta | Resultado |
+| --- | ---: |
+| ripgrep contra scanner anterior | `2,110×` mais rápido |
+| oito buscas duplicadas coalescidas | `87,5%` menos execuções |
+| ganho de latência na coalescência | `1,615×` |
+| compactação de saída de `2,44 MB` | `99,734%` em `12,918 ms` |
+
+Para não compartilhar SQLite, OAuth ou recovery com a instância aberta, o
+startup foi medido em um build de código idêntico com identificador Tauri
+temporário e diretório de dados isolado:
+
+| Amostra | Janela responsiva | Working set | Memória privada |
+| ---: | ---: | ---: | ---: |
+| 1, processo frio | `1.120,8 ms` | `37,8 MiB` | `7,6 MiB` |
+| 2 | `121,5 ms` | `29,8 MiB` | `7,4 MiB` |
+| 3 | `120,4 ms` | `29,6 MiB` | `7,7 MiB` |
+
+A mediana quente foi `121,5 ms`, o working set médio `32,4 MiB`, a memória
+privada média `7,6 MiB` e o executável `12,2 MiB`. A instância canônica aberta
+permaneceu responsiva e não foi encerrada ou substituída.
