@@ -50,7 +50,9 @@
     "measure:streaming": "node --experimental-strip-types scripts/measure-streaming.ts",
     "measure:syntax": "node --import ./scripts/register-typescript-imports.mjs --experimental-strip-types scripts/measure-syntax.ts",
     "measure:tool-cache": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::tools::fs::tests::benchmark_duplicate_search_coalescence -- --ignored --nocapture --test-threads=1",
+    "measure:tool-catalog": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::tools::tests::benchmark_tool_catalog_token_budget -- --ignored --nocapture --test-threads=1",
     "measure:tool-output": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::output_compaction::tests::benchmark_provider_output_reduction -- --ignored --nocapture --test-threads=1",
+    "measure:tokens": "pnpm measure:tool-catalog && pnpm measure:tool-output && pnpm measure:command-output && pnpm measure:history && pnpm measure:output-search && pnpm measure:tool-cache",
     "format:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --all",
     "tauri": "tauri"
   },

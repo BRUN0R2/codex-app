@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use base64::{Engine as _, prelude::BASE64_STANDARD};
@@ -21,7 +23,7 @@ use super::storage::ProviderHistorySnapshot;
 use super::stream_notifications::StreamNotificationBatcher;
 use super::text::{format_duration, truncate_utf8};
 use super::tools::{
-    MAX_PROVIDER_ITEM_BYTES, PreparedTool, ReadToolCache, ToolExecutionContext,
+    MAX_PROVIDER_ITEM_BYTES, PreparedTool, ReadToolCache, ReadToolCacheKey, ToolExecutionContext,
     ToolExecutionResult, ToolRegistry,
 };
 use super::{NativeEngineInner, TurnContinuation};
@@ -259,7 +261,7 @@ pub(super) async fn run_turn(
                     inner: &inner,
                     instructions: &instructions,
                     snapshot: &mut context_snapshot,
-                    tools: &tools,
+                    tools,
                 },
                 &mut run,
                 &mut provider_state,
@@ -274,7 +276,7 @@ pub(super) async fn run_turn(
                 run.model.id(),
                 &instructions,
                 &history.items,
-                &tools,
+                tools,
                 ResponseRequestSettings {
                     parallel_tool_calls: run.model.supports_parallel_tool_calls(),
                     reasoning_effort: run.reasoning_effort,
@@ -339,7 +341,7 @@ pub(super) async fn run_turn(
                                 inner: &inner,
                                 instructions: &instructions,
                                 snapshot: &mut context_snapshot,
-                                tools: &tools,
+                                tools,
                             },
                             &mut run,
                             &mut provider_state,
@@ -414,7 +416,7 @@ pub(super) async fn run_turn(
                                     inner: &inner,
                                     instructions: &instructions,
                                     snapshot: &mut context_snapshot,
-                                    tools: &tools,
+                                    tools,
                                 },
                                 &mut run,
                                 &mut provider_state,
@@ -628,12 +630,20 @@ pub(super) async fn run_turn(
 
             let allow_parallel_tools = run.model.supports_parallel_tool_calls();
             let mut pending_tools = pending_tools.into_iter().peekable();
+            let mut read_cache = ReadToolCache::default();
+            let mut read_leaders = HashMap::<ReadToolCacheKey, String>::new();
             while let Some(first) = pending_tools.next() {
                 let batch = collect_tool_batch(
                     first,
                     &mut pending_tools,
                     allow_parallel_tools,
                     run.config.permission_profile,
+                );
+                let (duplicate_reads, read_only_batch) = deduplicate_read_calls(
+                    &batch,
+                    &run.workspace,
+                    &run.thread_id,
+                    &mut read_leaders,
                 );
 
                 for pending in &batch {
@@ -652,25 +662,39 @@ pub(super) async fn run_turn(
                     }
                 }
 
-                let read_cache = ReadToolCache::default();
-                let executions = batch.iter().map(|pending| {
-                    let mut cancellation = run.cancellation.clone();
-                    let context = ToolExecutionContext {
-                        engine: Arc::downgrade(&inner),
-                        app: &app,
-                        workspace: &run.workspace,
-                        permissions: run.config.permission_profile,
-                        thread_id: &run.thread_id,
-                        turn_id: &run.turn_id,
-                        approvals: &inner.approvals,
-                        storage: &inner.storage,
-                        ripgrep: &inner.ripgrep,
-                        command_sessions: &inner.command_sessions,
-                        stream_deltas: &stream_deltas,
-                        read_cache: &read_cache,
-                    };
-                    async move { pending.execute(context, &mut cancellation).await }
-                });
+                let workspace = run.workspace.as_path();
+                let thread_id = run.thread_id.as_str();
+                let turn_id = run.turn_id.as_str();
+                let executions =
+                    batch
+                        .iter()
+                        .zip(duplicate_reads)
+                        .map(|(pending, duplicate_of)| {
+                            let mut cancellation = run.cancellation.clone();
+                            let context = ToolExecutionContext {
+                                engine: Arc::downgrade(&inner),
+                                app: &app,
+                                workspace,
+                                permissions: run.config.permission_profile,
+                                thread_id,
+                                turn_id,
+                                approvals: &inner.approvals,
+                                storage: &inner.storage,
+                                ripgrep: &inner.ripgrep,
+                                command_sessions: &inner.command_sessions,
+                                stream_deltas: &stream_deltas,
+                                read_cache: &read_cache,
+                            };
+                            async move {
+                                match duplicate_of {
+                                    Some(original_call_id) => {
+                                        Ok(pending
+                                            .duplicate_read_result(workspace, &original_call_id))
+                                    }
+                                    None => pending.execute(context, &mut cancellation).await,
+                                }
+                            }
+                        });
                 let results = join_all(executions).await;
                 stream_deltas.flush().await?;
                 let mut interrupted = false;
@@ -742,6 +766,10 @@ pub(super) async fn run_turn(
                 }
                 if interrupted {
                     return Ok(RunCompletion::Interrupted);
+                }
+                if !read_only_batch {
+                    read_cache = ReadToolCache::default();
+                    read_leaders.clear();
                 }
             }
         }
@@ -902,19 +930,37 @@ pub(super) fn provider_tools(
     inner: &NativeEngineInner,
     config: &AppConfig,
     mode: ConversationMode,
-) -> Vec<serde_json::Value> {
-    let mut tools = if local_tools_enabled(mode) {
-        inner.tools.definitions()
-    } else {
-        Vec::new()
-    };
-    if config.web_search == WebSearchMode::Live {
-        tools.push(json!({
+) -> &'static [serde_json::Value] {
+    static WEB_ONLY_TOOLS: OnceLock<Vec<serde_json::Value>> = OnceLock::new();
+    static FULL_WEB_TOOLS: OnceLock<Vec<serde_json::Value>> = OnceLock::new();
+    static READ_ONLY_WEB_TOOLS: OnceLock<Vec<serde_json::Value>> = OnceLock::new();
+
+    let local =
+        local_tools_enabled(mode).then(|| inner.tools.definitions_for(config.permission_profile));
+    if config.web_search != WebSearchMode::Live {
+        return local.unwrap_or(&[]);
+    }
+    let web_search = || {
+        json!({
             "type": "web_search",
             "external_web_access": true
-        }));
-    }
-    tools
+        })
+    };
+    let Some(local) = local else {
+        return WEB_ONLY_TOOLS.get_or_init(|| vec![web_search()]).as_slice();
+    };
+    let cache = if config.permission_profile.sandbox == crate::engine::SandboxMode::ReadOnly {
+        &READ_ONLY_WEB_TOOLS
+    } else {
+        &FULL_WEB_TOOLS
+    };
+    cache
+        .get_or_init(|| {
+            let mut combined = local.to_vec();
+            combined.push(web_search());
+            combined
+        })
+        .as_slice()
 }
 
 const fn local_tools_enabled(mode: ConversationMode) -> bool {
@@ -1206,6 +1252,28 @@ impl PendingTool {
         }
     }
 
+    fn read_dedup_key(&self, workspace: &Path, thread_id: &str) -> Option<ReadToolCacheKey> {
+        match &self.operation {
+            PendingToolOperation::Prepared(prepared) => {
+                prepared.read_dedup_key(workspace, thread_id)
+            }
+            PendingToolOperation::Rejected(_) => None,
+        }
+    }
+
+    fn duplicate_read_result(
+        &self,
+        workspace: &Path,
+        original_call_id: &str,
+    ) -> ToolExecutionResult {
+        match &self.operation {
+            PendingToolOperation::Prepared(prepared) => {
+                prepared.duplicate_read_result(workspace, original_call_id)
+            }
+            PendingToolOperation::Rejected(rejected) => rejected.result(),
+        }
+    }
+
     fn name(&self) -> &str {
         match &self.operation {
             PendingToolOperation::Prepared(prepared) => prepared.name(),
@@ -1274,6 +1342,29 @@ where
         }
     }
     batch
+}
+
+fn deduplicate_read_calls(
+    batch: &[PendingTool],
+    workspace: &Path,
+    thread_id: &str,
+    leaders: &mut HashMap<ReadToolCacheKey, String>,
+) -> (Vec<Option<String>>, bool) {
+    let mut all_reads = true;
+    let mut duplicates = Vec::with_capacity(batch.len());
+    for pending in batch {
+        let Some(key) = pending.read_dedup_key(workspace, thread_id) else {
+            all_reads = false;
+            duplicates.push(None);
+            continue;
+        };
+        let duplicate_of = leaders.get(&key).cloned();
+        if duplicate_of.is_none() {
+            leaders.insert(key, pending.call_id.clone());
+        }
+        duplicates.push(duplicate_of);
+    }
+    (duplicates, all_reads)
 }
 
 impl RejectedToolCall {
@@ -1613,11 +1704,14 @@ fn tool_failure_diagnostic(tool_name: &str, item: &ThreadItem) -> Option<String>
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+
     use super::{
         MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS, MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS,
         PendingTool, add_input_bytes, automatic_provider_retry_wait, automatic_rate_limit_wait,
-        collect_tool_batch, local_tools_enabled, record_turn_state, tool_failure_diagnostic,
-        validate_response_item, web_search_activity_detail,
+        collect_tool_batch, deduplicate_read_calls, local_tools_enabled, record_turn_state,
+        tool_failure_diagnostic, validate_response_item, web_search_activity_detail,
     };
     use crate::engine::native::provider::{ResponseItem, WebSearchAction};
     use crate::engine::native::tools::{ToolExecutionResult, ToolRegistry};
@@ -1632,6 +1726,74 @@ mod tests {
                 .map(|source| source.reference());
         }
         item
+    }
+
+    #[test]
+    fn duplicate_pure_reads_reference_one_leader_without_repeating_the_output() {
+        let registry = ToolRegistry;
+        let first = PendingTool::function(
+            &registry,
+            "read-item-1".into(),
+            "read_file",
+            r#"{"path":"src/lib.rs","start_line":1,"end_line":20}"#,
+            "read-call-1".into(),
+        );
+        let duplicate = PendingTool::function(
+            &registry,
+            "read-item-2".into(),
+            "read_file",
+            r#"{"path":"src/lib.rs","start_line":1,"end_line":20}"#,
+            "read-call-2".into(),
+        );
+        let distinct = PendingTool::function(
+            &registry,
+            "read-item-3".into(),
+            "read_file",
+            r#"{"path":"src/lib.rs","start_line":21,"end_line":40}"#,
+            "read-call-3".into(),
+        );
+        let batch = [first, duplicate, distinct];
+        let mut leaders = HashMap::new();
+
+        let (duplicates, all_reads) =
+            deduplicate_read_calls(&batch, Path::new(r"C:\workspace"), "thread-1", &mut leaders);
+
+        assert!(all_reads);
+        assert_eq!(duplicates, [None, Some("read-call-1".into()), None]);
+        let result = batch[1].duplicate_read_result(Path::new(r"C:\workspace"), "read-call-1");
+        assert!(result.provider_output.contains("read-call-1"));
+        assert!(result.display_output.is_none());
+        assert!(matches!(
+            result.completed_item,
+            ThreadItem::ToolExecution {
+                status: ActivityStatus::Completed,
+                output: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn mutation_calls_never_enter_the_read_deduplication_domain() {
+        let mutation = PendingTool::function(
+            &ToolRegistry,
+            "edit-item".into(),
+            "edit_file",
+            r#"{"path":"src/lib.rs","old_text":"old","new_text":"new","expected_occurrences":1}"#,
+            "edit-call".into(),
+        );
+        let mut leaders = HashMap::new();
+
+        let (duplicates, all_reads) = deduplicate_read_calls(
+            &[mutation],
+            Path::new(r"C:\workspace"),
+            "thread-1",
+            &mut leaders,
+        );
+
+        assert!(!all_reads);
+        assert_eq!(duplicates, [None]);
+        assert!(leaders.is_empty());
     }
 
     #[test]

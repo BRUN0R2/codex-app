@@ -37,8 +37,8 @@ mod workspace;
 
 use self::exec::{CommandOutput, command_timeout, command_yield_time};
 use self::fs::{edit_file, list_files, read_file, search_text, write_file};
-pub(super) use self::read_cache::ReadToolCache;
-use self::read_cache::{CachedReadOutput, ReadToolCacheKey};
+use self::read_cache::CachedReadOutput;
+pub(super) use self::read_cache::{ReadToolCache, ReadToolCacheKey};
 pub(super) use self::ripgrep::Ripgrep;
 use self::workspace::{canonical_workspace, display_workspace_path, resolve_existing_directory};
 
@@ -70,6 +70,9 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Default)]
 pub struct ToolRegistry;
+
+static TOOL_DEFINITIONS: OnceLock<Vec<Value>> = OnceLock::new();
+static READ_ONLY_TOOL_DEFINITIONS: OnceLock<Vec<Value>> = OnceLock::new();
 
 #[derive(Debug)]
 pub struct PreparedTool {
@@ -224,7 +227,33 @@ enum UpdatePlanStatus {
 }
 
 impl ToolRegistry {
-    pub fn definitions(&self) -> Vec<Value> {
+    pub fn definitions(&self) -> &'static [Value] {
+        TOOL_DEFINITIONS
+            .get_or_init(Self::build_definitions)
+            .as_slice()
+    }
+
+    pub fn definitions_for(&self, permissions: PermissionProfile) -> &'static [Value] {
+        if permissions.sandbox != SandboxMode::ReadOnly {
+            return self.definitions();
+        }
+        READ_ONLY_TOOL_DEFINITIONS
+            .get_or_init(|| {
+                self.definitions()
+                    .iter()
+                    .filter(|definition| {
+                        !matches!(
+                            definition["name"].as_str(),
+                            Some("apply_patch" | "edit_file" | "exec_command" | "write_file")
+                        )
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .as_slice()
+    }
+
+    fn build_definitions() -> Vec<Value> {
         vec![
             function_tool(
                 "read_file",
@@ -597,6 +626,29 @@ impl PreparedTool {
                 self.name
             ))
         })
+    }
+
+    pub(super) fn read_dedup_key(
+        &self,
+        workspace: &Path,
+        thread_id: &str,
+    ) -> Option<ReadToolCacheKey> {
+        ReadToolCacheKey::from_operation(workspace, thread_id, &self.operation)
+    }
+
+    pub(super) fn duplicate_read_result(
+        &self,
+        workspace: &Path,
+        original_call_id: &str,
+    ) -> ToolExecutionResult {
+        ToolExecutionResult {
+            provider_output: format!(
+                "Duplicate read skipped; the identical result was returned by tool call `{original_call_id}`."
+            ),
+            completed_item: self.finish_item(workspace, ActivityStatus::Completed, None, Some(0)),
+            display_output: None,
+            background_command: None,
+        }
     }
 
     pub fn started_item(&self, workspace: &Path) -> ThreadItem {
@@ -1297,6 +1349,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::io::Write as _;
     use std::path::Path;
+    use std::time::Instant;
 
     use serde_json::Value;
     use tempfile::TempDir;
@@ -1315,6 +1368,78 @@ mod tests {
         ToolOperation, ToolRegistry, WriteFileArgs, activity_status_for_exit_code,
         execute_patch_operation, search_text,
     };
+
+    #[test]
+    #[ignore = "performance benchmark"]
+    fn benchmark_tool_catalog_token_budget() {
+        let mut samples = Vec::with_capacity(101);
+        let mut encoded = Vec::new();
+        for _ in 0..101 {
+            let started = Instant::now();
+            let definitions = ToolRegistry.definitions();
+            encoded = serde_json::to_vec(&definitions).expect("tool catalog should encode");
+            std::hint::black_box(&encoded);
+            samples.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        samples.sort_by(f64::total_cmp);
+        let definitions = ToolRegistry.definitions();
+        let read_only_definitions = ToolRegistry.definitions_for(PermissionProfile::read_only());
+        let read_only_encoded =
+            serde_json::to_vec(read_only_definitions).expect("read-only catalog should encode");
+        let by_tool = definitions
+            .iter()
+            .map(|definition| {
+                let bytes = serde_json::to_vec(definition)
+                    .expect("tool definition should encode")
+                    .len();
+                serde_json::json!({
+                    "bytes": bytes,
+                    "estimatedTokens": bytes.div_ceil(4),
+                    "name": definition["name"],
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "definitions": definitions.len(),
+                "encodedBytes": encoded.len(),
+                "estimatedTokens": encoded.len().div_ceil(4),
+                "buildAndEncodeMedianMs": samples[samples.len() / 2],
+                "byTool": by_tool,
+                "readOnly": {
+                    "definitions": read_only_definitions.len(),
+                    "encodedBytes": read_only_encoded.len(),
+                    "estimatedTokens": read_only_encoded.len().div_ceil(4),
+                    "tokenReductionPercent":
+                        (1.0 - read_only_encoded.len() as f64 / encoded.len() as f64) * 100.0,
+                },
+                "samples": samples.len(),
+            }))
+            .expect("benchmark result should encode")
+        );
+    }
+
+    #[test]
+    fn read_only_catalog_does_not_advertise_impossible_mutations_or_commands() {
+        let names = ToolRegistry
+            .definitions_for(PermissionProfile::read_only())
+            .iter()
+            .filter_map(|definition| definition["name"].as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "list_files",
+                "poll_command",
+                "read_file",
+                "read_output",
+                "search_text",
+                "update_plan",
+            ])
+        );
+    }
 
     #[test]
     fn command_exit_code_controls_the_visual_activity_status() {
@@ -1439,7 +1564,7 @@ mod tests {
     fn apply_patch_tool_definition_is_freeform_and_grammar_constrained() {
         let tool = ToolRegistry
             .definitions()
-            .into_iter()
+            .iter()
             .find(|tool| tool["name"] == "apply_patch")
             .expect("apply_patch should be advertised");
 
@@ -1604,7 +1729,7 @@ mod tests {
     fn poll_command_schema_is_bounded_and_strict() {
         let definition = ToolRegistry
             .definitions()
-            .into_iter()
+            .iter()
             .find(|tool| tool["name"] == "poll_command")
             .expect("poll_command should be advertised");
         let parameters = &definition["parameters"];
@@ -1640,7 +1765,7 @@ mod tests {
     fn exec_command_schema_is_explicit_and_strict() {
         let definition = ToolRegistry
             .definitions()
-            .into_iter()
+            .iter()
             .find(|tool| tool["name"] == "exec_command")
             .expect("exec_command should be advertised");
         let parameters = &definition["parameters"];
@@ -1721,7 +1846,7 @@ mod tests {
     fn strict_function_schemas_require_every_declared_property() {
         for definition in ToolRegistry
             .definitions()
-            .into_iter()
+            .iter()
             .filter(|tool| tool["type"] == "function")
         {
             let name = definition["name"]
@@ -1863,7 +1988,7 @@ mod tests {
         let registry = ToolRegistry;
         let definition = registry
             .definitions()
-            .into_iter()
+            .iter()
             .find(|tool| tool["name"] == "update_plan")
             .expect("update_plan should be advertised");
         assert_eq!(definition["strict"], true);

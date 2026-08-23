@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use crate::error::AppError;
 
@@ -56,6 +57,15 @@ impl ChatStream {
         &mut self,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<Option<ChatStreamEvent>, AppError> {
+        self.next_event_until(cancellation, Instant::now() + STREAM_IDLE_TIMEOUT)
+            .await
+    }
+
+    async fn next_event_until(
+        &mut self,
+        cancellation: &mut watch::Receiver<bool>,
+        event_deadline: Instant,
+    ) -> Result<Option<ChatStreamEvent>, AppError> {
         loop {
             if let Some(event) = self.pending.pop_front() {
                 return Ok(Some(event));
@@ -68,7 +78,7 @@ impl ChatStream {
                 return Ok(Some(ChatStreamEvent::Interrupted));
             }
 
-            let next_chunk = tokio::time::timeout(STREAM_IDLE_TIMEOUT, self.response.chunk());
+            let next_chunk = tokio::time::timeout_at(event_deadline, self.response.chunk());
             let chunk = tokio::select! {
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() {
@@ -741,8 +751,14 @@ fn delta_error() -> AppError {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::time::Duration;
 
-    use super::{ChatSseParser, ChatStreamEvent, decode_payload};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpListener;
+    use tokio::sync::watch;
+    use tokio::time::Instant;
+
+    use super::{ChatSseParser, ChatStream, ChatStreamEvent, decode_payload};
 
     #[test]
     fn decodes_v1_delta_updates_without_cloning_the_accumulated_message() {
@@ -803,6 +819,67 @@ mod tests {
             )
             .expect("standard SSE extensions should be ignored");
         assert_eq!(events.pop_front(), Some(ChatStreamEvent::Completed));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_chunks_do_not_extend_the_semantic_event_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should have an address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("test request should connect");
+            let mut request = [0_u8; 2_048];
+            let _request_bytes = socket
+                .read(&mut request)
+                .await
+                .expect("test request should be readable");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+                )
+                .await
+                .expect("test response headers should write");
+            let heartbeat = b": heartbeat\n\n";
+            for _ in 0..100 {
+                let chunk = format!("{:X}\r\n", heartbeat.len());
+                if socket.write_all(chunk.as_bytes()).await.is_err()
+                    || socket.write_all(heartbeat).await.is_err()
+                    || socket.write_all(b"\r\n").await.is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .expect("test response should start");
+        let (_cancellation, mut cancellation) = watch::channel(false);
+        let mut stream = ChatStream::new(response);
+
+        let error = stream
+            .next_event_until(
+                &mut cancellation,
+                Instant::now() + Duration::from_millis(60),
+            )
+            .await
+            .expect_err("heartbeat-only traffic must reach the semantic deadline");
+
+        assert!(matches!(
+            error,
+            crate::error::AppError::Timeout {
+                operation: "ChatGPT response stream"
+            }
+        ));
+        server.abort();
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub(in crate::engine::native) struct ReadToolCache {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(super) struct ReadToolCacheKey {
+pub(in crate::engine::native) struct ReadToolCacheKey {
     workspace: PathBuf,
     thread_id: String,
     operation: ReadToolOperationKey,
