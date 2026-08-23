@@ -61,15 +61,23 @@ export function applyThreadRuntimeStreamDeltas(
       threadDeltas.push(delta);
     }
   }
-  const next = new Map(current);
+  let next: Map<string, ThreadRuntimeState> | null = null;
   for (const [threadId, threadDeltas] of deltasByThread) {
     const runtime = current.get(threadId) ?? emptyThreadRuntime();
+    const overlayIds = new Set(runtime.itemOverlays.map((item) => item.id));
+    const applicableDeltas = threadDeltas.filter(
+      (delta) => delta.kind !== "commandOutput" || overlayIds.has(delta.itemId),
+    );
+    if (applicableDeltas.length === 0) {
+      continue;
+    }
+    next ??= new Map(current);
     next.set(threadId, {
       ...runtime,
-      itemOverlays: applyStreamDeltas(runtime.itemOverlays, threadDeltas),
+      itemOverlays: applyStreamDeltas(runtime.itemOverlays, applicableDeltas),
     });
   }
-  return next;
+  return next ?? current;
 }
 
 export function synchronizeThreadRuntime(

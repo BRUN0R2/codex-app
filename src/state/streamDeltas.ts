@@ -12,6 +12,16 @@ export type StreamDelta =
       readonly index: number;
       readonly target: "content" | "summary";
       readonly delta: string;
+    }
+  | {
+      readonly kind: "commandOutput";
+      readonly threadId: string;
+      readonly turnId: string;
+      readonly itemId: string;
+      readonly stream: "stderr" | "stdout";
+      readonly operation:
+        | { readonly type: "append"; readonly delta: string }
+        | { readonly type: "backspace" | "clearCurrentLine" | "truncated" };
     };
 
 export interface StreamDeltaScheduler {
@@ -121,7 +131,7 @@ export function createStreamDeltaBatcher(options: StreamDeltaBatcherOptions): St
       leadingKeys.clear();
     },
     enqueue(delta) {
-      if (disposed || delta.delta.length === 0) {
+      if (disposed || streamDeltaText(delta) === "") {
         return;
       }
       const key = streamDeltaKey(delta);
@@ -131,6 +141,29 @@ export function createStreamDeltaBatcher(options: StreamDeltaBatcherOptions): St
         return;
       }
       const pendingIndex = pendingIndexes.get(key);
+      if (delta.kind === "commandOutput") {
+        const previous = pending.at(-1);
+        if (
+          previous?.kind === "commandOutput" &&
+          previous.itemId === delta.itemId &&
+          previous.threadId === delta.threadId &&
+          previous.stream === delta.stream &&
+          previous.operation.type === "append" &&
+          delta.operation.type === "append"
+        ) {
+          pending[pending.length - 1] = {
+            ...previous,
+            operation: {
+              type: "append",
+              delta: previous.operation.delta + delta.operation.delta,
+            },
+          };
+        } else {
+          pending.push(delta);
+        }
+        scheduleFlush();
+        return;
+      }
       if (pendingIndex === undefined) {
         pendingIndexes.set(key, pending.length);
         pending.push(delta);
@@ -163,7 +196,20 @@ export function createBrowserStreamDeltaScheduler(): StreamDeltaScheduler {
 
 function streamDeltaKey(delta: StreamDelta): string {
   const base = `${delta.threadId}${KEY_SEPARATOR}${delta.itemId}${KEY_SEPARATOR}${delta.kind}`;
-  return delta.kind === "agentText"
-    ? base
-    : `${base}${KEY_SEPARATOR}${delta.target}${KEY_SEPARATOR}${delta.index}`;
+  switch (delta.kind) {
+    case "agentText":
+      return base;
+    case "commandOutput":
+      return `${base}${KEY_SEPARATOR}${delta.turnId}${KEY_SEPARATOR}${delta.stream}`;
+    case "reasoningText":
+      return `${base}${KEY_SEPARATOR}${delta.target}${KEY_SEPARATOR}${delta.index}`;
+  }
+}
+
+function streamDeltaText(delta: StreamDelta): string | null {
+  return delta.kind === "commandOutput"
+    ? delta.operation.type === "append"
+      ? delta.operation.delta
+      : null
+    : delta.delta;
 }

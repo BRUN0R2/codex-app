@@ -15,7 +15,7 @@ use crate::process::headless_command;
 const RIPGREP_EXECUTABLE_NAME: &str = "rg.exe";
 const RIPGREP_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(in crate::engine::native) struct Ripgrep {
     executable: OnceLock<PathBuf>,
 }

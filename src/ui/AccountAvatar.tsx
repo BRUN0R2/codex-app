@@ -4,7 +4,7 @@ import type { ChatGptAccount } from "../contracts/types";
 
 interface AccountAvatarProps {
   readonly account: ChatGptAccount | null | undefined;
-  readonly large?: boolean;
+  readonly size?: "compact" | "profile" | "settings";
 }
 
 export function AccountAvatar(props: AccountAvatarProps) {
@@ -15,7 +15,7 @@ export function AccountAvatar(props: AccountAvatarProps) {
   };
 
   return (
-    <span aria-hidden="true" class="account-avatar" classList={{ large: props.large === true }}>
+    <span aria-hidden="true" class={`account-avatar account-avatar-${props.size ?? "compact"}`}>
       <span>{accountInitials(props.account)}</span>
       <Show when={picture()}>
         {(source) => (

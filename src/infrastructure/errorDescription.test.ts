@@ -13,6 +13,17 @@ describe("error descriptions", () => {
     ).toBe("A solicitação é inválida.");
   });
 
+  it("unwraps generic framework errors to the original command failure", () => {
+    const commandError = {
+      code: "invalid_attachment",
+      message: "O arquivo anexado não está mais disponível.",
+      retryable: false,
+    };
+    const wrapped = new Error("Unknown error", { cause: commandError });
+
+    expect(describeError(wrapped)).toBe("O arquivo anexado não está mais disponível.");
+  });
+
   it("preserves the complete error cause chain for diagnostics", () => {
     const root = new Error("falha original");
     const wrapped = new Error("falha ao renderizar o turno", { cause: root });

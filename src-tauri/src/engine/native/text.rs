@@ -1,16 +1,8 @@
 //! Bounded text presentation helpers shared across engine modules.
 
 pub(super) fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
-    let end = truncation_boundary(value, maximum_bytes);
+    let end = utf8_prefix_length(value, maximum_bytes);
     value[..end].to_string()
-}
-
-pub(super) fn truncate_utf8_marked(value: &str, maximum_bytes: usize) -> String {
-    let end = truncation_boundary(value, maximum_bytes);
-    if end == value.len() {
-        return value.to_string();
-    }
-    format!("{}\n[truncated]", &value[..end])
 }
 
 pub(super) fn format_duration(seconds: u64) -> String {
@@ -31,7 +23,7 @@ pub(super) fn format_duration(seconds: u64) -> String {
     }
 }
 
-fn truncation_boundary(value: &str, maximum_bytes: usize) -> usize {
+pub(super) fn utf8_prefix_length(value: &str, maximum_bytes: usize) -> usize {
     if value.len() <= maximum_bytes {
         return value.len();
     }
@@ -46,18 +38,11 @@ fn truncation_boundary(value: &str, maximum_bytes: usize) -> usize {
 mod tests {
     use super::format_duration;
     use super::truncate_utf8;
-    use super::truncate_utf8_marked;
 
     #[test]
     fn truncate_keeps_multibyte_characters_intact() {
         assert_eq!(truncate_utf8("café", 10), "café");
         assert_eq!(truncate_utf8("çççç", 5), "çç");
-    }
-
-    #[test]
-    fn truncate_marks_the_cut_visible_to_the_provider() {
-        assert_eq!(truncate_utf8_marked("abcdef", 3), "abc\n[truncated]");
-        assert_eq!(truncate_utf8_marked("abc", 3), "abc");
     }
 
     #[test]

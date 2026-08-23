@@ -29,8 +29,8 @@ use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
 use crate::engine::{
     ActivityStatus, AppConfig, ConversationMode, DiagnosticStream, ImageDetail, ItemNotification,
     MessagePhase, ModelRerouteReason, ModelReroutedNotification,
-    ModelSafetyBufferingUpdatedNotification, ModelVerificationNotification, Personality,
-    StreamDelta, ThreadItem, TurnInput, WebSearchMode,
+    ModelSafetyBufferingUpdatedNotification, ModelVerificationNotification, PermissionProfile,
+    Personality, StreamDelta, ThreadItem, TurnInput, WebSearchMode,
 };
 use crate::error::AppError;
 
@@ -43,7 +43,7 @@ const MAX_TURN_PREVIEW_BYTES: usize = 160;
 const MAX_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_ERROR_BYTES: usize = 4_096;
-const MAX_PARALLEL_READ_TOOLS: usize = 8;
+const MAX_PARALLEL_TOOLS: usize = 8;
 const MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS: u64 = 60;
 const MAX_CONTEXT_RECOVERY_ATTEMPTS_WITHOUT_PROGRESS: u8 = 1;
@@ -626,21 +626,15 @@ pub(super) async fn run_turn(
                 }
             }
 
-            let allow_parallel_reads = run.model.supports_parallel_tool_calls();
+            let allow_parallel_tools = run.model.supports_parallel_tool_calls();
             let mut pending_tools = pending_tools.into_iter().peekable();
             while let Some(first) = pending_tools.next() {
-                let parallel_batch = allow_parallel_reads && first.is_parallel_safe();
-                let mut batch = vec![first];
-                while parallel_batch
-                    && batch.len() < MAX_PARALLEL_READ_TOOLS
-                    && pending_tools
-                        .peek()
-                        .is_some_and(PendingTool::is_parallel_safe)
-                {
-                    if let Some(pending) = pending_tools.next() {
-                        batch.push(pending);
-                    }
-                }
+                let batch = collect_tool_batch(
+                    first,
+                    &mut pending_tools,
+                    allow_parallel_tools,
+                    run.config.permission_profile,
+                );
 
                 for pending in &batch {
                     if *run.cancellation.borrow() {
@@ -662,6 +656,7 @@ pub(super) async fn run_turn(
                 let executions = batch.iter().map(|pending| {
                     let mut cancellation = run.cancellation.clone();
                     let context = ToolExecutionContext {
+                        engine: Arc::downgrade(&inner),
                         app: &app,
                         workspace: &run.workspace,
                         permissions: run.config.permission_profile,
@@ -670,17 +665,20 @@ pub(super) async fn run_turn(
                         approvals: &inner.approvals,
                         storage: &inner.storage,
                         ripgrep: &inner.ripgrep,
+                        command_sessions: &inner.command_sessions,
+                        stream_deltas: &stream_deltas,
                         read_cache: &read_cache,
                     };
                     async move { pending.execute(context, &mut cancellation).await }
                 });
                 let results = join_all(executions).await;
+                stream_deltas.flush().await?;
                 let mut interrupted = false;
 
-                // Provider outputs remain in call order even when read-only execution overlaps.
+                // Provider outputs remain in call order even when execution overlaps.
                 for (pending, result) in batch.into_iter().zip(results) {
                     let pending_name = pending.name().to_string();
-                    let result = match result {
+                    let mut result = match result {
                         Ok(result) => result,
                         Err(AppError::Cancelled(message)) => {
                             let error = AppError::Cancelled(message);
@@ -698,6 +696,7 @@ pub(super) async fn run_turn(
                             failure
                         }
                     };
+                    let background_command = result.background_command.take();
                     let output = match pending.output_kind {
                         ToolOutputKind::Function => {
                             ResponseItem::function_output(pending.call_id, result.provider_output)
@@ -706,7 +705,7 @@ pub(super) async fn run_turn(
                             ResponseItem::custom_output(pending.call_id, result.provider_output)
                         }
                     };
-                    let completed_item = inner
+                    let completed_item = match inner
                         .storage
                         .append_provider_and_thread_item(
                             run.thread_id.clone(),
@@ -715,18 +714,31 @@ pub(super) async fn run_turn(
                             result.completed_item,
                             result.display_output,
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(item) => item,
+                        Err(error) => {
+                            if let Some(command) = background_command {
+                                command.discard();
+                            }
+                            return Err(error);
+                        }
+                    };
                     if let Some(message) = tool_failure_diagnostic(&pending_name, &completed_item) {
                         inner.emit_diagnostic(&app, DiagnosticStream::Runtime, message);
                     }
-                    emit_item_notification(
+                    let notification = emit_item_notification(
                         &inner,
                         &app,
                         &run.thread_id,
                         &run.turn_id,
                         completed_item,
                         false,
-                    )?;
+                    );
+                    if let Some(command) = background_command {
+                        command.commit();
+                    }
+                    notification?;
                 }
                 if interrupted {
                     return Ok(RunCompletion::Interrupted);
@@ -1185,9 +1197,11 @@ impl PendingTool {
         }
     }
 
-    fn is_parallel_safe(&self) -> bool {
+    fn supports_parallel_execution(&self, permissions: PermissionProfile) -> bool {
         match &self.operation {
-            PendingToolOperation::Prepared(prepared) => prepared.is_parallel_safe(),
+            PendingToolOperation::Prepared(prepared) => {
+                prepared.supports_parallel_execution(permissions)
+            }
             PendingToolOperation::Rejected(_) => true,
         }
     }
@@ -1238,6 +1252,30 @@ impl PendingTool {
     }
 }
 
+fn collect_tool_batch<I>(
+    first: PendingTool,
+    pending_tools: &mut std::iter::Peekable<I>,
+    allow_parallel_tools: bool,
+    permissions: PermissionProfile,
+) -> Vec<PendingTool>
+where
+    I: Iterator<Item = PendingTool>,
+{
+    let parallel_batch = allow_parallel_tools && first.supports_parallel_execution(permissions);
+    let mut batch = vec![first];
+    while parallel_batch
+        && batch.len() < MAX_PARALLEL_TOOLS
+        && pending_tools
+            .peek()
+            .is_some_and(|pending| pending.supports_parallel_execution(permissions))
+    {
+        if let Some(pending) = pending_tools.next() {
+            batch.push(pending);
+        }
+    }
+    batch
+}
+
 impl RejectedToolCall {
     fn new(item_id: String, name: &str, error: AppError) -> Self {
         Self {
@@ -1257,6 +1295,7 @@ impl RejectedToolCall {
             provider_output: format!("Tool failed: {error}"),
             completed_item: self.failed_item(),
             display_output: Some(display_output),
+            background_command: None,
         }
     }
 
@@ -1266,6 +1305,7 @@ impl RejectedToolCall {
             name: self.name.clone(),
             description: format!("Rejected {} call", self.name),
             status: ActivityStatus::Failed,
+            output_presentation: crate::engine::ToolOutputPresentation::PlainText,
             output: None,
         }
     }
@@ -1352,6 +1392,7 @@ fn visible_item(item: &ResponseItem) -> Result<Option<ThreadItem>, AppError> {
             name: "web_search".into(),
             description: web_search_activity_detail(action.as_ref()),
             status: ActivityStatus::Completed,
+            output_presentation: crate::engine::ToolOutputPresentation::PlainText,
             output: None,
         })),
         ResponseItem::FunctionCall { .. }
@@ -1575,12 +1616,12 @@ mod tests {
     use super::{
         MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS, MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS,
         PendingTool, add_input_bytes, automatic_provider_retry_wait, automatic_rate_limit_wait,
-        local_tools_enabled, record_turn_state, tool_failure_diagnostic, validate_response_item,
-        web_search_activity_detail,
+        collect_tool_batch, local_tools_enabled, record_turn_state, tool_failure_diagnostic,
+        validate_response_item, web_search_activity_detail,
     };
     use crate::engine::native::provider::{ResponseItem, WebSearchAction};
     use crate::engine::native::tools::{ToolExecutionResult, ToolRegistry};
-    use crate::engine::{ActivityStatus, ConversationMode, ThreadItem};
+    use crate::engine::{ActivityStatus, ConversationMode, PermissionProfile, ThreadItem};
 
     fn stored_tool_item(result: &ToolExecutionResult) -> ThreadItem {
         let mut item = result.completed_item.clone();
@@ -1626,6 +1667,102 @@ mod tests {
         assert!(!local_tools_enabled(ConversationMode::Chat));
         assert!(local_tools_enabled(ConversationMode::Work));
         assert!(local_tools_enabled(ConversationMode::Codex));
+    }
+
+    #[test]
+    fn tool_batches_overlap_only_consecutive_explicitly_safe_operations() {
+        let registry = ToolRegistry;
+        let read = |item_id: &str| {
+            PendingTool::function(
+                &registry,
+                item_id.into(),
+                "read_file",
+                r#"{"path":"source.rs","start_line":1,"end_line":1}"#,
+                format!("call-{item_id}"),
+            )
+        };
+        let command = |item_id: &str, parallel_safe: bool| {
+            PendingTool::function(
+                &registry,
+                item_id.into(),
+                "exec_command",
+                &serde_json::json!({
+                    "command": "Get-Date",
+                    "cwd": ".",
+                    "reason": "test",
+                    "parallel_safe": parallel_safe,
+                    "yield_time_ms": null,
+                    "timeout_seconds": null
+                })
+                .to_string(),
+                format!("call-{item_id}"),
+            )
+        };
+
+        let mut tools = vec![
+            read("read-1"),
+            command("command-safe", true),
+            command("command-exclusive", false),
+            read("read-2"),
+        ]
+        .into_iter()
+        .peekable();
+        let parallel = collect_tool_batch(
+            tools.next().expect("the first tool should exist"),
+            &mut tools,
+            true,
+            PermissionProfile::full_access(),
+        );
+        assert_eq!(
+            parallel.iter().map(PendingTool::name).collect::<Vec<_>>(),
+            ["read_file", "exec_command"]
+        );
+
+        let exclusive = collect_tool_batch(
+            tools.next().expect("the exclusive command should remain"),
+            &mut tools,
+            true,
+            PermissionProfile::full_access(),
+        );
+        assert_eq!(exclusive.len(), 1);
+        assert_eq!(exclusive[0].name(), "exec_command");
+
+        let trailing = collect_tool_batch(
+            tools.next().expect("the trailing read should remain"),
+            &mut tools,
+            true,
+            PermissionProfile::full_access(),
+        );
+        assert_eq!(trailing.len(), 1);
+        assert_eq!(trailing[0].name(), "read_file");
+        assert!(tools.next().is_none());
+
+        let mut approval_tools = vec![command("approval-command", true), read("approval-read")]
+            .into_iter()
+            .peekable();
+        let approval_batch = collect_tool_batch(
+            approval_tools
+                .next()
+                .expect("the approval command should exist"),
+            &mut approval_tools,
+            true,
+            PermissionProfile::workspace_write(),
+        );
+        assert_eq!(approval_batch.len(), 1);
+        assert_eq!(approval_batch[0].name(), "exec_command");
+
+        let mut sequential_reads = vec![read("sequential-1"), read("sequential-2")]
+            .into_iter()
+            .peekable();
+        let sequential_batch = collect_tool_batch(
+            sequential_reads
+                .next()
+                .expect("the sequential read should exist"),
+            &mut sequential_reads,
+            false,
+            PermissionProfile::full_access(),
+        );
+        assert_eq!(sequential_batch.len(), 1);
     }
 
     #[test]

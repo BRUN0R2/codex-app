@@ -8,6 +8,7 @@ mod compaction;
 mod content_references;
 mod context_window;
 mod diagnostics;
+mod file_diff;
 mod output;
 mod output_compaction;
 mod provider;
@@ -40,24 +41,25 @@ use self::chat::ChatGptConsumerProvider;
 use self::diagnostics::RuntimeDiagnostics;
 use self::provider::ChatGptCodexProvider;
 use self::storage::NativeStorage;
-use self::tools::{Ripgrep, ToolRegistry};
+use self::tools::{CommandSessionManager, Ripgrep, ToolRegistry};
 use crate::engine::{
-    AccountRateLimitsResponse, Automation, AutomationDeletedNotification, AutomationListResponse,
-    AutomationNotification, AutomationRun, AutomationRunNotification, ChatModelListResponse,
-    ConfigUpdate, ConfigUpdateResponse, ConversationMode, DiagnosticStream, EngineCapability,
-    EngineDescriptor, EngineNotification, EngineStartResponse, EngineStorage, EngineTransport,
-    ItemNotification, ModelContextWindowPreference, ModelListResponse, NOTIFICATION_EVENT,
-    OperationAck, OperationFailure, OutputReadResponse, PermissionProfile, RUNTIME_STATUS_EVENT,
-    ReasoningEffort, RuntimeDiagnosticSubsystem, RuntimeState, RuntimeStatus, ServerResponse,
+    AccountRateLimitsResponse, AutoTopUpSettingsSnapshot, Automation,
+    AutomationDeletedNotification, AutomationListResponse, AutomationNotification, AutomationRun,
+    AutomationRunNotification, ChatModelListResponse, ConfigUpdate, ConfigUpdateResponse,
+    ConversationMode, DiagnosticStream, EngineCapability, EngineDescriptor, EngineNotification,
+    EngineStartResponse, EngineStorage, EngineTransport, ItemNotification,
+    ModelContextWindowPreference, ModelListResponse, NOTIFICATION_EVENT, OperationAck,
+    OperationFailure, OutputReadResponse, PermissionProfile, RUNTIME_STATUS_EVENT, ReasoningEffort,
+    RuntimeDiagnosticSubsystem, RuntimeState, RuntimeStatus, ServerResponse,
     ThreadArchivedNotification, ThreadDeletedNotification, ThreadForkResponse, ThreadItem,
     ThreadListResponse, ThreadNotification, ThreadReadResponse, ThreadResumeResponse,
     ThreadStartResponse, ThreadSummary, ThreadUnarchiveResponse, ThreadUnarchivedNotification,
     TurnCompletedNotification, TurnInput, TurnNotification, TurnStartResponse, TurnStatus,
-    TurnSummary,
+    TurnSummary, UsageResetCreditsResponse, UsageResetRedemptionResponse,
 };
 use crate::error::AppError;
 
-pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 14;
+pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 17;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTOMATION_SCHEDULER_MAX_SLEEP: Duration = Duration::from_secs(15 * 60);
@@ -182,6 +184,7 @@ pub(super) struct NativeEngineInner {
     storage: NativeStorage,
     tools: ToolRegistry,
     ripgrep: Ripgrep,
+    command_sessions: CommandSessionManager,
     approvals: ApprovalBroker,
     diagnostics: Arc<RuntimeDiagnostics>,
     active_turns: Mutex<HashMap<String, ActiveTurn>>,
@@ -214,6 +217,7 @@ impl NativeEngine {
                 storage: NativeStorage::default(),
                 tools: ToolRegistry,
                 ripgrep: Ripgrep::default(),
+                command_sessions: CommandSessionManager::default(),
                 approvals: ApprovalBroker::default(),
                 diagnostics,
                 active_turns: Mutex::new(HashMap::new()),
@@ -547,6 +551,92 @@ impl NativeEngine {
             .await
     }
 
+    pub async fn account_usage_resets_read(
+        &self,
+        app: &AppHandle,
+    ) -> Result<UsageResetCreditsResponse, AppError> {
+        self.ensure_started()?;
+        self.inner
+            .provider
+            .read_usage_resets(app, &self.inner.auth)
+            .await
+    }
+
+    pub async fn account_usage_reset_redeem(
+        &self,
+        app: &AppHandle,
+        credit_id: Option<&str>,
+        redeem_request_id: &str,
+    ) -> Result<UsageResetRedemptionResponse, AppError> {
+        self.ensure_started()?;
+        self.inner
+            .provider
+            .redeem_usage_reset(app, &self.inner.auth, credit_id, redeem_request_id)
+            .await
+    }
+
+    pub async fn account_auto_top_up_read(
+        &self,
+        app: &AppHandle,
+    ) -> Result<AutoTopUpSettingsSnapshot, AppError> {
+        self.ensure_started()?;
+        self.inner
+            .provider
+            .read_auto_top_up(app, &self.inner.auth)
+            .await
+    }
+
+    pub async fn account_auto_top_up_enable(
+        &self,
+        app: &AppHandle,
+        recharge_threshold: &str,
+        recharge_target: &str,
+        recharge_monthly_limit: Option<&str>,
+    ) -> Result<AutoTopUpSettingsSnapshot, AppError> {
+        self.ensure_started()?;
+        self.inner
+            .provider
+            .enable_auto_top_up(
+                app,
+                &self.inner.auth,
+                recharge_threshold,
+                recharge_target,
+                recharge_monthly_limit,
+            )
+            .await
+    }
+
+    pub async fn account_auto_top_up_update(
+        &self,
+        app: &AppHandle,
+        recharge_threshold: &str,
+        recharge_target: &str,
+        recharge_monthly_limit: Option<&str>,
+    ) -> Result<AutoTopUpSettingsSnapshot, AppError> {
+        self.ensure_started()?;
+        self.inner
+            .provider
+            .update_auto_top_up(
+                app,
+                &self.inner.auth,
+                recharge_threshold,
+                recharge_target,
+                recharge_monthly_limit,
+            )
+            .await
+    }
+
+    pub async fn account_auto_top_up_disable(
+        &self,
+        app: &AppHandle,
+    ) -> Result<AutoTopUpSettingsSnapshot, AppError> {
+        self.ensure_started()?;
+        self.inner
+            .provider
+            .disable_auto_top_up(app, &self.inner.auth)
+            .await
+    }
+
     pub async fn login_chatgpt(&self, app: &AppHandle) -> Result<auth::LoginResponse, AppError> {
         self.ensure_started()?;
         self.inner.auth.start_login(app).await
@@ -725,6 +815,7 @@ impl NativeEngine {
         thread_id: String,
     ) -> Result<OperationAck, AppError> {
         self.ensure_started()?;
+        self.inner.command_sessions.cancel_thread(&thread_id).await;
         let active_deletion = {
             let lifecycle_guard = self.inner.thread_lifecycle_gate.lock().await;
             let mut active_turns = self.inner.active_turns.lock().await;
@@ -764,6 +855,16 @@ impl NativeEngine {
         {
             return Err(AppError::State(
                 "wait for the active turn to complete before forking its thread".into(),
+            ));
+        }
+        if self
+            .inner
+            .command_sessions
+            .has_running_for_thread(&thread_id)
+            .await
+        {
+            return Err(AppError::State(
+                "wait for background commands to complete before forking this thread".into(),
             ));
         }
         let page = self.inner.storage.fork_thread(thread_id).await?;
@@ -1278,6 +1379,7 @@ impl NativeEngine {
         for cancellation in cancellations {
             let _receiver_already_closed = cancellation.send(true);
         }
+        self.inner.command_sessions.shutdown().await;
         self.inner.approvals.cancel_all().await;
         self.inner.auth.stop().await;
 

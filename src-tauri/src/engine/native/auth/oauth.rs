@@ -14,6 +14,8 @@ use url::Url;
 use super::AuthSession;
 use super::error::AuthError;
 use super::pkce::PkceCodes;
+use super::profile::AccountProfileResponse;
+use super::profile::ChatGptProfileResponse;
 use super::token::MAX_PROFILE_NAME_BYTES;
 use super::token::SecretString;
 use super::token::TokenSet;
@@ -199,7 +201,7 @@ impl OAuthClient {
     pub async fn chatgpt_profile(
         &self,
         session: &AuthSession,
-    ) -> Result<AccountProfile, AuthError> {
+    ) -> Result<AccountProfileResponse, AuthError> {
         let response = self
             .client
             .get(CHATGPT_PROFILE_ENDPOINT)
@@ -219,7 +221,7 @@ impl OAuthClient {
             MAX_CHATGPT_PROFILE_RESPONSE_BYTES,
         )
         .await?;
-        Ok(AccountProfile::from(response))
+        AccountProfileResponse::try_from(response)
     }
 
     pub async fn revoke_tokens(&self, tokens: &TokenSet) -> Result<(), AuthError> {
@@ -308,37 +310,12 @@ struct UserInfoResponse {
     picture: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct ChatGptProfileResponse {
-    #[serde(default)]
-    profile: Option<ChatGptProfile>,
-}
-
-#[derive(Default, Deserialize)]
-struct ChatGptProfile {
-    #[serde(default)]
-    display_name: Option<String>,
-    #[serde(default)]
-    profile_picture_url: Option<String>,
-}
-
 impl From<UserInfoResponse> for AccountProfile {
     fn from(response: UserInfoResponse) -> Self {
         Self {
             email: clean_profile_text(response.email, MAX_PROFILE_EMAIL_BYTES),
             name: clean_profile_text(response.name, MAX_PROFILE_NAME_BYTES),
             picture: clean_profile_picture(response.picture),
-        }
-    }
-}
-
-impl From<ChatGptProfileResponse> for AccountProfile {
-    fn from(response: ChatGptProfileResponse) -> Self {
-        let profile = response.profile.unwrap_or_default();
-        Self {
-            email: None,
-            name: clean_profile_text(profile.display_name, MAX_PROFILE_NAME_BYTES),
-            picture: clean_profile_picture(profile.profile_picture_url),
         }
     }
 }
@@ -495,8 +472,6 @@ fn sanitized_nonempty(message: &str) -> Option<String> {
 mod tests {
     use super::AUTH_ISSUER;
     use super::AccountProfile;
-    use super::ChatGptProfile;
-    use super::ChatGptProfileResponse;
     use super::OAUTH_CLIENT_ID;
     use super::OAUTH_SCOPE;
     use super::OAuthClient;
@@ -560,44 +535,24 @@ mod tests {
     #[test]
     fn sanitizes_the_oidc_user_profile() {
         let profile = AccountProfile::from(UserInfoResponse {
-            email: Some(" bruno@example.com ".into()),
-            name: Some(" Bruno ".into()),
-            picture: Some("https://images.example.com/bruno.png".into()),
+            email: Some(" ada@example.com ".into()),
+            name: Some(" Ada ".into()),
+            picture: Some("https://images.example.com/ada.png".into()),
         });
 
-        assert_eq!(profile.email.as_deref(), Some("bruno@example.com"));
-        assert_eq!(profile.name.as_deref(), Some("Bruno"));
+        assert_eq!(profile.email.as_deref(), Some("ada@example.com"));
+        assert_eq!(profile.name.as_deref(), Some("Ada"));
         assert_eq!(
             profile.picture.as_deref(),
-            Some("https://images.example.com/bruno.png")
+            Some("https://images.example.com/ada.png")
         );
 
         let rejected = AccountProfile::from(UserInfoResponse {
             email: None,
-            name: Some("Bruno\nSilva".into()),
-            picture: Some("http://images.example.com/bruno.png".into()),
+            name: Some("Ada\nLovelace".into()),
+            picture: Some("http://images.example.com/ada.png".into()),
         });
         assert_eq!(rejected.name, None);
         assert_eq!(rejected.picture, None);
-    }
-
-    #[test]
-    fn maps_the_official_chatgpt_profile_shape() {
-        let profile = AccountProfile::from(ChatGptProfileResponse {
-            profile: Some(ChatGptProfile {
-                display_name: Some(" Bruno Silva ".into()),
-                profile_picture_url: Some("https://images.example.com/bruno.png".into()),
-            }),
-        });
-
-        assert_eq!(profile.email, None);
-        assert_eq!(profile.name.as_deref(), Some("Bruno Silva"));
-        assert_eq!(
-            profile.picture.as_deref(),
-            Some("https://images.example.com/bruno.png")
-        );
-
-        let missing = AccountProfile::from(ChatGptProfileResponse { profile: None });
-        assert_eq!(missing, AccountProfile::default());
     }
 }

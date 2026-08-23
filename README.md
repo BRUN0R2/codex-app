@@ -29,13 +29,16 @@ alterar estado.
 - execução simultânea de tarefas em segundo plano, direcionamento do turno
   ativo, compactação, fork, arquivamento e exclusão confirmada;
 - ferramentas nativas fechadas para leitura, listagem, busca, edição, escrita e
-  comandos;
+  comandos, incluindo saída ao vivo, yield de processos longos e polling por
+  cursor enquanto o agente executa trabalho independente;
 - três perfis de permissão sem combinações implícitas: somente leitura, projeto
   com aprovação de comando e acesso total;
 - limites explícitos para entrada, anexos, arquivos, resultados, processos,
   streams, histórico, paginação e encerramento;
 - UI enxuta para projetos, tarefas, timeline, aprovações, anexos, modelos,
-  configurações, uso da conta e diagnósticos.
+  configurações, perfil, atividade, uso da conta e diagnósticos;
+- Uso e faturamento com preço localizado do plano, saldo, limites gerais e por
+  modelo, recarga automática e consumo idempotente de redefinições disponíveis.
 
 ## Stack
 
@@ -46,8 +49,8 @@ alterar estado.
 | HTTP | reqwest 0.13, rustls e SSE incremental |
 | Persistência | SQLite via rusqlite 0.40 |
 | Credenciais | age+scrypt e Windows Credential Manager |
-| Interface | SolidJS 1.9.14 e TypeScript 7.0.2 estrito |
-| Build e qualidade | Vite 8.2, Biome 2.5, Vitest 4.1, pnpm 11.18 |
+| Interface | SolidJS 1.9.15 e TypeScript 7.0.2 estrito |
+| Build e qualidade | Vite 8.2, Biome 2.5, Vitest 4.1, pnpm 11.22 |
 
 As versões diretas são fixadas em `package.json`, `Cargo.toml` e
 `rust-toolchain.toml`; os grafos completos ficam travados nos lockfiles.
@@ -56,7 +59,8 @@ As versões diretas são fixadas em `package.json`, `Cargo.toml` e
 
 - Windows 10 ou 11 com WebView2;
 - conta ChatGPT com acesso ao Codex;
-- Node.js 26 ou superior e pnpm 11.18 ou superior;
+- PowerShell 7 ou superior (`pwsh`) para o executor de comandos UTF-8;
+- Node.js 26 ou superior e pnpm 11.22 ou superior;
 - Rust 1.97.1 e toolchain MSVC para desenvolvimento nativo.
 
 O Codex CLI não é pré-requisito.
@@ -96,9 +100,10 @@ interativo `codex-app.bat` para uso manual no Windows e
 pnpm verify
 ```
 
-O gate executa lint, testes TypeScript, tipagem, build de produção, auditoria da
-exceção transitiva conhecida, `cargo check`, `rustfmt`, Clippy com warnings como
-erros e testes Rust.
+O gate valida UTF-8 sem BOM em todos os arquivos de texto versionados, executa
+lint, testes TypeScript, tipagem, build de produção, auditoria da exceção
+transitiva conhecida, `cargo check`, `rustfmt`, Clippy com warnings como erros e
+testes Rust.
 
 Para gerar o instalador NSIS:
 

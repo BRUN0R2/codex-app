@@ -2,19 +2,21 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt as _;
 
-use crate::attachments::{AttachmentKind, inspect_path};
+use crate::attachments::{AttachmentKind, persist_attachment};
 use crate::command_validation::{
     MAX_TURN_ATTACHMENTS, MAX_TURN_TEXT_BYTES, validate_diagnostic_message, validate_model_name,
     validate_protocol_id, validate_timezone, validate_workspace,
 };
 use crate::engine::{
-    AccountProfileResponse, AccountRateLimitsResponse, AccountReadResponse, Automation,
-    AutomationListResponse, AutomationRun, CancelLoginResponse, ChatModelListResponse,
-    ConfigUpdate, ConfigUpdateResponse, ConversationMode, CreateAutomation, EngineManager,
-    EngineStartResponse, LoginResponse, LogoutResponse, ModelListResponse, OperationAck,
-    OutputReadResponse, ReasoningEffort, RuntimeDiagnosticSubsystem, ServerResponse, StartTurn,
-    SteerTurn, ThreadForkResponse, ThreadListResponse, ThreadReadResponse, ThreadResumeResponse,
-    ThreadStartResponse, ThreadUnarchiveResponse, TurnInput, TurnStartResponse, UpdateAutomation,
+    AccountProfileResponse, AccountRateLimitsResponse, AccountReadResponse,
+    AutoTopUpSettingsSnapshot, Automation, AutomationListResponse, AutomationRun,
+    CancelLoginResponse, ChatModelListResponse, ConfigUpdate, ConfigUpdateResponse,
+    ConversationMode, CreateAutomation, EngineManager, EngineStartResponse, LoginResponse,
+    LogoutResponse, ModelListResponse, OperationAck, OutputReadResponse, ReasoningEffort,
+    RuntimeDiagnosticSubsystem, ServerResponse, StartTurn, SteerTurn, ThreadForkResponse,
+    ThreadListResponse, ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse,
+    ThreadUnarchiveResponse, TurnInput, TurnStartResponse, UpdateAutomation,
+    UsageResetCreditsResponse, UsageResetRedemptionResponse,
 };
 use crate::error::{AppError, CommandError, CommandResult};
 
@@ -145,6 +147,21 @@ pub struct CancelLoginRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageResetRedeemRequest {
+    credit_id: Option<String>,
+    redeem_request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutoTopUpSettingsRequest {
+    recharge_threshold: String,
+    recharge_target: String,
+    recharge_monthly_limit: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeDiagnosticRequest {
     message: String,
 }
@@ -246,6 +263,85 @@ pub async fn engine_account_rate_limits_read(
 ) -> CommandResult<AccountRateLimitsResponse> {
     engine
         .account_rate_limits_read(&app)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_account_usage_resets_read(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+) -> CommandResult<UsageResetCreditsResponse> {
+    engine
+        .account_usage_resets_read(&app)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_account_usage_reset_redeem(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: UsageResetRedeemRequest,
+) -> CommandResult<UsageResetRedemptionResponse> {
+    validate_protocol_id("redeem request id", &request.redeem_request_id)?;
+    if let Some(credit_id) = request.credit_id.as_deref() {
+        validate_protocol_id("usage reset credit id", credit_id)?;
+    }
+    engine
+        .account_usage_reset_redeem(
+            &app,
+            request.credit_id.as_deref(),
+            &request.redeem_request_id,
+        )
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_account_auto_top_up_read(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+) -> CommandResult<AutoTopUpSettingsSnapshot> {
+    engine
+        .account_auto_top_up_read(&app)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_account_auto_top_up_enable(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: AutoTopUpSettingsRequest,
+) -> CommandResult<AutoTopUpSettingsSnapshot> {
+    let (threshold, target, monthly_limit) = validate_auto_top_up_settings(request)?;
+    engine
+        .account_auto_top_up_enable(&app, &threshold, &target, monthly_limit.as_deref())
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_account_auto_top_up_update(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+    request: AutoTopUpSettingsRequest,
+) -> CommandResult<AutoTopUpSettingsSnapshot> {
+    let (threshold, target, monthly_limit) = validate_auto_top_up_settings(request)?;
+    engine
+        .account_auto_top_up_update(&app, &threshold, &target, monthly_limit.as_deref())
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn engine_account_auto_top_up_disable(
+    app: AppHandle,
+    engine: State<'_, EngineManager>,
+) -> CommandResult<AutoTopUpSettingsSnapshot> {
+    engine
+        .account_auto_top_up_disable(&app)
         .await
         .map_err(Into::into)
 }
@@ -423,7 +519,7 @@ pub async fn engine_turn_start(
         )
         .into());
     }
-    let input = decode_turn_input(request.text, request.attachments).await?;
+    let input = decode_turn_input(&app, request.text, request.attachments).await?;
     engine
         .turn_start(
             &app,
@@ -451,7 +547,7 @@ pub async fn engine_turn_steer(
     validate_protocol_id("thread id", &request.thread_id)?;
     validate_protocol_id("expected turn id", &request.expected_turn_id)?;
     validate_protocol_id("client user message id", &request.client_user_message_id)?;
-    let input = decode_turn_input(request.text, request.attachments).await?;
+    let input = decode_turn_input(&app, request.text, request.attachments).await?;
     engine
         .turn_steer(
             &app,
@@ -635,7 +731,69 @@ fn validate_automation_schedule(
     Ok(())
 }
 
+fn validate_auto_top_up_settings(
+    request: AutoTopUpSettingsRequest,
+) -> CommandResult<(String, String, Option<String>)> {
+    const MINIMUM_RELOAD_CREDITS: u64 = 125;
+    const MAXIMUM_RELOAD_TARGET_CREDITS: u64 = 250_000;
+    const MAXIMUM_MONTHLY_RELOAD_CREDITS: u64 = 1_000_000_000;
+
+    let threshold = parse_credit_amount(
+        "automatic reload threshold",
+        &request.recharge_threshold,
+        MINIMUM_RELOAD_CREDITS,
+        MAXIMUM_RELOAD_TARGET_CREDITS,
+    )?;
+    let target = parse_credit_amount(
+        "automatic reload target",
+        &request.recharge_target,
+        MINIMUM_RELOAD_CREDITS,
+        MAXIMUM_RELOAD_TARGET_CREDITS,
+    )?;
+    if target.saturating_sub(threshold) < MINIMUM_RELOAD_CREDITS {
+        return Err(AppError::Protocol(format!(
+            "automatic reload target must exceed the threshold by at least {MINIMUM_RELOAD_CREDITS} credits"
+        ))
+        .into());
+    }
+    let monthly_limit = request
+        .recharge_monthly_limit
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            parse_credit_amount(
+                "automatic reload monthly limit",
+                &value,
+                target,
+                MAXIMUM_MONTHLY_RELOAD_CREDITS,
+            )
+        })
+        .transpose()?;
+    Ok((
+        threshold.to_string(),
+        target.to_string(),
+        monthly_limit.map(|value| value.to_string()),
+    ))
+}
+
+fn parse_credit_amount(label: &str, value: &str, minimum: u64, maximum: u64) -> CommandResult<u64> {
+    let value = value.trim();
+    let parsed = value.parse::<u64>().map_err(|_| {
+        CommandError::from(AppError::Protocol(format!(
+            "{label} must be a whole number"
+        )))
+    })?;
+    if !(minimum..=maximum).contains(&parsed) {
+        return Err(AppError::Protocol(format!(
+            "{label} must be between {minimum} and {maximum} credits"
+        ))
+        .into());
+    }
+    Ok(parsed)
+}
+
 async fn decode_turn_input(
+    app: &AppHandle,
     text: String,
     attachments: Vec<TurnAttachment>,
 ) -> CommandResult<Vec<TurnInput>> {
@@ -655,7 +813,7 @@ async fn decode_turn_input(
         input.push(TurnInput::Text(text));
     }
     for attachment in attachments {
-        let attachment = inspect_path(&attachment.path)
+        let attachment = persist_attachment(app, &attachment.path)
             .await
             .map_err(CommandError::from)?;
         match attachment.kind {
@@ -713,4 +871,43 @@ pub async fn engine_server_request_respond(
         .server_request_respond(request.id, request.response)
         .await
         .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AutoTopUpSettingsRequest, validate_auto_top_up_settings};
+
+    #[test]
+    fn validates_official_auto_top_up_boundaries() {
+        let settings = validate_auto_top_up_settings(AutoTopUpSettingsRequest {
+            recharge_threshold: "125".into(),
+            recharge_target: "250".into(),
+            recharge_monthly_limit: Some("1000".into()),
+        })
+        .expect("official defaults should validate");
+
+        assert_eq!(settings, ("125".into(), "250".into(), Some("1000".into())));
+    }
+
+    #[test]
+    fn rejects_auto_top_up_target_too_close_to_threshold() {
+        let result = validate_auto_top_up_settings(AutoTopUpSettingsRequest {
+            recharge_threshold: "125".into(),
+            recharge_target: "249".into(),
+            recharge_monthly_limit: None,
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_monthly_limit_below_reload_target() {
+        let result = validate_auto_top_up_settings(AutoTopUpSettingsRequest {
+            recharge_threshold: "125".into(),
+            recharge_target: "250".into(),
+            recharge_monthly_limit: Some("249".into()),
+        });
+
+        assert!(result.is_err());
+    }
 }

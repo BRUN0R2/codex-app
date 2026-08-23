@@ -5,8 +5,12 @@ import {
   findTimelineAnchorIndex,
   hasRecentTimelineUserScrollIntent,
   isTimelineNearEnd,
+  normalizeTimelineWheelDelta,
+  resolveNestedTimelineWheelTransfer,
   resolveTimelineFollowing,
+  resolveTimelineMessageOffset,
   resolveTimelineRestorationTop,
+  shouldPreserveTimelineAnchor,
   shouldSynchronizeTimelineToEnd,
 } from "./timelineScroll";
 
@@ -79,6 +83,84 @@ describe("timeline scroll metrics", () => {
     ).toBe(true);
   });
 
+  it("never applies anchor correction while manual scroll owns the viewport", () => {
+    expect(
+      shouldPreserveTimelineAnchor({
+        anchorDelta: 240,
+        followingLatest: false,
+        recentUserIntent: true,
+        scrollInteractionActive: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldPreserveTimelineAnchor({
+        anchorDelta: 240,
+        followingLatest: false,
+        recentUserIntent: false,
+        scrollInteractionActive: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldPreserveTimelineAnchor({
+        anchorDelta: 240,
+        followingLatest: false,
+        recentUserIntent: false,
+        scrollInteractionActive: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("normalizes pixel, line, and page wheel deltas", () => {
+    expect(normalizeTimelineWheelDelta({ deltaMode: 0, deltaY: -12, viewportHeight: 800 })).toBe(
+      -12,
+    );
+    expect(normalizeTimelineWheelDelta({ deltaMode: 1, deltaY: 3, viewportHeight: 800 })).toBe(48);
+    expect(normalizeTimelineWheelDelta({ deltaMode: 2, deltaY: -1, viewportHeight: 720 })).toBe(
+      -720,
+    );
+  });
+
+  it("lets a nested viewport consume wheel movement that fits", () => {
+    expect(
+      resolveNestedTimelineWheelTransfer({
+        clientHeight: 200,
+        delta: -80,
+        scrollHeight: 1_000,
+        scrollTop: 400,
+      }),
+    ).toBeNull();
+  });
+
+  it("transfers only the exact nested wheel overflow to the timeline", () => {
+    expect(
+      resolveNestedTimelineWheelTransfer({
+        clientHeight: 200,
+        delta: -100,
+        scrollHeight: 1_000,
+        scrollTop: 40,
+      }),
+    ).toEqual({ nestedScrollTop: 0, timelineDelta: -60 });
+    expect(
+      resolveNestedTimelineWheelTransfer({
+        clientHeight: 200,
+        delta: 90,
+        scrollHeight: 1_000,
+        scrollTop: 760,
+      }),
+    ).toEqual({ nestedScrollTop: 800, timelineDelta: 50 });
+  });
+
+  it("routes the whole wheel delta when nested content has no vertical range", () => {
+    expect(
+      resolveNestedTimelineWheelTransfer({
+        clientHeight: 200,
+        delta: -120,
+        scrollHeight: 200,
+        scrollTop: 0,
+      }),
+    ).toEqual({ nestedScrollTop: 0, timelineDelta: -120 });
+  });
+
   it("restores either the saved viewport or the exact end deterministically", () => {
     expect(
       resolveTimelineRestorationTop({
@@ -122,5 +204,11 @@ describe("timeline scroll metrics", () => {
 
   it("keeps the first message active before its anchor reaches the viewport", () => {
     expect(findTimelineAnchorIndex(3, (index) => [100, 200, 300][index] ?? 0, 20)).toBe(0);
+  });
+
+  it("uses the current message anchor instead of the turn start after expansion", () => {
+    expect(resolveTimelineMessageOffset(780, 120)).toBe(780);
+    expect(resolveTimelineMessageOffset(null, 120)).toBe(120);
+    expect(() => resolveTimelineMessageOffset(-1, 120)).toThrow("Mounted timeline message offset");
   });
 });

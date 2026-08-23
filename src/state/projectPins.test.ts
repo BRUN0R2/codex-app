@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   loadPinnedProjectPaths,
+  partitionProjectsByPinnedPaths,
   removePinnedProjectPath,
   savePinnedProjectPaths,
   togglePinnedProjectPath,
@@ -61,6 +62,22 @@ describe("project pins", () => {
     expect(
       removePinnedProjectPath(["C:\\Projetos\\Codex", "C:\\Outro"], "c:/projetos/codex"),
     ).toEqual(["C:\\Outro"]);
+  });
+
+  it("particiona projetos fixados e comuns sem duplicar entradas", () => {
+    const first = { name: "Primeiro", path: "C:\\Projetos\\Primeiro" };
+    const pinned = { name: "Fixado", path: "C:\\Projetos\\Fixado" };
+    const last = { name: "Último", path: "C:\\Projetos\\Ultimo" };
+
+    expect(
+      partitionProjectsByPinnedPaths(
+        [first, pinned, last],
+        ["c:/projetos/fixado", "C:\\Projetos\\Inexistente"],
+      ),
+    ).toEqual({
+      pinnedProjects: [pinned],
+      unpinnedProjects: [first, last],
+    });
   });
 
   it("rejeita payloads corrompidos ou incompatíveis", () => {

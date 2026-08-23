@@ -1,6 +1,7 @@
 import type { Accessor } from "solid-js";
 
 import type {
+  AccountProfileResponse,
   AccountRateLimitsResponse,
   AccountReadResponse,
   AppProduct,
@@ -9,6 +10,7 @@ import type {
   Automation,
   AutomationInput,
   AutomationRun,
+  AutoTopUpSettingsSnapshot,
   ChatGptMode,
   ChatModelOption,
   CodexModel,
@@ -28,6 +30,8 @@ import type {
   RuntimeDiagnostic,
   RuntimeStatus,
   ThreadSummary,
+  UsageResetCreditsResponse,
+  UsageResetRedemptionResponse,
 } from "../contracts/types";
 import type { QueuedMessage } from "./messageQueue";
 import type { VisibleThreadTurn, VisibleTurnSequence } from "./visibleTurnSequence";
@@ -47,6 +51,9 @@ export interface SendMessageInput {
 
 export interface AppController {
   readonly account: Accessor<AccountReadResponse | undefined>;
+  readonly accountProfile: Accessor<AccountProfileResponse | null>;
+  readonly accountProfileError: Accessor<string | null>;
+  readonly accountProfileLoading: Accessor<boolean>;
   readonly activeTurnId: Accessor<string | null>;
   readonly activePlan: Accessor<PlanItem | null>;
   readonly approvals: Accessor<readonly EngineServerRequest[]>;
@@ -85,6 +92,13 @@ export interface AppController {
   readonly rateLimits: Accessor<AccountRateLimitsResponse | null>;
   readonly rateLimitsError: Accessor<string | null>;
   readonly rateLimitsLoading: Accessor<boolean>;
+  readonly usageResets: Accessor<UsageResetCreditsResponse | null>;
+  readonly usageResetsError: Accessor<string | null>;
+  readonly usageResetsLoading: Accessor<boolean>;
+  readonly usageResetRedeemingId: Accessor<string | null>;
+  readonly autoTopUpSettings: Accessor<AutoTopUpSettingsSnapshot | null>;
+  readonly autoTopUpError: Accessor<string | null>;
+  readonly autoTopUpLoading: Accessor<boolean>;
   readonly runtimeStatus: Accessor<RuntimeStatus>;
   readonly signedIn: Accessor<boolean>;
   readonly safetyBuffering: Accessor<ModelSafetyBufferingUpdatedNotification["params"] | null>;
@@ -123,6 +137,23 @@ export interface AppController {
   readonly refreshAccountProfile: () => Promise<boolean>;
   readonly refreshRateLimits: () => Promise<boolean>;
   readonly refreshRateLimitsIfStale: () => Promise<boolean>;
+  readonly refreshUsageResets: () => Promise<boolean>;
+  readonly redeemUsageReset: (
+    creditId: string | null,
+    redeemRequestId: string,
+  ) => Promise<UsageResetRedemptionResponse | null>;
+  readonly refreshAutoTopUpSettings: () => Promise<boolean>;
+  readonly enableAutoTopUp: (
+    rechargeThreshold: string,
+    rechargeTarget: string,
+    rechargeMonthlyLimit: string | null,
+  ) => Promise<boolean>;
+  readonly updateAutoTopUp: (
+    rechargeThreshold: string,
+    rechargeTarget: string,
+    rechargeMonthlyLimit: string | null,
+  ) => Promise<boolean>;
+  readonly disableAutoTopUp: () => Promise<boolean>;
   readonly reportError: (reason: unknown) => void;
   readonly removeProject: (path: string) => void;
   readonly renameThread: (threadId: string, name: string) => Promise<boolean>;

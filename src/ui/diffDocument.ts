@@ -1,3 +1,5 @@
+import { DIFF_SYNTAX_LIMITS } from "./syntax/contracts";
+
 export type UnifiedDiffLineType = "addition" | "context" | "deletion" | "hunk" | "meta";
 
 export interface UnifiedDiffLine {
@@ -23,15 +25,33 @@ export interface SplitDiffRow {
 
 export interface SplitDiffProjection {
   readonly leftMaximumColumns: number;
+  readonly leftSourceIndexes: Uint32Array;
   readonly rightMaximumColumns: number;
+  readonly rightSourceIndexes: Uint32Array;
   readonly rows: readonly SplitDiffRow[];
 }
 
+export interface DiffSyntaxHunk {
+  readonly characterLength: number;
+  readonly lineCount: number;
+  readonly lines: readonly string[] | null;
+  readonly startRow: number;
+}
+
+export interface DiffSyntaxLocation {
+  readonly hunkIndex: number;
+  readonly lineIndex: number;
+}
+
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u;
+const NO_NEWLINE_MARKER = "\\ No newline at end of file";
 const TAB_COLUMNS = 4;
 
 export class DiffDocument {
+  readonly newLineNumberDigits: number;
+  readonly oldLineNumberDigits: number;
   readonly stats: DiffStats;
+  readonly syntaxHunks: readonly DiffSyntaxHunk[];
   readonly unifiedMaximumColumns: number;
   readonly unifiedRows: readonly UnifiedDiffLine[];
   #splitProjection: SplitDiffProjection | undefined;
@@ -40,21 +60,63 @@ export class DiffDocument {
     unifiedRows: readonly UnifiedDiffLine[],
     stats: DiffStats,
     unifiedMaximumColumns: number,
+    syntaxHunks: readonly DiffSyntaxHunk[],
   ) {
+    const lineNumberDigits = measureLineNumberDigits(unifiedRows);
     this.unifiedRows = unifiedRows;
     this.stats = stats;
     this.unifiedMaximumColumns = unifiedMaximumColumns;
+    this.syntaxHunks = syntaxHunks;
+    this.oldLineNumberDigits = lineNumberDigits.old;
+    this.newLineNumberDigits = lineNumberDigits.new;
   }
 
   splitProjection(): SplitDiffProjection {
     this.#splitProjection ??= projectSplitDiff(this.unifiedRows);
     return this.#splitProjection;
   }
+
+  syntaxLocation(rowIndex: number): DiffSyntaxLocation | null {
+    let low = 0;
+    let high = this.syntaxHunks.length - 1;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const hunk = this.syntaxHunks[middle];
+      if (hunk === undefined) {
+        return null;
+      }
+      if (rowIndex < hunk.startRow) {
+        high = middle - 1;
+        continue;
+      }
+      const lineIndex = rowIndex - hunk.startRow;
+      if (lineIndex >= hunk.lineCount) {
+        low = middle + 1;
+        continue;
+      }
+      return { hunkIndex: middle, lineIndex };
+    }
+    return null;
+  }
 }
 
 export function createDiffDocument(diff: string): DiffDocument {
   const lines = diff.replace(/\r\n?/gu, "\n").split("\n");
   const parsed: UnifiedDiffLine[] = [];
+  const syntaxHunks: Array<{
+    characterLength: number;
+    lineCount: number;
+    lines: string[] | null;
+    startRow: number;
+  }> = [];
+  let currentSyntaxHunk:
+    | {
+        characterLength: number;
+        lineCount: number;
+        lines: string[] | null;
+        startRow: number;
+      }
+    | undefined;
   let additions = 0;
   let deletions = 0;
   let maximumColumns = 0;
@@ -65,6 +127,31 @@ export function createDiffDocument(diff: string): DiffDocument {
   function append(line: UnifiedDiffLine): void {
     parsed.push(line);
     maximumColumns = Math.max(maximumColumns, monospaceColumnCount(line.content));
+  }
+
+  function appendContent(line: UnifiedDiffLine): void {
+    currentSyntaxHunk ??= {
+      characterLength: 0,
+      lineCount: 0,
+      lines: [],
+      startRow: parsed.length,
+    };
+    if (syntaxHunks.at(-1) !== currentSyntaxHunk) {
+      syntaxHunks.push(currentSyntaxHunk);
+    }
+    currentSyntaxHunk.lineCount += 1;
+    currentSyntaxHunk.characterLength += line.content.length + 1;
+    if (
+      currentSyntaxHunk.lines !== null &&
+      currentSyntaxHunk.lineCount <= DIFF_SYNTAX_LIMITS.maximumLines &&
+      currentSyntaxHunk.characterLength <= DIFF_SYNTAX_LIMITS.maximumBytes &&
+      line.content.length <= DIFF_SYNTAX_LIMITS.maximumLineCharacters
+    ) {
+      currentSyntaxHunk.lines.push(line.content);
+    } else {
+      currentSyntaxHunk.lines = null;
+    }
+    append(line);
   }
 
   for (const [index, line] of lines.entries()) {
@@ -83,6 +170,13 @@ export function createDiffDocument(diff: string): DiffDocument {
       newLine = Number(newStart);
       sawHunk = true;
       append({ content: line, newNumber: null, oldNumber: null, type: "hunk" });
+      currentSyntaxHunk = {
+        characterLength: 0,
+        lineCount: 0,
+        lines: [],
+        startRow: parsed.length,
+      };
+      syntaxHunks.push(currentSyntaxHunk);
       continue;
     }
 
@@ -90,6 +184,9 @@ export function createDiffDocument(diff: string): DiffDocument {
       continue;
     }
 
+    if (line === NO_NEWLINE_MARKER) {
+      continue;
+    }
     if (isDiffMetadata(line)) {
       append({ content: line, newNumber: null, oldNumber: null, type: "meta" });
       continue;
@@ -97,7 +194,7 @@ export function createDiffDocument(diff: string): DiffDocument {
 
     if (line.startsWith("+")) {
       additions += 1;
-      append({
+      appendContent({
         content: line.slice(1),
         newNumber: newLine++,
         oldNumber: null,
@@ -108,7 +205,7 @@ export function createDiffDocument(diff: string): DiffDocument {
 
     if (line.startsWith("-")) {
       deletions += 1;
-      append({
+      appendContent({
         content: line.slice(1),
         newNumber: null,
         oldNumber: oldLine++,
@@ -117,7 +214,7 @@ export function createDiffDocument(diff: string): DiffDocument {
       continue;
     }
 
-    append({
+    appendContent({
       content: line.startsWith(" ") ? line.slice(1) : line,
       newNumber: newLine++,
       oldNumber: oldLine++,
@@ -125,7 +222,7 @@ export function createDiffDocument(diff: string): DiffDocument {
     });
   }
 
-  return new DiffDocument(parsed, { additions, deletions }, maximumColumns);
+  return new DiffDocument(parsed, { additions, deletions }, maximumColumns, syntaxHunks);
 }
 
 export function parseUnifiedDiff(diff: string): readonly UnifiedDiffLine[] {
@@ -152,6 +249,9 @@ export function summarizeDiff(diff: string): DiffStats {
     if (!sawHunk && (line.startsWith("--- ") || line.startsWith("+++ "))) {
       continue;
     }
+    if (line === NO_NEWLINE_MARKER) {
+      continue;
+    }
     if (isDiffMetadata(line)) {
       continue;
     }
@@ -171,12 +271,21 @@ export function monospaceColumnCount(value: string): number {
 
 function projectSplitDiff(lines: readonly UnifiedDiffLine[]): SplitDiffProjection {
   const rows: SplitDiffRow[] = [];
+  const leftSourceIndexes = new Uint32Array(lines.length);
+  const rightSourceIndexes = new Uint32Array(lines.length);
   let index = 0;
   let leftMaximumColumns = 0;
   let rightMaximumColumns = 0;
 
-  function append(row: SplitDiffRow): void {
+  function append(
+    row: SplitDiffRow,
+    leftSourceIndex: number | null,
+    rightSourceIndex: number | null,
+  ): void {
+    const rowIndex = rows.length;
     rows.push(row);
+    leftSourceIndexes[rowIndex] = leftSourceIndex === null ? 0 : leftSourceIndex + 1;
+    rightSourceIndexes[rowIndex] = rightSourceIndex === null ? 0 : rightSourceIndex + 1;
     leftMaximumColumns = Math.max(leftMaximumColumns, monospaceColumnCount(row.leftContent));
     rightMaximumColumns = Math.max(rightMaximumColumns, monospaceColumnCount(row.rightContent));
   }
@@ -188,14 +297,18 @@ function projectSplitDiff(lines: readonly UnifiedDiffLine[]): SplitDiffProjectio
     }
 
     if (line.type === "hunk" || line.type === "meta") {
-      append({
-        leftNumber: null,
-        leftContent: line.content,
-        leftType: "header",
-        rightNumber: null,
-        rightContent: line.content,
-        rightType: "header",
-      });
+      append(
+        {
+          leftNumber: null,
+          leftContent: line.content,
+          leftType: "header",
+          rightNumber: null,
+          rightContent: line.content,
+          rightType: "header",
+        },
+        null,
+        null,
+      );
       index += 1;
       continue;
     }
@@ -203,6 +316,7 @@ function projectSplitDiff(lines: readonly UnifiedDiffLine[]): SplitDiffProjectio
     if (line.type === "deletion") {
       const removed: UnifiedDiffLine[] = [];
       const added: UnifiedDiffLine[] = [];
+      const removedStartIndex = index;
       while (lines[index]?.type === "deletion") {
         const current = lines[index];
         if (current !== undefined) {
@@ -210,6 +324,7 @@ function projectSplitDiff(lines: readonly UnifiedDiffLine[]): SplitDiffProjectio
         }
         index += 1;
       }
+      const addedStartIndex = index;
       while (lines[index]?.type === "addition") {
         const current = lines[index];
         if (current !== undefined) {
@@ -221,43 +336,77 @@ function projectSplitDiff(lines: readonly UnifiedDiffLine[]): SplitDiffProjectio
       for (let pairIndex = 0; pairIndex < rowCount; pairIndex += 1) {
         const left = removed[pairIndex];
         const right = added[pairIndex];
-        append({
-          leftNumber: left?.oldNumber ?? null,
-          leftContent: left?.content ?? "",
-          leftType: left === undefined ? "empty" : "removed",
-          rightNumber: right?.newNumber ?? null,
-          rightContent: right?.content ?? "",
-          rightType: right === undefined ? "empty" : "added",
-        });
+        append(
+          {
+            leftNumber: left?.oldNumber ?? null,
+            leftContent: left?.content ?? "",
+            leftType: left === undefined ? "empty" : "removed",
+            rightNumber: right?.newNumber ?? null,
+            rightContent: right?.content ?? "",
+            rightType: right === undefined ? "empty" : "added",
+          },
+          left === undefined ? null : removedStartIndex + pairIndex,
+          right === undefined ? null : addedStartIndex + pairIndex,
+        );
       }
       continue;
     }
 
     if (line.type === "addition") {
-      append({
-        leftNumber: null,
-        leftContent: "",
-        leftType: "empty",
-        rightNumber: line.newNumber,
-        rightContent: line.content,
-        rightType: "added",
-      });
+      append(
+        {
+          leftNumber: null,
+          leftContent: "",
+          leftType: "empty",
+          rightNumber: line.newNumber,
+          rightContent: line.content,
+          rightType: "added",
+        },
+        null,
+        index,
+      );
       index += 1;
       continue;
     }
 
-    append({
-      leftNumber: line.oldNumber,
-      leftContent: line.content,
-      leftType: "normal",
-      rightNumber: line.newNumber,
-      rightContent: line.content,
-      rightType: "normal",
-    });
+    append(
+      {
+        leftNumber: line.oldNumber,
+        leftContent: line.content,
+        leftType: "normal",
+        rightNumber: line.newNumber,
+        rightContent: line.content,
+        rightType: "normal",
+      },
+      index,
+      index,
+    );
     index += 1;
   }
 
-  return { leftMaximumColumns, rightMaximumColumns, rows };
+  return {
+    leftMaximumColumns,
+    leftSourceIndexes: leftSourceIndexes.subarray(0, rows.length),
+    rightMaximumColumns,
+    rightSourceIndexes: rightSourceIndexes.subarray(0, rows.length),
+    rows,
+  };
+}
+
+function measureLineNumberDigits(lines: readonly UnifiedDiffLine[]): {
+  readonly new: number;
+  readonly old: number;
+} {
+  let maximumNew = 0;
+  let maximumOld = 0;
+  for (const line of lines) {
+    maximumNew = Math.max(maximumNew, line.newNumber ?? 0);
+    maximumOld = Math.max(maximumOld, line.oldNumber ?? 0);
+  }
+  return {
+    new: Math.max(1, String(maximumNew).length),
+    old: Math.max(1, String(maximumOld).length),
+  };
 }
 
 function isDiffMetadata(line: string): boolean {

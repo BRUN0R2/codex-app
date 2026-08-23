@@ -2,8 +2,8 @@
 
 ## Snapshot estudado
 
-O diretório local ignorado `.reference/openai-codex` aponta para o commit
-`9894a14c81e50bbd845a337e4f77293f1cbc2633`, de 20 de agosto de 2026, do
+O diretório local ignorado `.references/openai-codex` aponta para o commit
+`1e6185e52214a879a8b94f3743f47f57135dc64b`, de 23 de agosto de 2026, do
 repositório [openai/codex](https://github.com/openai/codex).
 
 A referência serve para confirmar protocolos e semântica. Nenhum crate, pacote,
@@ -22,20 +22,34 @@ runtime deste aplicativo.
 - cliente HTTP: allowlist de cookies de infraestrutura Cloudflare delegada ao
   `reqwest::cookie::Jar`, incluindo escopo, expiração e remoção;
 - leitura de limites da conta: endpoint e semântica das janelas de uso;
-- políticas e ferramentas: inspiração para limites, aprovações e cancelamento.
+- políticas e ferramentas: inspiração para limites, aprovações e cancelamento;
+- TUI e execução: normalização incremental de terminal, deltas limitados,
+  transcript integral separado da projeção visual e ordem entre stream e item
+  terminal;
+- comandos longos: yield inicial, registro da sessão antes da espera,
+  polling por cursor, serialização de operações da mesma sessão, concorrência
+  entre sessões independentes e watcher terminal após a drenagem da saída;
+- execução paralela: `parallel_tool_calls: true`, futuros iniciados conforme cada
+  item termina, `FuturesOrdered` para persistir respostas na ordem do provider e
+  uma barreira `RwLock` em que handlers concorrentes usam leitura e operações
+  exclusivas usam escrita. O handler oficial de `exec_command` declara suporte
+  paralelo; neste projeto a declaração adicional `parallel_safe` mantém a
+  independência explícita e impede concorrência entre aprovações.
 
 O login nativo foi validado em runtime antes desta reescrita. Essa validação
 confirma o protocolo OAuth, não autoriza dependência da CLI nem compatibilidade
 com o armazenamento dela.
 
-O catálogo declara explicitamente `0.146.0` como versão de compatibilidade do
-cliente no parâmetro `client_version`. Esse contrato acompanha a versão estável
-do protocolo estudado e é independente da versão comercial do aplicativo.
+O cliente local conserva `0.146.0` como versão de compatibilidade do catálogo no
+parâmetro `client_version`. O checkout atualizado não apresentou evidência
+autoritativa para trocar esse valor: seus clientes atuais usam versão de pacote
+em runtime, enquanto o contrato consumer deste aplicativo permanece
+independente da versão comercial.
 
 ## Desktop oficial e limites do agente
 
-O aplicativo oficial para Windows foi revalidado em 21 de agosto de 2026 no
-build `26.818.3698.0`. Seu processo Electron `ChatGPT.exe` inicia o executável
+O aplicativo oficial para Windows foi revalidado em 23 de agosto de 2026 no
+build `26.818.5229.0`. Seu processo Electron `ChatGPT.exe` inicia o executável
 embarcado como `codex.exe -c features.code_mode_host=true app-server
 --analytics-default-enabled` e também inicia `codex-code-mode-host.exe`.
 Portanto, o Desktop usa o `app-server` e o core como engine; ele não executa o
@@ -43,13 +57,83 @@ fluxo interativo da CLI. O build anterior `26.727.6591.0` reportava
 `codex-cli 0.146.0-alpha.9.2`; a versão interna atual não foi inferida porque o
 binário protegido não publica esse metadado.
 
+## Comandos longos no core e no Desktop oficial
+
+O fluxo foi conferido diretamente em:
+
+- `codex-rs/core/src/unified_exec/mod.rs`;
+- `codex-rs/core/src/unified_exec/process_manager.rs`;
+- `codex-rs/core/src/unified_exec/process_manager_tests.rs`;
+- `codex-rs/core/src/tools/handlers/unified_exec.rs`;
+- `codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs`;
+- `codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs`;
+- `codex-rs/core/src/tools/handlers/shell_spec.rs`.
+
+O core registra o processo antes da espera inicial, usa dez segundos como yield
+padrão e limita o valor a 30 segundos. No Windows oficial existe um piso inicial
+de dez segundos; nos demais caminhos o mínimo geral é 250 ms. Se o processo
+continua ativo, a resposta entrega `session_id` e o manager conserva até 64
+processos. O buffer de resposta do unified exec é limitado a 1 MiB, separado do
+lifetime do processo.
+
+`write_stdin` também funciona como polling quando recebe `chars` vazio. Nesse
+caso o piso efetivo é cinco segundos; operações sobre a mesma sessão usam
+ownership exclusivo, enquanto sessões diferentes podem avançar em paralelo. O
+watcher de background continua drenando a saída e só publica o evento terminal
+depois do fim do stream. O handler oficial declara suporte a tool calls
+paralelas.
+
+No build Desktop `26.818.5229.0`, os módulos
+`command-execution-command-BBWs2f2A.js` e
+`exec-shell-container-DMZRsqLR.js` confirmam a projeção de `isInProgress`,
+`liveOutput` e snapshots de terminal: sucesso e exit code aparecem somente no
+estado terminal, não no primeiro yield.
+
+Este aplicativo mantém o mesmo ciclo conceitual com contratos próprios. Como
+`exec_command` é deliberadamente não interativo, não expõe stdin: usa
+`poll_command` separado e tipado. O piso local de 250 ms também vale no Windows
+para permitir baixa latência explícita, sem alterar o padrão de dez segundos.
+Sessões usam UUID, pertencem à tarefa, são limitadas a 32 e concluem item mais
+saída em transação SQLite. O transcript vivo é limitado, o resultado integral
+fica no spool e polling append-only devolve somente o delta posterior ao cursor.
+Nenhum arquivo da referência participa dessa implementação.
+
+## Perfil e atividade no Desktop oficial
+
+O módulo `profile-1E_96Kyk.js` e seu CSS do build `26.818.5229.0` foram
+extraídos estruturalmente do `app.asar` para
+`.references/codex-desktop-26.818.5229.0/`, diretório ignorado e sem participação
+no build. O fluxo observado usa `GET /wham/profiles/me`, cache padrão de seis
+horas e chave por `userId/accountId`. Edição de identidade usa
+`PATCH /wham/profiles/me`; foto possui upload multipart separado em
+`/wham/profiles/me/photo`. Este projeto implementa nesta etapa somente a leitura
+e apresentação solicitadas, sem escrever na conta.
+
+A resposta autoritativa contém:
+
+- `profile.display_name`, `username` e `profile_picture_url`;
+- `lifetime_tokens`, `peak_daily_tokens`, `longest_running_turn_sec`,
+  sequências atual/máxima e `daily_usage_buckets`;
+- percentual de modo rápido, raciocínio mais usado e seu percentual, skills
+  únicas/totais, total de chats e `top_invocations`;
+- `metadata.stats_error`, que torna estatísticas indisponíveis sem descartar a
+  identidade.
+
+O layout oficial usa conteúdo de até `732 px`, avatar de `80 px`, cinco métricas
+em um cartão de `60 px`, calendário de 52 semanas com abas diária/semanal/
+acumulada e duas colunas para insights e plugins. A implementação local reproduz
+essa hierarquia e suas proporções com código próprio SolidJS/CSS e contratos
+Rust/TypeScript próprios; nenhum módulo Electron extraído é importado, copiado
+para runtime ou transformado em dependência.
+
 ## Referência visual da conversa
 
-O bundle `app.asar` do build `26.818.3698.0` foi analisado somente como
+O bundle `app.asar` do build `26.818.5229.0` foi analisado somente como
 referência. Os módulos relevantes incluem `agent-activity-item`,
+`split-items-into-render-groups`, `content-reference-markers`,
 `command-execution-command`, `exec-shell-container` e `conversation-markdown`.
-A janela oficial em execução foi capturada sem interação e medida por OCR
-nativo do Windows.
+A captura visual preservada do build `26.818.3698.0` foi obtida sem interação e
+medida por OCR nativo do Windows.
 
 O contrato visual observado no viewport nativo maximizado inclui:
 
@@ -65,6 +149,9 @@ O contrato visual observado no viewport nativo maximizado inclui:
 - comandos individuais no formato **Comando executado: ...**;
 - `read_thread_terminal` apresentado como **Lendo terminal do chat**,
   **Terminal do chat lido** e, em resumo composto, **leu o terminal do chat**;
+- alteração simples de um arquivo mantida no grupo enquanto é a atividade
+  atual e convertida, ao concluir sozinha, em uma linha direta compacta,
+  recolhida e sem superfície de cartão;
 - grupos semânticos independentes, com apenas os detalhes escolhidos pelo
   usuário expandidos.
 
@@ -216,7 +303,7 @@ produto. O estado atual é:
 
 | Área | Cobertura local |
 | --- | --- |
-| Login ChatGPT, renovação, logout e uso da conta | implementada |
+| Login ChatGPT, renovação, logout, uso, faturamento, recarga e resets | implementada |
 | Modelos, esforço, tier, permissões e janela de contexto | implementada |
 | Criar, listar, abrir, renomear e arquivar tarefas | implementada |
 | Turno incremental com raciocínio, ferramentas, aprovação e interrupção | implementada |
@@ -233,6 +320,60 @@ O aplicativo executa o fluxo essencial moderno de um agente Codex para PC sem
 depender da CLI. As superfícies ainda ausentes não são representadas por botões
 inertes; cada uma exige um contrato nativo próprio antes de aparecer na
 interface.
+
+## Referências de syntax highlighting
+
+Em 22 de agosto de 2026, o Shiki oficial `v4.4.3` foi baixado somente para
+`.references/shiki`. Foram estudados `@shikijs/core`, primitive, engines
+JavaScript/Oniguruma, tokens, estado gramatical, limites de linha/tempo, registro
+de linguagens e tema por variáveis CSS. Os princípios portados foram:
+
+- saída em arrays de tokens, não HTML como contrato central;
+- estado validado e continuado entre linhas;
+- singleton/caches com lifecycle explícito;
+- linguagens e aliases fechados;
+- limites antes de tokenizar;
+- fallback para texto puro;
+- tema semântico separado da tokenização.
+
+O código Shiki não foi copiado nem adicionado ao runtime. O motor local usa um
+lexer stateful próprio, módulos com no máximo 406 linhas e políticas menores
+para a viewport do WebView.
+
+O OpenAI Codex oficial foi atualizado por fast-forward de `9894a14c8` para
+`343074d42` (96 commits) em `.references/openai-codex`. O estudo do TUI mostrou
+hunks destacados como bloco, estado incremental em fences Markdown, revisão de
+tema para invalidar cache e guardrails de 512 KiB, 10.000 linhas e 4 KiB por
+linha. O projeto local portou hunk-level state e fallback, mas rejeitou Syntect:
+o próprio grafo Codex mantém exceções para transitivas não mantidas desse caminho.
+
+Entre as mudanças recentes também foram revisados deltas de execução limitados a
+8 KiB com transcript integral preservado, resultados de ferramenta externos ao
+contexto, busca case-insensitive linear e cache de snapshots de shell. Os três
+primeiros princípios já possuem equivalentes locais; snapshot de shell não foi
+portado porque o executor PowerShell atual não mantém uma sessão persistente e
+adicioná-lo seria especulativo.
+
+## Referências de eficiência de contexto
+
+Em 22 de agosto de 2026, a estratégia de ferramentas foi comparada com projetos
+abertos e ativos:
+
+- [RTK](https://github.com/rtk-ai/rtk): filtros determinísticos por comando,
+  passthrough seguro e recuperação do bruto;
+- [Context Mode](https://github.com/mksglu/context-mode): dados volumosos fora do
+  contexto e busca direcionada sobre o conteúdo persistido;
+- [Headroom](https://github.com/headroomlabs-ai/headroom): cache reversível,
+  roteamento por tipo de conteúdo e gates de qualidade;
+- [LeanCTX](https://github.com/yvgude/lean-ctx): métricas de redução, recuperação
+  por handles e benchmarks adversariais.
+
+O projeto não incorpora nenhum desses runtimes como dependência ou proxy. Foram
+portados somente os princípios compatíveis com `RULES.md`: classificação fechada
+e determinística de logs, recurso bruto sempre preservado, busca exata limitada
+e benchmarks antes/depois. Compressão de código por AST, cache persistente de
+releituras e reescrita genérica de prompts foram rejeitados por ampliarem
+complexidade ou poderem degradar fidelidade sem uma prova local suficiente.
 
 ## Fluxo unificado ChatGPT, Work e Codex
 
@@ -317,6 +458,12 @@ Eventos desconhecidos continuam falhando na fronteira.
 Falhas de turno persistidas agora fazem parte do contrato de leitura e são
 mostradas na timeline. Isso evita que reabrir uma tarefa transforme uma falha de
 provider em silêncio visual.
+
+A aba Uso e faturamento segue a decomposição atual do Desktop oficial: plano e
+preço localizado, saldo e recarga automática, limites gerais, buckets adicionais
+por modelo e redefinições da conta. Resets exigem confirmação em dois passos e
+um identificador idempotente preservado em retry; a resposta do servidor
+continua autoritativa para disponibilidade, expiração e consumo.
 
 No transporte Responses, um status HTTP de sucesso pode iniciar um stream SSE
 sem o header `Content-Type`. O corpo, e não esse header opcional, é a fronteira

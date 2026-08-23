@@ -2,6 +2,7 @@ mod callback;
 mod error;
 mod oauth;
 mod pkce;
+mod profile;
 mod storage;
 mod token;
 
@@ -25,6 +26,7 @@ use self::oauth::OAuthClient;
 use self::pkce::PkceCodes;
 use self::pkce::generate_pkce;
 use self::pkce::generate_state;
+pub use self::profile::AccountProfileResponse;
 use self::storage::CredentialStorage;
 use self::token::AuthRecord;
 use super::super::AuthLoginCompleted;
@@ -206,11 +208,7 @@ impl AuthInner {
         // logout, or provider work behind a non-essential image fetch.
         let session = self.session(app).await?;
         let context = self.context(app).await?;
-        let profile = context.oauth.chatgpt_profile(&session).await?;
-        Ok(AccountProfileResponse {
-            name: profile.name,
-            picture: profile.picture,
-        })
+        context.oauth.chatgpt_profile(&session).await
     }
 
     async fn session(&self, app: &AppHandle) -> Result<AuthSession, AuthError> {
@@ -541,13 +539,6 @@ pub struct AccountReadResponse {
     account: Option<Account>,
     requires_openai_auth: bool,
     refresh: RefreshResult,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AccountProfileResponse {
-    name: Option<String>,
-    picture: Option<String>,
 }
 
 impl AccountReadResponse {

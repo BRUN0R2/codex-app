@@ -11,6 +11,7 @@ export interface TimelineDisclosureBinding {
 
 export interface TimelineDisclosureContextValue {
   readonly keyPrefix: () => TimelineDisclosureKey;
+  readonly onLayoutChange: () => void;
   readonly store: TimelineDisclosureStore;
 }
 
@@ -49,11 +50,18 @@ export function useTimelineDisclosure(
 
   const storageKey = () => timelineDisclosureChildKey(context.keyPrefix(), key());
   const isOpen = () => context.store.read(storageKey(), initialOpen());
-  const setOpen = (open: boolean) => context.store.setOpen(storageKey(), open);
+  const setOpen = (open: boolean) => {
+    if (isOpen() === open) {
+      return;
+    }
+    context.store.setOpen(storageKey(), open);
+    context.onLayoutChange();
+  };
 
   return {
     descendantContext: {
       keyPrefix: storageKey,
+      onLayoutChange: context.onLayoutChange,
       store: context.store,
     },
     isOpen,

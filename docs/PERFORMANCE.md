@@ -155,9 +155,9 @@ caminhos alternada para reduzir viés de cache, produziram:
 
 | Caminho | Mediana |
 | --- | ---: |
-| scanner sequencial anterior | 496,774 ms |
-| `ripgrep` empacotado | 224,357 ms |
-| aceleração | 2,214× |
+| scanner sequencial anterior | 545,800 ms |
+| `ripgrep` empacotado | 260,168 ms |
+| aceleração | 2,098× |
 
 O benchmark exige pelo menos `2×` nesse corpus e também valida que ambos os
 caminhos retornam o mesmo resultado vazio. Ele mede varredura local aquecida e
@@ -174,7 +174,7 @@ blocos SQLite de 64 KiB e pode ser percorrido sem compactação por `read_output
 
 `pnpm measure:tool-output` gera deterministicamente 40.000 linhas e 2.439.995
 bytes, incluindo uma falha representativa no centro. Em perfil release, a
-prévia final enviada ao provider mediu 6.494 bytes e levou 12,5687 ms para ser
+prévia final enviada ao provider mediu 6.494 bytes e levou 14,8406 ms para ser
 produzida:
 
 | Dimensão | Original | Prévia atual | Redução |
@@ -204,14 +204,54 @@ sete amostras válidas em ordem alternada:
 | --- | ---: | ---: |
 | processos de busca por lote | 8 | 1 |
 | redução de execuções | — | 87,5% |
-| mediana de parede | 195,978 ms | 134,292 ms |
-| aceleração observada | — | 1,459× |
+| mediana de parede | 241,556 ms | 157,230 ms |
+| aceleração observada | — | 1,536× |
 
 O teste funcional exige exatamente uma execução para oito chamadas, preserva o
 tipo dos erros compartilhados, diferencia workspace/tarefa/argumentos e prova
 que um novo lote não reutiliza o anterior. A aceleração mede somente chamadas
 duplicadas no mesmo lote; chamadas distintas continuam paralelas e não recebem
 um ganho artificial atribuído ao cache.
+
+#### Compactação semântica e busca em saídas — 22 de agosto de 2026
+
+O caminho genérico de cabeça/cauda permanece como fallback lossless. Acima dele,
+comandos concluídos com sucesso reconhecem apenas classes fechadas de ruído:
+progresso de build, progresso de gerenciador de pacotes e linhas de sucesso de
+testes Rust ou JavaScript. Diagnósticos, summaries e linhas representativas
+continuam presentes; formatos desconhecidos abaixo de 10 KiB permanecem
+byte-a-byte e comandos com exit code diferente de zero nunca usam o filtro de
+sucesso.
+
+`pnpm measure:command-output` compara o algoritmo anterior e o semântico em
+perfil release:
+
+| Corpus | Original | Prévia anterior | Prévia semântica | Redução adicional | Mediana |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| logs moderados de testes | 3.186 B | 3.216 B | 414 B | 87,127% | 0,137 ms |
+| build + 465 arquivos/testes | 29.086 B | 6.121 B | 633 B | 89,659% | 0,537 ms |
+
+Usando a mesma aproximação conservadora do runtime de quatro bytes por token,
+as prévias representam aproximadamente `804 -> 104` tokens e `1.531 -> 159`
+tokens. Esses números são estimativas; a contagem exata continua dependendo do
+tokenizer e do conteúdo.
+
+`read_output` também aceita uma busca exata que varre os chunks sem materializar
+o recurso inteiro no provider. `pnpm measure:output-search` posiciona um match no
+fim de 64 MiB e compara a resposta com uma página bruta:
+
+| Dimensão | Página bruta | Busca direcionada |
+| --- | ---: | ---: |
+| bytes enviados ao contexto | 65.536 | 110 |
+| tokens estimados | 16.384 | 28 |
+| redução | — | 99,832% |
+| latência mediana da busca em 64 MiB | — | 61,080 ms |
+
+O benchmark inclui duas amostras de aquecimento e sete amostras válidas da
+varredura completa em memória dos chunks sintéticos, sempre com o match no fim.
+Testes funcionais adicionais cobrem query atravessando fronteira de chunk, UTF-8
+multibyte, uma ocorrência por linha, truncamento explícito e isolamento por
+tarefa.
 
 #### Benchmark da conversa de referência — 16 de agosto de 2026
 
@@ -264,6 +304,117 @@ execução:
 O lote ficou 194,557 vezes mais rápido que as atualizações sequenciais já
 otimizadas nesse cenário. Este benchmark mede somente custo local de redução
 de estado; não representa TTFT de rede, tempo do modelo ou tempo de ferramentas.
+
+#### Saída de comando ao vivo e âncoras dinâmicas — 22 de agosto de 2026
+
+`exec_command` agora normaliza `stdout` e `stderr` enquanto drena os pipes. A UI
+recebe frames append de até 8 KiB, operações semânticas de carriage return e
+backspace e no máximo 256 KiB combinados por comando ativo. A saída integral
+continua no spool e no recurso persistido; a prévia transitória não entra no
+provider nem no histórico.
+
+Em três execuções de `pnpm measure:streaming`, cada uma com duas amostras de
+aquecimento e sete válidas, as medianas entre execuções foram:
+
+| Carga sobre 20.000 itens | Sequencial | Caminho agrupado | Aceleração |
+| --- | ---: | ---: | ---: |
+| 1.200 deltas de texto | 22,650 ms | 0,100 ms | 226,5× |
+| 128 deltas / 256 KiB de comando | 2,709 ms | 0,038 ms | 71,3× |
+
+O caminho de comando reproduz o primeiro frame imediato seguido do frame
+coalescido. Um benchmark Rust release separado processa 64 MiB com ANSI,
+carriage return e leituras de 8 KiB. Em três execuções, a mediana foi
+`1.787,762 ms`, equivalente a `35,8 MiB/s`; todas produziram exatamente as
+mesmas operações e checksum.
+
+O navegador de mensagens deixou de usar `turnIndex` como destino final. Ele usa
+a âncora real por `message.id`, aguarda a revisão de layout dos disclosures e só
+conclui depois de duas geometrias quietas. A auditoria reproduz uma mensagem
+`708,781 px` abaixo do início do mesmo turno expandido. Ela chega a `32 px` do
+topo nos viewports menores e ao scroll máximo matematicamente possível no
+viewport de 1920 × 1080.
+
+O gate visual corrente cobre 21 cenários em três viewports, totalizando
+63 capturas. Além das regressões anteriores, valida saída ao vivo com auto-follow
+de `0 px`, exclusão com `−288`, ausência do cabeçalho agrupado redundante,
+navegação por âncora após expansão, ownership manual de scroll com drift `0` e
+handoff de wheel entre comando, diff e leitura. As três transferências levam
+`0,6–0,7 ms` juntas, não executam `getComputedStyle` e entregam exatamente
+`−60`, `−120` e `−80 px` à timeline. O gate também cobre arquivo criado de 338
+linhas colorido, `read_file`/`search_text` tipados, gutters compactos, três ondas
+de atividade em 2 s e o perfil com largura de `732 px`, avatar de `80 px`, 364
+células, cinco métricas, cinco insights e zero overflow.
+
+O build corrente produz app principal de `466,21 KiB` (`138,67 KiB` gzip),
+chunk auxiliar de `20,47 KiB` (`8,14 KiB` gzip), CSS de `128,89 KiB`
+(`23,74 KiB` gzip) e worker Markdown lazy de `63,48 KiB`. Contra o gate integral
+de 21 de agosto, o payload inicial agregado passou de `151,10 KiB` para
+`170,55 KiB` gzip, acréscimo de `19,45 KiB` (`12,87%`) para syntax, streaming,
+navegação, perfil e demais superfícies novas. Nenhuma dependência, WASM ou worker
+de runtime adicional foi introduzido; o worker Markdown continua lazy.
+
+#### Comandos independentes em paralelo — 23 de agosto de 2026
+
+O provider continua recebendo `parallel_tool_calls` apenas quando o modelo
+declara suporte. O scheduler nativo forma lotes contíguos de até oito operações,
+mantém mutações e aprovações como barreiras e persiste resultados na ordem das
+chamadas. Leituras são intrinsecamente seguras; `exec_command` exige
+`parallel_safe: true` e o perfil `danger-full-access/never`.
+
+`pnpm measure:parallel-commands` inicia quatro processos PowerShell independentes
+com a mesma espera útil de 180 ms. Após uma rodada de aquecimento, cinco amostras
+alternam a ordem dos caminhos e validam conteúdo e ordenação:
+
+| Caminho | Mediana |
+| --- | ---: |
+| quatro comandos sequenciais | `2.903,025 ms` |
+| quatro comandos paralelos | `741,562 ms` |
+| aceleração de tempo de parede | `3,915×` |
+
+As cinco amostras paralelas ficaram entre `714,693 ms` e `795,816 ms`; as
+sequenciais, entre `2.891,948 ms` e `2.918,971 ms`. O benchmark inclui startup
+real de `pwsh`, não apenas timers no mesmo processo. Ele não autoriza concorrência
+por inferência: um comando sem a declaração explícita ou fora do perfil seguro
+continua exclusivo.
+
+#### Comandos longos, yield e polling incremental — 23 de agosto de 2026
+
+`pnpm measure:background-command` executa uma rodada de aquecimento e cinco
+amostras de um processo PowerShell real que produz 16 KiB, permanece ativo,
+permite um segundo comando independente e conclui com uma nova linha. O
+benchmark release usa o piso local de 250 ms e compara o snapshot inicial com a
+resposta posterior ao cursor:
+
+| Medição | Resultado |
+| --- | ---: |
+| retorno mediano após `exec_command` | `261 ms` (`250–266 ms`) |
+| comando independente mediano durante a sessão | `481 ms` (`470–510 ms`) |
+| duração total mediana | `2.466 ms` (`2.461–2.474 ms`) |
+| ganho mediano entre yield e conclusão | `9,43×` (`9,27–9,82×`) |
+| payload do snapshot inicial | `16.513 bytes` |
+| payload incremental posterior | `146 bytes` |
+| redução mediana do payload repetido | `113,10×` |
+| 2.000 snapshots completos de 256 KiB | `200.346 µs` |
+| 2.000 polls incrementais sem cópia integral | `176 µs` |
+| ganho por eliminação da cópia | `1.133,82×` |
+
+Bytes são usados como proxy determinístico de tokens; a tokenização exata varia
+por modelo. O gate exige pelo menos `4×` de ganho de responsividade e `20×` de
+redução de payload. A implementação comum não repete o histórico append-only:
+checkpoints recuperam apenas o sufixo posterior ao cursor. Reescritas de terminal
+invalidam o checkpoint de forma explícita e usam snapshot, preservando correção
+em vez de fingir um delta seguro.
+
+O tipo de polling é separado do snapshot visual. Quando um checkpoint
+append-only é válido, o backend clona somente o delta; não materializa primeiro
+os até 512 KiB de `stdout` e `stderr` para descartá-los em seguida. A medição de
+2.000 consultas usa `black_box`, o transcript no limite de 256 KiB e o mesmo
+mutex assíncrono dos dois caminhos.
+
+O teste também valida que o segundo comando termina antes do primeiro e que a
+linha final não carrega novamente o marcador do histórico. O processo continua
+com spool integral, cancelamento da árvore, limite de sessão e finalização
+transacional; a redução afeta somente a resposta enviada ao agente.
 
 O comando `pnpm measure:soak` cobre estruturas destinadas a sessões longas sem
 simular rede ou provider. Na revalidação de 18 de agosto de 2026, 100.000 turnos,
@@ -319,6 +470,61 @@ na quantidade de linhas simultaneamente montadas. O canvas físico é limitado
 para evitar limites de layout do WebView, mas preserva a altura lógica e o
 mapeamento de todas as linhas. Esse benchmark roda em Node e não substitui
 medidas de paint, heap ou INP no WebView de produção.
+
+#### Motor próprio de syntax highlighting — 22 de agosto de 2026
+
+Antes da mudança, `syntaxHighlight.ts` combinava palavras-chave de linguagens
+distintas, ignorava o parâmetro de linguagem e gerava HTML diretamente. Em Rust,
+`#[test]` podia ser classificado como comentário; somente linhas adicionadas ou
+removidas recebiam decoração. O baseline imediatamente anterior mediu:
+
+| Dimensão | Baseline |
+| --- | ---: |
+| parse de 150.001 linhas | 92,163 ms |
+| projeção split de 100.001 rows | 63,592 ms |
+| highlight stateless do documento completo | 638,955 ms |
+| highlight stateless de 73 linhas | 0,394 ms |
+| app principal | 420,38 KiB / 124,90 KiB gzip |
+| worker Markdown | 45,58 KiB |
+
+O motor novo possui registro explícito de linguagens, estado multiline, tokens
+tipados, CSS semântico, renderização Solid no diff, escaping no Markdown e
+fallback por limites. `pnpm measure:syntax` executa duas amostras de aquecimento
+e sete válidas:
+
+| Operação | Mediana |
+| --- | ---: |
+| 18 linguagens × 500 iterações | 52,567 ms |
+| bloco Rust de 4.000 linhas | 16,407 ms |
+| 1.000 serializações HTML seguras | 13,736 ms |
+| cold path de 73 linhas de diff | 0,757 ms |
+| warm path das mesmas 73 linhas | 0,044 ms |
+| arquivo Rust criado com 338 linhas | 1,431 ms |
+| fallback de hunk acima do limite | 0,002 ms |
+
+A revalidação de 23 de agosto de 2026 alinhou o limite do diff ao preview nativo
+de 128 KiB e 4.096 linhas. O caso que antes perdia todas as cores ficou abaixo
+de 1,5 ms sem alterar o fallback patológico.
+
+No corpus de diff completo, a série final permaneceu próxima do baseline no
+parse (`92,754 ms`), reduziu o highlight integral para `506,087 ms`, manteve o
+cold path abaixo de `1,3 ms` e o warm path abaixo de `0,2 ms`. A projeção split
+subiu para `67,571 ms` porque conserva índices compactos de origem em dois
+`Uint32Array`; o custo adicional de `3,98 ms` ocorre uma única vez em 100 mil
+rows e evita ampliar cada objeto visual ou perder estado sintático no modo split.
+
+O checkpoint isolado do motor produziu:
+
+- app principal: `439,47 KiB`, `130,81 KiB` gzip;
+- chunk auxiliar: `20,47 KiB`, `8,14 KiB` gzip;
+- CSS: `119,65 KiB`, `22,09 KiB` gzip;
+- worker Markdown: `62,50 KiB`.
+
+Contra o baseline, o custo inicial adicional é `5,91 KiB` gzip, sem WASM,
+worker novo, inicialização assíncrona ou dependência. O worker maior continua
+lazy e só nasce para Markdown final acima de 32 KiB. A auditoria visual valida
+quatorze cenários em três viewports, incluindo nove cores distintas, linhas de
+contexto coloridas, fundos de adição/remoção preservados e ausência de overflow.
 
 ### Moldura e configurações — 18 de agosto de 2026
 
@@ -406,9 +612,10 @@ causa e não distingue rede, modelo, ferramenta e disputa de estado.
 
 ### Chat oficial, ferramentas e release isolada — 21 de agosto de 2026
 
-O chat foi comparado com o build oficial `26.818.3698.0`. A auditoria visual
-agora executa onze cenários em `920 × 640`, `1280 × 820` e `1920 × 1080`,
-produzindo trinta e três capturas. Três cenários são específicos da conversa:
+O chat foi comparado com o build oficial `26.818.3698.0`. Naquele gate, a
+auditoria visual executou onze cenários em `920 × 640`, `1280 × 820` e
+`1920 × 1080`, produzindo trinta e três capturas. Três cenários são específicos
+da conversa:
 
 - reprodução do turno de referência, incluindo usuário, duração, três
   commentaries, comandos, leitura do terminal e resposta final, começando
@@ -419,15 +626,23 @@ produzindo trinta e três capturas. Três cenários são específicos da convers
 - alteração de um único arquivo renderizada diretamente e já expandida, sem o
   contêiner agregado reservado a mudanças com múltiplos arquivos.
 
+Em 22 de agosto de 2026, o bundle do build oficial `26.818.4152.0` mostrou a
+evolução desse último contrato: um patch simples permanece no grupo enquanto é
+a atividade atual e, ao concluir sozinho, vira uma linha direta compacta,
+recolhida e sem contorno ou fundo de cartão. O cenário visual corrente segue
+esse fluxo e valida também que o ícone interno do grupo não vaza para a linha
+independente. O gate frontend completo aprovou 50 arquivos e 240 testes,
+os três benchmarks sintéticos, as 33 capturas e o build de produção.
+
 A auditoria também rejeita as páginas removidas **Aparência** e **Segurança e
 permissões**. O perfil permanece somente dentro de Configurações, enquanto o
 menu da conta conserva uso, configurações e saída. A ação do menu de projeto
 abre diretamente seu caminho persistido no Explorer, sem reutilizar o seletor
 de workspace.
 
-O gate integral aprovou 50 arquivos e 238 testes frontend, além de 210 testes
-Rust; quatro benchmarks nativos continuam ignorados no fluxo comum e foram
-executados separadamente quando aplicável. O build Vite produziu:
+O gate integral de 21 de agosto aprovou 50 arquivos e 238 testes frontend, além
+de 210 testes Rust; quatro benchmarks nativos continuam ignorados no fluxo
+comum e foram executados separadamente quando aplicável. O build Vite produziu:
 
 - app principal: `408,97 KiB`, `121,65 KiB` gzip;
 - chunk auxiliar: `20,46 KiB`, `8,14 KiB` gzip;
@@ -438,7 +653,7 @@ Medições sintéticas após o porte:
 
 | Operação | Resultado |
 | --- | ---: |
-| batching de 1.200 deltas sobre 20.000 itens | `186,028×` mais rápido |
+| batching de 1.200 deltas sobre 20.000 itens | `223,020×` mais rápido |
 | turnos simultaneamente montados em histórico de 100.000 | `8` |
 | 5.000 blocos Markdown incrementais | `91,931 ms` |
 | 20.000 projeções de atividade | `146,101 ms` |
@@ -452,21 +667,52 @@ As ferramentas nativas em release mediram:
 
 | Ferramenta | Resultado |
 | --- | ---: |
-| ripgrep contra scanner anterior | `2,110×` mais rápido |
+| ripgrep contra scanner anterior | `2,098×` mais rápido |
 | oito buscas duplicadas coalescidas | `87,5%` menos execuções |
-| ganho de latência na coalescência | `1,615×` |
-| compactação de saída de `2,44 MB` | `99,734%` em `12,918 ms` |
+| ganho de latência na coalescência | `1,536×` |
+| compactação de saída de `2,44 MB` | `99,734%` em `14,841 ms` |
 
 Para não compartilhar SQLite, OAuth ou recovery com a instância aberta, o
 startup foi medido em um build de código idêntico com identificador Tauri
 temporário e diretório de dados isolado:
 
-| Amostra | Janela responsiva | Working set | Memória privada |
-| ---: | ---: | ---: | ---: |
-| 1, processo frio | `1.120,8 ms` | `37,8 MiB` | `7,6 MiB` |
-| 2 | `121,5 ms` | `29,8 MiB` | `7,4 MiB` |
-| 3 | `120,4 ms` | `29,6 MiB` | `7,7 MiB` |
+Em 22 de agosto de 2026 foram executadas três séries independentes de sete
+processos cada:
 
-A mediana quente foi `121,5 ms`, o working set médio `32,4 MiB`, a memória
-privada média `7,6 MiB` e o executável `12,2 MiB`. A instância canônica aberta
-permaneceu responsiva e não foi encerrada ou substituída.
+| Série | Mediana da janela responsiva | Working set médio | Memória privada média |
+| ---: | ---: | ---: | ---: |
+| 1 | `188,9 ms` | `32,3 MiB` | `7,8 MiB` |
+| 2 | `80,9 ms` | `31,3 MiB` | `7,7 MiB` |
+| 3 | `154,1 ms` | `29,9 MiB` | `7,6 MiB` |
+
+A mediana das 21 partidas foi `158,9 ms` e a mediana das três medianas
+`154,1 ms`. As partidas aquecidas variaram de `71,9 ms` a `232,4 ms`; uma
+primeira partida fria levou `1.400,1 ms`. A média entre séries foi `31,2 MiB` de
+working set e `7,7 MiB` privados, com executável de `12,5 MiB`. A instância
+canônica aberta permaneceu responsiva e não foi encerrada ou substituída.
+
+### Validação integral final — 23 de agosto de 2026
+
+`pnpm verify` concluiu sem falhas no Windows com token de administrador e nível
+de integridade alto:
+
+- 291 arquivos de texto validados como UTF-8 sem BOM;
+- 56 arquivos e 281 testes frontend aprovados;
+- 21 cenários visuais em três viewports, totalizando 63 capturas;
+- TypeScript estrito, Biome e build Vite de produção;
+- bootstrap/hash do ripgrep e auditoria de dependências transitivas;
+- `cargo check`, `rustfmt` e Clippy com warnings como erro;
+- 272 testes Rust aprovados e 8 benchmarks ignorados no fluxo comum por design;
+- benchmarks release de streaming, sessões longas e comandos paralelos
+  executados separadamente dentro do mesmo gate.
+
+Timeout e cancelamento iniciam processos reais, encerram a árvore e preservam
+saída já drenada. Yield e polling usam processo real, e as regressões de storage
+validam finalização transacional e reparo de atividades interrompidas após
+reinício abrupto.
+
+Os executáveis de teste da biblioteca e do aplicativo foram inspecionados com
+`mt.exe`: ambos possuem exatamente um recurso de manifesto, Common Controls v6
+e `requestedExecutionLevel="asInvoker"`. O mesmo harness executou com sucesso
+sob o token elevado; portanto o erro anterior de `TaskDialogIndirect` não
+dependia de privilégio e foi removido na composição do build.

@@ -6,13 +6,17 @@ use tauri::AppHandle;
 use tokio::sync::Mutex;
 
 use super::NativeEngineInner;
-use crate::engine::{DiagnosticStream, EngineNotification, StreamDelta, StreamDeltasNotification};
+use crate::engine::{
+    CommandOutputOperation, CommandOutputStream, DiagnosticStream, EngineNotification, StreamDelta,
+    StreamDeltasNotification,
+};
 use crate::error::AppError;
 
 const STREAM_BATCH_INTERVAL: Duration = Duration::from_millis(8);
 const MAX_STREAM_BATCH_ENTRIES: usize = 128;
 const MAX_STREAM_BATCH_BYTES: usize = 512 * 1_024;
 const MAX_STREAM_DELTA_BYTES: usize = 64 * 1_024;
+const MAX_COMMAND_OUTPUT_DELTA_BYTES: usize = 8 * 1_024;
 
 #[derive(Clone)]
 pub(super) struct StreamNotificationBatcher {
@@ -39,6 +43,7 @@ struct BatchState {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum StreamDeltaKey {
     AgentText(String),
+    CommandOutput(String, CommandOutputStream),
     ReasoningSummary(String, usize),
     ReasoningText(String, usize),
 }
@@ -69,7 +74,7 @@ impl StreamNotificationBatcher {
     }
 
     async fn push_chunk(&self, delta: StreamDelta) -> Result<(), AppError> {
-        if delta_text(&delta).is_empty() {
+        if delta_text(&delta).is_some_and(str::is_empty) {
             return Ok(());
         }
         let key = delta_key(&delta);
@@ -164,6 +169,9 @@ impl BatchState {
 fn delta_key(delta: &StreamDelta) -> StreamDeltaKey {
     match delta {
         StreamDelta::AgentText { item_id, .. } => StreamDeltaKey::AgentText(item_id.clone()),
+        StreamDelta::CommandOutput {
+            item_id, stream, ..
+        } => StreamDeltaKey::CommandOutput(item_id.clone(), *stream),
         StreamDelta::ReasoningSummary { item_id, index, .. } => {
             StreamDeltaKey::ReasoningSummary(item_id.clone(), *index)
         }
@@ -173,29 +181,40 @@ fn delta_key(delta: &StreamDelta) -> StreamDeltaKey {
     }
 }
 
-fn delta_text(delta: &StreamDelta) -> &str {
+fn delta_text(delta: &StreamDelta) -> Option<&str> {
     match delta {
         StreamDelta::AgentText { delta, .. }
         | StreamDelta::ReasoningSummary { delta, .. }
-        | StreamDelta::ReasoningText { delta, .. } => delta,
+        | StreamDelta::ReasoningText { delta, .. } => Some(delta),
+        StreamDelta::CommandOutput {
+            operation: CommandOutputOperation::Append { delta },
+            ..
+        } => Some(delta),
+        StreamDelta::CommandOutput { .. } => None,
     }
 }
 
 fn delta_bytes(delta: &StreamDelta) -> usize {
     let item_bytes = match delta {
         StreamDelta::AgentText { item_id, .. }
+        | StreamDelta::CommandOutput { item_id, .. }
         | StreamDelta::ReasoningSummary { item_id, .. }
         | StreamDelta::ReasoningText { item_id, .. } => item_id.len(),
     };
-    item_bytes.saturating_add(delta_text(delta).len())
+    item_bytes.saturating_add(delta_text(delta).map_or(1, str::len))
 }
 
 fn split_stream_delta(delta: StreamDelta) -> Vec<StreamDelta> {
-    if delta_text(&delta).len() <= MAX_STREAM_DELTA_BYTES {
+    let maximum_bytes = if matches!(&delta, StreamDelta::CommandOutput { .. }) {
+        MAX_COMMAND_OUTPUT_DELTA_BYTES
+    } else {
+        MAX_STREAM_DELTA_BYTES
+    };
+    if delta_text(&delta).is_none_or(|text| text.len() <= maximum_bytes) {
         return vec![delta];
     }
     match delta {
-        StreamDelta::AgentText { item_id, delta } => split_text(delta)
+        StreamDelta::AgentText { item_id, delta } => split_text(delta, maximum_bytes)
             .into_iter()
             .map(|delta| StreamDelta::AgentText {
                 item_id: item_id.clone(),
@@ -206,7 +225,7 @@ fn split_stream_delta(delta: StreamDelta) -> Vec<StreamDelta> {
             item_id,
             index,
             delta,
-        } => split_text(delta)
+        } => split_text(delta, maximum_bytes)
             .into_iter()
             .map(|delta| StreamDelta::ReasoningSummary {
                 item_id: item_id.clone(),
@@ -218,7 +237,7 @@ fn split_stream_delta(delta: StreamDelta) -> Vec<StreamDelta> {
             item_id,
             index,
             delta,
-        } => split_text(delta)
+        } => split_text(delta, maximum_bytes)
             .into_iter()
             .map(|delta| StreamDelta::ReasoningText {
                 item_id: item_id.clone(),
@@ -226,14 +245,27 @@ fn split_stream_delta(delta: StreamDelta) -> Vec<StreamDelta> {
                 delta,
             })
             .collect(),
+        StreamDelta::CommandOutput {
+            item_id,
+            stream,
+            operation: CommandOutputOperation::Append { delta },
+        } => split_text(delta, maximum_bytes)
+            .into_iter()
+            .map(|delta| StreamDelta::CommandOutput {
+                item_id: item_id.clone(),
+                stream,
+                operation: CommandOutputOperation::Append { delta },
+            })
+            .collect(),
+        StreamDelta::CommandOutput { .. } => vec![delta],
     }
 }
 
-fn split_text(text: String) -> Vec<String> {
-    let mut chunks = Vec::with_capacity(text.len().div_ceil(MAX_STREAM_DELTA_BYTES));
+fn split_text(text: String, maximum_bytes: usize) -> Vec<String> {
+    let mut chunks = Vec::with_capacity(text.len().div_ceil(maximum_bytes));
     let mut remaining = text.as_str();
     while !remaining.is_empty() {
-        let mut boundary = remaining.len().min(MAX_STREAM_DELTA_BYTES);
+        let mut boundary = remaining.len().min(maximum_bytes);
         while !remaining.is_char_boundary(boundary) {
             boundary -= 1;
         }
@@ -246,8 +278,8 @@ fn split_text(text: String) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_STREAM_DELTA_BYTES, split_stream_delta};
-    use crate::engine::StreamDelta;
+    use super::{MAX_COMMAND_OUTPUT_DELTA_BYTES, MAX_STREAM_DELTA_BYTES, split_stream_delta};
+    use crate::engine::{CommandOutputOperation, CommandOutputStream, StreamDelta};
 
     #[test]
     fn splits_large_unicode_deltas_without_changing_content() {
@@ -277,5 +309,58 @@ mod tests {
                 .collect::<String>(),
             text
         );
+    }
+
+    #[test]
+    fn uses_smaller_bounded_frames_for_live_command_output() {
+        let text = "á".repeat(MAX_COMMAND_OUTPUT_DELTA_BYTES);
+        let chunks = split_stream_delta(StreamDelta::CommandOutput {
+            item_id: "command-1".into(),
+            stream: CommandOutputStream::Stdout,
+            operation: CommandOutputOperation::Append {
+                delta: text.clone(),
+            },
+        });
+
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| match chunk {
+            StreamDelta::CommandOutput {
+                item_id,
+                stream: CommandOutputStream::Stdout,
+                operation: CommandOutputOperation::Append { delta },
+            } => item_id == "command-1" && delta.len() <= MAX_COMMAND_OUTPUT_DELTA_BYTES,
+            _ => false,
+        }));
+        assert_eq!(
+            chunks
+                .into_iter()
+                .map(|chunk| match chunk {
+                    StreamDelta::CommandOutput {
+                        operation: CommandOutputOperation::Append { delta },
+                        ..
+                    } => delta,
+                    _ => unreachable!("the command output kind is preserved"),
+                })
+                .collect::<String>(),
+            text
+        );
+    }
+
+    #[test]
+    fn preserves_command_control_operations_without_text_chunking() {
+        let chunks = split_stream_delta(StreamDelta::CommandOutput {
+            item_id: "command-1".into(),
+            stream: CommandOutputStream::Stderr,
+            operation: CommandOutputOperation::ClearCurrentLine,
+        });
+
+        assert!(matches!(
+            chunks.as_slice(),
+            [StreamDelta::CommandOutput {
+                item_id,
+                stream: CommandOutputStream::Stderr,
+                operation: CommandOutputOperation::ClearCurrentLine,
+            }] if item_id == "command-1"
+        ));
     }
 }

@@ -1,6 +1,7 @@
 import { exceedsUtf8ByteLength, utf8ByteLength } from "../utf8";
 import type {
   AccountPlanType,
+  AccountProfileInvocation,
   AccountProfileResponse,
   AccountRateLimitsResponse,
   AccountReadResponse,
@@ -14,6 +15,7 @@ import type {
   Automation,
   AutomationListResponse,
   AutomationRun,
+  AutoTopUpSettingsSnapshot,
   CancelLoginResponse,
   ChatGptAccount,
   ChatModelListResponse,
@@ -21,6 +23,7 @@ import type {
   CodexModel,
   CodexThread,
   CommandError,
+  CommandLiveOutput,
   ConfigReadResponse,
   ConfigUpdateResponse,
   CreditsSnapshot,
@@ -47,6 +50,7 @@ import type {
   OutputReadResponse,
   PermissionProfile,
   Personality,
+  PlanPriceSnapshot,
   PlanStepStatus,
   RateLimitReachedType,
   RateLimitSnapshot,
@@ -70,8 +74,12 @@ import type {
   ThreadTurn,
   ThreadUnarchiveResponse,
   TokenUsage,
+  ToolOutputPresentation,
   TurnStartResponse,
   TurnStatus,
+  UsageResetCredit,
+  UsageResetCreditsResponse,
+  UsageResetRedemptionResponse,
   UserContent,
   WebSearchMode,
 } from "./types";
@@ -180,7 +188,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [14] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [17] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -230,10 +238,161 @@ export function decodeAccountReadResponse(value: unknown): AccountReadResponse {
 }
 
 export function decodeAccountProfileResponse(value: unknown): AccountProfileResponse {
-  const object = exactRecord(value, "$", ["name", "picture"]);
+  const object = exactRecord(value, "$", [
+    "activityInsights",
+    "dailyUsage",
+    "displayName",
+    "picture",
+    "statisticsStatus",
+    "summary",
+    "username",
+  ]);
+  const summary = exactRecord(object.summary, "$.summary", [
+    "currentStreakDays",
+    "lifetimeTokens",
+    "longestRunningTurnSeconds",
+    "longestStreakDays",
+    "peakDailyTokens",
+  ]);
+  const activity = exactRecord(object.activityInsights, "$.activityInsights", [
+    "fastModePercent",
+    "mostUsedReasoningEffort",
+    "mostUsedReasoningEffortPercent",
+    "topInvocations",
+    "totalSkillsUsed",
+    "totalThreads",
+    "uniqueSkillsUsed",
+  ]);
+  const dailyUsage =
+    object.dailyUsage === null
+      ? null
+      : array(object.dailyUsage, "$.dailyUsage", decodeAccountProfileDailyUsage, 800);
+  if (dailyUsage !== null) {
+    let previousDate: string | null = null;
+    for (const [index, bucket] of dailyUsage.entries()) {
+      if (previousDate !== null && bucket.date <= previousDate) {
+        throw new ContractError(
+          `$.dailyUsage[${index}].date`,
+          "daily usage dates must be unique and strictly ascending",
+        );
+      }
+      previousDate = bucket.date;
+    }
+  }
   return {
-    name: object.name === null ? null : text(object.name, "$.name", 256),
+    displayName:
+      object.displayName === null ? null : text(object.displayName, "$.displayName", 256),
+    username: object.username === null ? null : text(object.username, "$.username", 64),
     picture: object.picture === null ? null : urlText(object.picture, "$.picture", ["https:"]),
+    statisticsStatus: literal(object.statisticsStatus, "$.statisticsStatus", [
+      "available",
+      "unavailable",
+    ] as const),
+    summary: {
+      lifetimeTokens: nullableSafeInteger(
+        summary.lifetimeTokens,
+        "$.summary.lifetimeTokens",
+        Number.MAX_SAFE_INTEGER,
+      ),
+      peakDailyTokens: nullableSafeInteger(
+        summary.peakDailyTokens,
+        "$.summary.peakDailyTokens",
+        Number.MAX_SAFE_INTEGER,
+      ),
+      longestRunningTurnSeconds: nullableSafeInteger(
+        summary.longestRunningTurnSeconds,
+        "$.summary.longestRunningTurnSeconds",
+        Number.MAX_SAFE_INTEGER,
+      ),
+      currentStreakDays: nullableSafeInteger(
+        summary.currentStreakDays,
+        "$.summary.currentStreakDays",
+        1_000_000,
+      ),
+      longestStreakDays: nullableSafeInteger(
+        summary.longestStreakDays,
+        "$.summary.longestStreakDays",
+        1_000_000,
+      ),
+    },
+    dailyUsage,
+    activityInsights: {
+      fastModePercent: nullableFiniteNumber(
+        activity.fastModePercent,
+        "$.activityInsights.fastModePercent",
+        0,
+        100,
+      ),
+      mostUsedReasoningEffort:
+        activity.mostUsedReasoningEffort === null
+          ? null
+          : literal(
+              activity.mostUsedReasoningEffort,
+              "$.activityInsights.mostUsedReasoningEffort",
+              REASONING_EFFORTS,
+            ),
+      mostUsedReasoningEffortPercent: nullableFiniteNumber(
+        activity.mostUsedReasoningEffortPercent,
+        "$.activityInsights.mostUsedReasoningEffortPercent",
+        0,
+        100,
+      ),
+      uniqueSkillsUsed: nullableSafeInteger(
+        activity.uniqueSkillsUsed,
+        "$.activityInsights.uniqueSkillsUsed",
+        Number.MAX_SAFE_INTEGER,
+      ),
+      totalSkillsUsed: nullableSafeInteger(
+        activity.totalSkillsUsed,
+        "$.activityInsights.totalSkillsUsed",
+        Number.MAX_SAFE_INTEGER,
+      ),
+      totalThreads: nullableSafeInteger(
+        activity.totalThreads,
+        "$.activityInsights.totalThreads",
+        Number.MAX_SAFE_INTEGER,
+      ),
+      topInvocations:
+        activity.topInvocations === null
+          ? null
+          : array(
+              activity.topInvocations,
+              "$.activityInsights.topInvocations",
+              decodeAccountProfileInvocation,
+              100,
+            ),
+    },
+  };
+}
+
+function decodeAccountProfileDailyUsage(value: unknown, path: string) {
+  const object = exactRecord(value, path, ["date", "tokens"]);
+  return {
+    date: isoDate(object.date, `${path}.date`),
+    tokens: integer(object.tokens, `${path}.tokens`, 0, Number.MAX_SAFE_INTEGER),
+  };
+}
+
+function decodeAccountProfileInvocation(value: unknown, path: string): AccountProfileInvocation {
+  const object = record(value, path);
+  const type = literal(field(object, "type"), `${path}.type`, ["plugin", "skill"] as const);
+  if (type === "plugin") {
+    const plugin = exactRecord(object, path, ["id", "name", "type", "usageCount"]);
+    return {
+      type,
+      id: plugin.id === null ? null : text(plugin.id, `${path}.id`, 256),
+      name: text(plugin.name, `${path}.name`, 256),
+      usageCount: integer(plugin.usageCount, `${path}.usageCount`, 0, Number.MAX_SAFE_INTEGER),
+    };
+  }
+  const skill = exactRecord(object, path, ["id", "name", "pluginName", "type", "usageCount"]);
+  return {
+    type,
+    id: skill.id === null ? null : text(skill.id, `${path}.id`, 256),
+    name: text(skill.name, `${path}.name`, 256),
+    pluginName:
+      skill.pluginName === null ? null : text(skill.pluginName, `${path}.pluginName`, 256),
+    usageCount: integer(skill.usageCount, `${path}.usageCount`, 0, Number.MAX_SAFE_INTEGER),
   };
 }
 
@@ -463,7 +622,7 @@ export function decodeConfigUpdateResponse(value: unknown): ConfigUpdateResponse
 }
 
 export function decodeAccountRateLimitsResponse(value: unknown): AccountRateLimitsResponse {
-  const object = exactRecord(value, "$", ["rateLimits", "rateLimitsByLimitId"]);
+  const object = exactRecord(value, "$", ["planPrice", "rateLimits", "rateLimitsByLimitId"]);
   const byId = record(object.rateLimitsByLimitId, "$.rateLimitsByLimitId");
   const decodedById: Record<string, RateLimitSnapshot> = {};
   for (const [key, entry] of Object.entries(byId)) {
@@ -475,6 +634,62 @@ export function decodeAccountRateLimitsResponse(value: unknown): AccountRateLimi
   return {
     rateLimits: decodeRateLimitSnapshot(object.rateLimits, "$.rateLimits"),
     rateLimitsByLimitId: decodedById,
+    planPrice:
+      object.planPrice === null ? null : decodePlanPriceSnapshot(object.planPrice, "$.planPrice"),
+  };
+}
+
+export function decodeUsageResetCreditsResponse(value: unknown): UsageResetCreditsResponse {
+  const object = exactRecord(value, "$", [
+    "availableCount",
+    "credits",
+    "immediateResetPurchaseEligible",
+  ]);
+  return {
+    credits: array(object.credits, "$.credits", decodeUsageResetCredit, 100),
+    availableCount: integer(object.availableCount, "$.availableCount", 0, 1_000_000),
+    immediateResetPurchaseEligible: booleanValue(
+      object.immediateResetPurchaseEligible,
+      "$.immediateResetPurchaseEligible",
+    ),
+  };
+}
+
+export function decodeUsageResetRedemptionResponse(value: unknown): UsageResetRedemptionResponse {
+  const object = exactRecord(value, "$", ["code", "creditId"]);
+  return {
+    code: text(object.code, "$.code", 128),
+    creditId: nullableText(object.creditId, "$.creditId", 256),
+  };
+}
+
+export function decodeAutoTopUpSettingsSnapshot(value: unknown): AutoTopUpSettingsSnapshot {
+  const object = exactRecord(value, "$", [
+    "autoReloadCreditDiscountPolicy",
+    "available",
+    "hasPaymentMethod",
+    "isEnabled",
+    "maximumDiscountPercent",
+    "rechargeMonthlyLimit",
+    "rechargeTarget",
+    "rechargeThreshold",
+  ]);
+  return {
+    available: booleanValue(object.available, "$.available"),
+    isEnabled: booleanValue(object.isEnabled, "$.isEnabled"),
+    hasPaymentMethod: booleanValue(object.hasPaymentMethod, "$.hasPaymentMethod"),
+    rechargeThreshold: nullableText(object.rechargeThreshold, "$.rechargeThreshold", 32),
+    rechargeTarget: nullableText(object.rechargeTarget, "$.rechargeTarget", 32),
+    rechargeMonthlyLimit: nullableText(object.rechargeMonthlyLimit, "$.rechargeMonthlyLimit", 32),
+    autoReloadCreditDiscountPolicy: nullableText(
+      object.autoReloadCreditDiscountPolicy,
+      "$.autoReloadCreditDiscountPolicy",
+      128,
+    ),
+    maximumDiscountPercent:
+      object.maximumDiscountPercent === null
+        ? null
+        : integer(object.maximumDiscountPercent, "$.maximumDiscountPercent", 0, 100),
   };
 }
 
@@ -743,7 +958,8 @@ function decodeAccount(value: unknown, path: string): ChatGptAccount {
       object.picture === null
         ? null
         : urlText(object.picture, `${path}.picture`, ["data:", "https:"]),
-    planType: nullableText(object.planType, `${path}.planType`),
+    planType:
+      object.planType === null ? null : literal(object.planType, `${path}.planType`, PLAN_TYPES),
   };
 }
 
@@ -1249,6 +1465,7 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
         "durationMs",
         "exitCode",
         "id",
+        "liveOutput",
         "processId",
         "source",
         "startedAt",
@@ -1268,6 +1485,10 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
         source: literal(item.source, `${path}.source`, ["agent"] as const),
         status: literal(item.status, `${path}.status`, ACTIVITY_STATUSES),
         aggregatedOutput: nullableThreadOutput(item.aggregatedOutput, `${path}.aggregatedOutput`),
+        liveOutput:
+          item.liveOutput === null
+            ? null
+            : decodeCommandLiveOutput(item.liveOutput, `${path}.liveOutput`),
         exitCode:
           item.exitCode === null
             ? null
@@ -1293,6 +1514,7 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
         "id",
         "name",
         "output",
+        "outputPresentation",
         "status",
         "type",
       ]);
@@ -1302,6 +1524,10 @@ function decodeThreadItem(value: unknown, path: string): ThreadItem {
         name: identifier(item.name, `${path}.name`),
         description: text(item.description, `${path}.description`, 4_096),
         status: literal(item.status, `${path}.status`, ACTIVITY_STATUSES),
+        outputPresentation: decodeToolOutputPresentation(
+          item.outputPresentation,
+          `${path}.outputPresentation`,
+        ),
         output: nullableThreadOutput(item.output, `${path}.output`),
       };
     }
@@ -1376,11 +1602,23 @@ function decodeUserContent(value: unknown, path: string): UserContent {
 }
 
 function decodeFileChange(value: unknown, path: string): FileChange {
-  const object = exactRecord(value, path, ["diff", "kind", "path"]);
+  const object = exactRecord(value, path, ["diff", "kind", "lineStats", "path"]);
   return {
     path: text(object.path, `${path}.path`, 4_096),
     kind: decodeFileChangeKind(object.kind, `${path}.kind`),
     diff: text(object.diff, `${path}.diff`, MAX_STRING_BYTES, true),
+    lineStats:
+      object.lineStats === null
+        ? null
+        : decodeFileChangeLineStats(object.lineStats, `${path}.lineStats`),
+  };
+}
+
+function decodeFileChangeLineStats(value: unknown, path: string) {
+  const object = exactRecord(value, path, ["additions", "deletions"]);
+  return {
+    additions: integer(object.additions, `${path}.additions`, 0, 1_000_000_000),
+    deletions: integer(object.deletions, `${path}.deletions`, 0, 1_000_000_000),
   };
 }
 
@@ -1399,6 +1637,30 @@ function decodeFileChangeKind(value: unknown, path: string): FileChangeKind {
     }
     default:
       throw new ContractError(`${path}.type`, `unsupported file change ${JSON.stringify(type)}`);
+  }
+}
+
+function decodeToolOutputPresentation(value: unknown, path: string): ToolOutputPresentation {
+  const object = record(value, path);
+  const type = text(field(object, "type"), `${path}.type`, 32);
+  switch (type) {
+    case "fileList":
+    case "plainText":
+    case "searchResults":
+      exactRecord(object, path, ["type"]);
+      return { type };
+    case "sourceFile": {
+      const presentation = exactRecord(object, path, ["path", "type"]);
+      return {
+        type,
+        path: text(presentation.path, `${path}.path`, 4_096),
+      };
+    }
+    default:
+      throw new ContractError(
+        `${path}.type`,
+        `unsupported tool output presentation ${JSON.stringify(type)}`,
+      );
   }
 }
 
@@ -1559,6 +1821,19 @@ function decodeRateLimitWindow(value: unknown, path: string): RateLimitWindow {
   };
 }
 
+function decodePlanPriceSnapshot(value: unknown, path: string): PlanPriceSnapshot {
+  const object = exactRecord(value, path, ["amount", "currency", "minorUnitExponent"]);
+  const currency = text(object.currency, `${path}.currency`, 3);
+  if (!/^[A-Z]{3}$/u.test(currency)) {
+    throw new ContractError(`${path}.currency`, "must be a three-letter ISO currency code");
+  }
+  return {
+    amount: integer(object.amount, `${path}.amount`, 1, Number.MAX_SAFE_INTEGER),
+    currency,
+    minorUnitExponent: integer(object.minorUnitExponent, `${path}.minorUnitExponent`, 0, 6),
+  };
+}
+
 function decodeCredits(value: unknown, path: string): CreditsSnapshot {
   const object = exactRecord(value, path, ["balance", "hasCredits", "unlimited"]);
   return {
@@ -1575,6 +1850,19 @@ function decodeSpendControl(value: unknown, path: string): SpendControlLimitSnap
     used: text(object.used, `${path}.used`),
     remainingPercent: integer(object.remainingPercent, `${path}.remainingPercent`, 0, 100),
     resetsAt: integer(object.resetsAt, `${path}.resetsAt`, 0, Number.MAX_SAFE_INTEGER),
+  };
+}
+
+function decodeUsageResetCredit(value: unknown, path: string): UsageResetCredit {
+  const object = exactRecord(value, path, ["expiresAt", "id", "status", "title"]);
+  return {
+    id: identifier(object.id, `${path}.id`),
+    title: nullableText(object.title, `${path}.title`, 512),
+    status: text(object.status, `${path}.status`, 64),
+    expiresAt:
+      object.expiresAt === null
+        ? null
+        : integer(object.expiresAt, `${path}.expiresAt`, 0, Number.MAX_SAFE_INTEGER),
   };
 }
 
@@ -1618,6 +1906,39 @@ function decodeStreamDeltaPayload(value: unknown, path: string) {
         itemId: identifier(delta.itemId, `${path}.itemId`),
         index: integer(delta.index, `${path}.index`, 0, 1_024),
         delta: text(delta.delta, `${path}.delta`, 262_144, true),
+      };
+    }
+    case "commandOutput": {
+      const delta = exactRecord(object, path, ["itemId", "kind", "operation", "stream"]);
+      const operationPath = `${path}.operation`;
+      const operationRecord = record(delta.operation, operationPath);
+      const operationType = text(field(operationRecord, "type"), `${operationPath}.type`, 32);
+      const operation =
+        operationType === "append"
+          ? (() => {
+              const append = exactRecord(operationRecord, operationPath, ["delta", "type"]);
+              return {
+                type: "append" as const,
+                delta: text(append.delta, `${operationPath}.delta`, 8 * 1_024, true),
+              };
+            })()
+          : {
+              type: literal(operationType, `${operationPath}.type`, [
+                "backspace",
+                "clearCurrentLine",
+                "truncated",
+              ] as const),
+            };
+      exactKeys(
+        operationRecord,
+        operationPath,
+        operation.type === "append" ? ["delta", "type"] : ["type"],
+      );
+      return {
+        kind,
+        itemId: identifier(delta.itemId, `${path}.itemId`),
+        stream: literal(delta.stream, `${path}.stream`, ["stderr", "stdout"] as const),
+        operation,
       };
     }
     default:
@@ -1710,6 +2031,20 @@ function nullableText(
   return value === null ? null : text(value, path, maximumBytes);
 }
 
+function decodeCommandLiveOutput(value: unknown, path: string): CommandLiveOutput {
+  const object = exactRecord(value, path, ["stderr", "stdout", "truncated"]);
+  const stderr = text(object.stderr, `${path}.stderr`, 256 * 1_024, true);
+  const stdout = text(object.stdout, `${path}.stdout`, 256 * 1_024, true);
+  if (utf8ByteLength(stderr) + utf8ByteLength(stdout) > 256 * 1_024) {
+    throw new ContractError(path, "combined live command output exceeds 262144 bytes");
+  }
+  return {
+    stderr,
+    stdout,
+    truncated: booleanValue(object.truncated, `${path}.truncated`),
+  };
+}
+
 function nullableThreadOutput(value: unknown, path: string): ThreadOutput | null {
   if (value === null) {
     return null;
@@ -1773,6 +2108,31 @@ function integer(value: unknown, path: string, minimum: number, maximum: number)
   const decoded = finiteNumber(value, path, minimum, maximum);
   if (!Number.isSafeInteger(decoded)) {
     throw new ContractError(path, "expected a safe integer");
+  }
+  return decoded;
+}
+
+function nullableFiniteNumber(
+  value: unknown,
+  path: string,
+  minimum: number,
+  maximum: number,
+): number | null {
+  return value === null ? null : finiteNumber(value, path, minimum, maximum);
+}
+
+function nullableSafeInteger(value: unknown, path: string, maximum: number): number | null {
+  return value === null ? null : integer(value, path, 0, maximum);
+}
+
+function isoDate(value: unknown, path: string): string {
+  const decoded = text(value, path, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(decoded)) {
+    throw new ContractError(path, "expected an ISO calendar date");
+  }
+  const timestamp = Date.parse(`${decoded}T00:00:00.000Z`);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== decoded) {
+    throw new ContractError(path, "expected a valid ISO calendar date");
   }
   return decoded;
 }

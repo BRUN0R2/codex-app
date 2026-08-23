@@ -13,6 +13,7 @@ import { formatShortDate } from "./dateFormat";
 import { HomeComposerModeToggle } from "./HomeComposerModeToggle";
 import { Icon } from "./Icon";
 import { PlanProgress } from "./PlanProgress";
+import { ProfileView } from "./ProfileView";
 import { ReviewPanel } from "./ReviewPanel";
 import { LatestTurnFileChangeStore } from "./reviewChanges";
 import { SettingsDialog, type SettingsPage } from "./SettingsDialog";
@@ -26,7 +27,9 @@ export function AppShell(props: { readonly controller: AppController }) {
   const [settingsPage, setSettingsPage] = createSignal<SettingsPage | null>(previewSettingsPage);
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
   const [reviewOpen, setReviewOpen] = createSignal(false);
-  const [activeSurface, setActiveSurface] = createSignal<"automations" | "chat">(previewSurface);
+  const [activeSurface, setActiveSurface] = createSignal<"automations" | "chat" | "profile">(
+    previewSurface,
+  );
   const reviewChangeStore = new LatestTurnFileChangeStore();
   const reviewChanges = createMemo(() =>
     reviewChangeStore.project(props.controller.turns(), props.controller.activeTurnId()),
@@ -154,9 +157,14 @@ export function AppShell(props: { readonly controller: AppController }) {
           setReviewOpen(false);
           setActiveSurface("automations");
         }}
+        onOpenProfile={() => {
+          setReviewOpen(false);
+          setActiveSurface("profile");
+        }}
         onOpenWorkspace={(path) => void openWorkspace(path)}
         onOpenSettings={openSettings}
         onShowChat={() => setActiveSurface("chat")}
+        profileActive={activeSurface() === "profile"}
       />
       <main class="main-panel" inert={settingsOpen()}>
         <Show when={activeSurface() === "chat" && props.controller.product() === "chatgpt"}>
@@ -212,6 +220,9 @@ export function AppShell(props: { readonly controller: AppController }) {
               onShowChat={() => setActiveSurface("chat")}
             />
           </Show>
+          <Show when={activeSurface() === "profile"}>
+            <ProfileView controller={props.controller} />
+          </Show>
           <Show when={activeSurface() === "chat" && reviewOpen() && reviewChanges().length > 0}>
             <ReviewPanel
               changes={reviewChanges()}
@@ -265,13 +276,12 @@ function readPreviewSettingsPage(): SettingsPage | null {
     : null;
 }
 
-function readPreviewSurface(): "automations" | "chat" {
+function readPreviewSurface(): "automations" | "chat" | "profile" {
   if (!import.meta.env.DEV || !isBrowserPreview()) {
     return "chat";
   }
-  return new URLSearchParams(window.location.search).get("surface") === "automations"
-    ? "automations"
-    : "chat";
+  const surface = new URLSearchParams(window.location.search).get("surface");
+  return surface === "automations" || surface === "profile" ? surface : "chat";
 }
 
 function UsageLimitBanner(props: { readonly controller: AppController }) {

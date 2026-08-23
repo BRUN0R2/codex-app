@@ -1,7 +1,7 @@
 import { Marked } from "marked";
 
 import { normalizeMarkdownSource } from "./markdownSource";
-import { highlightCode } from "./syntaxHighlight";
+import { highlightCodeToHtml } from "./syntax/render";
 
 const markdownParser = new Marked({
   async: false,
@@ -9,7 +9,7 @@ const markdownParser = new Marked({
   gfm: true,
   renderer: {
     code({ text, lang }: { text: string; lang?: string }) {
-      const highlighted = highlightCode(text, lang);
+      const highlighted = highlightCodeToHtml(text, lang);
       const langClass = lang ? ` class="language-${escapeAttribute(lang)}"` : "";
       return `<pre><code${langClass}>${highlighted}</code></pre>`;
     },

@@ -43,7 +43,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 14;
+  readonly schemaVersion: 17;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -61,7 +61,7 @@ export interface ChatGptAccount {
   readonly email: string | null;
   readonly name: string | null;
   readonly picture: string | null;
-  readonly planType: string | null;
+  readonly planType: AccountPlanType | null;
 }
 
 export interface AccountReadResponse {
@@ -71,9 +71,54 @@ export interface AccountReadResponse {
 }
 
 export interface AccountProfileResponse {
-  readonly name: string | null;
+  readonly displayName: string | null;
+  readonly username: string | null;
   readonly picture: string | null;
+  readonly statisticsStatus: AccountProfileStatisticsStatus;
+  readonly summary: AccountProfileSummary;
+  readonly dailyUsage: readonly AccountProfileDailyUsage[] | null;
+  readonly activityInsights: AccountProfileActivityInsights;
 }
+
+export type AccountProfileStatisticsStatus = "available" | "unavailable";
+
+export interface AccountProfileSummary {
+  readonly lifetimeTokens: number | null;
+  readonly peakDailyTokens: number | null;
+  readonly longestRunningTurnSeconds: number | null;
+  readonly currentStreakDays: number | null;
+  readonly longestStreakDays: number | null;
+}
+
+export interface AccountProfileDailyUsage {
+  readonly date: string;
+  readonly tokens: number;
+}
+
+export interface AccountProfileActivityInsights {
+  readonly fastModePercent: number | null;
+  readonly mostUsedReasoningEffort: ReasoningEffort | null;
+  readonly mostUsedReasoningEffortPercent: number | null;
+  readonly uniqueSkillsUsed: number | null;
+  readonly totalSkillsUsed: number | null;
+  readonly totalThreads: number | null;
+  readonly topInvocations: readonly AccountProfileInvocation[] | null;
+}
+
+export type AccountProfileInvocation =
+  | {
+      readonly type: "plugin";
+      readonly id: string | null;
+      readonly name: string;
+      readonly usageCount: number;
+    }
+  | {
+      readonly type: "skill";
+      readonly id: string | null;
+      readonly name: string;
+      readonly pluginName: string | null;
+      readonly usageCount: number;
+    };
 
 export interface LoginResponse {
   readonly type: "chatgpt";
@@ -181,10 +226,16 @@ export type FileChangeKind =
   | { readonly type: "delete" }
   | { readonly type: "update"; readonly movePath: string | null };
 
+export interface FileChangeLineStats {
+  readonly additions: number;
+  readonly deletions: number;
+}
+
 export interface FileChange {
   readonly path: string;
   readonly kind: FileChangeKind;
   readonly diff: string;
+  readonly lineStats: FileChangeLineStats | null;
 }
 
 export interface TokenUsage {
@@ -231,6 +282,16 @@ export interface OutputReadResponse {
   readonly nextCursor: string | null;
 }
 
+export interface CommandLiveOutput {
+  readonly stderr: string;
+  readonly stdout: string;
+  readonly truncated: boolean;
+}
+
+export type ToolOutputPresentation =
+  | { readonly type: "fileList" | "plainText" | "searchResults" }
+  | { readonly type: "sourceFile"; readonly path: string };
+
 export type ThreadItem =
   | ContextUsageItem
   | PlanItem
@@ -254,6 +315,7 @@ export type ThreadItem =
       readonly source: "agent";
       readonly status: ActivityStatus;
       readonly aggregatedOutput: ThreadOutput | null;
+      readonly liveOutput: CommandLiveOutput | null;
       readonly exitCode: number | null;
       readonly durationMs: number | null;
     }
@@ -275,6 +337,7 @@ export type ThreadItem =
       readonly name: string;
       readonly description: string;
       readonly status: ActivityStatus;
+      readonly outputPresentation: ToolOutputPresentation;
       readonly output: ThreadOutput | null;
     }
   | {
@@ -523,9 +586,45 @@ export interface RateLimitSnapshot {
   readonly rateLimitReachedType: RateLimitReachedType | null;
 }
 
+export interface PlanPriceSnapshot {
+  readonly amount: number;
+  readonly currency: string;
+  readonly minorUnitExponent: number;
+}
+
 export interface AccountRateLimitsResponse {
   readonly rateLimits: RateLimitSnapshot;
   readonly rateLimitsByLimitId: Readonly<Record<string, RateLimitSnapshot>>;
+  readonly planPrice: PlanPriceSnapshot | null;
+}
+
+export interface UsageResetCredit {
+  readonly id: string;
+  readonly title: string | null;
+  readonly status: string;
+  readonly expiresAt: number | null;
+}
+
+export interface UsageResetCreditsResponse {
+  readonly credits: readonly UsageResetCredit[];
+  readonly availableCount: number;
+  readonly immediateResetPurchaseEligible: boolean;
+}
+
+export interface UsageResetRedemptionResponse {
+  readonly code: string;
+  readonly creditId: string | null;
+}
+
+export interface AutoTopUpSettingsSnapshot {
+  readonly available: boolean;
+  readonly isEnabled: boolean;
+  readonly hasPaymentMethod: boolean;
+  readonly rechargeThreshold: string | null;
+  readonly rechargeTarget: string | null;
+  readonly rechargeMonthlyLimit: string | null;
+  readonly autoReloadCreditDiscountPolicy: string | null;
+  readonly maximumDiscountPercent: number | null;
 }
 
 export type AttachmentKind = "file" | "image";
@@ -611,6 +710,14 @@ export type StreamDeltaPayload =
       readonly itemId: string;
       readonly index: number;
       readonly delta: string;
+    }
+  | {
+      readonly kind: "commandOutput";
+      readonly itemId: string;
+      readonly stream: "stderr" | "stdout";
+      readonly operation:
+        | { readonly type: "append"; readonly delta: string }
+        | { readonly type: "backspace" | "clearCurrentLine" | "truncated" };
     };
 
 export interface StreamDeltasNotification {

@@ -12,12 +12,13 @@ import {
 } from "solid-js";
 
 import type {
-  AccountPlanType,
   ApplicationPreferences,
+  AutoTopUpSettingsSnapshot,
   CreditsSnapshot,
   ModelVerbosity,
   Personality,
   SpendControlLimitSnapshot,
+  UsageResetCredit,
   WebSearchMode,
 } from "../contracts/types";
 import {
@@ -48,6 +49,19 @@ type SettingsDialogController = Pick<
   | "rateLimitsLoading"
   | "refreshRateLimits"
   | "refreshRateLimitsIfStale"
+  | "usageResets"
+  | "usageResetsError"
+  | "usageResetsLoading"
+  | "usageResetRedeemingId"
+  | "refreshUsageResets"
+  | "redeemUsageReset"
+  | "autoTopUpSettings"
+  | "autoTopUpError"
+  | "autoTopUpLoading"
+  | "refreshAutoTopUpSettings"
+  | "enableAutoTopUp"
+  | "updateAutoTopUp"
+  | "disableAutoTopUp"
   | "reportError"
   | "turnBusy"
   | "unarchiveThread"
@@ -55,11 +69,12 @@ type SettingsDialogController = Pick<
 >;
 
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
+import { accountPlanLabel } from "./accountPresentation";
 import {
   DEFAULT_APPLICATION_PREFERENCES,
   mergeApplicationPreferences,
 } from "./applicationPreferences";
-import { formatShortDate } from "./dateFormat";
+import { formatShortDate, formatShortDateWithTimeZone } from "./dateFormat";
 import { Icon, type IconName } from "./Icon";
 import {
   formatModelContextTokens,
@@ -710,25 +725,111 @@ function ShortcutRow(props: { readonly keys: readonly string[]; readonly label: 
 function UsageSettings(props: { readonly controller: SettingsDialogController }) {
   const rateLimits = () => props.controller.rateLimits();
   const snapshot = () => rateLimits()?.rateLimits;
+  const autoTopUp = () => props.controller.autoTopUpSettings();
+  const [autoTopUpEditing, setAutoTopUpEditing] = createSignal(false);
+  const [rechargeThreshold, setRechargeThreshold] = createSignal("125");
+  const [rechargeTarget, setRechargeTarget] = createSignal("250");
+  const [rechargeMonthlyLimit, setRechargeMonthlyLimit] = createSignal("");
+  const [confirmReset, setConfirmReset] = createSignal<{
+    readonly key: string;
+    readonly requestId: string;
+  } | null>(null);
+  const [resetSuccess, setResetSuccess] = createSignal<string | null>(null);
+
   onMount(() => {
-    void props.controller.refreshRateLimitsIfStale();
+    void Promise.all([
+      props.controller.refreshRateLimitsIfStale(),
+      props.controller.refreshUsageResets(),
+      props.controller.refreshAutoTopUpSettings(),
+    ]);
   });
+  createEffect(() => {
+    const settings = autoTopUp();
+    if (settings === null || autoTopUpEditing()) {
+      return;
+    }
+    setRechargeThreshold(settings.rechargeThreshold ?? "125");
+    setRechargeTarget(settings.rechargeTarget ?? "250");
+    setRechargeMonthlyLimit(settings.rechargeMonthlyLimit ?? "");
+  });
+
   const limitGroups = () => presentUsageLimits(rateLimits());
   const credits = () => snapshot()?.credits ?? null;
+  const planPrice = () => rateLimits()?.planPrice ?? null;
   const spendControl = () => snapshot()?.individualLimit ?? null;
+  const availableResetCredits = () =>
+    props.controller.usageResets()?.credits.filter((credit) => credit.status === "available") ?? [];
+  const resetRows = (): readonly (UsageResetCredit | null)[] => {
+    const credits = availableResetCredits();
+    if (credits.length > 0) {
+      return credits;
+    }
+    return (props.controller.usageResets()?.availableCount ?? 0) > 0 ? [null] : [];
+  };
+
+  async function useReset(credit: UsageResetCredit | null): Promise<void> {
+    const key = credit?.id ?? "automatic";
+    const confirmation = confirmReset();
+    if (confirmation?.key !== key) {
+      setConfirmReset({ key, requestId: crypto.randomUUID() });
+      setResetSuccess(null);
+      return;
+    }
+    const response = await props.controller.redeemUsageReset(
+      credit?.id ?? null,
+      confirmation.requestId,
+    );
+    if (response?.code === "reset" || response?.code === "already_redeemed") {
+      setConfirmReset(null);
+      setResetSuccess("Limites de uso redefinidos.");
+    }
+  }
+
+  async function toggleAutoTopUp(): Promise<void> {
+    const settings = autoTopUp();
+    if (settings?.isEnabled) {
+      if (await props.controller.disableAutoTopUp()) {
+        setAutoTopUpEditing(false);
+      }
+      return;
+    }
+    await props.controller.enableAutoTopUp(
+      rechargeThreshold(),
+      rechargeTarget(),
+      normalizedOptionalCreditValue(rechargeMonthlyLimit()),
+    );
+  }
+
+  async function saveAutoTopUpSettings(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    const settings = autoTopUp();
+    const operation = settings?.isEnabled
+      ? props.controller.updateAutoTopUp
+      : props.controller.enableAutoTopUp;
+    if (
+      await operation(
+        rechargeThreshold(),
+        rechargeTarget(),
+        normalizedOptionalCreditValue(rechargeMonthlyLimit()),
+      )
+    ) {
+      setAutoTopUpEditing(false);
+    }
+  }
+
   return (
     <div class="settings-page">
       <SettingsHeading
-        title="Uso e cobrança"
-        description="Consulte o plano, os créditos e todos os limites disponíveis para sua conta ChatGPT."
+        title="Uso e faturamento"
+        description="Consulte seu plano, créditos, limites de uso e redefinições disponíveis para a conta."
       />
       <Show when={snapshot()}>
         {(current) => (
           <SettingsSection title="Seu plano">
             <div class="usage-plan">
               <span>
-                <strong>{planLabel(current().planType)}</strong>
-                <small>Plano atual</small>
+                <strong>{accountPlanLabel(current().planType)}</strong>
+                <small>{planPriceLabel(planPrice()) ?? "Seu plano atual do ChatGPT"}</small>
               </span>
               <button
                 class="usage-credits-button"
@@ -741,32 +842,154 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
           </SettingsSection>
         )}
       </Show>
-      <Show when={credits()}>
-        {(snap) => (
-          <SettingsSection
-            description="Use créditos para continuar tarefas do Codex quando atingir um limite."
-            title="Saldo de créditos"
+      <Show when={credits() !== null || autoTopUp() !== null || props.controller.autoTopUpError()}>
+        <SettingsSection
+          description="Compre créditos ou ative a recarga automática para continuar usando o Codex ao atingir um limite."
+          title="Saldo de créditos"
+        >
+          <Show when={credits()}>
+            {(snap) => (
+              <div class="usage-credits usage-credit-balance">
+                <span>
+                  <strong>{creditsLabel(snap())}</strong>
+                  <small>Saldo atual</small>
+                </span>
+                <button
+                  class="usage-credits-button"
+                  onClick={() => void openExternalUrl("https://chatgpt.com/settings/billing")}
+                  type="button"
+                >
+                  Comprar créditos
+                </button>
+              </div>
+            )}
+          </Show>
+          <Show
+            when={autoTopUp()}
+            fallback={
+              <div class="usage-auto-top-up-state">
+                <span>
+                  {props.controller.autoTopUpLoading()
+                    ? "Consultando recarga automática..."
+                    : (props.controller.autoTopUpError() ?? "Recarga automática indisponível.")}
+                </span>
+                <Show when={!props.controller.autoTopUpLoading()}>
+                  <button
+                    class="usage-inline-action"
+                    onClick={() => void props.controller.refreshAutoTopUpSettings()}
+                    type="button"
+                  >
+                    Tentar novamente
+                  </button>
+                </Show>
+              </div>
+            }
           >
-            <div class="usage-credits usage-credit-balance">
-              <span>
-                <strong>{creditsLabel(snap())}</strong>
-                <small>Saldo atual</small>
-              </span>
-              <button
-                class="usage-credits-button"
-                onClick={() => void openExternalUrl("https://chatgpt.com/settings/billing")}
-                type="button"
-              >
-                Comprar créditos
-              </button>
-            </div>
-          </SettingsSection>
-        )}
+            {(settings) => (
+              <>
+                <div class="usage-auto-top-up-row">
+                  <span class="usage-auto-top-up-copy">
+                    <strong>Recarga automática</strong>
+                    <small>{autoTopUpDescription(settings())}</small>
+                  </span>
+                  <span class="usage-auto-top-up-actions">
+                    <Show when={settings().maximumDiscountPercent}>
+                      {(discount) => (
+                        <span class="usage-discount-badge">Até {discount()}% de desconto</span>
+                      )}
+                    </Show>
+                    <Show when={settings().isEnabled}>
+                      <button
+                        class="usage-inline-action"
+                        onClick={() => setAutoTopUpEditing((value) => !value)}
+                        type="button"
+                      >
+                        Gerenciar
+                      </button>
+                    </Show>
+                    <button
+                      aria-checked={settings().isEnabled}
+                      aria-label="Alternar recarga automática"
+                      class="usage-switch"
+                      classList={{ checked: settings().isEnabled }}
+                      disabled={props.controller.autoTopUpLoading()}
+                      onClick={() => void toggleAutoTopUp()}
+                      role="switch"
+                      type="button"
+                    >
+                      <span />
+                    </button>
+                  </span>
+                </div>
+                <Show when={autoTopUpEditing()}>
+                  <form class="usage-auto-top-up-editor" onSubmit={saveAutoTopUpSettings}>
+                    <label>
+                      <span>Recarregar quando o saldo chegar a</span>
+                      <input
+                        min="125"
+                        onInput={(event) => setRechargeThreshold(event.currentTarget.value)}
+                        required
+                        step="1"
+                        type="number"
+                        value={rechargeThreshold()}
+                      />
+                    </label>
+                    <label>
+                      <span>Recarregar o saldo até</span>
+                      <input
+                        max="250000"
+                        min="250"
+                        onInput={(event) => setRechargeTarget(event.currentTarget.value)}
+                        required
+                        step="1"
+                        type="number"
+                        value={rechargeTarget()}
+                      />
+                    </label>
+                    <label>
+                      <span>Limite mensal opcional</span>
+                      <input
+                        min="250"
+                        onInput={(event) => setRechargeMonthlyLimit(event.currentTarget.value)}
+                        placeholder="Sem limite definido"
+                        step="1"
+                        type="number"
+                        value={rechargeMonthlyLimit()}
+                      />
+                    </label>
+                    <div class="usage-auto-top-up-editor-actions">
+                      <button
+                        class="usage-inline-action"
+                        onClick={() => setAutoTopUpEditing(false)}
+                        type="button"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        class="usage-credits-button"
+                        disabled={props.controller.autoTopUpLoading()}
+                        type="submit"
+                      >
+                        {props.controller.autoTopUpLoading() ? "Salvando..." : "Salvar"}
+                      </button>
+                    </div>
+                  </form>
+                </Show>
+                <Show when={props.controller.autoTopUpError()}>
+                  {(message) => <p class="usage-inline-error">{message()}</p>}
+                </Show>
+              </>
+            )}
+          </Show>
+        </SettingsSection>
       </Show>
-      <SettingsSection busy={props.controller.rateLimitsLoading()} title="Limites gerais de uso">
-        <Show
-          when={limitGroups().length > 0}
-          fallback={
+      <Show
+        when={limitGroups().length > 0}
+        fallback={
+          <SettingsSection
+            busy={props.controller.rateLimitsLoading()}
+            title="Limites gerais de uso"
+          >
             <div
               aria-live="polite"
               class="usage-empty"
@@ -794,18 +1017,24 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
                 </p>
               </div>
             </div>
-          }
-        >
-          <For each={limitGroups()}>
-            {(group) => (
+          </SettingsSection>
+        }
+      >
+        <For each={limitGroups()}>
+          {(group) => (
+            <SettingsSection
+              busy={props.controller.rateLimitsLoading()}
+              title={
+                group.label === null ? "Limites gerais de uso" : `Limites de uso do ${group.label}`
+              }
+            >
               <section class="usage-limit-group">
-                <Show when={group.label}>{(label) => <h4>Limites de uso do {label()}</h4>}</Show>
                 <For each={group.limits}>{(limit) => <UsageMeter limit={limit} />}</For>
               </section>
-            )}
-          </For>
-        </Show>
-      </SettingsSection>
+            </SettingsSection>
+          )}
+        </For>
+      </Show>
       <Show when={spendControl()}>
         {(limit) => (
           <SettingsSection title="Limite de gastos">
@@ -813,36 +1042,120 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
           </SettingsSection>
         )}
       </Show>
-      <div class="usage-actions">
-        <button
-          class="usage-upgrade-button"
-          onClick={() => void openExternalUrl("https://chatgpt.com/membership/plans")}
-          type="button"
+      <SettingsSection
+        busy={props.controller.usageResetsLoading()}
+        title="Redefinições do limite de uso"
+      >
+        <Show
+          when={
+            !props.controller.usageResetsLoading() ||
+            props.controller.usageResets() !== null ||
+            props.controller.usageResetsError() !== null
+          }
+          fallback={<div class="usage-reset-state">Consultando redefinições disponíveis...</div>}
         >
-          Fazer upgrade do plano
-        </button>
-        <Show when={credits() !== null}>
+          <Show
+            when={props.controller.usageResetsError() === null || resetRows().length > 0}
+            fallback={
+              <div class="usage-reset-state">
+                <span>{props.controller.usageResetsError()}</span>
+                <button
+                  class="usage-inline-action"
+                  onClick={() => void props.controller.refreshUsageResets()}
+                  type="button"
+                >
+                  Tentar novamente
+                </button>
+              </div>
+            }
+          >
+            <Show
+              when={resetRows().length > 0}
+              fallback={<div class="usage-reset-state">Nenhuma redefinição disponível.</div>}
+            >
+              <For each={resetRows()}>
+                {(credit) => {
+                  const key = () => credit?.id ?? "automatic";
+                  const confirming = () => confirmReset()?.key === key();
+                  const resetting = () => props.controller.usageResetRedeemingId() === key();
+                  return (
+                    <div class="usage-reset-row">
+                      <span>
+                        <strong>{credit?.title?.trim() || "Redefinição completa"}</strong>
+                        <Show when={credit?.expiresAt}>
+                          {(expiration) => (
+                            <small>Expira em {formatShortDateWithTimeZone(expiration())}</small>
+                          )}
+                        </Show>
+                      </span>
+                      <button
+                        class="usage-reset-button"
+                        disabled={props.controller.usageResetRedeemingId() !== null && !resetting()}
+                        onClick={() => void useReset(credit)}
+                        type="button"
+                      >
+                        {resetting()
+                          ? "Redefinindo..."
+                          : confirming()
+                            ? "Confirmar"
+                            : "Usar redefinição"}
+                      </button>
+                    </div>
+                  );
+                }}
+              </For>
+            </Show>
+          </Show>
+        </Show>
+        <Show when={resetSuccess()}>
+          {(message) => <p class="usage-inline-success">{message()}</p>}
+        </Show>
+        <Show when={props.controller.usageResetsError() !== null && resetRows().length > 0}>
+          <p class="usage-inline-error">{props.controller.usageResetsError()}</p>
+        </Show>
+        <Show when={props.controller.usageResets()?.immediateResetPurchaseEligible}>
           <button
-            class="usage-credits-button"
-            onClick={() => void openExternalUrl("https://chatgpt.com/settings/billing")}
+            class="usage-inline-action usage-buy-reset"
+            onClick={() => void openExternalUrl("https://chatgpt.com/settings/usage")}
             type="button"
           >
-            Adicionar créditos
+            Comprar redefinição instantânea
           </button>
         </Show>
-        <button
-          class="usage-refresh-button"
-          classList={{ refreshing: props.controller.rateLimitsLoading() }}
-          disabled={props.controller.rateLimitsLoading()}
-          onClick={() => void props.controller.refreshRateLimits()}
-          type="button"
-        >
-          <Icon name="reset" size={13} />
-          {props.controller.rateLimitsLoading() ? "Atualizando..." : "Atualizar"}
-        </button>
-      </div>
+      </SettingsSection>
     </div>
   );
+}
+
+function normalizedOptionalCreditValue(value: string): string | null {
+  const normalized = value.trim();
+  return normalized.length === 0 ? null : normalized;
+}
+
+function planPriceLabel(
+  price: NonNullable<ReturnType<SettingsDialogController["rateLimits"]>>["planPrice"],
+): string | null {
+  if (price === null) {
+    return null;
+  }
+  const amount = price.amount / 10 ** price.minorUnitExponent;
+  return `${new Intl.NumberFormat("pt-BR", {
+    style: "currency",
+    currency: price.currency,
+  }).format(amount)}/mês`;
+}
+
+function autoTopUpDescription(settings: AutoTopUpSettingsSnapshot): string {
+  if (!settings.isEnabled) {
+    return "Continue trabalhando quando o saldo de créditos atingir o limite configurado.";
+  }
+  const threshold = settings.rechargeThreshold ?? "—";
+  const target = settings.rechargeTarget ?? "—";
+  const monthly =
+    settings.rechargeMonthlyLimit === null
+      ? ""
+      : ` Limite mensal: ${settings.rechargeMonthlyLimit} créditos.`;
+  return `Recarrega para ${target} créditos quando o saldo chegar a ${threshold}.${monthly}`;
 }
 
 function UsageMeter(props: { readonly limit: UsageLimitEntry }) {
@@ -904,46 +1217,13 @@ function creditsLabel(credits: CreditsSnapshot): string {
   return credits.balance ?? "—";
 }
 
-function planLabel(planType: AccountPlanType | null): string {
-  switch (planType) {
-    case "free":
-      return "Plano grátis";
-    case "go":
-      return "Plano Go";
-    case "plus":
-      return "Plano Plus";
-    case "pro":
-      return "Plano Pro";
-    case "prolite":
-      return "Plano Pro Lite";
-    case "team":
-      return "Plano Team";
-    case "business":
-      return "Plano Business";
-    case "edu":
-      return "Plano Education";
-    case "enterprise":
-      return "Plano Enterprise";
-    case "ent26":
-      return "Plano Enterprise";
-    case "enterprise_cbp_usage_based":
-      return "Plano Enterprise com uso baseado em créditos";
-    case "self_serve_business_prolite":
-      return "Plano Business Pro Lite";
-    case "self_serve_business_usage_based":
-      return "Plano Business com uso baseado em créditos";
-    case null:
-      return "Plano ChatGPT";
-  }
-}
-
 function ProfileSettings(props: { readonly controller: SettingsDialogController }) {
   const account = () => props.controller.account()?.account;
   return (
     <div class="settings-page">
       <SettingsHeading title="Perfil" description="Conta ChatGPT usada pelo Codex App." />
       <section class="account-settings-card">
-        <AccountAvatar account={account()} large />
+        <AccountAvatar account={account()} size="settings" />
         <div>
           <strong>{accountDisplayName(account())}</strong>
           <Show when={account()?.email}>{(email) => <small>{email()}</small>}</Show>

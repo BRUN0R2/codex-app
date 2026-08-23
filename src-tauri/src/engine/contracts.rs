@@ -182,6 +182,26 @@ pub struct StreamDeltasNotification {
     pub deltas: Vec<StreamDelta>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CommandOutputStream {
+    Stderr,
+    Stdout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CommandOutputOperation {
+    Append { delta: String },
+    Backspace,
+    ClearCurrentLine,
+    Truncated,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(
     tag = "kind",
@@ -202,6 +222,11 @@ pub enum StreamDelta {
         item_id: String,
         index: usize,
         delta: String,
+    },
+    CommandOutput {
+        item_id: String,
+        stream: CommandOutputStream,
+        operation: CommandOutputOperation,
     },
 }
 
@@ -697,6 +722,15 @@ pub struct FileChange {
     pub path: String,
     pub kind: FileChangeKind,
     pub diff: String,
+    #[serde(default)]
+    pub line_stats: Option<FileChangeLineStats>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileChangeLineStats {
+    pub additions: usize,
+    pub deletions: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -720,6 +754,31 @@ pub enum FileChangeKind {
     Add,
     Delete,
     Update { move_path: Option<String> },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommandLiveOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ToolOutputPresentation {
+    FileList,
+    #[default]
+    PlainText,
+    SearchResults,
+    SourceFile {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -771,6 +830,8 @@ pub enum ThreadItem {
         status: ActivityStatus,
         #[serde(rename = "aggregatedOutput")]
         aggregated_output: Option<ThreadOutput>,
+        #[serde(default, rename = "liveOutput")]
+        live_output: Option<CommandLiveOutput>,
         #[serde(rename = "exitCode")]
         exit_code: Option<i32>,
         #[serde(rename = "durationMs")]
@@ -788,6 +849,8 @@ pub enum ThreadItem {
         name: String,
         description: String,
         status: ActivityStatus,
+        #[serde(default, rename = "outputPresentation")]
+        output_presentation: ToolOutputPresentation,
         output: Option<ThreadOutput>,
     },
 }
@@ -1140,6 +1203,52 @@ pub struct RateLimitSnapshot {
 pub struct AccountRateLimitsResponse {
     pub rate_limits: RateLimitSnapshot,
     pub rate_limits_by_limit_id: BTreeMap<String, RateLimitSnapshot>,
+    pub plan_price: Option<PlanPriceSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanPriceSnapshot {
+    pub amount: i64,
+    pub currency: String,
+    pub minor_unit_exponent: u8,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageResetCredit {
+    pub id: String,
+    pub title: Option<String>,
+    pub status: String,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageResetCreditsResponse {
+    pub credits: Vec<UsageResetCredit>,
+    pub available_count: u32,
+    pub immediate_reset_purchase_eligible: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageResetRedemptionResponse {
+    pub code: String,
+    pub credit_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoTopUpSettingsSnapshot {
+    pub available: bool,
+    pub is_enabled: bool,
+    pub has_payment_method: bool,
+    pub recharge_threshold: Option<String>,
+    pub recharge_target: Option<String>,
+    pub recharge_monthly_limit: Option<String>,
+    pub auto_reload_credit_discount_policy: Option<String>,
+    pub maximum_discount_percent: Option<u32>,
 }
 
 #[cfg(test)]

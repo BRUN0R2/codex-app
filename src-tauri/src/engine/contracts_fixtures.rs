@@ -170,6 +170,18 @@ fn notification_fixtures() -> Vec<EngineNotification> {
                     index: 1,
                     delta: "detalhe".into(),
                 },
+                StreamDelta::CommandOutput {
+                    item_id: "item-command".into(),
+                    stream: CommandOutputStream::Stdout,
+                    operation: CommandOutputOperation::Append {
+                        delta: "transforming...\n".into(),
+                    },
+                },
+                StreamDelta::CommandOutput {
+                    item_id: "item-command".into(),
+                    stream: CommandOutputStream::Stderr,
+                    operation: CommandOutputOperation::ClearCurrentLine,
+                },
             ],
         }),
         EngineNotification::ModelRerouted(ModelReroutedNotification {
@@ -297,6 +309,7 @@ fn thread_item_fixtures() -> Vec<EngineNotification> {
                 byte_length: 20,
                 next_cursor: None,
             }),
+            live_output: None,
             exit_code: Some(0),
             duration_ms: Some(4_800),
         },
@@ -306,6 +319,10 @@ fn thread_item_fixtures() -> Vec<EngineNotification> {
                 path: "src/parser.rs".into(),
                 kind: FileChangeKind::Update { move_path: None },
                 diff: "--- before\n+++ after".into(),
+                line_stats: Some(FileChangeLineStats {
+                    additions: 1,
+                    deletions: 1,
+                }),
             }],
             status: ActivityStatus::Completed,
         },
@@ -314,6 +331,9 @@ fn thread_item_fixtures() -> Vec<EngineNotification> {
             name: "read_file".into(),
             description: "Read src/parser.rs".into(),
             status: ActivityStatus::Completed,
+            output_presentation: ToolOutputPresentation::SourceFile {
+                path: "src/parser.rs".into(),
+            },
             output: Some(ThreadOutput {
                 id: "output-2".into(),
                 preview: "1: fn main()".into(),

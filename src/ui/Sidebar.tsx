@@ -52,6 +52,7 @@ type SidebarController = Pick<
   | "workspace"
 >;
 
+import { partitionProjectsByPinnedPaths } from "../state/projectPins";
 import { pathsEqual } from "../state/projects";
 import { threadsWithoutConfiguredProject } from "../state/sidebarThreads";
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
@@ -63,15 +64,22 @@ const MAX_VISIBLE_PROJECT_GROUPS = 5;
 const MAX_UNGROUPED_RECENT_THREADS = 8;
 const MAX_INLINE_PROJECT_THREADS = 5;
 
+interface SidebarProjectGroup {
+  readonly project: ProjectRecord;
+  readonly threads: readonly ThreadSummary[];
+}
+
 export interface SidebarProps {
   readonly automationsActive: boolean;
   readonly collapsed: boolean;
   readonly controller: SidebarController;
   readonly inert: boolean;
   readonly onOpenAutomations: () => void;
+  readonly onOpenProfile: () => void;
   readonly onOpenWorkspace: (path: string) => void;
   readonly onOpenSettings: (page?: SettingsPage) => void;
   readonly onShowChat: () => void;
+  readonly profileActive: boolean;
 }
 
 export function Sidebar(props: SidebarProps) {
@@ -87,25 +95,41 @@ export function Sidebar(props: SidebarProps) {
   let sidebarElement: HTMLElement | undefined;
   let searchInput: HTMLInputElement | undefined;
   const normalizedSearchQuery = createMemo(() => searchQuery().trim().toLocaleLowerCase("pt-BR"));
-  const grouped = createMemo(() => {
-    const query = normalizedSearchQuery();
-    return props.controller.projects().flatMap((project) => {
-      const threads = props.controller
-        .threads()
-        .filter((thread) => pathsEqual(thread.projectPath, project.path))
-        .sort((left, right) => right.updatedAt - left.updatedAt);
-      if (query.length === 0 || matchesProject(project, query)) {
-        return [{ project, threads }];
-      }
-      const matchingThreads = threads.filter((thread) => matchesThread(thread, query));
-      return matchingThreads.length > 0 ? [{ project, threads: matchingThreads }] : [];
-    });
-  });
+  const projectPartition = createMemo(() =>
+    partitionProjectsByPinnedPaths(
+      props.controller.projects(),
+      props.controller.pinnedProjectPaths(),
+    ),
+  );
+  const grouped = createMemo(() =>
+    createSidebarProjectGroups(
+      projectPartition().unpinnedProjects,
+      props.controller.threads(),
+      normalizedSearchQuery(),
+    ),
+  );
+  const collapsedProjectGroups = createMemo(() =>
+    createSidebarProjectGroups(
+      props.controller.projects(),
+      props.controller.threads(),
+      normalizedSearchQuery(),
+    ),
+  );
+  const pinnedProjectGroups = createMemo(() =>
+    createSidebarProjectGroups(
+      projectPartition().pinnedProjects,
+      props.controller.threads(),
+      normalizedSearchQuery(),
+    ),
+  );
+  const projectSectionGroups = createMemo(() =>
+    props.collapsed ? collapsedProjectGroups() : grouped(),
+  );
   const visibleGrouped = createMemo(() => {
     if (normalizedSearchQuery().length > 0 || showAllProjects()) {
-      return grouped();
+      return projectSectionGroups();
     }
-    return grouped().slice(0, MAX_VISIBLE_PROJECT_GROUPS);
+    return projectSectionGroups().slice(0, MAX_VISIBLE_PROJECT_GROUPS);
   });
   const ungrouped = createMemo(() =>
     threadsWithoutConfiguredProject(props.controller.threads(), props.controller.projects())
@@ -127,17 +151,6 @@ export function Sidebar(props: SidebarProps) {
       )
       .sort((left, right) => right.updatedAt - left.updatedAt);
   });
-  const pinnedProjects = createMemo(() => {
-    const pinned = props.controller.pinnedProjectPaths();
-    return props.controller
-      .projects()
-      .filter((project) => pinned.some((path) => pathsEqual(path, project.path)))
-      .filter(
-        (project) =>
-          normalizedSearchQuery().length === 0 || matchesProject(project, normalizedSearchQuery()),
-      );
-  });
-
   createEffect(() => {
     if (props.collapsed) {
       setAccountMenuOpen(false);
@@ -359,7 +372,9 @@ export function Sidebar(props: SidebarProps) {
 
       <div class="sidebar-scroll">
         <Show
-          when={!props.collapsed && (pinnedThreads().length > 0 || pinnedProjects().length > 0)}
+          when={
+            !props.collapsed && (pinnedThreads().length > 0 || pinnedProjectGroups().length > 0)
+          }
         >
           <SidebarSectionHeading
             expanded={pinnedExpanded() || normalizedSearchQuery().length > 0}
@@ -368,34 +383,32 @@ export function Sidebar(props: SidebarProps) {
           />
           <Show when={pinnedExpanded() || normalizedSearchQuery().length > 0}>
             <div class="pinned-threads">
-              <For each={pinnedProjects()}>
-                {(project) => {
-                  const threads = () =>
-                    props.controller
-                      .threads()
-                      .filter((thread) => pathsEqual(thread.projectPath, project.path));
-                  return (
-                    <ProjectGroup
-                      collapsed={props.collapsed}
-                      controller={props.controller}
-                      expanded={isProjectExpanded(project)}
-                      onBeginRename={beginRename}
-                      onOpenWorkspace={props.onOpenWorkspace}
-                      onShowChat={props.onShowChat}
-                      onSubmitRename={submitRename}
-                      onToggleExpanded={() => props.controller.toggleProjectExpanded(project.path)}
-                      onToggleThreadList={() =>
-                        props.controller.toggleProjectThreadListExpanded(project.path)
-                      }
-                      project={project}
-                      renameValue={renameValue()}
-                      renamingId={renamingId()}
-                      setRenameValue={setRenameValue}
-                      threadListExpanded={props.controller.projectThreadListExpanded(project.path)}
-                      threads={threads()}
-                    />
-                  );
-                }}
+              <For each={pinnedProjectGroups()}>
+                {(group) => (
+                  <ProjectGroup
+                    collapsed={props.collapsed}
+                    controller={props.controller}
+                    expanded={isProjectExpanded(group.project)}
+                    onBeginRename={beginRename}
+                    onOpenWorkspace={props.onOpenWorkspace}
+                    onShowChat={props.onShowChat}
+                    onSubmitRename={submitRename}
+                    onToggleExpanded={() =>
+                      props.controller.toggleProjectExpanded(group.project.path)
+                    }
+                    onToggleThreadList={() =>
+                      props.controller.toggleProjectThreadListExpanded(group.project.path)
+                    }
+                    project={group.project}
+                    renameValue={renameValue()}
+                    renamingId={renamingId()}
+                    setRenameValue={setRenameValue}
+                    threadListExpanded={props.controller.projectThreadListExpanded(
+                      group.project.path,
+                    )}
+                    threads={group.threads}
+                  />
+                )}
               </For>
               <For each={pinnedThreads()}>
                 {(thread) => (
@@ -443,9 +456,11 @@ export function Sidebar(props: SidebarProps) {
           }
         >
           <Show
-            when={grouped().length > 0}
+            when={projectSectionGroups().length > 0}
             fallback={
-              <Show when={normalizedSearchQuery().length === 0}>
+              <Show
+                when={normalizedSearchQuery().length === 0 && pinnedProjectGroups().length === 0}
+              >
                 <p class="sidebar-empty">Nenhum projeto</p>
               </Show>
             }
@@ -477,7 +492,12 @@ export function Sidebar(props: SidebarProps) {
                 />
               )}
             </For>
-            <Show when={normalizedSearchQuery().length === 0 && grouped().length > 5}>
+            <Show
+              when={
+                normalizedSearchQuery().length === 0 &&
+                projectSectionGroups().length > MAX_VISIBLE_PROJECT_GROUPS
+              }
+            >
               <button
                 aria-expanded={showAllProjects()}
                 class="sidebar-pagination-button"
@@ -551,7 +571,11 @@ export function Sidebar(props: SidebarProps) {
         </Show>
         <Show
           when={
-            normalizedSearchQuery().length > 0 && grouped().length === 0 && ungrouped().length === 0
+            normalizedSearchQuery().length > 0 &&
+            grouped().length === 0 &&
+            pinnedProjectGroups().length === 0 &&
+            pinnedThreads().length === 0 &&
+            ungrouped().length === 0
           }
         >
           <p class="sidebar-search-empty">Nenhum projeto ou tarefa encontrado.</p>
@@ -566,6 +590,18 @@ export function Sidebar(props: SidebarProps) {
               <strong>{accountLabel(props.controller)}</strong>
             </div>
             <hr class="account-menu-separator" />
+            <button
+              onClick={() => {
+                setAccountMenuOpen(false);
+                props.onOpenProfile();
+              }}
+              role="menuitem"
+              type="button"
+            >
+              <Icon name="user" size={15} />
+              <span>Perfil</span>
+              <Icon name="chevronRight" size={13} />
+            </button>
             <button
               onClick={() => {
                 setAccountMenuOpen(false);
@@ -610,10 +646,11 @@ export function Sidebar(props: SidebarProps) {
             aria-expanded={accountMenuOpen()}
             aria-haspopup="menu"
             class="sidebar-account-trigger"
+            classList={{ active: props.profileActive }}
             onClick={() => {
               setBrandMenuOpen(false);
               if (props.collapsed) {
-                props.onOpenSettings();
+                props.onOpenProfile();
                 return;
               }
               const opening = !accountMenuOpen();
@@ -998,6 +1035,23 @@ function ThreadButton(props: ThreadButtonProps) {
 
 export function threadTitle(thread: ThreadSummary): string {
   return (thread.name ?? thread.preview) || "Nova tarefa";
+}
+
+function createSidebarProjectGroups(
+  projects: readonly ProjectRecord[],
+  allThreads: readonly ThreadSummary[],
+  query: string,
+): readonly SidebarProjectGroup[] {
+  return projects.flatMap((project) => {
+    const threads = allThreads
+      .filter((thread) => pathsEqual(thread.projectPath, project.path))
+      .sort((left, right) => right.updatedAt - left.updatedAt);
+    if (query.length === 0 || matchesProject(project, query)) {
+      return [{ project, threads }];
+    }
+    const matchingThreads = threads.filter((thread) => matchesThread(thread, query));
+    return matchingThreads.length > 0 ? [{ project, threads: matchingThreads }] : [];
+  });
 }
 
 function matchesProject(project: ProjectRecord, query: string): boolean {

@@ -1,12 +1,8 @@
 import type { FileChange, VisibleThreadItem } from "../contracts/types";
 import { findVisibleTurn, type VisibleTurnSequence } from "../state/visibleTurnSequence";
 
-import {
-  createDiffDocument,
-  type DiffDocument,
-  type DiffStats,
-  summarizeDiff,
-} from "./diffDocument";
+import { createDiffDocument, type DiffDocument, type DiffStats } from "./diffDocument";
+import { fileChangeLineStats } from "./fileChangeStats";
 
 export interface ReviewStats extends DiffStats {
   readonly fileCount: number;
@@ -15,6 +11,7 @@ export interface ReviewStats extends DiffStats {
 export interface ReviewFileDocument {
   readonly change: FileChange;
   readonly document: DiffDocument;
+  readonly stats: DiffStats;
 }
 
 type FileChangeItem = Extract<VisibleThreadItem, { readonly type: "fileChange" }>;
@@ -54,7 +51,11 @@ export class ReviewDocumentStore {
       const document =
         current !== undefined && sameFileChange(current.change, change)
           ? current
-          : { change, document: createDiffDocument(change.diff) };
+          : {
+              change,
+              document: createDiffDocument(change.diff),
+              stats: fileChangeLineStats(change),
+            };
       nextByPath.set(change.path, document);
       return document;
     });
@@ -78,7 +79,7 @@ export class ReviewStatisticsStore {
       const entry =
         current !== undefined && sameFileChange(current.change, change)
           ? current
-          : { change, stats: summarizeDiff(change.diff) };
+          : { change, stats: fileChangeLineStats(change) };
       nextByPath.set(change.path, entry);
       additions += entry.stats.additions;
       deletions += entry.stats.deletions;
@@ -107,6 +108,7 @@ function mergeFileChanges(items: readonly FileChangeItem[]): readonly FileChange
           : {
               ...change,
               diff: [previous.diff, change.diff].filter((diff) => diff.length > 0).join("\n"),
+              lineStats: mergeLineStats(previous.lineStats, change.lineStats),
             },
       );
     }
@@ -121,7 +123,7 @@ export function summarizeReviewChanges(changes: readonly FileChange[]): ReviewSt
 export function summarizeReviewDocuments(documents: readonly ReviewFileDocument[]): ReviewStats {
   return documents.reduce<ReviewStats>(
     (total, entry) => {
-      const stats = entry.document.stats;
+      const stats = entry.stats;
       return {
         additions: total.additions + stats.additions,
         deletions: total.deletions + stats.deletions,
@@ -133,13 +135,31 @@ export function summarizeReviewDocuments(documents: readonly ReviewFileDocument[
 }
 
 function sameFileChange(left: FileChange, right: FileChange): boolean {
-  if (left.path !== right.path || left.diff !== right.diff || left.kind.type !== right.kind.type) {
+  if (
+    left.path !== right.path ||
+    left.diff !== right.diff ||
+    left.kind.type !== right.kind.type ||
+    left.lineStats?.additions !== right.lineStats?.additions ||
+    left.lineStats?.deletions !== right.lineStats?.deletions
+  ) {
     return false;
   }
   return (
     left.kind.type !== "update" ||
     (right.kind.type === "update" && left.kind.movePath === right.kind.movePath)
   );
+}
+
+function mergeLineStats(
+  left: FileChange["lineStats"],
+  right: FileChange["lineStats"],
+): FileChange["lineStats"] {
+  return left === null || right === null
+    ? null
+    : {
+        additions: left.additions + right.additions,
+        deletions: left.deletions + right.deletions,
+      };
 }
 
 function sameFileChangeItems(

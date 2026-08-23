@@ -32,7 +32,7 @@ describe("atualização do perfil ChatGPT", () => {
     expect(first).toBe(second);
     expect(read).toHaveBeenCalledTimes(1);
 
-    pending.resolve({ picture: "https://images.example.com/bruno.png" });
+    pending.resolve({ picture: "https://images.example.com/ada.png" });
     await expect(first).resolves.toBe(true);
     expect(apply).toHaveBeenCalledOnce();
   });
@@ -76,7 +76,7 @@ describe("atualização do perfil ChatGPT", () => {
 
   it("mantém o perfil em cache por seis horas como o cliente oficial", async () => {
     let now = 1_000;
-    const read = vi.fn(() => Promise.resolve({ picture: "https://images.example.com/bruno.png" }));
+    const read = vi.fn(() => Promise.resolve({ picture: "https://images.example.com/ada.png" }));
     const coordinator = createAccountProfileRefreshCoordinator({
       getSessionKey: () => "account-1",
       read,

@@ -35,6 +35,30 @@ Ferramentas de desenvolvimento: `vite` + `vite-plugin-solid` (build),
 A política de atualização é contínua: versões modernas e estáveis, mudanças
 revisadas pelo Dependabot e gates de lockfile em `pnpm verify`.
 
+## Referências de estudo
+
+`.references/` é ignorado pelo Git e nunca participa de build, runtime, bundle,
+configuração ou armazenamento do aplicativo. Em 23 de agosto de 2026 ele contém:
+
+- `shiki`, revisão `48cd2cc695ed2e3357c3f9c370578ea843d6d9a3`
+  (`v4.4.3`);
+- `openai-codex`, revisão
+  `1e6185e52214a879a8b94f3743f47f57135dc64b`;
+- módulos selecionados de perfil, uso e execução de comandos extraídos do
+  `app.asar` do Codex Desktop `26.818.5229.0` em
+  `codex-desktop-26.818.5229.0/`.
+
+Nenhum pacote Shiki, Syntect, Tree-sitter ou Codex foi adicionado ao grafo. O
+motor de realce é código próprio e usa apenas princípios arquiteturais observados
+nas referências. Remover `.references/` não altera nenhuma funcionalidade.
+
+O suporte a sessões longas, polling incremental e Common Controls v6 não
+adicionou crates. O manager usa apenas `tokio`, `uuid`, tipos do domínio e o
+spool já existente. No Windows, `build.rs` usa a API oficial
+`WindowsAttributes::new_without_app_manifest` do `tauri-build` e fornece um único
+manifesto ao linker, evitando tanto import ausente de `TaskDialogIndirect` quanto
+recurso `MANIFEST` duplicado.
+
 ## Dependências transitivas
 
 ### `unic-*` via Tauri

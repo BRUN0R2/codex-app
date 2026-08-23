@@ -122,6 +122,23 @@
           "itemId": "item-2",
           "index": 1,
           "delta": "detalhe"
+        },
+        {
+          "kind": "commandOutput",
+          "itemId": "item-command",
+          "stream": "stdout",
+          "operation": {
+            "type": "append",
+            "delta": "transforming...\n"
+          }
+        },
+        {
+          "kind": "commandOutput",
+          "itemId": "item-command",
+          "stream": "stderr",
+          "operation": {
+            "type": "clearCurrentLine"
+          }
         }
       ]
     }
@@ -332,6 +349,7 @@
           "byteLength": 20,
           "nextCursor": null
         },
+        "liveOutput": null,
         "exitCode": 0,
         "durationMs": 4800
       }
@@ -352,7 +370,11 @@
               "type": "update",
               "movePath": null
             },
-            "diff": "--- before\n+++ after"
+            "diff": "--- before\n+++ after",
+            "lineStats": {
+              "additions": 1,
+              "deletions": 1
+            }
           }
         ],
         "status": "completed"
@@ -370,6 +392,10 @@
         "name": "read_file",
         "description": "Read src/parser.rs",
         "status": "completed",
+        "outputPresentation": {
+          "type": "sourceFile",
+          "path": "src/parser.rs"
+        },
         "output": {
           "id": "output-2",
           "preview": "1: fn main()",

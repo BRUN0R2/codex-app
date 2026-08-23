@@ -8,12 +8,15 @@ import {
   decodeAttachmentImageResponse,
   decodeAutomationListResponse,
   decodeAutomationRun,
+  decodeAutoTopUpSettingsSnapshot,
   decodeChatModelListResponse,
   decodeEngineNotification,
   decodeEngineStartResponse,
   decodeModelListResponse,
   decodeOutputReadResponse,
   decodeThreadReadResponse,
+  decodeUsageResetCreditsResponse,
+  decodeUsageResetRedemptionResponse,
 } from "./decode";
 
 function modelFixture() {
@@ -98,35 +101,126 @@ describe("decodificação dos contratos nativos", () => {
     ).toThrow(ContractError);
   });
 
+  it("valida redefinições de uso e recarga automática", () => {
+    expect(
+      decodeUsageResetCreditsResponse({
+        credits: [
+          {
+            id: "reset-1",
+            title: "Redefinição completa",
+            status: "available",
+            expiresAt: 1_800_000_000_000,
+          },
+        ],
+        availableCount: 1,
+        immediateResetPurchaseEligible: true,
+      }),
+    ).toEqual({
+      credits: [
+        {
+          id: "reset-1",
+          title: "Redefinição completa",
+          status: "available",
+          expiresAt: 1_800_000_000_000,
+        },
+      ],
+      availableCount: 1,
+      immediateResetPurchaseEligible: true,
+    });
+    expect(decodeUsageResetRedemptionResponse({ code: "reset", creditId: "reset-1" })).toEqual({
+      code: "reset",
+      creditId: "reset-1",
+    });
+    expect(
+      decodeAutoTopUpSettingsSnapshot({
+        available: true,
+        isEnabled: true,
+        hasPaymentMethod: true,
+        rechargeThreshold: "125",
+        rechargeTarget: "250",
+        rechargeMonthlyLimit: "1000",
+        autoReloadCreditDiscountPolicy: "volume_discount_with_auto_reload_incentive_v1",
+        maximumDiscountPercent: 40,
+      }),
+    ).toMatchObject({
+      isEnabled: true,
+      rechargeThreshold: "125",
+      rechargeTarget: "250",
+      maximumDiscountPercent: 40,
+    });
+  });
+
   it("preserva nome e foto do perfil ChatGPT", () => {
     const decoded = decodeAccountReadResponse({
       account: {
         type: "chatgpt",
-        email: "bruno@example.com",
-        name: "Bruno",
-        picture: "https://images.example.com/bruno.png",
+        email: "ada@example.com",
+        name: "Ada",
+        picture: "https://images.example.com/ada.png",
         planType: "plus",
       },
       requiresOpenaiAuth: true,
       refresh: { status: "notRequired", error: null },
     });
 
-    expect(decoded.account?.name).toBe("Bruno");
-    expect(decoded.account?.picture).toBe("https://images.example.com/bruno.png");
+    expect(decoded.account?.name).toBe("Ada");
+    expect(decoded.account?.picture).toBe("https://images.example.com/ada.png");
   });
 
-  it("valida o perfil carregado pelo endpoint oficial do ChatGPT", () => {
-    expect(
-      decodeAccountProfileResponse({
-        name: "Bruno Silva",
-        picture: "https://images.example.com/bruno.png",
-      }),
-    ).toEqual({
-      name: "Bruno Silva",
-      picture: "https://images.example.com/bruno.png",
-    });
+  it("valida identidade e atividade carregadas pelo endpoint oficial do ChatGPT", () => {
+    const profile = {
+      displayName: "Ada Lovelace",
+      username: "ada.dev",
+      picture: "https://images.example.com/ada.png",
+      statisticsStatus: "available",
+      summary: {
+        lifetimeTokens: 9_000_000_000,
+        peakDailyTokens: 671_100_000,
+        longestRunningTurnSeconds: 28_020,
+        currentStreakDays: 7,
+        longestStreakDays: 20,
+      },
+      dailyUsage: [
+        { date: "2026-08-21", tokens: 10 },
+        { date: "2026-08-22", tokens: 15 },
+      ],
+      activityInsights: {
+        fastModePercent: 2,
+        mostUsedReasoningEffort: "max",
+        mostUsedReasoningEffortPercent: 76,
+        uniqueSkillsUsed: 1,
+        totalSkillsUsed: 1,
+        totalThreads: 660,
+        topInvocations: [
+          {
+            type: "plugin",
+            id: "test-android-apps",
+            name: "@test-android-apps",
+            usageCount: 1,
+          },
+          {
+            type: "skill",
+            id: "inspect",
+            name: "@test-android-apps:inspect",
+            pluginName: "@test-android-apps",
+            usageCount: 2,
+          },
+        ],
+      },
+    } as const;
+
+    expect(decodeAccountProfileResponse(profile)).toEqual(profile);
     expect(() =>
-      decodeAccountProfileResponse({ name: "Bruno", picture: "http://example.com/photo.png" }),
+      decodeAccountProfileResponse({ ...profile, picture: "http://example.com/photo.png" }),
+    ).toThrow(ContractError);
+    expect(() =>
+      decodeAccountProfileResponse({
+        ...profile,
+        dailyUsage: [
+          { date: "2026-08-22", tokens: 15 },
+          { date: "2026-08-21", tokens: 10 },
+        ],
+      }),
     ).toThrow(ContractError);
   });
 
@@ -148,9 +242,9 @@ describe("decodificação dos contratos nativos", () => {
           "scheduledAutomations",
         ],
       },
-      schemaVersion: 14,
+      schemaVersion: 17,
       config: configFixture(),
-      diagnosticLogPath: "C:\\Users\\Bruno\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
+      diagnosticLogPath: "C:\\Users\\Developer\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
         { sandbox: "read-only", approvals: "untrusted" },
         { sandbox: "workspace-write", approvals: "on-request" },
@@ -175,12 +269,12 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 14,
+        schemaVersion: 17,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",
         }),
-        diagnosticLogPath: "C:\\Users\\Bruno\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
+        diagnosticLogPath: "C:\\Users\\Developer\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
         permissionProfiles: [],
       }),
     ).toThrow(ContractError);
@@ -313,12 +407,58 @@ describe("decodificação dos contratos nativos", () => {
             source: "agent",
             status: "completed",
             aggregatedOutput: null,
+            liveOutput: null,
             exitCode: 0,
             durationMs: 12,
             commandActions: [],
           },
         },
       }),
+    ).toThrow(ContractError);
+  });
+
+  it("limita a prévia combinada de stdout e stderr do comando ativo", () => {
+    const notification = (liveOutput: unknown) => ({
+      method: "item.started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "commandExecution",
+          id: "item-1",
+          command: "pnpm build",
+          cwd: "C:\\workspace",
+          processId: null,
+          startedAt: 1_000,
+          source: "agent",
+          status: "inProgress",
+          aggregatedOutput: null,
+          liveOutput,
+          exitCode: null,
+          durationMs: null,
+        },
+      },
+    });
+    const decoded = decodeEngineNotification(
+      notification({ stdout: "building...", stderr: "warning", truncated: false }),
+    );
+
+    if (decoded.method !== "item.started" || decoded.params.item.type !== "commandExecution") {
+      throw new Error("A execução de comando ativa mudou de tipo.");
+    }
+    expect(decoded.params.item.liveOutput).toEqual({
+      stdout: "building...",
+      stderr: "warning",
+      truncated: false,
+    });
+    expect(() =>
+      decodeEngineNotification(
+        notification({
+          stdout: "x".repeat(128 * 1_024),
+          stderr: "y".repeat(128 * 1_024 + 1),
+          truncated: true,
+        }),
+      ),
     ).toThrow(ContractError);
   });
 
@@ -346,6 +486,7 @@ describe("decodificação dos contratos nativos", () => {
                 name: "read_file",
                 description: "Lê um arquivo",
                 status: "completed",
+                outputPresentation: { type: "sourceFile", path: "src/main.rs" },
                 output,
               },
             ],
@@ -380,6 +521,7 @@ describe("decodificação dos contratos nativos", () => {
           name: "read_file",
           description: "Lê um arquivo",
           status: "completed",
+          outputPresentation: { type: "sourceFile", path: "src/main.rs" },
           output,
         },
       },
@@ -418,7 +560,7 @@ describe("decodificação dos contratos nativos", () => {
         item: {
           type: "fileChange",
           id: "change-1",
-          changes: [{ path: "src/old.ts", kind, diff: "" }],
+          changes: [{ path: "src/old.ts", kind, diff: "", lineStats: null }],
           status: "completed",
         },
       },
@@ -551,6 +693,12 @@ describe("decodificação dos contratos nativos", () => {
             index: 0,
             delta: "Analisando",
           },
+          {
+            kind: "commandOutput",
+            itemId: "command-1",
+            stream: "stdout",
+            operation: { type: "append", delta: "building..." },
+          },
         ],
       },
     });
@@ -558,7 +706,13 @@ describe("decodificação dos contratos nativos", () => {
     if (decoded.method !== "item.streamDeltas") {
       throw new Error("O lote de deltas mudou de método.");
     }
-    expect(decoded.params.deltas).toHaveLength(2);
+    expect(decoded.params.deltas).toHaveLength(3);
+    expect(decoded.params.deltas[2]).toEqual({
+      kind: "commandOutput",
+      itemId: "command-1",
+      stream: "stdout",
+      operation: { type: "append", delta: "building..." },
+    });
     expect(() =>
       decodeEngineNotification({
         method: "item.streamDeltas",

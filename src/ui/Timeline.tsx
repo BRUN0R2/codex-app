@@ -49,8 +49,9 @@ import {
 import { CodexGlyph } from "./CodexGlyph";
 import { presentAssistantText } from "./contentReferenceMarkers";
 import { DiffView } from "./DiffView";
-import { createDiffDocument, summarizeDiff } from "./diffDocument";
+import { createDiffDocument } from "./diffDocument";
 import { observeElementResize } from "./elementResize";
+import { fileChangeLineStats } from "./fileChangeStats";
 import { FrontendFailureContext, useFrontendFailureReporter } from "./frontendFailure";
 import { Icon, type IconName } from "./Icon";
 import { TimelineTurnRenderFailure } from "./RenderFailure";
@@ -61,6 +62,7 @@ import {
   CommentaryMessage,
   inlinePreview,
   UserMessage,
+  userMessageAnchor,
   userMessageCopyText,
 } from "./TimelineMessages";
 import { createTimelineDisclosureStore } from "./timelineDisclosure";
@@ -79,7 +81,10 @@ import {
 } from "./timelineIdentity";
 import {
   commandActivityTitle,
+  commandLiveOutputText,
   commandOutputText,
+  commandPollActivityTitle,
+  fileChangeActionLabel,
   fileChangeGroupTitle,
   formatElapsedSeconds,
   reasoningTitle,
@@ -95,9 +100,13 @@ import {
   findTimelineAnchorIndex,
   hasRecentTimelineUserScrollIntent,
   isTimelineNearEnd,
+  normalizeTimelineWheelDelta,
+  resolveNestedTimelineWheelTransfer,
   resolveTimelineFollowing,
+  resolveTimelineMessageOffset,
   resolveTimelineRestorationTop,
   type ScrollbarMetrics,
+  shouldPreserveTimelineAnchor,
   shouldSynchronizeTimelineToEnd,
 } from "./timelineScroll";
 import { TimelineThreadSessionStore } from "./timelineSession";
@@ -149,9 +158,18 @@ const TIMELINE_ESTIMATED_TURN_HEIGHT = 498;
 const TIMELINE_VIRTUAL_OVERSCAN_PX = 900;
 const TIMELINE_HISTORY_LOAD_THRESHOLD_PX = 640;
 const TIMELINE_SESSION_CACHE_CAPACITY: number = 16;
+const USER_MESSAGE_NAVIGATION_MAX_FRAMES: number = 8;
+const USER_MESSAGE_NAVIGATION_QUIET_FRAMES: number = 2;
+const USER_MESSAGE_SCROLL_INSET_PX: number = 32;
+const TIMELINE_SCROLL_REGION_SELECTOR = "[data-timeline-scroll-region]";
 
 interface TimelineUserMessageEntry extends UserMessageEntry {
   readonly turnIndex: number;
+}
+
+interface PendingUserMessageNavigation {
+  readonly message: TimelineUserMessageEntry;
+  readonly threadId: string;
 }
 
 export function Timeline(props: {
@@ -169,11 +187,16 @@ export function Timeline(props: {
   let pendingUserScrollMeasurement = false;
   let historyRevealFrame: number | undefined;
   let timelineRestorationFrame: number | undefined;
-  let virtualMeasurementFrame: number | undefined;
+  let userMessageNavigationFrame: number | undefined;
+  let pendingUserMessageNavigation: PendingUserMessageNavigation | undefined;
+  let virtualMeasurementGeneration = 0;
+  let virtualMeasurementScheduledGeneration: number | undefined;
   let lastUserScrollIntentAt = Number.NEGATIVE_INFINITY;
   let smoothScrollTarget: number | null = null;
   let activeTimelineThreadId: string | null = null;
   let timelineTransitionRevision = 0;
+  let timelineLayoutRevision = 0;
+  let measuredTimelineLayoutRevision = 0;
   let observedActiveTurnId: string | null | undefined;
   let observedThreadId: string | null | undefined;
   let dragState:
@@ -199,6 +222,20 @@ export function Timeline(props: {
   const disclosures = createTimelineDisclosureStore();
   const disclosureContext: TimelineDisclosureContextValue = {
     keyPrefix: () => timelineDisclosureNamespacePrefix(props.controller.currentThread()?.id ?? ""),
+    onLayoutChange: () => {
+      timelineLayoutRevision += 1;
+      queueMicrotask(measureMountedVirtualTurns);
+      const pending = pendingUserMessageNavigation;
+      if (pending !== undefined) {
+        cancelUserMessageNavigationFrame();
+        scheduleMountedUserMessageNavigation(
+          pending.message,
+          pending.threadId,
+          USER_MESSAGE_NAVIGATION_MAX_FRAMES,
+          timelineLayoutRevision,
+        );
+      }
+    },
     store: disclosures,
   };
   const reportFrontendFailure = (reason: unknown) => props.controller.reportError(reason);
@@ -245,10 +282,41 @@ export function Timeline(props: {
     }),
   );
 
+  function readMountedUserMessageOffset(messageId: string): number | null {
+    if (virtualListElement === undefined) {
+      return null;
+    }
+    const anchor = document.getElementById(userMessageAnchor(messageId));
+    if (!(anchor instanceof HTMLElement) || !virtualListElement.contains(anchor)) {
+      return null;
+    }
+    return Math.max(
+      0,
+      anchor.getBoundingClientRect().top - virtualListElement.getBoundingClientRect().top,
+    );
+  }
+
+  function readUserMessageOffset(message: TimelineUserMessageEntry): number {
+    return resolveTimelineMessageOffset(
+      readMountedUserMessageOffset(message.id),
+      virtualizer.offsetOf(message.turnIndex),
+    );
+  }
+
   function measureActiveUserMessage(): void {
     const messages = userMessages();
     if (scrollElement === undefined || virtualListElement === undefined || messages.length === 0) {
       setActiveUserMessageIndex(0);
+      return;
+    }
+    if (
+      isTimelineNearEnd({
+        clientHeight: scrollElement.clientHeight,
+        scrollHeight: scrollElement.scrollHeight,
+        scrollTop: scrollElement.scrollTop,
+      })
+    ) {
+      setActiveUserMessageIndex(messages.length - 1);
       return;
     }
     virtualRevision();
@@ -256,7 +324,10 @@ export function Timeline(props: {
     setActiveUserMessageIndex(
       findTimelineAnchorIndex(
         messages.length,
-        (index) => virtualizer.offsetOf(messages[index]?.turnIndex ?? Number.MAX_SAFE_INTEGER),
+        (index) => {
+          const message = messages[index];
+          return message === undefined ? Number.MAX_SAFE_INTEGER : readUserMessageOffset(message);
+        },
         viewportTop,
       ),
     );
@@ -355,8 +426,21 @@ export function Timeline(props: {
     saveActiveTimelineViewport(nextFollowingLatest);
   }
 
+  function cancelUserMessageNavigationFrame(): void {
+    if (userMessageNavigationFrame !== undefined) {
+      cancelAnimationFrame(userMessageNavigationFrame);
+      userMessageNavigationFrame = undefined;
+    }
+  }
+
+  function cancelPendingUserMessageNavigation(): void {
+    cancelUserMessageNavigationFrame();
+    pendingUserMessageNavigation = undefined;
+  }
+
   function cancelPendingTimelineWork(): number {
     timelineTransitionRevision += 1;
+    cancelPendingUserMessageNavigation();
     if (animationFrame !== undefined) {
       cancelAnimationFrame(animationFrame);
       animationFrame = undefined;
@@ -369,10 +453,8 @@ export function Timeline(props: {
       cancelAnimationFrame(timelineRestorationFrame);
       timelineRestorationFrame = undefined;
     }
-    if (virtualMeasurementFrame !== undefined) {
-      cancelAnimationFrame(virtualMeasurementFrame);
-      virtualMeasurementFrame = undefined;
-    }
+    virtualMeasurementGeneration += 1;
+    virtualMeasurementScheduledGeneration = undefined;
     pendingLayoutSynchronization = false;
     pendingUserScrollMeasurement = false;
     pendingVirtualMeasurements.clear();
@@ -453,13 +535,33 @@ export function Timeline(props: {
     return `${props.controller.currentThread()?.id ?? ""}\u0000${turnId}`;
   }
 
-  function measureVirtualTurn(key: string, size: number): void {
-    pendingVirtualMeasurements.set(key, size);
-    if (virtualMeasurementFrame !== undefined) {
+  function measureMountedVirtualTurns(): void {
+    if (virtualListElement === undefined) {
       return;
     }
-    virtualMeasurementFrame = requestAnimationFrame(() => {
-      virtualMeasurementFrame = undefined;
+    for (const element of virtualListElement.querySelectorAll<HTMLElement>(
+      ":scope > .timeline-virtual-item[data-virtual-turn-id]",
+    )) {
+      const turnId = element.getAttribute("data-virtual-turn-id");
+      if (turnId !== null) {
+        measureVirtualTurn(virtualTurnKey(turnId), element.getBoundingClientRect().height);
+      }
+    }
+  }
+
+  function measureVirtualTurn(key: string, size: number): void {
+    pendingVirtualMeasurements.set(key, size);
+    if (virtualMeasurementScheduledGeneration !== undefined) {
+      return;
+    }
+    virtualMeasurementGeneration += 1;
+    const generation = virtualMeasurementGeneration;
+    virtualMeasurementScheduledGeneration = generation;
+    queueMicrotask(() => {
+      if (virtualMeasurementScheduledGeneration !== generation) {
+        return;
+      }
+      virtualMeasurementScheduledGeneration = undefined;
       const measurements = [...pendingVirtualMeasurements].map(
         ([measurementKey, measuredSize]) => ({
           key: measurementKey,
@@ -468,10 +570,25 @@ export function Timeline(props: {
       );
       pendingVirtualMeasurements.clear();
       const batch = virtualizer.measureBatch(measurements, virtualViewport().offset);
+      measuredTimelineLayoutRevision = timelineLayoutRevision;
       if (!batch.changed) {
         return;
       }
-      if (scrollElement !== undefined && !followingLatest() && batch.anchorDelta !== 0) {
+      if (
+        scrollElement !== undefined &&
+        shouldPreserveTimelineAnchor({
+          anchorDelta: batch.anchorDelta,
+          followingLatest: followingLatest(),
+          recentUserIntent: hasRecentTimelineUserScrollIntent(
+            lastUserScrollIntentAt,
+            performance.now(),
+          ),
+          scrollInteractionActive:
+            dragState !== undefined ||
+            smoothScrollTarget !== null ||
+            pendingUserMessageNavigation !== undefined,
+        })
+      ) {
         scrollTimelineTo(scrollElement.scrollTop + batch.anchorDelta);
       }
       setVirtualRevision((revision) => revision + 1);
@@ -518,31 +635,23 @@ export function Timeline(props: {
   }
 
   function markUserScrollIntent(): void {
+    cancelPendingUserMessageNavigation();
     smoothScrollTarget = null;
     lastUserScrollIntentAt = performance.now();
   }
 
-  function targetsNestedScrollableContent(target: EventTarget | null): boolean {
+  function readNestedTimelineScrollRegion(target: EventTarget | null): HTMLElement | null {
     if (!(target instanceof Element) || scrollElement === undefined) {
-      return false;
+      return null;
     }
-    for (
-      let element: Element | null = target;
-      element !== null && element !== scrollElement;
-      element = element.parentElement
-    ) {
-      const style = window.getComputedStyle(element);
-      const vertical =
-        element.scrollHeight > element.clientHeight + 1 &&
-        (style.overflowY === "auto" || style.overflowY === "scroll");
-      const horizontal =
-        element.scrollWidth > element.clientWidth + 1 &&
-        (style.overflowX === "auto" || style.overflowX === "scroll");
-      if (vertical || horizontal) {
-        return true;
-      }
-    }
-    return false;
+    const region = target.closest<HTMLElement>(TIMELINE_SCROLL_REGION_SELECTOR);
+    return region !== null && region !== scrollElement && scrollElement.contains(region)
+      ? region
+      : null;
+  }
+
+  function targetsNestedScrollableContent(target: EventTarget | null): boolean {
+    return readNestedTimelineScrollRegion(target) !== null;
   }
 
   function handleTimelineKeyDown(event: KeyboardEvent): void {
@@ -576,10 +685,37 @@ export function Timeline(props: {
   }
 
   function handleTimelineWheel(event: WheelEvent): void {
+    if (event.ctrlKey || event.shiftKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
+      return;
+    }
     markUserScrollIntent();
-    if (targetsNestedScrollableContent(event.target)) {
+    const nestedRegion = readNestedTimelineScrollRegion(event.target);
+    if (nestedRegion === null) {
+      return;
+    }
+    if (followingLatest()) {
       setActiveTimelineFollowing(false);
     }
+    if (scrollElement === undefined || !event.cancelable) {
+      return;
+    }
+    const transfer = resolveNestedTimelineWheelTransfer({
+      clientHeight: nestedRegion.clientHeight,
+      delta: normalizeTimelineWheelDelta({
+        deltaMode: event.deltaMode,
+        deltaY: event.deltaY,
+        viewportHeight: nestedRegion.clientHeight,
+      }),
+      scrollHeight: nestedRegion.scrollHeight,
+      scrollTop: nestedRegion.scrollTop,
+    });
+    if (transfer === null) {
+      return;
+    }
+    event.preventDefault();
+    nestedRegion.scrollTop = transfer.nestedScrollTop;
+    scrollTimelineTo(scrollElement.scrollTop + transfer.timelineDelta);
+    scheduleTimelineFrame(true, false);
   }
 
   function handleTimelineFocusIn(event: FocusEvent): void {
@@ -641,18 +777,129 @@ export function Timeline(props: {
     }
   }
 
+  function scheduleUserMessageNavigationCompletion(
+    message: TimelineUserMessageEntry,
+    threadId: string,
+    alignedOffset: number,
+    alignedLayoutRevision: number,
+    quietFrames: number,
+  ): void {
+    userMessageNavigationFrame = requestAnimationFrame(() => {
+      userMessageNavigationFrame = undefined;
+      const pending = pendingUserMessageNavigation;
+      if (
+        pending?.threadId !== threadId ||
+        pending.message.id !== message.id ||
+        props.controller.currentThread()?.id !== threadId
+      ) {
+        return;
+      }
+      const mountedOffset = readMountedUserMessageOffset(message.id);
+      const layoutStable =
+        timelineLayoutRevision === alignedLayoutRevision &&
+        measuredTimelineLayoutRevision >= timelineLayoutRevision;
+      const geometryStable = mountedOffset !== null && Math.abs(mountedOffset - alignedOffset) <= 1;
+      if (layoutStable && geometryStable) {
+        if (quietFrames <= 1) {
+          pendingUserMessageNavigation = undefined;
+          return;
+        }
+        scheduleUserMessageNavigationCompletion(
+          message,
+          threadId,
+          mountedOffset,
+          alignedLayoutRevision,
+          quietFrames - 1,
+        );
+        return;
+      }
+      scheduleMountedUserMessageNavigation(
+        message,
+        threadId,
+        USER_MESSAGE_NAVIGATION_MAX_FRAMES,
+        timelineLayoutRevision,
+        mountedOffset,
+      );
+    });
+  }
+
+  function scheduleMountedUserMessageNavigation(
+    message: TimelineUserMessageEntry,
+    threadId: string,
+    remainingFrames: number,
+    requiredLayoutRevision: number,
+    previousOffset: number | null = null,
+  ): void {
+    userMessageNavigationFrame = requestAnimationFrame(() => {
+      userMessageNavigationFrame = undefined;
+      if (props.controller.currentThread()?.id !== threadId || virtualListElement === undefined) {
+        return;
+      }
+      const mountedOffset = readMountedUserMessageOffset(message.id);
+      if (mountedOffset === null) {
+        if (remainingFrames <= 1) {
+          return;
+        }
+        updateVirtualViewport();
+        scheduleMountedUserMessageNavigation(
+          message,
+          threadId,
+          remainingFrames - 1,
+          requiredLayoutRevision,
+          null,
+        );
+        return;
+      }
+      const stable = previousOffset !== null && Math.abs(mountedOffset - previousOffset) <= 1;
+      const layoutSettled = measuredTimelineLayoutRevision >= requiredLayoutRevision;
+      if ((layoutSettled && stable) || remainingFrames <= 1) {
+        const alignedLayoutRevision = timelineLayoutRevision;
+        scrollTimelineTo(
+          virtualListElement.offsetTop + mountedOffset - USER_MESSAGE_SCROLL_INSET_PX,
+          "smooth",
+        );
+        scheduleUserMessageNavigationCompletion(
+          message,
+          threadId,
+          mountedOffset,
+          alignedLayoutRevision,
+          USER_MESSAGE_NAVIGATION_QUIET_FRAMES,
+        );
+        return;
+      }
+      scheduleMountedUserMessageNavigation(
+        message,
+        threadId,
+        remainingFrames - 1,
+        requiredLayoutRevision,
+        mountedOffset,
+      );
+    });
+  }
+
   function scrollToUserMessage(message: UserMessageEntry): void {
     if (scrollElement === undefined || virtualListElement === undefined) {
       return;
     }
     const target = userMessages().find((entry) => entry.id === message.id);
-    if (target === undefined) {
+    const threadId = props.controller.currentThread()?.id;
+    if (target === undefined || threadId === undefined) {
       return;
     }
+    cancelPendingUserMessageNavigation();
+    pendingUserMessageNavigation = { message: target, threadId };
     setActiveTimelineFollowing(false);
-    scrollTimelineTo(
-      Math.max(0, virtualListElement.offsetTop + virtualizer.offsetOf(target.turnIndex) - 32),
-      "smooth",
+    if (readMountedUserMessageOffset(target.id) === null) {
+      scrollTimelineTo(
+        virtualListElement.offsetTop + readUserMessageOffset(target) - USER_MESSAGE_SCROLL_INSET_PX,
+      );
+      updateVirtualViewport();
+    }
+    scheduleMountedUserMessageNavigation(
+      target,
+      threadId,
+      USER_MESSAGE_NAVIGATION_MAX_FRAMES,
+      timelineLayoutRevision,
     );
   }
 
@@ -689,6 +936,7 @@ export function Timeline(props: {
       return;
     }
     event.preventDefault();
+    markUserScrollIntent();
     dragState = {
       pointerId: event.pointerId,
       startScrollTop: scrollElement.scrollTop,
@@ -805,6 +1053,7 @@ export function Timeline(props: {
   onCleanup(() => {
     saveActiveTimelineViewport();
     resizeObserver?.disconnect();
+    cancelPendingUserMessageNavigation();
     if (animationFrame !== undefined) {
       cancelAnimationFrame(animationFrame);
     }
@@ -814,9 +1063,8 @@ export function Timeline(props: {
     if (timelineRestorationFrame !== undefined) {
       cancelAnimationFrame(timelineRestorationFrame);
     }
-    if (virtualMeasurementFrame !== undefined) {
-      cancelAnimationFrame(virtualMeasurementFrame);
-    }
+    virtualMeasurementGeneration += 1;
+    virtualMeasurementScheduledGeneration = undefined;
     pendingVirtualMeasurements.clear();
   });
 
@@ -1005,7 +1253,6 @@ function VirtualConversationTurn(props: {
 }) {
   let element: HTMLDivElement | undefined;
   let releaseResizeObservation: (() => void) | undefined;
-  let measurementFrame: number | undefined;
   const reportFailure = useFrontendFailureReporter();
   const turn = createMemo(props.turn);
 
@@ -1015,35 +1262,27 @@ function VirtualConversationTurn(props: {
     }
   }
 
-  function scheduleMeasurement(): void {
-    if (measurementFrame !== undefined) {
-      return;
-    }
-    measurementFrame = requestAnimationFrame(() => {
-      measurementFrame = undefined;
-      measure();
-    });
-  }
-
   onMount(() => {
     if (element !== undefined) {
-      releaseResizeObservation = observeElementResize(element, scheduleMeasurement);
-      scheduleMeasurement();
+      releaseResizeObservation = observeElementResize(element, measure);
+      measure();
     }
   });
   createEffect(() => {
     props.measurementKey;
-    scheduleMeasurement();
+    measure();
   });
   onCleanup(() => {
     releaseResizeObservation?.();
-    if (measurementFrame !== undefined) {
-      cancelAnimationFrame(measurementFrame);
-    }
   });
 
   return (
-    <div class="timeline-virtual-item" ref={element} style={{ top: `${Math.round(props.top)}px` }}>
+    <div
+      class="timeline-virtual-item"
+      data-virtual-turn-id={props.turnId}
+      ref={element}
+      style={{ top: `${Math.round(props.top)}px` }}
+    >
       <ErrorBoundary
         fallback={(error, reset) => (
           <TimelineTurnRenderFailure
@@ -1429,7 +1668,7 @@ function AgentActivityGroup(props: {
 
   return (
     <Show
-      when={shouldRenderAgentActivityGroup(props.items, props.isCurrent, disclosure.isOpen())}
+      when={shouldRenderAgentActivityGroup(props.items, props.isCurrent)}
       fallback={
         <Show when={props.items[0]}>
           {(item) => (
@@ -1644,6 +1883,8 @@ function CommandItem(props: {
   readonly item: Extract<ThreadItem, { type: "commandExecution" }>;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
+  let outputScrollElement: HTMLDivElement | undefined;
+  let followLiveOutput = true;
   const disclosure = useTimelineDisclosure(() => `command:${props.item.id}`);
   const title = () =>
     commandActivityTitle(
@@ -1652,10 +1893,34 @@ function CommandItem(props: {
       props.variant === "grouped" ? false : disclosure.isOpen(),
     );
   const output = () => props.item.aggregatedOutput;
+  const liveOutput = () => commandLiveOutputText(props.item.liveOutput);
   const duration = () =>
     props.variant === "grouped" && props.item.status === "inProgress"
       ? null
       : commandDurationLabel(props.item, props.clock);
+
+  createEffect(() => {
+    liveOutput();
+    if (!disclosure.isOpen() || !followLiveOutput) {
+      return;
+    }
+    queueMicrotask(() => {
+      if (outputScrollElement !== undefined && followLiveOutput) {
+        outputScrollElement.scrollTop = outputScrollElement.scrollHeight;
+      }
+    });
+  });
+
+  function updateLiveOutputFollow(): void {
+    if (outputScrollElement === undefined) {
+      return;
+    }
+    followLiveOutput =
+      outputScrollElement.scrollHeight -
+        outputScrollElement.clientHeight -
+        outputScrollElement.scrollTop <=
+      24;
+  }
 
   return (
     <details
@@ -1679,11 +1944,27 @@ function CommandItem(props: {
       <Show when={disclosure.isOpen()}>
         <div class="command-card-inner">
           <div class="command-card-header">Shell</div>
-          <div class="command-card-scroll">
+          <div
+            class="command-card-scroll"
+            data-timeline-scroll-region=""
+            onScroll={updateLiveOutputFollow}
+            ref={outputScrollElement}
+          >
             <div class="command-card-prompt">
               <span class="prompt-symbol">$</span> {props.item.command}
             </div>
-            <Show when={output()}>
+            <Show
+              when={output()}
+              fallback={
+                <Show when={liveOutput()}>
+                  {(visibleOutput) => (
+                    <pre class="command-live-output">
+                      <code>{visibleOutput()}</code>
+                    </pre>
+                  )}
+                </Show>
+              }
+            >
               {(visibleOutput) => (
                 <ThreadOutputView format={commandOutputText} output={visibleOutput()} />
               )}
@@ -1718,16 +1999,19 @@ function ToolItem(props: {
   const disclosure = useTimelineDisclosure(() => `tool:${props.item.id}`);
   const description = () => props.item.description || toolLabel(props.item.name);
   const isWebSearch = () => props.item.name === "web_search" || props.item.name === "web_fetch";
+  const isCommandPoll = () => props.item.name === "poll_command";
   const isTerminalRead = () => isTerminalReadTool(props.item.name);
   const output = () => props.item.output;
   const hasDetails = () =>
     output() !== null || props.item.status === "failed" || props.item.status === "declined";
   const title = () =>
-    isTerminalRead()
-      ? terminalReadActivityTitle(props.item.status)
-      : isWebSearch()
-        ? webSearchActivityTitle(description(), props.item.status)
-        : toolActivityTitle(description(), props.item.status, disclosure.isOpen());
+    isCommandPoll()
+      ? commandPollActivityTitle(props.item.status)
+      : isTerminalRead()
+        ? terminalReadActivityTitle(props.item.status)
+        : isWebSearch()
+          ? webSearchActivityTitle(description(), props.item.status)
+          : toolActivityTitle(description(), props.item.status, disclosure.isOpen());
 
   const headline = () => (
     <>
@@ -1767,8 +2051,12 @@ function ToolItem(props: {
             <div class="command-card-header">{toolLabel(props.item.name)}</div>
             <Show when={output()}>
               {(visibleOutput) => (
-                <div class="command-card-scroll">
-                  <ThreadOutputView format={toolOutputText} output={visibleOutput()} />
+                <div class="command-card-scroll" data-timeline-scroll-region="">
+                  <ThreadOutputView
+                    format={toolOutputText}
+                    output={visibleOutput()}
+                    presentation={props.item.outputPresentation}
+                  />
                 </div>
               )}
             </Show>
@@ -1810,7 +2098,6 @@ function FileChangeItem(props: {
           change={change()}
           diffDisplay={props.diffDisplay}
           disclosureKey={`change:${props.item.id}:${timelineFileChangeIdentity(change(), 0)}`}
-          initialOpen
           variant={props.variant}
         />
       )}
@@ -1830,44 +2117,49 @@ function FileChangeGroup(props: {
   const changesByIdentity = createMemo(
     () => new Map(changeEntries().map((entry) => [entry.identity, entry.change] as const)),
   );
+  const changeList = () => (
+    <div class="file-change-list">
+      <For each={changeIdentities()}>
+        {(changeIdentity) => (
+          <Change
+            change={readTimelineValue(changesByIdentity(), changeIdentity, "alteração de arquivo")}
+            diffDisplay={props.diffDisplay}
+            disclosureKey={`change:${props.item.id}:${changeIdentity}`}
+            variant={props.variant}
+          />
+        )}
+      </For>
+    </div>
+  );
 
   return (
-    <details
-      class="activity-card file-change-card"
-      classList={{ "grouped-activity-item": props.variant === "grouped" }}
-      onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
-      open={disclosure.isOpen()}
+    <Show
+      when={props.variant === "grouped"}
+      fallback={
+        <details
+          class="activity-card file-change-card"
+          onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
+          open={disclosure.isOpen()}
+        >
+          <summary class="activity-summary" data-timeline-disclosure="">
+            <span class="activity-icon">
+              <Icon name="edit" size={13} />
+            </span>
+            <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
+            <span class="activity-chevron">
+              <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+            </span>
+          </summary>
+          <Show when={disclosure.isOpen()}>
+            <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
+              {changeList()}
+            </TimelineDisclosureContext.Provider>
+          </Show>
+        </details>
+      }
     >
-      <summary class="activity-summary" data-timeline-disclosure="">
-        <span class="activity-icon">
-          <Icon name="edit" size={13} />
-        </span>
-        <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
-        <span class="activity-chevron">
-          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-        </span>
-      </summary>
-      <Show when={disclosure.isOpen()}>
-        <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
-          <div class="file-change-list">
-            <For each={changeIdentities()}>
-              {(changeIdentity) => (
-                <Change
-                  change={readTimelineValue(
-                    changesByIdentity(),
-                    changeIdentity,
-                    "alteração de arquivo",
-                  )}
-                  diffDisplay={props.diffDisplay}
-                  disclosureKey={`change:${props.item.id}:${changeIdentity}`}
-                  variant={props.variant}
-                />
-              )}
-            </For>
-          </div>
-        </TimelineDisclosureContext.Provider>
-      </Show>
-    </details>
+      <div class="grouped-file-change-set">{changeList()}</div>
+    </Show>
   );
 }
 
@@ -1875,47 +2167,42 @@ function Change(props: {
   readonly change: FileChange;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly disclosureKey: string;
-  readonly initialOpen?: boolean | undefined;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
-  const disclosure = useTimelineDisclosure(
-    () => props.disclosureKey,
-    () => props.initialOpen === true,
-  );
+  const disclosure = useTimelineDisclosure(() => props.disclosureKey);
   const diff = createMemo(() => props.change.diff);
   const kind = createMemo(() => props.change.kind.type);
   const path = createMemo(() => props.change.path);
-  const stats = createMemo(() => summarizeDiff(diff()));
+  const stats = createMemo(() => fileChangeLineStats(props.change));
 
   return (
     <details
-      class="diff-block"
-      classList={{ "grouped-diff-block": props.variant === "grouped" }}
+      class="diff-block file-change-diff"
       data-kind={kind()}
       onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
       open={disclosure.isOpen()}
     >
       <summary data-timeline-disclosure="">
-        <Show when={props.variant === "grouped"}>
-          <span class="activity-icon">
-            <Icon name="edit" size={13} />
-          </span>
-          <span class="grouped-change-action">{groupedChangeAction(kind())}</span>
-        </Show>
+        <span class="activity-icon">
+          <Icon name="edit" size={13} />
+        </span>
+        <span class="file-change-action">{fileChangeActionLabel(kind())}</span>
         <span class="diff-file-identity">
           <code title={path()}>{fileName(path())}</code>
-          <Show when={props.variant !== "grouped" && kind() !== "update"}>
-            <span class={`change-kind kind-${kind()}`}>
-              {kind() === "add" ? "NOVO" : "EXCLUÍDO"}
-            </span>
-          </Show>
         </span>
-        <span class="diff-stat additions" title={`${stats().additions} linhas adicionadas`}>
-          +{stats().additions}
-        </span>
-        <span class="diff-stat deletions" title={`${stats().deletions} linhas removidas`}>
-          −{stats().deletions}
-        </span>
+        <Show when={kind() !== "update"}>
+          <span class={`change-kind kind-${kind()}`}>{kind() === "add" ? "NOVO" : "EXCLUÍDO"}</span>
+        </Show>
+        <Show when={stats().additions > 0}>
+          <span class="diff-stat additions" title={`${stats().additions} linhas adicionadas`}>
+            +{stats().additions}
+          </span>
+        </Show>
+        <Show when={stats().deletions > 0}>
+          <span class="diff-stat deletions" title={`${stats().deletions} linhas removidas`}>
+            −{stats().deletions}
+          </span>
+        </Show>
         <span aria-hidden="true" class="diff-file-chevron">
           <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
         </span>
@@ -1939,17 +2226,6 @@ function ExpandedChangeDiff(props: {
 }) {
   const document = createMemo(() => createDiffDocument(props.diff));
   return <DiffView document={document()} mode={props.mode} path={props.path} />;
-}
-
-function groupedChangeAction(kind: FileChange["kind"]["type"]): string {
-  switch (kind) {
-    case "add":
-      return "Criado";
-    case "delete":
-      return "Excluído";
-    case "update":
-      return "Edição";
-  }
 }
 
 function sameScrollbarMetrics(left: ScrollbarMetrics, right: ScrollbarMetrics): boolean {

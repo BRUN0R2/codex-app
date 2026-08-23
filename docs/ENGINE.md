@@ -8,7 +8,7 @@ O único backend é `NativeEngine`:
 - provider: `ChatGPT Codex`;
 - autenticação: `ChatGPT OAuth`;
 - armazenamento: `sqlite`;
-- schema IPC: versão `14`.
+- schema IPC: versão `15`.
 
 Não existe variável de ambiente para trocar backend nem execução de binário
 genérico. O único sidecar é o `rg.exe` 15.2.0 fixado por manifesto e hash para a
@@ -63,11 +63,26 @@ Notificações suportadas:
 Qualquer método diferente falha na fronteira TypeScript e gera diagnóstico
 visível.
 
+A versão IPC 15 adiciona saída transitória de comandos ao
+`item.streamDeltas`. Cada delta identifica `stdout` ou `stderr` e carrega uma
+operação fechada: `append`, `backspace`, `clearCurrentLine` ou `truncated`.
+`CommandExecution.liveOutput` existe somente enquanto o item está ativo e volta
+a `null` na projeção terminal. Frames append são limitados a 8 KiB e a soma
+visível dos dois streams a 256 KiB; o recurso persistido continua integral.
+
+A versão IPC 16 adiciona `ToolExecution.outputPresentation`. O backend define
+explicitamente `sourceFile { path }`, `searchResults`, `fileList` ou `plainText`;
+a UI nunca extrai path da descrição nem tenta adivinhar linguagem pelo conteúdo.
+Dados internos anteriores recebem `plainText` durante a desserialização e voltam
+ao frontend com o campo explícito.
+
 A sincronização Rust↔TypeScript é travada por fixtures golden em
 `src/contracts/fixtures/`: `cargo test` falha se o contrato Rust mudar sem
 regenerá-los e os testes do Vitest decodificam os mesmos arquivos com os
 decoders estritos da interface. Regenere intencionalmente com
-`cargo test -p codex-desktop-next regenerate_golden_contract_fixtures -- --ignored`.
+`cargo test --locked --manifest-path src-tauri/Cargo.toml
+engine::contracts_fixtures::tests::regenerate_golden_contract_fixtures --
+--ignored`.
 
 `turn.completed` carrega a projeção terminal persistida do turno: `id`,
 `status`, `error` e `updatedAt`. O storage produz esses valores na mesma
@@ -141,7 +156,12 @@ Para Work local e Codex:
 - catálogo em `https://chatgpt.com/backend-api/codex/models`;
 - respostas em `https://chatgpt.com/backend-api/codex/responses`;
 - perfil em `https://chatgpt.com/backend-api/wham/profiles/me`;
-- uso em `https://chatgpt.com/backend-api/wham/usage`.
+- uso em `https://chatgpt.com/backend-api/wham/usage`;
+- redefinições em `/backend-api/wham/rate-limit-reset-credits` e
+  `/backend-api/wham/rate-limit-reset-credits/consume`;
+- recarga automática em `/backend-api/subscriptions/auto_top_up/*`;
+- moeda e preço localizado em `/backend-api/accounts/check/v4-2023-04-27` e
+  `/backend-api/checkout_pricing_config/configs/{country_code}`.
 
 O catálogo Codex da sessão é a fonte autoritativa para `context_window`,
 `max_context_window`, percentual útil e limite de compactação automática. A
@@ -151,18 +171,35 @@ Rust resolve os números atuais do catálogo e recalcula proporcionalmente a jan
 útil e o ponto de compactação. Nenhum tamanho ou nome comercial de modelo é
 fixado na interface.
 
-O perfil segue o fluxo do Desktop oficial: `display_name` e
-`profile_picture_url` são buscados depois que a conta local já foi apresentada.
+O perfil segue o fluxo do Desktop oficial. `GET /wham/profiles/me` fornece
+`display_name`, `username`, `profile_picture_url`, resumo vitalício, buckets
+diários, insights e invocações de plugins/skills. O wire remoto é privado ao
+módulo `auth/profile.rs`; antes do IPC, o Rust valida limites, percentuais,
+datas ISO, cardinalidade e overflow, agrega buckets duplicados pela data e
+produz uniões discriminadas próprias. `metadata.stats_error` vira o estado
+explícito `unavailable`, preservando a identidade sem inventar estatísticas.
+
 A chamada tem deadline próprio de cinco segundos, não participa do caminho de
-boot e fica válida por seis horas. Respostas de uma sessão substituída são
-descartadas; URL ausente ou imagem que falha mantém as iniciais. A ausência de
-foto no token OIDC não aciona `userinfo` nem atrasa a inicialização.
+boot e fica válida por seis horas por identidade de sessão. Respostas de uma
+sessão substituída são descartadas; URL ausente ou imagem que falha mantém as
+iniciais. A ausência de foto no token OIDC não aciona `userinfo` nem atrasa a
+inicialização. A UI deriva localmente somente as projeções diária, semanal e
+acumulada da janela fixa de 52 semanas; totais e insights continuam
+autoritativos da conta e nunca são estimados pelo histórico SQLite local.
 
 O uso segue uma política separada e não possui polling permanente: o valor fica
 válido por cinco minutos e é revalidado, quando obsoleto, ao recuperar foco ou
 visibilidade, ao abrir a tela e depois da conclusão de um turno. Há uma única
 chamada em voo por revisão de sessão, e respostas de conta antiga nunca
 atualizam a interface.
+
+Redefinições e recarga automática são consultadas separadamente para que uma
+indisponibilidade de cobrança não esconda os limites já carregados. O consumo de
+reset exige confirmação na UI e um `redeem_request_id` estável; `reset` e
+`already_redeemed` são resultados idempotentes e provocam nova leitura dos
+limites. A recarga valida inteiros, mínimo de 125 créditos, diferença mínima de
+125 entre gatilho e alvo, alvo máximo de 250.000 e limite mensal não inferior ao
+alvo. Respostas `failed` ou `payment_declined` permanecem falhas visíveis.
 
 Headers de conta e sessão são montados somente no Rust. Tokens, cookies e
 respostas brutas não são expostos ao frontend. Cookies de infraestrutura
@@ -277,25 +314,94 @@ persistido; política, recuperação e atomicidade pertencem integralmente ao Ru
 | `edit_file`, `write_file` | não | sim | sim |
 | `apply_patch` | não | sim | sim |
 | `exec_command` | não | aprovação | sem aprovação |
+| `poll_command` | sim | sim | sim |
 
 Todos os paths de ferramenta são relativos ao workspace. Escritas são atômicas,
-arquivos são UTF-8 e comandos são não interativos. Cada chamada pode declarar
+arquivos são UTF-8 e comandos são não interativos. O engine não possui uma
+bifurcação funcional para token médio ou elevado: parser, busca, contratos e
+renderização são idênticos. Quando iniciado como administrador, processos filhos
+apenas herdam o token alto, ampliando o impacto permitido pelo Windows; isso não
+muda a gramática nem o comportamento do ripgrep. Cada chamada pode declarar
 `timeout_seconds`; o agente escolhe o orçamento pelo pior caso esperado do
 comando, usa `null` para o padrão seguro de uma hora e pode solicitar até sete
-dias, sempre com cancelamento. A timeline não mostra cronômetro para operações
+dias, sempre com cancelamento. Cada comando também declara `parallel_safe`: o
+valor só pode ser `true` quando não há dependência de saída nem mutação de
+arquivos ou configuração compartilhados. O motor limita lotes a oito operações
+consecutivas, sobrepõe sempre as leituras e só sobrepõe comandos em
+`danger-full-access` com aprovação `never`; qualquer mutação, aprovação ou
+comando exclusivo funciona como barreira. Itens começam juntos, mas resultados
+e saídas para o provider são persistidos deterministicamente na ordem original
+das chamadas. A timeline não mostra cronômetro para operações
 curtas; após dez segundos, comandos ativos exibem duração atualizada a cada
 segundo e preservam a duração terminal.
+
+`yield_time_ms` controla por quanto tempo `exec_command` aguarda a conclusão em
+primeiro plano. O padrão é dez segundos e o intervalo fechado permitido é de
+250 ms a 30 s. Se o processo ultrapassa esse prazo, a chamada retorna
+`session_id`, `cursor`, tempo decorrido e o snapshot disponível, enquanto o
+processo continua sob ownership do `NativeEngine`. O item permanece
+`inProgress`, continua recebendo `stdout`/`stderr` em tempo real e o agente pode
+executar trabalho independente antes de consultar a sessão novamente.
+
+`poll_command` aceita somente uma sessão pertencente à própria tarefa, um cursor
+opcional e espera de zero a 300 segundos. Consultas da mesma sessão são
+serializadas; sessões diferentes continuam independentes. O manager mantém no
+máximo 32 sessões, remove primeiro a terminal mais antiga e nunca abandona um
+processo ativo para abrir espaço. Um cursor append-only recebe apenas o delta
+posterior; se o terminal reescreveu conteúdo com backspace, carriage return ou
+limpeza de linha, a resposta muda explicitamente para `output_mode: snapshot`.
+Cursores futuros são rejeitados. Checkpoints são limitados, o transcript ao vivo
+retém no máximo 256 KiB por stream e o spool integral em disco continua sendo a
+fonte autoritativa após a conclusão.
+
+Uma licença RAII acompanha cada sessão entregue ao agente. Persistir o item
+consome a licença por `commit`; qualquer retorno antecipado, cancelamento ou
+falha antes disso executa `discard`, cancela a árvore e libera o finalizador.
+Depois do commit, conclusão, timeout e cancelamento atualizam o mesmo
+`CommandExecution` e seu `ThreadOutput` em uma única transação SQLite. O evento
+terminal só é publicado depois da drenagem dos dois pipes. Exclusão da tarefa e
+encerramento cancelam e drenam suas sessões; fork é recusado enquanto existir
+comando ativo. Na inicialização, qualquer item de atividade que um processo
+anterior deixou `inProgress` é marcado como falha explícita.
+
 `stdout` e `stderr` são drenados concorrentemente para arquivos temporários,
-normalizados em streaming e persistidos em blocos UTF-8 de 64 KiB, sem corte de
-tamanho agregado imposto pelo aplicativo. O item do turno contém somente ID,
-prévia, tamanho total e cursor; UI e agente continuam por `engine_output_read` e
-`read_output`. Recusa de comando retorna um resultado tipado ao modelo;
-cancelamento interrompe o turno.
+normalizados incrementalmente e persistidos em blocos UTF-8 de 64 KiB, sem corte
+de tamanho agregado imposto pelo aplicativo. As mesmas operações normalizadas
+alimentam a prévia ao vivo limitada; todos os lotes são emitidos antes do item
+terminal, inclusive em falha, timeout ou cancelamento. O item concluído contém
+somente ID, prévia, tamanho total e cursor; UI e agente continuam por
+`engine_output_read` e `read_output`. Recusa de comando retorna um resultado
+tipado ao modelo; cancelamento interrompe o turno.
+
+`read_output` possui dois caminhos mutuamente exclusivos. `query: null` lê a
+página bruta indicada por `cursor`; uma `query` textual exige `cursor: null` e
+procura o fragmento exato diretamente nos chunks persistidos, retornando no
+máximo doze linhas distintas com excertos UTF-8 limitados. A busca preserva
+matches que atravessam a fronteira entre chunks, informa truncamento e continua
+restrita à tarefa proprietária do recurso. Não existe fallback implícito entre
+busca e paginação.
+
+Comandos concluídos com sucesso passam por um classificador determinístico de
+linhas antes do próximo request. Progresso repetitivo de build e linhas de
+sucesso de testes Rust/JavaScript podem ser substituídos por contagens tipadas,
+mantendo diagnósticos, summaries e amostras representativas. A transformação só
+é aceita quando reconhece pelo menos oito linhas e reduz materialmente a saída.
+Comandos com falha e formatos desconhecidos conservam o caminho lossless
+anterior; o recurso integral permanece recuperável em todos os casos.
+
+Arquivos escolhidos e imagens coladas são copiados atomicamente para
+`app_local_data_dir/attachments/<uuid>/` antes de entrarem em rascunhos, filas ou
+turnos. O histórico aponta para esse snapshot imutável, não para o arquivo
+externo original. Históricos antigos cujo arquivo já desapareceu degradam apenas
+a miniatura correspondente; o restante do turno continua renderizável.
 
 `search_text` usa o `ripgrep` embarcado com correspondência literal,
 sensibilidade de caixa explícita, regras `.gitignore`, leitura incremental,
-limite global de resultados, timeout e cancelamento. O binário é validado no
-bootstrap, no build e novamente no runtime.
+limite global de resultados, timeout e cancelamento. Consultas com quebra de
+linha ativam `--multiline` e são enviadas como duas variantes literais
+normalizadas, LF e CRLF; portanto o mesmo fragmento funciona nos dois formatos
+sem regex ou fallback heurístico. O binário é validado no bootstrap, no build e
+novamente no runtime.
 
 Erros de validação ou execução de uma ferramenta pertencem à chamada, não ao
 turno inteiro. Um plano com mais de uma etapa `in_progress`, um patch malformado
@@ -304,14 +410,24 @@ para o provider e diagnóstico operacional; o agente pode corrigir a entrada na
 rodada seguinte. Cancelamento explícito continua sendo terminal.
 
 Processos recebem `NO_COLOR=1`, `CLICOLOR=0`, `FORCE_COLOR=0` e `TERM=dumb`. No
-Windows, todo processo iniciado pelo engine usa `CREATE_NO_WINDOW`; o PowerShell
-também configura entrada, saída e `$OutputEncoding` como UTF-8 sem BOM. A sessão
-define `Start-Process` como oculta e bloqueante por padrão, portanto validações
-que criam um processo filho não abrem um console separado nem escapam do
-lifetime limitado do comando. Processos destacados e janelas externas não fazem
-parte do contrato de `exec_command`. Mesmo quando uma ferramenta ignora o modo
-sem cor, o engine remove sequências ANSI e normaliza controles de terminal antes
-de persistir ou publicar a saída.
+Windows, todo processo iniciado pelo engine usa `CREATE_NO_WINDOW`; o shell é
+PowerShell 7 (`pwsh`) e configura entrada, saída, `$OutputEncoding` e parâmetros
+de `Encoding` dos cmdlets como UTF-8 sem BOM. A sessão também ativa o modo UTF-8
+do Python e define `Start-Process` como oculto e bloqueante por padrão, portanto
+validações que criam um processo filho não abrem um console separado nem escapam
+do lifetime limitado do comando. Processos destacados e janelas externas não
+fazem parte do contrato de `exec_command`. Mesmo quando uma ferramenta ignora o
+modo sem cor, o engine remove sequências ANSI e normaliza controles de terminal
+antes de persistir ou publicar a saída. Bytes visíveis fora de UTF-8 são
+rejeitados com erro explícito; nunca são convertidos silenciosamente em `�`.
+
+O build Windows contém exatamente um manifesto de aplicação. `build.rs` pede ao
+`tauri-build` que gere ícone e metadados sem seu manifesto embutido e fornece ao
+linker um único manifesto com Common Controls v6. Assim, harnesses que passam a
+alcançar APIs de diálogo carregam `TaskDialogIndirect`, enquanto o executável
+Tauri não recebe dois recursos `MANIFEST`. O nível de execução continua
+`asInvoker`: iniciar o aplicativo elevado apenas faz os filhos herdarem o token
+alto; não altera parser, busca, streaming ou ciclo das ferramentas.
 
 A fila de mensagens posteriores não possui limite local de quantidade. Ela é
 persistida por conversa em schema versionado antes de aceitar o enqueue,
@@ -322,8 +438,15 @@ visível; não causa descarte silencioso.
 
 `apply_patch` é uma ferramenta freeform do Responses, anunciada com gramática
 Lark fechada e respondida por `custom_tool_call_output`; ela não passa por shell,
-PowerShell, `git apply` ou executável auxiliar. O parser aceita somente o envelope
-canônico e hunks add/delete/update/move. Antes do primeiro write, o planejador
+PowerShell, `git apply` ou executável auxiliar. A gramática exige que cada bloco
+`@@` contenha pelo menos uma linha `+` ou `-`, impedindo que o modelo gere
+separadores de contexto vazios. A descrição da ferramenta explicita que `@@`
+somente abre um bloco e nunca funciona como delimitador de fechamento; append
+mantém contexto e adições no mesmo bloco. O parser aplica a mesma invariável em
+runtime, distingue bloco vazio de bloco contendo apenas contexto e retorna linha
+exata mais uma correção acionável, sem aceitar silenciosamente um patch
+malformado. O envelope permitido continua restrito a hunks
+add/delete/update/move. Antes do primeiro write, o planejador
 resolve todos os paths, rejeita escapes, symlinks, duplicidades e sobreposições,
 aplica todos os chunks em memória e fotografa conteúdo, permissões e SHA-256.
 
@@ -331,7 +454,12 @@ O commit prepara e sincroniza todos os temporários, revalida cada fotografia e
 só então troca os arquivos. Cancelamento, concorrência ou falha intermediária
 acionam o journal inverso; qualquer falha de restauração vira erro explícito de
 integridade com os paths afetados. A timeline recebe um único `FileChange` com
-as alterações canônicas somente após o commit completo.
+as alterações canônicas somente após o commit completo. Add, update e delete
+preservam a semântica de cada linha; exclusões textuais geram unified diff
+canônico a partir do snapshot original. `lineStats` é calculado antes do limite
+de 128 KiB do preview, portanto um arquivo removido continua exibindo seu total
+exato mesmo quando o diff visual é truncado. Binários não inventam contagem de
+linhas.
 
 ## Configuração
 

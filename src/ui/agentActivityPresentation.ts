@@ -37,7 +37,7 @@ export interface ActiveAgentActivity {
 }
 
 const EXPLORATION_TOOLS = new Set(["code_search", "list_files", "read_file", "search_text"]);
-const COMMAND_TOOLS = new Set(["run_shell", "shell"]);
+const COMMAND_TOOLS = new Set(["poll_command", "run_shell", "shell"]);
 const TERMINAL_READ_TOOLS = new Set(["read_output", "read_thread_terminal"]);
 const WEB_TOOLS = new Set(["web_fetch", "web_search"]);
 
@@ -111,14 +111,8 @@ export function splitAgentActivityUnits(
 export function shouldRenderAgentActivityGroup(
   items: readonly AgentActivityItem[],
   isCurrent: boolean,
-  expanded = false,
 ): boolean {
-  const onlyItem = items.length === 1 ? items[0] : undefined;
-  if (onlyItem?.type === "fileChange" && onlyItem.changes.length === 1) {
-    return false;
-  }
   return (
-    expanded ||
     isCurrent ||
     items.length > 1 ||
     items.some((item) => item.type === "fileChange" && item.changes.length > 1)

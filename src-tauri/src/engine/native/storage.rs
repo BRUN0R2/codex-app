@@ -22,11 +22,11 @@ use super::provider::ResponseItem;
 use super::terminal_output::normalize_terminal_bytes;
 use super::text::truncate_utf8;
 use crate::engine::{
-    AppConfig, Automation, AutomationListResponse, AutomationRun, AutomationRunStatus,
-    AutomationRunTrigger, CompletedTurn, ConfigReadResponse, ConfigUpdate, ConfigUpdateResponse,
-    ConversationMode, DesktopPreferences, ModelContextWindowPreference, OperationAck,
-    OutputReadResponse, ThreadActiveFlag, ThreadItem, ThreadListResponse, ThreadOutput,
-    ThreadStatus, ThreadSummary, TurnStatus, TurnSummary,
+    ActivityStatus, AppConfig, Automation, AutomationListResponse, AutomationRun,
+    AutomationRunStatus, AutomationRunTrigger, CompletedTurn, ConfigReadResponse, ConfigUpdate,
+    ConfigUpdateResponse, ConversationMode, DesktopPreferences, ModelContextWindowPreference,
+    OperationAck, OutputReadResponse, ThreadActiveFlag, ThreadItem, ThreadListResponse,
+    ThreadOutput, ThreadStatus, ThreadSummary, TurnStatus, TurnSummary,
 };
 use crate::error::AppError;
 
@@ -34,8 +34,11 @@ use crate::error::AppError;
 use crate::engine::CodexThread;
 
 mod history;
+mod output_search;
 
 use self::history::{StoredThreadPage, parse_history_cursor, read_thread_page as load_thread_page};
+use self::output_search::OutputSearcher;
+pub(super) use self::output_search::{MAX_OUTPUT_SEARCH_QUERY_BYTES, OutputSearchResponse};
 
 const DATABASE_FILE_NAME: &str = "native-state-profile-v2.sqlite3";
 const DATABASE_SCHEMA_VERSION: i64 = 4;
@@ -271,6 +274,7 @@ impl NativeStorage {
                     [now],
                 )
                 .map_err(storage_error)?;
+            interrupt_unfinished_activity_items(&transaction)?;
             transaction
                 .execute(
                     "UPDATE automation_runs
@@ -415,6 +419,67 @@ impl NativeStorage {
     ) -> Result<OutputReadResponse, AppError> {
         self.read_output_scoped(Some(thread_id), output_id, cursor)
             .await
+    }
+
+    pub(super) async fn search_output_for_thread(
+        &self,
+        thread_id: String,
+        output_id: String,
+        query: String,
+    ) -> Result<OutputSearchResponse, AppError> {
+        validate_text("output id", &output_id, MAX_IDENTIFIER_BYTES)?;
+        validate_text("output search query", &query, MAX_OUTPUT_SEARCH_QUERY_BYTES)?;
+        if output_id.chars().any(char::is_control) {
+            return Err(AppError::Protocol(
+                "output id contains control characters".into(),
+            ));
+        }
+        if query.chars().any(char::is_control) {
+            return Err(AppError::Protocol(
+                "output search query contains control characters".into(),
+            ));
+        }
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let exists = connection
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM output_resources
+                         JOIN turns ON turns.id = output_resources.turn_id
+                         WHERE output_resources.id = ?1
+                           AND turns.thread_id = ?2
+                     )",
+                    params![&output_id, &thread_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(storage_error)?;
+            if !exists {
+                return Err(AppError::State("stored output does not exist".into()));
+            }
+
+            let mut statement = connection
+                .prepare(
+                    "SELECT content
+                     FROM output_chunks
+                     WHERE output_id = ?1
+                     ORDER BY sequence",
+                )
+                .map_err(storage_error)?;
+            let mut chunks = statement
+                .query(params![&output_id])
+                .map_err(storage_error)?;
+            let mut searcher = OutputSearcher::new(query);
+            while let Some(row) = chunks.next().map_err(storage_error)? {
+                let chunk = row.get::<_, String>(0).map_err(storage_error)?;
+                if !searcher.push(&chunk) {
+                    break;
+                }
+            }
+            Ok(searcher.finish(output_id))
+        })
+        .await
     }
 
     async fn read_output_scoped(
@@ -1032,6 +1097,64 @@ impl NativeStorage {
             if let Some(output) = output {
                 persist_output_source(&transaction, &turn_id, &item_id, output)?;
             }
+            transaction.commit().map_err(storage_error)?;
+            Ok(item)
+        })
+        .await
+    }
+
+    pub(super) async fn complete_background_command(
+        &self,
+        turn_id: String,
+        mut item: ThreadItem,
+        output: OutputSource,
+    ) -> Result<ThreadItem, AppError> {
+        let item_id = item.id().to_string();
+        prepare_thread_item_output(&mut item, Some(&output))?;
+        let payload = encode_bounded(&item, MAX_ITEM_BYTES, "background command item")?;
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            let (sequence, current_payload) = transaction
+                .query_row(
+                    "SELECT sequence, payload
+                     FROM thread_items
+                     WHERE turn_id = ?1 AND item_id = ?2
+                     ORDER BY sequence DESC
+                     LIMIT 1",
+                    params![&turn_id, &item_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(storage_error)?
+                .ok_or_else(|| AppError::State("background command item does not exist".into()))?;
+            let current: ThreadItem =
+                decode_bounded(&current_payload, MAX_ITEM_BYTES, "background command item")?;
+            validate_background_command_transition(&current, &item)?;
+            let existing_output: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM output_resources
+                         WHERE turn_id = ?1 AND item_id = ?2
+                     )",
+                    params![&turn_id, &item_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if existing_output {
+                return Err(AppError::State(
+                    "background command already owns stored output".into(),
+                ));
+            }
+            let changed = transaction
+                .execute(
+                    "UPDATE thread_items SET payload = ?1 WHERE sequence = ?2",
+                    params![payload, sequence],
+                )
+                .map_err(storage_error)?;
+            require_changed(changed, "background command item")?;
+            persist_output_source(&transaction, &turn_id, &item_id, output)?;
             transaction.commit().map_err(storage_error)?;
             Ok(item)
         })
@@ -2796,6 +2919,92 @@ fn copy_thread_items_for_fork(
     Ok(())
 }
 
+fn interrupt_unfinished_activity_items(transaction: &Transaction<'_>) -> Result<(), AppError> {
+    let rows = {
+        let mut statement = transaction
+            .prepare("SELECT sequence, payload FROM thread_items ORDER BY sequence")
+            .map_err(storage_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?
+    };
+    for (sequence, payload) in rows {
+        let mut item: ThreadItem =
+            decode_bounded(&payload, MAX_ITEM_BYTES, "unfinished thread item")?;
+        let changed = match &mut item {
+            ThreadItem::CommandExecution {
+                status,
+                live_output,
+                ..
+            } if matches!(status, ActivityStatus::InProgress) => {
+                *status = ActivityStatus::Failed;
+                *live_output = None;
+                true
+            }
+            ThreadItem::FileChange { status, .. } | ThreadItem::ToolExecution { status, .. }
+                if matches!(status, ActivityStatus::InProgress) =>
+            {
+                *status = ActivityStatus::Failed;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            let payload = encode_bounded(&item, MAX_ITEM_BYTES, "interrupted thread item")?;
+            let updated = transaction
+                .execute(
+                    "UPDATE thread_items SET payload = ?1 WHERE sequence = ?2",
+                    params![payload, sequence],
+                )
+                .map_err(storage_error)?;
+            require_changed(updated, "interrupted thread item")?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_background_command_transition(
+    current: &ThreadItem,
+    completed: &ThreadItem,
+) -> Result<(), AppError> {
+    match (current, completed) {
+        (
+            ThreadItem::CommandExecution {
+                id: current_id,
+                command: current_command,
+                cwd: current_cwd,
+                process_id: current_process_id,
+                status: ActivityStatus::InProgress,
+                aggregated_output: None,
+                ..
+            },
+            ThreadItem::CommandExecution {
+                id,
+                command,
+                cwd,
+                process_id,
+                status,
+                aggregated_output: Some(_),
+                live_output: None,
+                ..
+            },
+        ) if current_id == id
+            && current_command == command
+            && current_cwd == cwd
+            && current_process_id == process_id
+            && !matches!(status, ActivityStatus::InProgress) =>
+        {
+            Ok(())
+        }
+        _ => Err(AppError::State(
+            "background command transition is not a single in-progress to terminal update".into(),
+        )),
+    }
+}
+
 fn thread_item_output_mut(item: &mut ThreadItem) -> Option<&mut Option<ThreadOutput>> {
     match item {
         ThreadItem::CommandExecution {
@@ -3425,9 +3634,9 @@ mod tests {
     use crate::engine::native::output::OutputSource;
     use crate::engine::native::provider::{ResponseContent, ResponseItem};
     use crate::engine::{
-        ActivityStatus, AutomationRunStatus, AutomationRunTrigger, ConfigUpdate, ConversationMode,
-        ImageDetail, ModelContextWindowPreference, ModelVerbosity, ThreadItem, ThreadOutput,
-        TokenUsage, TurnStatus, UserContent,
+        ActivityStatus, AutomationRunStatus, AutomationRunTrigger, CommandLiveOutput,
+        CommandSource, ConfigUpdate, ConversationMode, ImageDetail, ModelContextWindowPreference,
+        ModelVerbosity, ThreadItem, ThreadOutput, TokenUsage, TurnStatus, UserContent,
     };
 
     #[test]
@@ -3467,6 +3676,26 @@ mod tests {
                 ..
             } => output,
             item => panic!("expected a tool output reference, received {item:?}"),
+        }
+    }
+
+    fn background_command_item(status: ActivityStatus, live: bool) -> ThreadItem {
+        ThreadItem::CommandExecution {
+            id: "background-command".into(),
+            command: "Start-Sleep -Seconds 1".into(),
+            cwd: ".".into(),
+            process_id: Some("session-1".into()),
+            started_at: Some(1),
+            source: CommandSource::Agent,
+            status,
+            aggregated_output: None,
+            live_output: live.then(|| CommandLiveOutput {
+                stdout: "running\n".into(),
+                stderr: String::new(),
+                truncated: false,
+            }),
+            exit_code: (!matches!(status, ActivityStatus::InProgress)).then_some(0),
+            duration_ms: (!matches!(status, ActivityStatus::InProgress)).then_some(1_000),
         }
     }
 
@@ -5148,6 +5377,185 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn completes_a_background_command_and_output_in_one_transaction() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("background-command.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "background-user".into(),
+                    content: vec![UserContent::Text {
+                        text: "run in background".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "run in background".into(),
+                }]),
+                "run in background".into(),
+            )
+            .await
+            .expect("turn should begin");
+        storage
+            .append_thread_item(
+                turn.id.clone(),
+                background_command_item(ActivityStatus::InProgress, true),
+                None,
+            )
+            .await
+            .expect("running command should persist");
+
+        let completed = storage
+            .complete_background_command(
+                turn.id.clone(),
+                background_command_item(ActivityStatus::Completed, false),
+                OutputSource::text("exit_code: 0\nstdout:\ndone\nstderr:\n".into()),
+            )
+            .await
+            .expect("background command should complete");
+        let output = match &completed {
+            ThreadItem::CommandExecution {
+                status: ActivityStatus::Completed,
+                aggregated_output: Some(output),
+                live_output: None,
+                exit_code: Some(0),
+                ..
+            } => output.clone(),
+            item => panic!("unexpected completed command: {item:?}"),
+        };
+        assert_eq!(
+            read_complete_output(&storage, &output.id).await,
+            "exit_code: 0\nstdout:\ndone\nstderr:\n"
+        );
+        let loaded = storage
+            .read_thread(thread.id.clone())
+            .await
+            .expect("thread should reload");
+        assert!(matches!(
+            loaded.turns[0].items.last(),
+            Some(ThreadItem::CommandExecution {
+                status: ActivityStatus::Completed,
+                aggregated_output: Some(stored),
+                live_output: None,
+                ..
+            }) if stored.id == output.id
+        ));
+        assert!(
+            storage
+                .complete_background_command(
+                    turn.id,
+                    background_command_item(ActivityStatus::Completed, false),
+                    OutputSource::text("duplicate".into()),
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_marks_unfinished_activity_items_as_failed() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("unfinished-activity.sqlite3");
+        let thread_id = {
+            let storage = NativeStorage::default();
+            storage
+                .initialize_at(database_path.clone())
+                .await
+                .expect("storage should initialize");
+            let thread = storage
+                .create_thread(
+                    directory.path().display().to_string(),
+                    Some(directory.path().display().to_string()),
+                    ConversationMode::Codex,
+                )
+                .await
+                .expect("thread should persist");
+            let turn = storage
+                .begin_turn(
+                    thread.id.clone(),
+                    "gpt-test".into(),
+                    None,
+                    ThreadItem::UserMessage {
+                        id: "recovery-user".into(),
+                        content: vec![UserContent::Text {
+                            text: "recover activities".into(),
+                        }],
+                    },
+                    ResponseItem::user_content(vec![ResponseContent::InputText {
+                        text: "recover activities".into(),
+                    }]),
+                    "recover activities".into(),
+                )
+                .await
+                .expect("turn should begin");
+            storage
+                .append_thread_item(
+                    turn.id.clone(),
+                    background_command_item(ActivityStatus::InProgress, true),
+                    None,
+                )
+                .await
+                .expect("running command should persist");
+            storage
+                .append_thread_item(
+                    turn.id,
+                    ThreadItem::ToolExecution {
+                        id: "running-tool".into(),
+                        name: "read_file".into(),
+                        description: "Read".into(),
+                        status: ActivityStatus::InProgress,
+                        output_presentation: crate::engine::ToolOutputPresentation::PlainText,
+                        output: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("running tool should persist");
+            thread.id.clone()
+        };
+
+        let recovered = NativeStorage::default();
+        recovered
+            .initialize_at(database_path)
+            .await
+            .expect("storage should recover");
+        let thread = recovered
+            .read_thread(thread_id)
+            .await
+            .expect("recovered thread should load");
+        assert_eq!(thread.turns[0].status, TurnStatus::Interrupted);
+        assert!(matches!(
+            thread.turns[0].items.get(1),
+            Some(ThreadItem::CommandExecution {
+                status: ActivityStatus::Failed,
+                live_output: None,
+                ..
+            })
+        ));
+        assert!(matches!(
+            thread.turns[0].items.get(2),
+            Some(ThreadItem::ToolExecution {
+                status: ActivityStatus::Failed,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn stores_large_outputs_in_pages_and_forks_them_independently() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let storage = NativeStorage::default();
@@ -5181,7 +5589,13 @@ mod tests {
             )
             .await
             .expect("turn should begin");
-        let content = format!("{}{}", "x".repeat(1_100_000), "😀".repeat(300_000));
+        const SEARCH_QUERY: &str = "TARGET-OUTPUT-LINE";
+        let content = format!(
+            "{}{}{}",
+            "x".repeat(super::OUTPUT_CHUNK_BYTES - 8),
+            SEARCH_QUERY,
+            "😀".repeat(300_000)
+        );
         let stored_item = storage
             .append_thread_item(
                 turn.id.clone(),
@@ -5190,6 +5604,7 @@ mod tests {
                     name: "read_file".into(),
                     description: "Large UTF-8 output".into(),
                     status: ActivityStatus::Completed,
+                    output_presentation: crate::engine::ToolOutputPresentation::PlainText,
                     output: None,
                 },
                 Some(OutputSource::text(content.clone())),
@@ -5208,6 +5623,23 @@ mod tests {
         assert_eq!(first_page.byte_length, output.byte_length);
         assert!(first_page.next_cursor.is_some());
         assert_eq!(read_complete_output(&storage, &output.id).await, content);
+        let search = storage
+            .search_output_for_thread(source.id.clone(), output.id.clone(), SEARCH_QUERY.into())
+            .await
+            .expect("stored output search should load");
+        let rendered_search = search.render();
+        assert!(rendered_search.contains("matches: 1"));
+        assert!(rendered_search.contains(SEARCH_QUERY));
+        assert!(
+            storage
+                .search_output_for_thread(
+                    "different-thread".into(),
+                    output.id.clone(),
+                    SEARCH_QUERY.into(),
+                )
+                .await
+                .is_err()
+        );
 
         storage
             .complete_turn(source.id.clone(), turn.id, TurnStatus::Completed, None)

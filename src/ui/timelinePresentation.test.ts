@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   commandActivityTitle,
+  commandLiveOutputText,
   commandOutputText,
+  commandPollActivityTitle,
+  fileChangeActionLabel,
   fileChangeGroupTitle,
   formatElapsedSeconds,
   reasoningTitle,
@@ -63,6 +66,12 @@ describe("timeline presentation", () => {
     expect(terminalReadActivityTitle("failed")).toBe("Falha ao ler o terminal do chat");
   });
 
+  it("uses explicit command polling labels", () => {
+    expect(commandPollActivityTitle("inProgress")).toBe("Verificando comando");
+    expect(commandPollActivityTitle("completed")).toBe("Comando verificado");
+    expect(commandPollActivityTitle("failed")).toBe("Falha ao verificar comando");
+  });
+
   it("shows command duration only after the long-running threshold", () => {
     expect(visibleCommandDurationMs("inProgress", 1_000, null, 10_999)).toBeNull();
     expect(visibleCommandDurationMs("inProgress", 1_000, null, 11_000)).toBe(10_000);
@@ -70,9 +79,16 @@ describe("timeline presentation", () => {
     expect(visibleCommandDurationMs("completed", 1_000, 10_000, 50_000)).toBe(10_000);
   });
 
-  it("summarizes grouped file edits with a concise activity heading", () => {
+  it("summarizes standalone file collections with correct grammar", () => {
+    expect(fileChangeGroupTitle(1)).toBe("1 arquivo alterado");
     expect(fileChangeGroupTitle(2)).toBe("2 arquivos alterados");
     expect(fileChangeGroupTitle(4)).toBe("4 arquivos alterados");
+  });
+
+  it("labels each file change before its file name", () => {
+    expect(fileChangeActionLabel("update")).toBe("Arquivo editado");
+    expect(fileChangeActionLabel("add")).toBe("Arquivo criado");
+    expect(fileChangeActionLabel("delete")).toBe("Arquivo excluído");
   });
 
   it("presents command stdout without leaking the provider envelope", () => {
@@ -84,6 +100,19 @@ describe("timeline presentation", () => {
     expect(commandOutputText(undefined)).toBeNull();
     expect(toolOutputText(undefined)).toBeNull();
     expect(toolOutputText("resultado")).toBe("resultado");
+  });
+
+  it("presents live stdout and stderr before the final output exists", () => {
+    expect(
+      commandLiveOutputText({
+        stdout: "transforming...\n",
+        stderr: "warning\n",
+        truncated: true,
+      }),
+    ).toBe(
+      "stdout:\ntransforming...\n\nstderr:\nwarning\n\n[Prévia ao vivo limitada; a saída completa estará disponível ao concluir.]",
+    );
+    expect(commandLiveOutputText({ stdout: "", stderr: "", truncated: false })).toBeNull();
   });
 
   it("keeps navigation marks equal until pointer or keyboard interaction", () => {

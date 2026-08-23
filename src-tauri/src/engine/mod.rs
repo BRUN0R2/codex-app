@@ -73,6 +73,72 @@ impl EngineManager {
         self.engine.account_rate_limits_read(app).await
     }
 
+    pub async fn account_usage_resets_read(
+        &self,
+        app: &AppHandle,
+    ) -> Result<UsageResetCreditsResponse, AppError> {
+        self.engine.account_usage_resets_read(app).await
+    }
+
+    pub async fn account_usage_reset_redeem(
+        &self,
+        app: &AppHandle,
+        credit_id: Option<&str>,
+        redeem_request_id: &str,
+    ) -> Result<UsageResetRedemptionResponse, AppError> {
+        self.engine
+            .account_usage_reset_redeem(app, credit_id, redeem_request_id)
+            .await
+    }
+
+    pub async fn account_auto_top_up_read(
+        &self,
+        app: &AppHandle,
+    ) -> Result<AutoTopUpSettingsSnapshot, AppError> {
+        self.engine.account_auto_top_up_read(app).await
+    }
+
+    pub async fn account_auto_top_up_enable(
+        &self,
+        app: &AppHandle,
+        recharge_threshold: &str,
+        recharge_target: &str,
+        recharge_monthly_limit: Option<&str>,
+    ) -> Result<AutoTopUpSettingsSnapshot, AppError> {
+        self.engine
+            .account_auto_top_up_enable(
+                app,
+                recharge_threshold,
+                recharge_target,
+                recharge_monthly_limit,
+            )
+            .await
+    }
+
+    pub async fn account_auto_top_up_update(
+        &self,
+        app: &AppHandle,
+        recharge_threshold: &str,
+        recharge_target: &str,
+        recharge_monthly_limit: Option<&str>,
+    ) -> Result<AutoTopUpSettingsSnapshot, AppError> {
+        self.engine
+            .account_auto_top_up_update(
+                app,
+                recharge_threshold,
+                recharge_target,
+                recharge_monthly_limit,
+            )
+            .await
+    }
+
+    pub async fn account_auto_top_up_disable(
+        &self,
+        app: &AppHandle,
+    ) -> Result<AutoTopUpSettingsSnapshot, AppError> {
+        self.engine.account_auto_top_up_disable(app).await
+    }
+
     pub async fn login_chatgpt(&self, app: &AppHandle) -> Result<LoginResponse, AppError> {
         self.engine.login_chatgpt(app).await
     }

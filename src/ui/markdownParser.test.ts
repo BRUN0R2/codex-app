@@ -7,8 +7,18 @@ describe("Markdown parser", () => {
     const html = renderMarkdownSource("```typescript\nconst answer = 42;\n```");
 
     expect(html).toContain('<code class="language-typescript">');
-    expect(html).toContain('<span class="token-keyword">const</span>');
-    expect(html).toContain('<span class="token-number">42</span>');
+    expect(html).toContain('<span class="syntax-token token-keyword">const</span>');
+    expect(html).toContain('<span class="syntax-token token-number">42</span>');
+  });
+
+  it("preserves multiline grammar state inside fenced code", () => {
+    const html = renderMarkdownSource(
+      "```rust\n/* open comment\n   still a comment */\n#[test]\nfn works() {}\n```",
+    );
+
+    expect(html.match(/token-comment/gu)).toHaveLength(2);
+    expect(html).toContain('<span class="syntax-token token-attribute">#[test]</span>');
+    expect(html).toContain('<span class="syntax-token token-function">works</span>');
   });
 
   it("escapes image metadata before producing the hydration contract", () => {

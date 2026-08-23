@@ -13,6 +13,7 @@ use reqwest::header::AUTHORIZATION;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderValue;
 use reqwest::header::USER_AGENT;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -81,6 +82,66 @@ impl ProviderClient {
             let request = self
                 .authorized(Method::GET, url, session)?
                 .header(ACCEPT, "application/json");
+            let response = match tokio::time::timeout(REQUEST_TIMEOUT, request.send()).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) if error.is_connect() || error.is_timeout() => {
+                    last_error = Some(error.to_string());
+                    if attempt + 1 < MAX_REQUEST_ATTEMPTS {
+                        retry_delay(attempt).await;
+                    }
+                    continue;
+                }
+                Ok(Err(error)) => return Err(AppError::Transport(error.to_string())),
+                Err(_) => {
+                    last_error = Some(format!("{operation} timed out"));
+                    if attempt + 1 < MAX_REQUEST_ATTEMPTS {
+                        retry_delay(attempt).await;
+                    }
+                    continue;
+                }
+            };
+            if response.status().is_server_error() && attempt + 1 < MAX_REQUEST_ATTEMPTS {
+                last_error = Some(format!("HTTP {}", response.status().as_u16()));
+                retry_delay(attempt).await;
+                continue;
+            }
+            if !response.status().is_success() {
+                let failure = decode_provider_response_failure(response).await;
+                if failure.edge_blocked {
+                    self.clear_cloudflare_cookies()?;
+                    if attempt + 1 < MAX_REQUEST_ATTEMPTS {
+                        retry_delay(attempt).await;
+                        continue;
+                    }
+                }
+                return Err(failure.error);
+            }
+            return decode_json(response, operation, maximum_bytes).await;
+        }
+        Err(AppError::Transport(last_error.unwrap_or_else(|| {
+            format!("{operation} failed without a diagnostic")
+        })))
+    }
+
+    pub async fn post_json<B, T>(
+        &self,
+        session: &AuthSession,
+        url: &str,
+        body: &B,
+        operation: &'static str,
+        maximum_bytes: usize,
+    ) -> Result<T, AppError>
+    where
+        B: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        let mut last_error = None;
+        for attempt in 0..MAX_REQUEST_ATTEMPTS {
+            let request = self
+                .authorized(Method::POST, url, session)?
+                .header(ACCEPT, "application/json")
+                .header(CONTENT_TYPE, "application/json")
+                .json(body);
             let response = match tokio::time::timeout(REQUEST_TIMEOUT, request.send()).await {
                 Ok(Ok(response)) => response,
                 Ok(Err(error)) if error.is_connect() || error.is_timeout() => {

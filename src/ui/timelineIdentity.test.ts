@@ -50,6 +50,7 @@ describe("timeline render identity", () => {
       path: "src/App.tsx",
       kind: { type: "update" as const, movePath: null },
       diff: "-old\n+new",
+      lineStats: null,
     };
 
     expect(timelineFileChangeIdentity({ ...change, diff: `${change.diff}\n+next` }, 0)).toBe(

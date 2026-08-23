@@ -29,7 +29,54 @@ fn main() {
     prepare_ripgrep_sidecar().unwrap_or_else(|error| {
         panic!("could not prepare the bundled ripgrep executable: {error}");
     });
-    tauri_build::build();
+    configure_windows_common_controls_manifest().unwrap_or_else(|error| {
+        panic!("could not configure the Windows Common Controls manifest: {error}");
+    });
+    let attributes = tauri_build::Attributes::new()
+        .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
+    tauri_build::try_build(attributes).unwrap_or_else(|error| {
+        panic!("could not generate the Tauri build resources: {error}");
+    });
+}
+
+fn configure_windows_common_controls_manifest() -> Result<(), String> {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    let output_directory =
+        PathBuf::from(env::var_os("OUT_DIR").ok_or_else(|| "OUT_DIR is unavailable".to_string())?);
+    let manifest_path = output_directory.join("common-controls-v6.manifest");
+    fs::write(
+        &manifest_path,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>
+"#,
+    )
+    .map_err(|error| {
+        format!(
+            "could not write {}: {error}",
+            manifest_path.to_string_lossy()
+        )
+    })?;
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
+        manifest_path.display()
+    );
+    Ok(())
 }
 
 fn prepare_ripgrep_sidecar() -> Result<(), String> {

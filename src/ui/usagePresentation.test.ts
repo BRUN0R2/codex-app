@@ -25,6 +25,7 @@ function response(
   return {
     rateLimits: primary,
     rateLimitsByLimitId: { codex: primary, ...additional },
+    planPrice: null,
   };
 }
 

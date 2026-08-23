@@ -100,6 +100,30 @@ describe("stream delta batcher", () => {
 
     expect(batches).toEqual([[agentDelta("A")], [agentDelta("B")]]);
   });
+
+  it("coalesces adjacent command appends without reordering control operations", () => {
+    const scheduler = new ManualScheduler();
+    const batches: (readonly StreamDelta[])[] = [];
+    const batcher = createStreamDeltaBatcher({
+      apply: (deltas) => batches.push(deltas),
+      reportError: (reason) => {
+        throw reason;
+      },
+      scheduler,
+    });
+
+    batcher.enqueue(commandAppend("A"));
+    batcher.enqueue(commandAppend("B"));
+    batcher.enqueue(commandAppend("C"));
+    batcher.enqueue(commandOperation("clearCurrentLine"));
+    batcher.enqueue(commandAppend("D"));
+    batcher.flush();
+
+    expect(batches).toEqual([
+      [commandAppend("A")],
+      [commandAppend("BC"), commandOperation("clearCurrentLine"), commandAppend("D")],
+    ]);
+  });
 });
 
 function agentDelta(delta: string): StreamDelta {
@@ -111,7 +135,11 @@ function agentDelta(delta: string): StreamDelta {
   };
 }
 
-function reasoningDelta(target: "content" | "summary", index: number, delta: string): StreamDelta {
+function reasoningDelta(
+  target: "content" | "summary",
+  index: number,
+  delta: string,
+): Extract<StreamDelta, { readonly kind: "reasoningText" }> {
   return {
     kind: "reasoningText",
     threadId: "thread-a",
@@ -119,5 +147,27 @@ function reasoningDelta(target: "content" | "summary", index: number, delta: str
     index,
     target,
     delta,
+  };
+}
+
+function commandAppend(delta: string): StreamDelta {
+  return {
+    kind: "commandOutput",
+    threadId: "thread-a",
+    turnId: "turn-a",
+    itemId: "command-a",
+    stream: "stdout",
+    operation: { type: "append", delta },
+  };
+}
+
+function commandOperation(type: "backspace" | "clearCurrentLine" | "truncated"): StreamDelta {
+  return {
+    kind: "commandOutput",
+    threadId: "thread-a",
+    turnId: "turn-a",
+    itemId: "command-a",
+    stream: "stdout",
+    operation: { type },
   };
 }

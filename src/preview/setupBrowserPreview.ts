@@ -8,6 +8,7 @@ import type {
   Automation,
   AutomationListResponse,
   AutomationRun,
+  AutoTopUpSettingsSnapshot,
   ChatModelListResponse,
   CodexModel,
   CodexThread,
@@ -19,6 +20,7 @@ import type {
   ThreadListResponse,
   ThreadOutput,
   ThreadSummary,
+  UsageResetCreditsResponse,
   VisibleThreadItem,
 } from "../contracts/types";
 import { saveProjects } from "../state/projects";
@@ -41,6 +43,43 @@ function previewOutput(id: string, preview: string): ThreadOutput {
   };
 }
 
+const PREVIEW_CREATED_RUST_LINE_COUNT: number = 338;
+
+function previewCreatedRustDiff(): string {
+  const source = [
+    "use std::fmt;",
+    "",
+    "#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]",
+    "enum RoutineLineKind {",
+    "    BuildProgress,",
+    "    JavaScriptTestSuccess,",
+    "    PackageProgress,",
+    "    RustTestSuccess,",
+    "}",
+    "",
+    "impl RoutineLineKind {",
+    "    fn label(self) -> &'static str {",
+    "        match self {",
+    '            Self::BuildProgress => "build progress lines",',
+    '            Self::JavaScriptTestSuccess => "JavaScript test success lines",',
+    '            Self::PackageProgress => "package-manager progress lines",',
+    '            Self::RustTestSuccess => "Rust test success lines",',
+    "        }",
+    "    }",
+    "}",
+  ];
+  while (source.length < PREVIEW_CREATED_RUST_LINE_COUNT) {
+    const index = source.length + 1;
+    source.push(`const VALUE_${index}: usize = ${index} * 1_024;`);
+  }
+  return [
+    "--- /dev/null",
+    "+++ b/src-tauri/src/engine/native/output_compaction/semantic.rs",
+    `@@ -0,0 +1,${PREVIEW_CREATED_RUST_LINE_COUNT} @@`,
+    ...source.map((line) => `+${line}`),
+  ].join("\n");
+}
+
 function previewCommand(
   id: string,
   command: string,
@@ -56,6 +95,7 @@ function previewCommand(
     source: "agent",
     status: "completed",
     aggregatedOutput: null,
+    liveOutput: null,
     exitCode: 0,
     durationMs,
   };
@@ -65,33 +105,71 @@ const PREVIEW_PROJECTS = [
   {
     color: "#4ade80",
     name: "codex-app",
-    path: "D:\\ARQUIVOS IMPORTANTES\\REPOSITORIOS\\Tools\\codex-app",
+    path: "D:\\Workspaces\\codex-app",
   },
   {
     name: "streamplay-app",
-    path: "D:\\ARQUIVOS IMPORTANTES\\REPOSITORIOS\\apps\\streamplay-app",
+    path: "D:\\Workspaces\\streamplay-app",
   },
 ] as const satisfies readonly ProjectRecord[];
+
+function createPreviewProfileDailyUsage() {
+  const firstDay = Date.UTC(2025, 7, 24);
+  return Array.from({ length: 365 }, (_, index) => {
+    const date = new Date(firstDay + index * 86_400_000).toISOString().slice(0, 10);
+    const recent = index >= 210;
+    const active = recent && ((index * 13) % 19 <= 11 || index >= 358);
+    const tokens =
+      index === 341 ? 671_100_000 : active ? (24 + ((index * 47) % 260)) * 1_000_000 : 0;
+    return { date, tokens };
+  }).filter((bucket) => bucket.tokens > 0);
+}
 
 const PREVIEW_ACCOUNT = {
   account: {
     type: "chatgpt",
     email: null,
-    name: "Bruno",
+    name: "Ada",
     picture:
       "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23546673'/%3E%3Ccircle cx='32' cy='25' r='14' fill='%23f0c6a7'/%3E%3Cpath d='M8 64c3-17 13-25 24-25s21 8 24 25' fill='%23c03f77'/%3E%3Cpath d='M18 24c1-14 26-18 30 1-10-4-18-9-30-1' fill='%23302028'/%3E%3C/svg%3E",
-    planType: "plus",
+    planType: "pro",
   },
   requiresOpenaiAuth: true,
   refresh: { status: "notRequired", error: null },
 } as const satisfies AccountReadResponse;
 
 const PREVIEW_ACCOUNT_PROFILE = {
-  name: "Bruno",
+  displayName: "ADA",
+  username: "ada.dev",
   // The production endpoint only accepts HTTPS profile URLs. Keep the
   // self-contained data URI on the base account and exercise a valid nullable
   // profile response without weakening the IPC contract for browser preview.
   picture: null,
+  statisticsStatus: "available",
+  summary: {
+    lifetimeTokens: 9_000_000_000,
+    peakDailyTokens: 671_100_000,
+    longestRunningTurnSeconds: 28_020,
+    currentStreakDays: 7,
+    longestStreakDays: 20,
+  },
+  dailyUsage: createPreviewProfileDailyUsage(),
+  activityInsights: {
+    fastModePercent: 2,
+    mostUsedReasoningEffort: "max",
+    mostUsedReasoningEffortPercent: 76,
+    uniqueSkillsUsed: 1,
+    totalSkillsUsed: 1,
+    totalThreads: 660,
+    topInvocations: [
+      {
+        type: "plugin",
+        id: "test-android-apps",
+        name: "@test-android-apps",
+        usageCount: 1,
+      },
+    ],
+  },
 } as const satisfies AccountProfileResponse;
 
 const PREVIEW_CONFIG = {
@@ -132,7 +210,7 @@ const PREVIEW_ENGINE = {
       "scheduledAutomations",
     ],
   },
-  schemaVersion: 14,
+  schemaVersion: 17,
   config: PREVIEW_CONFIG,
   diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
   permissionProfiles: [
@@ -199,7 +277,7 @@ const PREVIEW_CHAT_MODEL_CATALOG = {
 } satisfies ChatModelListResponse;
 
 const PREVIEW_NOW_SECONDS = Math.floor(Date.now() / 1_000);
-const PREVIEW_WORKSPACE = "D:\\ARQUIVOS IMPORTANTES\\REPOSITORIOS\\apps\\streamplay-app";
+const PREVIEW_WORKSPACE = "D:\\Workspaces\\streamplay-app";
 const PREVIEW_IMAGE_ONE = previewSvg(`
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 220">
     <rect width="320" height="220" fill="#17191d"/>
@@ -248,6 +326,7 @@ const PREVIEW_SCROLL_ITEMS: readonly VisibleThreadItem[] = [
           name: "read_file",
           description: `Leitura de contrato ${step}`,
           status: "completed",
+          outputPresentation: { type: "sourceFile", path: "src/contracts/types.ts" },
           output: null,
         };
   }),
@@ -344,6 +423,31 @@ const PREVIEW_CONTEXT_THREAD = {
           ],
         },
         {
+          type: "fileChange",
+          id: "preview-isolated-file-change",
+          status: "completed",
+          changes: [
+            {
+              path: "crates/media-windows/src/windows/engine.rs",
+              kind: { type: "update", movePath: null },
+              lineStats: { additions: 6, deletions: 2 },
+              diff: [
+                "@@ -1,4 +1,7 @@",
+                " use std::time::Instant;",
+                "-const SAMPLE_COUNT: usize = 5;",
+                "-fn old_benchmark() {}",
+                "+#[test]",
+                "+fn benchmark_targeted_output_search() {",
+                "+    const TARGET_BYTES: usize = 64 * 1_024 * 1_024;",
+                '+    let message = r#"ready"#;',
+                '+    assert!(message.contains("ready"));',
+                "+}",
+                " fn helper() {}",
+              ].join("\n"),
+            },
+          ],
+        },
+        {
           type: "contextCompaction",
           id: "preview-context-compaction",
         },
@@ -357,13 +461,14 @@ const PREVIEW_CONTEXT_THREAD = {
           type: "commandExecution",
           id: "preview-command-1",
           command:
-            "$candidates = @('C:\\Users\\bruno\\.codex\\bin\\rtk.exe', 'C:\\Users\\bruno\\bin\\rtk.exe')",
+            "$candidates = @('C:\\Users\\Developer\\.codex\\bin\\rtk.exe', 'C:\\Users\\Developer\\bin\\rtk.exe')",
           cwd: PREVIEW_WORKSPACE,
           processId: null,
           startedAt: null,
           source: "agent",
           status: "completed",
           aggregatedOutput: null,
+          liveOutput: null,
           exitCode: 0,
           durationMs: 18,
         },
@@ -380,6 +485,7 @@ const PREVIEW_CONTEXT_THREAD = {
             "preview-command-output-2",
             "exit_code: 0\nstdout:\nsrc/ui/WindowChrome.tsx\nsrc/ui/turnFailure.ts\nsrc/ui/timelineScroll.ts\nsrc/ui/Timeline.tsx\nsrc/ui/SettingsDialog.tsx\nsrc/ui/Composer.tsx\nsrc/ui/AppShell.tsx\nsrc/state/threadRuntime.ts\nsrc/contracts/types.ts\n\nstderr:\n",
           ),
+          liveOutput: null,
           exitCode: 0,
           durationMs: 24,
         },
@@ -393,6 +499,7 @@ const PREVIEW_CONTEXT_THREAD = {
           source: "agent",
           status: "completed",
           aggregatedOutput: null,
+          liveOutput: null,
           exitCode: 0,
           durationMs: 31,
         },
@@ -406,6 +513,7 @@ const PREVIEW_CONTEXT_THREAD = {
           source: "agent",
           status: "completed",
           aggregatedOutput: null,
+          liveOutput: null,
           exitCode: 0,
           durationMs: 19,
         },
@@ -419,6 +527,7 @@ const PREVIEW_CONTEXT_THREAD = {
           source: "agent",
           status: "completed",
           aggregatedOutput: null,
+          liveOutput: null,
           exitCode: 0,
           durationMs: 28,
         },
@@ -432,6 +541,7 @@ const PREVIEW_CONTEXT_THREAD = {
           source: "agent",
           status: "completed",
           aggregatedOutput: null,
+          liveOutput: null,
           exitCode: 0,
           durationMs: 14,
         },
@@ -445,6 +555,7 @@ const PREVIEW_CONTEXT_THREAD = {
           source: "agent",
           status: "completed",
           aggregatedOutput: null,
+          liveOutput: null,
           exitCode: 0,
           durationMs: 410,
         },
@@ -458,6 +569,7 @@ const PREVIEW_CONTEXT_THREAD = {
           source: "agent",
           status: "completed",
           aggregatedOutput: null,
+          liveOutput: null,
           exitCode: 0,
           durationMs: 1_240,
         },
@@ -471,6 +583,7 @@ const PREVIEW_CONTEXT_THREAD = {
           source: "agent",
           status: "completed",
           aggregatedOutput: null,
+          liveOutput: null,
           exitCode: 0,
           durationMs: 17,
         },
@@ -482,6 +595,7 @@ const PREVIEW_CONTEXT_THREAD = {
             {
               path: "src/preview/setupBrowserPreview.ts",
               kind: { type: "update", movePath: null },
+              lineStats: { additions: 2, deletions: 2 },
               diff: [
                 "@@ -22,6 +22,6 @@ const PREVIEW_PERMISSION_PROFILE = {",
                 '   approvals: "never",',
@@ -493,7 +607,66 @@ const PREVIEW_CONTEXT_THREAD = {
                 '+const PREVIEW_REASONING_EFFORT = "low";',
               ].join("\n"),
             },
+            {
+              path: "src-tauri/src/engine/native/output_compaction/semantic.rs",
+              kind: { type: "add" },
+              lineStats: { additions: PREVIEW_CREATED_RUST_LINE_COUNT, deletions: 0 },
+              diff: previewCreatedRustDiff(),
+            },
+            {
+              path: "src-tauri/src/engine/native/terminal_output.rs",
+              kind: { type: "delete" },
+              lineStats: { additions: 0, deletions: 288 },
+              diff: [
+                "--- a/src-tauri/src/engine/native/terminal_output.rs",
+                "+++ /dev/null",
+                "@@ -1,3 +0,0 @@",
+                "-use std::fs::File;",
+                "-use std::io::{Read, Write};",
+                "-pub fn normalize_terminal_output() {}",
+                "[diff truncated]",
+              ].join("\n"),
+            },
           ],
+        },
+        {
+          type: "toolExecution",
+          id: "preview-source-read",
+          name: "read_file",
+          description: "Read src/ui/syntax/diffHighlighter.test.ts",
+          status: "completed",
+          outputPresentation: {
+            type: "sourceFile",
+            path: "src/ui/syntax/diffHighlighter.test.ts",
+          },
+          output: previewOutput(
+            "preview-source-read-output",
+            [
+              '20:     const continuation = highlighter.render(document, "src/main.rs", 4);',
+              "21: ",
+              '22:     expect(opening?.some((token) => token.kind === "comment")).toBe(true);',
+              '23:     expect(continuation?.map((token) => token.kind)).toEqual(["comment"]);',
+              '24:     expect(continuation === null ? null : continuation.map((token) => token.text).join("")).toBe(',
+              '25:       "       continues */",',
+              "26:     );",
+              "27:   });",
+            ].join("\n"),
+          ),
+        },
+        {
+          type: "toolExecution",
+          id: "preview-search-results",
+          name: "search_text",
+          description: "Search syntax highlighter usage",
+          status: "completed",
+          outputPresentation: { type: "searchResults" },
+          output: previewOutput(
+            "preview-search-results-output",
+            [
+              'src/ui/syntax/diffHighlighter.test.ts:20:const continuation = highlighter.render(document, "src/main.rs", 4);',
+              "src-tauri/src/engine/native/tools/fs.rs:104:let queries = search_query_variants(&args.query);",
+            ].join("\n"),
+          ),
         },
         {
           type: "toolExecution",
@@ -501,6 +674,7 @@ const PREVIEW_CONTEXT_THREAD = {
           name: "web_search",
           description: "Codex app activity files commands",
           status: "completed",
+          outputPresentation: { type: "plainText" },
           output: null,
         },
         {
@@ -509,6 +683,7 @@ const PREVIEW_CONTEXT_THREAD = {
           name: "web_search",
           description: "Codex app work activity messages",
           status: "completed",
+          outputPresentation: { type: "plainText" },
           output: null,
         },
         {
@@ -517,6 +692,7 @@ const PREVIEW_CONTEXT_THREAD = {
           name: "web_search",
           description: "https://developers.openai.com/codex/app/",
           status: "completed",
+          outputPresentation: { type: "plainText" },
           output: null,
         },
         {
@@ -534,6 +710,7 @@ const PREVIEW_CONTEXT_THREAD = {
           name: "view_image",
           description: "Visualizou uma imagem",
           status: "completed",
+          outputPresentation: { type: "plainText" },
           output: previewOutput(
             "preview-image-output",
             JSON.stringify({ image_url: PREVIEW_IMAGE_ONE }),
@@ -555,6 +732,17 @@ const PREVIEW_CONTEXT_THREAD = {
           source: "agent",
           status: "inProgress",
           aggregatedOutput: null,
+          liveOutput: {
+            stdout: [
+              "vite v8.2.2 building client environment for production...",
+              "transforming...",
+              "✓ 115 modules transformed.",
+              ...Array.from({ length: 24 }, (_, index) => `rendering chunk ${index + 1}/24...`),
+              "computing gzip size...",
+            ].join("\n"),
+            stderr: "warning: release validation is still running\n",
+            truncated: false,
+          },
           exitCode: null,
           durationMs: null,
         },
@@ -629,6 +817,7 @@ const PREVIEW_CHAT_REFERENCE_THREAD = {
           name: "read_output",
           description: "Read stored output preview-chat-terminal",
           status: "completed",
+          outputPresentation: { type: "plainText" },
           output: previewOutput(
             "preview-chat-terminal-output",
             "Os processos terminaram sem erros.\n",
@@ -729,18 +918,71 @@ function previewThreadSummary(thread: CodexThread): ThreadSummary {
 
 const PREVIEW_RATE_LIMITS = {
   rateLimits: {
-    limitId: null,
+    limitId: "codex",
     limitName: null,
-    primary: { usedPercent: 21, windowDurationMins: 300, resetsAt: null },
-    secondary: null,
-    credits: null,
+    primary: {
+      usedPercent: 43,
+      windowDurationMins: 300,
+      resetsAt: Date.parse("2026-08-22T11:45:00-03:00"),
+    },
+    secondary: {
+      usedPercent: 93,
+      windowDurationMins: 10_080,
+      resetsAt: Date.parse("2026-08-27T05:38:00-03:00"),
+    },
+    credits: { hasCredits: true, unlimited: false, balance: "R$ 0" },
     individualLimit: null,
     spendControlReached: null,
-    planType: "plus",
+    planType: "pro",
     rateLimitReachedType: null,
   },
-  rateLimitsByLimitId: {},
+  rateLimitsByLimitId: {
+    codex_spark: {
+      limitId: "codex_spark",
+      limitName: "GPT-5.3-Codex-Spark",
+      primary: {
+        usedPercent: 0,
+        windowDurationMins: 300,
+        resetsAt: Date.parse("2026-08-22T08:45:00-03:00"),
+      },
+      secondary: {
+        usedPercent: 100,
+        windowDurationMins: 10_080,
+        resetsAt: Date.parse("2026-08-23T06:03:00-03:00"),
+      },
+      credits: null,
+      individualLimit: null,
+      spendControlReached: null,
+      planType: "pro",
+      rateLimitReachedType: null,
+    },
+  },
+  planPrice: { amount: 52_500, currency: "BRL", minorUnitExponent: 2 },
 } as const satisfies AccountRateLimitsResponse;
+
+let previewUsageResets: UsageResetCreditsResponse = {
+  credits: [
+    {
+      id: "preview-reset-credit",
+      title: "Redefinição completa",
+      status: "available",
+      expiresAt: Date.parse("2026-09-20T21:16:00-03:00"),
+    },
+  ],
+  availableCount: 1,
+  immediateResetPurchaseEligible: true,
+};
+
+let previewAutoTopUpSettings: AutoTopUpSettingsSnapshot = {
+  available: true,
+  isEnabled: false,
+  hasPaymentMethod: true,
+  rechargeThreshold: "125",
+  rechargeTarget: "250",
+  rechargeMonthlyLimit: null,
+  autoReloadCreditDiscountPolicy: "volume_discount_with_auto_reload_incentive_v1",
+  maximumDiscountPercent: 40,
+};
 
 let previewApplicationPreferences: ApplicationPreferences = {
   schemaVersion: 1,
@@ -877,6 +1119,46 @@ export function setupBrowserPreview(): void {
           };
         case "engine_account_rate_limits_read":
           return PREVIEW_RATE_LIMITS;
+        case "engine_account_usage_resets_read":
+          return previewUsageResets;
+        case "engine_account_usage_reset_redeem": {
+          const request = (args as { request?: { creditId?: string | null } }).request;
+          const redeemedId = request?.creditId ?? previewUsageResets.credits[0]?.id ?? null;
+          previewUsageResets = {
+            ...previewUsageResets,
+            availableCount: Math.max(0, previewUsageResets.availableCount - 1),
+            credits: previewUsageResets.credits.filter((credit) => credit.id !== redeemedId),
+          };
+          return { code: "reset", creditId: redeemedId };
+        }
+        case "engine_account_auto_top_up_read":
+          return previewAutoTopUpSettings;
+        case "engine_account_auto_top_up_enable":
+        case "engine_account_auto_top_up_update": {
+          const request = (
+            args as {
+              request?: {
+                rechargeMonthlyLimit?: string | null;
+                rechargeTarget?: string;
+                rechargeThreshold?: string;
+              };
+            }
+          ).request;
+          previewAutoTopUpSettings = {
+            ...previewAutoTopUpSettings,
+            isEnabled: true,
+            rechargeMonthlyLimit: request?.rechargeMonthlyLimit ?? null,
+            rechargeTarget: request?.rechargeTarget ?? "250",
+            rechargeThreshold: request?.rechargeThreshold ?? "125",
+          };
+          return previewAutoTopUpSettings;
+        }
+        case "engine_account_auto_top_up_disable":
+          previewAutoTopUpSettings = {
+            ...previewAutoTopUpSettings,
+            isEnabled: false,
+          };
+          return previewAutoTopUpSettings;
         case "application_preferences_read":
           return previewApplicationPreferences;
         case "application_preferences_update": {

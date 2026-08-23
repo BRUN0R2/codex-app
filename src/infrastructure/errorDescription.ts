@@ -4,12 +4,27 @@ const MAX_DIAGNOSTIC_DETAIL_CHARACTERS = 4_000;
 const MAX_DIAGNOSTIC_CAUSE_DEPTH = 4;
 
 export function describeError(reason: unknown): string {
+  return describeErrorAt(reason, new Set<Error>(), 0);
+}
+
+function describeErrorAt(reason: unknown, ancestors: Set<Error>, depth: number): string {
   const commandError = decodeCommandError(reason);
   if (commandError !== null) {
     return commandError.message;
   }
   if (reason instanceof Error) {
-    return reason.message;
+    const message = reason.message.trim();
+    if (
+      (message.length === 0 || message === "Unknown error") &&
+      reason.cause !== undefined &&
+      depth < MAX_DIAGNOSTIC_CAUSE_DEPTH &&
+      !ancestors.has(reason)
+    ) {
+      const nextAncestors = new Set(ancestors);
+      nextAncestors.add(reason);
+      return describeErrorAt(reason.cause, nextAncestors, depth + 1);
+    }
+    return message || "Ocorreu um erro inesperado.";
   }
   if (typeof reason === "string" && reason.length > 0) {
     return reason;

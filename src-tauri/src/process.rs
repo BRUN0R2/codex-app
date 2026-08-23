@@ -5,10 +5,14 @@ use tokio::process::Command;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
+const WINDOWS_POWERSHELL_EXECUTABLE: &str = "pwsh.exe";
+#[cfg(windows)]
 const WINDOWS_POWERSHELL_SESSION_SETUP: &str = concat!(
-    "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); ",
-    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ",
-    "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); ",
+    "$__codexUtf8NoBom = [System.Text.UTF8Encoding]::new($false); ",
+    "[Console]::InputEncoding = $__codexUtf8NoBom; ",
+    "[Console]::OutputEncoding = $__codexUtf8NoBom; ",
+    "$OutputEncoding = $__codexUtf8NoBom; ",
+    "$PSDefaultParameterValues['*:Encoding'] = 'utf8NoBOM'; ",
     "$PSDefaultParameterValues['Start-Process:WindowStyle'] = 'Hidden'; ",
     "$PSDefaultParameterValues['Start-Process:Wait'] = $true;"
 );
@@ -22,7 +26,7 @@ pub(crate) fn headless_command(program: impl AsRef<OsStr>) -> Command {
 
 #[cfg(windows)]
 pub(crate) fn headless_shell_command(command: &str) -> Command {
-    let mut process = headless_command("powershell.exe");
+    let mut process = headless_command(WINDOWS_POWERSHELL_EXECUTABLE);
     let script = format!("{WINDOWS_POWERSHELL_SESSION_SETUP}\n{command}");
     process.args([
         "-NoLogo",
@@ -44,6 +48,8 @@ pub(crate) fn headless_shell_command(command: &str) -> Command {
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
+    use std::path::Path;
+    #[cfg(windows)]
     use std::time::{Duration, Instant};
 
     #[cfg(windows)]
@@ -51,20 +57,77 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn powershell_session_is_utf8_headless_and_joined() {
+    async fn powershell_session_is_modern_utf8_headless_and_joined() {
         let output = headless_shell_command(
-            "Write-Output \"$($PSDefaultParameterValues['Start-Process:WindowStyle'])|$($PSDefaultParameterValues['Start-Process:Wait'])|$([char]0x00E1)\"",
+            "Write-Output \"$($PSVersionTable.PSEdition)|$($PSVersionTable.PSVersion.Major)|$([Console]::InputEncoding.WebName)|$([Console]::OutputEncoding.WebName)|$($OutputEncoding.WebName)|$($PSDefaultParameterValues['*:Encoding'])|$($PSDefaultParameterValues['Start-Process:WindowStyle'])|$($PSDefaultParameterValues['Start-Process:Wait'])|$([char]0x00E1)\"",
         )
         .output()
         .await
         .expect("PowerShell should execute");
 
         assert!(output.status.success());
+        let text = std::str::from_utf8(&output.stdout)
+            .expect("PowerShell output should be valid UTF-8")
+            .trim();
+        let fields = text.split('|').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 9);
+        assert_eq!(fields[0], "Core");
+        assert!(fields[1].parse::<u32>().is_ok_and(|major| major >= 7));
+        assert_eq!(&fields[2..6], &["utf-8", "utf-8", "utf-8", "utf8NoBOM"]);
+        assert_eq!(&fields[6..], &["Hidden", "True", "á"]);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn powershell_file_commands_write_utf8_without_bom() {
+        const CONTENT: &str = "ação, edição, coração, maçã e ÁÉÍÓÚ";
+
+        let directory = tempfile::tempdir().expect("temporary directory should exist");
+        let redirect = directory.path().join("redirect.txt");
+        let set_content = directory.path().join("set-content.txt");
+        let out_file = directory.path().join("out-file.txt");
+        let script = format!(
+            "$value = '{CONTENT}'; $value > '{}'; Set-Content -LiteralPath '{}' -Value $value; Out-File -LiteralPath '{}' -InputObject $value",
+            powershell_literal(&redirect),
+            powershell_literal(&set_content),
+            powershell_literal(&out_file),
+        );
+        let output = headless_shell_command(&script)
+            .output()
+            .await
+            .expect("PowerShell should execute");
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for path in [&redirect, &set_content, &out_file] {
+            let bytes = std::fs::read(path).expect("PowerShell output file should exist");
+            assert!(!bytes.starts_with(&[0xef, 0xbb, 0xbf]));
+            assert_eq!(
+                std::str::from_utf8(&bytes)
+                    .expect("PowerShell output file should be valid UTF-8")
+                    .trim_end(),
+                CONTENT
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cmd_output_inherits_the_utf8_console_contract() {
+        let output = headless_shell_command(r#"cmd.exe /d /s /c "echo ação çãõ ÁÉÍÓÚ""#)
+            .output()
+            .await
+            .expect("cmd should execute through PowerShell");
+
+        assert!(output.status.success());
         assert_eq!(
             std::str::from_utf8(&output.stdout)
-                .expect("PowerShell output should be valid UTF-8")
+                .expect("cmd output should be valid UTF-8")
                 .trim(),
-            "Hidden|True|á"
+            "ação çãõ ÁÉÍÓÚ"
         );
     }
 
@@ -73,7 +136,7 @@ mod tests {
     async fn start_process_waits_for_its_hidden_child() {
         let started_at = Instant::now();
         let output = headless_shell_command(
-            "Start-Process -FilePath powershell.exe -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Milliseconds 250'); Write-Output 'completed'",
+            "Start-Process -FilePath pwsh.exe -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Milliseconds 250'); Write-Output 'completed'",
         )
         .output()
         .await
@@ -87,5 +150,12 @@ mod tests {
             "completed"
         );
         assert!(started_at.elapsed() >= Duration::from_millis(150));
+    }
+
+    #[cfg(windows)]
+    fn powershell_literal(path: &Path) -> String {
+        path.to_str()
+            .expect("temporary test path should be valid Unicode")
+            .replace('\'', "''")
     }
 }

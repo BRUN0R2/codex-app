@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
@@ -17,6 +17,7 @@ const MAX_ATTACHMENT_COUNT: usize = 12;
 const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_PASTED_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_PASTED_IMAGE_BASE64_BYTES: usize = MAX_PASTED_IMAGE_BYTES.div_ceil(3) * 4;
+const ATTACHMENT_DIRECTORY: &str = "attachments";
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -61,7 +62,10 @@ struct ImageFormat {
 }
 
 #[tauri::command]
-pub async fn attachment_inspect(paths: Vec<String>) -> CommandResult<Vec<Attachment>> {
+pub async fn attachment_inspect(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> CommandResult<Vec<Attachment>> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
@@ -74,7 +78,11 @@ pub async fn attachment_inspect(paths: Vec<String>) -> CommandResult<Vec<Attachm
 
     let mut attachments = Vec::with_capacity(paths.len());
     for path in paths {
-        attachments.push(inspect_path(&path).await.map_err(CommandError::from)?);
+        attachments.push(
+            persist_attachment(&app, &path)
+                .await
+                .map_err(CommandError::from)?,
+        );
     }
     Ok(attachments)
 }
@@ -113,20 +121,14 @@ pub async fn attachment_save_pasted_image(
     let format = detect_image_format(&bytes).ok_or_else(|| {
         AppError::InvalidAttachment("clipboard image must be PNG, JPEG, GIF, or WebP".into())
     })?;
-    let cache_directory = app
+    let attachment_directory = app
         .path()
-        .app_cache_dir()
+        .app_local_data_dir()
         .map_err(|error| AppError::FileSystem(error.to_string()))?
-        .join("attachments");
-    tokio::fs::create_dir_all(&cache_directory)
-        .await
-        .map_err(|error| AppError::FileSystem(error.to_string()))?;
+        .join(ATTACHMENT_DIRECTORY);
 
     let name = format!("pasted-{}.{}", Uuid::now_v7(), format.extension);
-    let path = cache_directory.join(&name);
-    write_new_file_atomically(&path, &bytes)
-        .await
-        .map_err(|error| AppError::FileSystem(error.to_string()))?;
+    let path = persist_attachment_bytes(&attachment_directory, &name, &bytes).await?;
 
     Ok(Attachment {
         id: Uuid::now_v7().to_string(),
@@ -136,6 +138,18 @@ pub async fn attachment_save_pasted_image(
         size: bytes.len() as u64,
         media_type: Some(format.media_type.into()),
     })
+}
+
+pub(crate) async fn persist_attachment(
+    app: &AppHandle,
+    source_path: &str,
+) -> Result<Attachment, AppError> {
+    let attachment_directory = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| AppError::FileSystem(error.to_string()))?
+        .join(ATTACHMENT_DIRECTORY);
+    persist_attachment_at(&attachment_directory, source_path).await
 }
 
 #[tauri::command]
@@ -233,6 +247,69 @@ pub async fn inspect_path(path: &str) -> Result<Attachment, AppError> {
     })
 }
 
+async fn persist_attachment_at(
+    attachment_directory: &Path,
+    source_path: &str,
+) -> Result<Attachment, AppError> {
+    let source = inspect_path(source_path).await?;
+    tokio::fs::create_dir_all(attachment_directory)
+        .await
+        .map_err(|error| AppError::FileSystem(error.to_string()))?;
+    let canonical_directory = tokio::fs::canonicalize(attachment_directory)
+        .await
+        .map_err(|error| AppError::FileSystem(error.to_string()))?;
+    let canonical_source = tokio::fs::canonicalize(&source.path)
+        .await
+        .map_err(|error| AppError::InvalidAttachment(error.to_string()))?;
+    if canonical_source.starts_with(&canonical_directory) {
+        return Ok(source);
+    }
+
+    let bytes = tokio::fs::read(&canonical_source)
+        .await
+        .map_err(|error| AppError::InvalidAttachment(error.to_string()))?;
+    if bytes.len() as u64 != source.size || bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        return Err(AppError::InvalidAttachment(
+            "attachment changed while its durable snapshot was being created".into(),
+        ));
+    }
+    if let Some(media_type) = source.media_type.as_deref()
+        && detect_image_media_type(&bytes) != Some(media_type)
+    {
+        return Err(AppError::InvalidAttachment(
+            "image changed while its durable snapshot was being created".into(),
+        ));
+    }
+
+    let path = persist_attachment_bytes(attachment_directory, &source.name, &bytes).await?;
+    inspect_path(&path.to_string_lossy()).await
+}
+
+async fn persist_attachment_bytes(
+    attachment_directory: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, AppError> {
+    tokio::fs::create_dir_all(attachment_directory)
+        .await
+        .map_err(|error| AppError::FileSystem(error.to_string()))?;
+    let snapshot_directory = attachment_directory.join(Uuid::now_v7().to_string());
+    tokio::fs::create_dir(&snapshot_directory)
+        .await
+        .map_err(|error| AppError::FileSystem(error.to_string()))?;
+    let path = snapshot_directory.join(name);
+    if let Err(error) = write_new_file_atomically(&path, bytes).await {
+        let cleanup_result = tokio::fs::remove_dir_all(&snapshot_directory).await;
+        return match cleanup_result {
+            Ok(()) => Err(AppError::FileSystem(error.to_string())),
+            Err(cleanup_error) => Err(AppError::FileSystem(format!(
+                "{error}; attachment snapshot cleanup also failed: {cleanup_error}"
+            ))),
+        };
+    }
+    Ok(path)
+}
+
 fn media_type_from_extension(path: &Path) -> Option<&'static str> {
     match path
         .extension()
@@ -325,7 +402,7 @@ async fn write_new_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_image_format, image_data_url};
+    use super::{detect_image_format, image_data_url, inspect_path, persist_attachment_at};
 
     #[test]
     fn detects_supported_image_signatures() {
@@ -344,5 +421,69 @@ mod tests {
             image_data_url("image/png", b"hello"),
             "data:image/png;base64,aGVsbG8="
         );
+    }
+
+    #[tokio::test]
+    async fn durable_attachment_snapshot_survives_source_removal_and_preserves_name() {
+        let directory = tempfile::tempdir().expect("temporary directory should exist");
+        let source = directory.path().join("captura.png");
+        let attachment_directory = directory.path().join("managed");
+        let bytes = b"\x89PNG\r\n\x1a\nfixture";
+        tokio::fs::write(&source, bytes)
+            .await
+            .expect("source image should exist");
+
+        let attachment = persist_attachment_at(
+            &attachment_directory,
+            source
+                .to_str()
+                .expect("temporary source path should be valid Unicode"),
+        )
+        .await
+        .expect("attachment should be snapshotted");
+        tokio::fs::remove_file(&source)
+            .await
+            .expect("source image should be removable");
+
+        assert_eq!(attachment.name, "captura.png");
+        assert_ne!(attachment.path, source.to_string_lossy());
+        assert_eq!(
+            tokio::fs::read(&attachment.path)
+                .await
+                .expect("durable image should remain"),
+            bytes
+        );
+        assert_eq!(
+            inspect_path(&attachment.path)
+                .await
+                .expect("durable image should remain valid")
+                .kind,
+            super::AttachmentKind::Image
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_attachment_is_reused_without_another_snapshot() {
+        let directory = tempfile::tempdir().expect("temporary directory should exist");
+        let source = directory.path().join("documento.txt");
+        let attachment_directory = directory.path().join("managed");
+        tokio::fs::write(&source, "conteúdo em português")
+            .await
+            .expect("source file should exist");
+        let first = persist_attachment_at(
+            &attachment_directory,
+            source
+                .to_str()
+                .expect("temporary source path should be valid Unicode"),
+        )
+        .await
+        .expect("attachment should be snapshotted");
+
+        let second = persist_attachment_at(&attachment_directory, &first.path)
+            .await
+            .expect("managed attachment should be reused");
+
+        assert_eq!(second.path, first.path);
+        assert_eq!(second.name, first.name);
     }
 }

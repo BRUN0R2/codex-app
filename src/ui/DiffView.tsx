@@ -7,7 +7,9 @@ import {
   type DiffVirtualRange,
 } from "./diffViewport";
 import { observeElementResize } from "./elementResize";
-import { escapeHtml, highlightCode } from "./syntaxHighlight";
+import type { SyntaxLine } from "./syntax/contracts";
+import { DiffSyntaxHighlighter } from "./syntax/diffHighlighter";
+import { SyntaxTokens } from "./syntax/SyntaxTokens";
 
 export type DiffDisplayMode = "split" | "unified";
 
@@ -15,9 +17,6 @@ interface DiffViewportMetrics {
   readonly height: number;
   readonly scrollTop: number;
 }
-
-const MAX_HIGHLIGHT_CACHE_ENTRIES = 4_096;
-const MAX_HIGHLIGHT_LINE_CHARACTERS = 10_000;
 
 export function DiffView(props: {
   readonly document: DiffDocument;
@@ -28,15 +27,14 @@ export function DiffView(props: {
   let releaseResizeObservation: (() => void) | undefined;
   let measurementFrame: number | undefined;
   let observedIdentity = "";
-  const highlighter = new BoundedDiffHighlighter();
+  const highlighter = new DiffSyntaxHighlighter();
   const [viewport, setViewport] = createSignal<DiffViewportMetrics>({
     height: 1,
     scrollTop: 0,
   });
+  const splitProjection = createMemo(() => props.document.splitProjection());
   const rowCount = createMemo(() =>
-    props.mode === "split"
-      ? props.document.splitProjection().rows.length
-      : props.document.unifiedRows.length,
+    props.mode === "split" ? splitProjection().rows.length : props.document.unifiedRows.length,
   );
   const range = createMemo<DiffVirtualRange>(() =>
     calculateDiffVirtualRange({
@@ -51,15 +49,20 @@ export function DiffView(props: {
   });
   const splitRows = createMemo(() => {
     const currentRange = range();
-    return props.document.splitProjection().rows.slice(currentRange.start, currentRange.end);
+    return splitProjection().rows.slice(currentRange.start, currentRange.end);
   });
   const canvasWidth = createMemo(() => {
+    const lineNumberColumns =
+      props.document.oldLineNumberDigits + props.document.newLineNumberDigits;
     if (props.mode === "split") {
-      const projection = props.document.splitProjection();
+      const projection = splitProjection();
       const columns = Math.max(1, projection.leftMaximumColumns + projection.rightMaximumColumns);
-      return `max(100%, calc(176px + ${columns}ch))`;
+      return `max(100%, calc(${columns + lineNumberColumns}ch + 48px))`;
     }
-    return `max(100%, calc(112px + ${Math.max(1, props.document.unifiedMaximumColumns)}ch))`;
+    return `max(100%, calc(${Math.max(
+      1,
+      props.document.unifiedMaximumColumns + lineNumberColumns,
+    )}ch + 38px))`;
   });
 
   function measureViewport(): void {
@@ -115,6 +118,7 @@ export function DiffView(props: {
   return (
     <div
       class={`diff-viewport is-${props.mode}`}
+      data-timeline-scroll-region=""
       onScroll={scheduleViewportMeasurement}
       ref={viewportElement}
       // biome-ignore lint/a11y/noNoninteractiveTabindex: the virtual diff viewport must remain keyboard-scrollable without mounting the full document.
@@ -125,6 +129,8 @@ export function DiffView(props: {
         aria-rowcount={rowCount()}
         class="diff-virtual-table"
         style={{
+          "--diff-new-line-number-width": `calc(${props.document.newLineNumberDigits}ch + 8px)`,
+          "--diff-old-line-number-width": `calc(${props.document.oldLineNumberDigits}ch + 8px)`,
           width: canvasWidth(),
         }}
       >
@@ -140,13 +146,13 @@ export function DiffView(props: {
               <For each={unifiedRows()}>
                 {(row, relativeIndex) => (
                   <UnifiedDiffRowView
-                    highlighted={
-                      row.type === "addition" || row.type === "deletion"
-                        ? highlighter.render(row.content, props.path)
-                        : escapeHtml(row.content)
-                    }
                     row={row}
                     rowIndex={range().start + relativeIndex()}
+                    tokens={highlighter.render(
+                      props.document,
+                      props.path,
+                      range().start + relativeIndex(),
+                    )}
                     top={range().offsetTop + relativeIndex() * DIFF_ROW_HEIGHT_PX}
                   />
                 )}
@@ -156,9 +162,24 @@ export function DiffView(props: {
             <For each={splitRows()}>
               {(row, relativeIndex) => (
                 <SplitDiffRowView
-                  highlight={(content) => highlighter.render(content, props.path)}
+                  leftTokens={highlighter.render(
+                    props.document,
+                    props.path,
+                    splitSourceIndex(
+                      splitProjection().leftSourceIndexes,
+                      range().start + relativeIndex(),
+                    ),
+                  )}
                   row={row}
                   rowIndex={range().start + relativeIndex()}
+                  rightTokens={highlighter.render(
+                    props.document,
+                    props.path,
+                    splitSourceIndex(
+                      splitProjection().rightSourceIndexes,
+                      range().start + relativeIndex(),
+                    ),
+                  )}
                   top={range().offsetTop + relativeIndex() * DIFF_ROW_HEIGHT_PX}
                 />
               )}
@@ -170,10 +191,18 @@ export function DiffView(props: {
   );
 }
 
+function splitSourceIndex(indexes: Uint32Array, rowIndex: number): number | null {
+  const sourceIndex = indexes[rowIndex];
+  if (sourceIndex === undefined) {
+    throw new Error(`Split diff source index ${rowIndex} does not exist.`);
+  }
+  return sourceIndex === 0 ? null : sourceIndex - 1;
+}
+
 function UnifiedDiffRowView(props: {
-  readonly highlighted: string;
   readonly row: UnifiedDiffLine;
   readonly rowIndex: number;
+  readonly tokens: SyntaxLine | null;
   readonly top: number;
 }) {
   const header = () => props.row.type === "hunk" || props.row.type === "meta";
@@ -197,7 +226,9 @@ function UnifiedDiffRowView(props: {
               {props.row.type === "addition" ? "+" : props.row.type === "deletion" ? "−" : ""}
             </td>
             <td class="unified-diff-code">
-              <code innerHTML={props.highlighted} />
+              <code>
+                <SyntaxTokens content={props.row.content} tokens={props.tokens} />
+              </code>
             </td>
           </>
         }
@@ -211,9 +242,10 @@ function UnifiedDiffRowView(props: {
 }
 
 function SplitDiffRowView(props: {
-  readonly highlight: (content: string) => string;
+  readonly leftTokens: SyntaxLine | null;
   readonly row: SplitDiffRow;
   readonly rowIndex: number;
+  readonly rightTokens: SyntaxLine | null;
   readonly top: number;
 }) {
   const header = () => props.row.leftType === "header";
@@ -231,25 +263,17 @@ function SplitDiffRowView(props: {
               {props.row.leftNumber ?? ""}
             </th>
             <td class={`split-diff-cell left ${props.row.leftType}`}>
-              <code
-                innerHTML={
-                  props.row.leftType === "removed"
-                    ? props.highlight(props.row.leftContent)
-                    : escapeHtml(props.row.leftContent)
-                }
-              />
+              <code>
+                <SyntaxTokens content={props.row.leftContent} tokens={props.leftTokens} />
+              </code>
             </td>
             <th class="diff-line-number right" scope="row">
               {props.row.rightNumber ?? ""}
             </th>
             <td class={`split-diff-cell right ${props.row.rightType}`}>
-              <code
-                innerHTML={
-                  props.row.rightType === "added"
-                    ? props.highlight(props.row.rightContent)
-                    : escapeHtml(props.row.rightContent)
-                }
-              />
+              <code>
+                <SyntaxTokens content={props.row.rightContent} tokens={props.rightTokens} />
+              </code>
             </td>
           </>
         }
@@ -260,38 +284,4 @@ function SplitDiffRowView(props: {
       </Show>
     </tr>
   );
-}
-
-class BoundedDiffHighlighter {
-  readonly #entries = new Map<string, string>();
-  #path = "";
-
-  render(content: string, path: string): string {
-    if (this.#path !== path) {
-      this.#path = path;
-      this.#entries.clear();
-    }
-    if (content.length > MAX_HIGHLIGHT_LINE_CHARACTERS) {
-      return escapeHtml(content);
-    }
-    const cached = this.#entries.get(content);
-    if (cached !== undefined) {
-      return cached;
-    }
-    const highlighted = highlightCode(content, fileExtension(path));
-    if (this.#entries.size >= MAX_HIGHLIGHT_CACHE_ENTRIES) {
-      const oldest = this.#entries.keys().next().value;
-      if (oldest !== undefined) {
-        this.#entries.delete(oldest);
-      }
-    }
-    this.#entries.set(content, highlighted);
-    return highlighted;
-  }
-}
-
-function fileExtension(path: string): string | undefined {
-  const file = path.split(/[\\/]/u).at(-1) ?? path;
-  const extension = file.includes(".") ? file.split(".").at(-1) : undefined;
-  return extension?.toLowerCase();
 }

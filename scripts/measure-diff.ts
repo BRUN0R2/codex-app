@@ -2,11 +2,18 @@ import { performance } from "node:perf_hooks";
 
 import { createDiffDocument, summarizeDiff } from "../src/ui/diffDocument.ts";
 import { calculateDiffVirtualRange, DIFF_ROW_HEIGHT_PX } from "../src/ui/diffViewport.ts";
-import { highlightCode } from "../src/ui/syntaxHighlight.ts";
+import type { SyntaxBlock, SyntaxLimits } from "../src/ui/syntax/contracts.ts";
+import { DiffSyntaxHighlighter } from "../src/ui/syntax/diffHighlighter.ts";
+import { tokenizeSyntaxBlock } from "../src/ui/syntax/tokenizer.ts";
 
 const MODIFICATION_COUNT = 50_000;
 const VIEWPORT_QUERY_COUNT = 100_000;
 const SAMPLE_COUNT = 5;
+const SINGLE_LINE_SYNTAX_LIMITS: SyntaxLimits = {
+  maximumBytes: 64 * 1_024,
+  maximumLineCharacters: 10_000,
+  maximumLines: 1,
+};
 const diff = createSyntheticDiff(MODIFICATION_COUNT);
 
 const statsMeasurement = measure(() => summarizeDiff(diff));
@@ -16,7 +23,9 @@ const splitProjectionMilliseconds = duration(() => document.splitProjection());
 let fullHighlightChecksum = 0;
 const fullHighlightMilliseconds = duration(() => {
   for (const row of document.unifiedRows) {
-    fullHighlightChecksum += highlightCode(row.content, "ts").length;
+    fullHighlightChecksum += tokenCount(
+      tokenizeSyntaxBlock(row.content, "typescript", SINGLE_LINE_SYNTAX_LIMITS),
+    );
   }
 });
 let maximumMountedRows = 0;
@@ -47,10 +56,49 @@ const representativeRows = document.unifiedRows.slice(
   representativeRange.end,
 );
 let visibleHighlightChecksum = 0;
-const visibleHighlightMilliseconds = duration(() => {
+const statelessVisibleHighlightMilliseconds = duration(() => {
   for (const row of representativeRows) {
-    visibleHighlightChecksum += highlightCode(row.content, "ts").length;
+    visibleHighlightChecksum += tokenCount(
+      tokenizeSyntaxBlock(row.content, "typescript", SINGLE_LINE_SYNTAX_LIMITS),
+    );
   }
+});
+const representativeDiff = createSyntheticDiff(80);
+const representativeDocument = createDiffDocument(representativeDiff);
+const representativeSyntaxRange = calculateDiffVirtualRange({
+  rowCount: representativeDocument.unifiedRows.length,
+  scrollTop: (representativeDocument.unifiedRows.length * DIFF_ROW_HEIGHT_PX) / 2,
+  viewportHeight: 900,
+});
+const representativeSyntaxRows = representativeDocument.unifiedRows.slice(
+  representativeSyntaxRange.start,
+  representativeSyntaxRange.end,
+);
+const highlighter = new DiffSyntaxHighlighter();
+let statefulHighlightChecksum = 0;
+const coldVisibleHighlightMilliseconds = duration(() => {
+  for (const [index] of representativeSyntaxRows.entries()) {
+    statefulHighlightChecksum +=
+      highlighter.render(
+        representativeDocument,
+        "benchmark.ts",
+        representativeSyntaxRange.start + index,
+      )?.length ?? 0;
+  }
+});
+const warmVisibleHighlightMilliseconds = duration(() => {
+  for (const [index] of representativeSyntaxRows.entries()) {
+    statefulHighlightChecksum +=
+      highlighter.render(
+        representativeDocument,
+        "benchmark.ts",
+        representativeSyntaxRange.start + index,
+      )?.length ?? 0;
+  }
+});
+const largeHunkHighlighter = new DiffSyntaxHighlighter();
+const largeHunkFallbackMilliseconds = duration(() => {
+  largeHunkHighlighter.render(document, "benchmark.ts", representativeRange.start);
 });
 
 if (
@@ -61,7 +109,8 @@ if (
   maximumMountedRows > 74 ||
   viewportChecksum <= 0 ||
   fullHighlightChecksum <= 0 ||
-  visibleHighlightChecksum <= 0
+  visibleHighlightChecksum <= 0 ||
+  statefulHighlightChecksum <= 0
 ) {
   throw new Error("Diff benchmark violated parsing or virtualization invariants.");
 }
@@ -76,7 +125,10 @@ process.stdout.write(
       documentMedianMs: documentMeasurement.medianMilliseconds,
       splitProjectionMs: roundMilliseconds(splitProjectionMilliseconds),
       fullDocumentHighlightMs: roundMilliseconds(fullHighlightMilliseconds),
-      visibleWindowHighlightMs: roundMilliseconds(visibleHighlightMilliseconds),
+      statelessVisibleWindowHighlightMs: roundMilliseconds(statelessVisibleHighlightMilliseconds),
+      coldVisibleWindowHighlightMs: roundMilliseconds(coldVisibleHighlightMilliseconds),
+      warmVisibleWindowHighlightMs: roundMilliseconds(warmVisibleHighlightMilliseconds),
+      largeHunkFallbackMs: roundMilliseconds(largeHunkFallbackMilliseconds),
       representativeHighlightedRows: representativeRows.length,
       viewportQueries: VIEWPORT_QUERY_COUNT,
       viewportQueriesMs: roundMilliseconds(viewportQueriesMilliseconds),
@@ -87,6 +139,23 @@ process.stdout.write(
     2,
   )}\n`,
 );
+
+function tokenCount(
+  result: ReturnType<typeof tokenizeSyntaxBlock>,
+): number {
+  if (result.kind !== "highlighted") {
+    return 0;
+  }
+  return countBlockTokens(result.lines);
+}
+
+function countBlockTokens(block: SyntaxBlock): number {
+  let count = 0;
+  for (const line of block) {
+    count += line.length;
+  }
+  return count;
+}
 
 function createSyntheticDiff(modifications: number): string {
   const lines = [`@@ -1,${modifications * 2} +1,${modifications * 2} @@`];

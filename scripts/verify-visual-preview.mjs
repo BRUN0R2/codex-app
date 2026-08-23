@@ -12,8 +12,10 @@ const PREVIEW_PORT = 1420;
 const HOME_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1`;
 const CHAT_REFERENCE_PREVIEW_URL = `${HOME_PREVIEW_URL}&chatReference=1`;
 const SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=general`;
+const USAGE_SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=usage`;
 const SETTINGS_INTERACTION_PREVIEW_URL = `${SETTINGS_PREVIEW_URL}&preferenceDelay=400`;
 const AUTOMATIONS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&surface=automations`;
+const PROFILE_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&surface=profile`;
 const ARTIFACT_DIRECTORY = path.join(PROJECT_ROOT, ".freebuff", "visual-audit");
 const VIEWPORTS = [
   { width: 920, height: 640 },
@@ -46,6 +48,222 @@ const SCENARIOS = [
     validate: validateActiveActivityReflectionMetrics,
   },
   {
+    id: "user-message-navigation",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      threadButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const activeTurn = [...document.querySelectorAll(".conversation-turn")].at(-1);
+        const group = activeTurn?.querySelector(".agent-activity-group:not([open]) > summary");
+        group?.click();
+        queueMicrotask(() => {
+          document.querySelectorAll(".user-message-navigator button")[2]?.click();
+        });
+      }));
+    })()`,
+    readyExpression: `(() => {
+      const timeline = document.querySelector(".timeline");
+      const target = document.getElementById("user-message-preview-image-user-message");
+      const marker = document.querySelectorAll(".user-message-navigator button")[2];
+      if (
+        !(timeline instanceof HTMLElement) ||
+        !(target instanceof HTMLElement) ||
+        !(marker instanceof HTMLButtonElement)
+      ) {
+        return false;
+      }
+      const targetGap =
+        target.getBoundingClientRect().top - timeline.getBoundingClientRect().top;
+      const targetOffset = timeline.scrollTop + targetGap;
+      const maximumScroll = timeline.scrollHeight - timeline.clientHeight;
+      const expectedScroll = Math.min(maximumScroll, Math.max(0, targetOffset - 32));
+      return Math.abs(timeline.scrollTop - expectedScroll) <= 2 &&
+        marker.getAttribute("aria-current") === "true";
+    })()`,
+    auditExpression: userMessageNavigationVisualAuditExpression,
+    validate: validateUserMessageNavigationMetrics,
+  },
+  {
+    id: "manual-scroll-ownership",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      threadButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const timeline = document.querySelector(".timeline");
+        if (!(timeline instanceof HTMLElement)) {
+          return;
+        }
+        timeline.scrollTop = Math.min(700, timeline.scrollHeight - timeline.clientHeight);
+        requestAnimationFrame(() => {
+          const target = Math.max(0, timeline.scrollTop - 180);
+          timeline.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -180 }));
+          timeline.scrollTop = target;
+          window.__previewManualScrollTarget = target;
+          const item = document.querySelector(".timeline-virtual-item");
+          if (item instanceof HTMLElement) {
+            const padding = Number.parseFloat(getComputedStyle(item).paddingBottom) || 0;
+            item.style.paddingBottom = (padding + 320) + "px";
+          }
+          setTimeout(() => {
+            window.__previewManualScrollReady = true;
+          }, 300);
+        });
+      }));
+    })()`,
+    readyExpression: `window.__previewManualScrollReady === true`,
+    auditExpression: manualScrollOwnershipVisualAuditExpression,
+    validate: validateManualScrollOwnershipMetrics,
+  },
+  {
+    id: "nested-scroll-handoff",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      threadButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        document.querySelectorAll(".agent-activity-group:not([open]) > summary").forEach(
+          (summary) => summary.click(),
+        );
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const command = [...document.querySelectorAll(".command-activity-card")].find(
+            (details) => details.querySelector(":scope > summary .activity-title.is-running") !== null,
+          );
+          const source = [...document.querySelectorAll(".tool-activity-card")].find(
+            (details) => details.textContent?.includes("diffHighlighter.test.ts"),
+          );
+          const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
+            (element) => element.textContent?.trim() === "semantic.rs",
+          );
+          const diff = file?.closest(".file-change-diff");
+          for (const details of [command, source, diff]) {
+            if (details instanceof HTMLDetailsElement && !details.open) {
+              details.querySelector(":scope > summary")?.click();
+            }
+          }
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const timeline = document.querySelector(".timeline");
+            const commandScroll = command?.querySelector(".command-card-scroll");
+            const sourceScroll = source?.querySelector(".command-card-scroll");
+            const diffScroll = diff?.querySelector(".diff-viewport");
+            if (
+              !(timeline instanceof HTMLElement) ||
+              !(commandScroll instanceof HTMLElement) ||
+              !(sourceScroll instanceof HTMLElement) ||
+              !(diffScroll instanceof HTMLElement)
+            ) {
+              return;
+            }
+            const maximumTimelineScroll = timeline.scrollHeight - timeline.clientHeight;
+            const baseTimelineScroll = Math.round(
+              Math.min(maximumTimelineScroll, Math.max(400, maximumTimelineScroll * 0.6)),
+            );
+            const originalGetComputedStyle = window.getComputedStyle;
+            let styleReadCount = 0;
+            window.getComputedStyle = (...args) => {
+              styleReadCount += 1;
+              return originalGetComputedStyle.apply(window, args);
+            };
+            const run = (region, requestedTop, deltaY) => {
+              timeline.scrollTop = baseTimelineScroll;
+              region.scrollTop = requestedTop;
+              const nestedStart = region.scrollTop;
+              const maximumNestedScroll = Math.max(0, region.scrollHeight - region.clientHeight);
+              const desiredNestedScroll = nestedStart + deltaY;
+              const expectedNestedScroll = Math.min(
+                maximumNestedScroll,
+                Math.max(0, desiredNestedScroll),
+              );
+              const expectedTimelineDelta = desiredNestedScroll - expectedNestedScroll;
+              const wheel = new WheelEvent("wheel", {
+                bubbles: true,
+                cancelable: true,
+                deltaMode: 0,
+                deltaY,
+              });
+              region.dispatchEvent(wheel);
+              return {
+                defaultPrevented: wheel.defaultPrevented,
+                expectedNestedScroll,
+                expectedTimelineDelta,
+                nestedScrollTop: region.scrollTop,
+                timelineDelta: timeline.scrollTop - baseTimelineScroll,
+              };
+            };
+            try {
+              const handoffStartedAt = performance.now();
+              const commandMetrics = run(commandScroll, 40, -100);
+              const diffMetrics = run(diffScroll, 0, -120);
+              const sourceMetrics = run(sourceScroll, 0, -80);
+              window.__previewNestedScrollMetrics = {
+                command: commandMetrics,
+                diff: diffMetrics,
+                handoffDurationMs: performance.now() - handoffStartedAt,
+                source: sourceMetrics,
+                styleReadCount,
+              };
+            } finally {
+              window.getComputedStyle = originalGetComputedStyle;
+            }
+            window.__previewNestedScrollReady = true;
+          }));
+        }));
+      }));
+    })()`,
+    readyExpression: `window.__previewNestedScrollReady === true`,
+    auditExpression: nestedScrollHandoffVisualAuditExpression,
+    validate: validateNestedScrollHandoffMetrics,
+  },
+  {
+    id: "live-command-output",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      threadButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const group = [...document.querySelectorAll(".agent-activity-group")].find(
+          (details) => details.querySelector(":scope > summary .activity-title.is-running") !== null,
+        );
+        if (group instanceof HTMLDetailsElement && !group.open) {
+          group.querySelector(":scope > summary")?.click();
+        }
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const command = [...document.querySelectorAll(".command-activity-card")].find(
+            (details) => details.querySelector(":scope > summary .activity-title.is-running") !== null,
+          );
+          if (command instanceof HTMLDetailsElement && !command.open) {
+            command.querySelector(":scope > summary")?.click();
+          }
+        }));
+      }));
+    })()`,
+    readyExpression: `document.querySelector(".command-activity-card[open] .command-live-output code")
+      ?.textContent?.includes("computing gzip size...") === true`,
+    auditExpression: liveCommandOutputVisualAuditExpression,
+    validate: validateLiveCommandOutputMetrics,
+  },
+  {
     id: "single-file-change",
     url: HOME_PREVIEW_URL,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
@@ -62,11 +280,106 @@ const SCENARIOS = [
         );
       }));
     })()`,
-    readyExpression: `[...document.querySelectorAll(".diff-block[open] .diff-file-identity code")].some(
-      (element) => element.textContent?.trim() === "setupBrowserPreview.ts",
+    readyExpression: `[...document.querySelectorAll(".file-change-diff .diff-file-identity code")].some(
+      (element) => element.textContent?.trim() === "engine.rs",
     )`,
     auditExpression: singleFileChangeVisualAuditExpression,
     validate: validateSingleFileChangeMetrics,
+  },
+  {
+    id: "syntax-highlighted-diff",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      threadButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
+          (element) => element.textContent?.trim() === "engine.rs",
+        );
+        const block = file?.closest(".file-change-diff");
+        if (block instanceof HTMLDetailsElement && !block.open) {
+          block.querySelector(":scope > summary")?.click();
+        }
+      }));
+    })()`,
+    readyExpression: `[...document.querySelectorAll(".file-change-diff .diff-file-identity code")].some(
+      (element) =>
+        element.textContent?.trim() === "engine.rs" &&
+        element.closest(".file-change-diff")?.querySelector(".syntax-token") !== null,
+    )`,
+    auditExpression: syntaxHighlightedDiffVisualAuditExpression,
+    validate: validateSyntaxHighlightedDiffMetrics,
+  },
+  {
+    id: "syntax-highlighted-created-file",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      threadButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        document.querySelectorAll(".agent-activity-group:not([open]) > summary").forEach(
+          (summary) => summary.click(),
+        );
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
+            (element) => element.textContent?.trim() === "semantic.rs",
+          );
+          const block = file?.closest(".file-change-diff");
+          if (block instanceof HTMLDetailsElement && !block.open) {
+            block.querySelector(":scope > summary")?.click();
+          }
+        }));
+      }));
+    })()`,
+    readyExpression: `[...document.querySelectorAll(".file-change-diff .diff-file-identity code")].some(
+      (element) =>
+        element.textContent?.trim() === "semantic.rs" &&
+        element.closest(".file-change-diff")?.querySelector(".syntax-token") !== null,
+    )`,
+    auditExpression: syntaxHighlightedCreatedFileVisualAuditExpression,
+    validate: validateSyntaxHighlightedCreatedFileMetrics,
+  },
+  {
+    id: "highlighted-tool-output",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      threadButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        document.querySelectorAll(".agent-activity-group:not([open]) > summary").forEach(
+          (summary) => summary.click(),
+        );
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          for (const text of ["diffHighlighter.test.ts", "Search syntax highlighter usage"]) {
+            const card = [...document.querySelectorAll(".tool-activity-card")].find(
+              (element) => element.textContent?.includes(text),
+            );
+            if (card instanceof HTMLDetailsElement && !card.open) {
+              card.querySelector(":scope > summary")?.click();
+            }
+          }
+        }));
+      }));
+    })()`,
+    readyExpression: `document.querySelector(".tool-source-output .syntax-token") !== null &&
+      document.querySelector(".tool-search-output .syntax-token") !== null`,
+    auditExpression: highlightedToolOutputVisualAuditExpression,
+    validate: validateHighlightedToolOutputMetrics,
   },
   {
     id: "chat-reference",
@@ -155,6 +468,35 @@ const SCENARIOS = [
     validate: validateSettingsMetrics,
   },
   {
+    id: "usage-settings",
+    url: USAGE_SETTINGS_PREVIEW_URL,
+    readyExpression: `document.querySelector(".usage-reset-row") !== null &&
+      document.querySelector(".usage-auto-top-up-row") !== null &&
+      document.querySelectorAll(".usage-meter-row").length >= 4`,
+    auditExpression: usageSettingsVisualAuditExpression,
+    validate: validateUsageSettingsMetrics,
+  },
+  {
+    id: "usage-settings-interaction",
+    url: USAGE_SETTINGS_PREVIEW_URL,
+    initialReadyExpression: `document.querySelector(".usage-reset-button")?.textContent?.trim() === "Usar redefinição" &&
+      document.querySelector(".usage-switch")?.getAttribute("aria-checked") === "false"`,
+    prepareExpression: `(() => {
+      const resetButton = document.querySelector(".usage-reset-button");
+      resetButton?.click();
+      requestAnimationFrame(() => {
+        if (resetButton?.textContent?.trim() === "Confirmar") {
+          resetButton.click();
+        }
+        document.querySelector(".usage-switch")?.click();
+      });
+    })()`,
+    readyExpression: `document.querySelector(".usage-inline-success")?.textContent?.includes("Limites de uso redefinidos") === true &&
+      document.querySelector(".usage-switch")?.getAttribute("aria-checked") === "true"`,
+    auditExpression: usageSettingsInteractionVisualAuditExpression,
+    validate: validateUsageSettingsInteractionMetrics,
+  },
+  {
     id: "settings-output-detail",
     url: SETTINGS_PREVIEW_URL,
     initialReadyExpression: `document.querySelector(".output-detail-trigger") !== null`,
@@ -175,6 +517,17 @@ const SCENARIOS = [
     readyExpression: `document.querySelector('.visually-hidden[aria-live="polite"]')?.textContent?.includes("Salvando") === true`,
     auditExpression: settingsInteractionVisualAuditExpression,
     validate: validateSettingsInteractionMetrics,
+  },
+  {
+    id: "profile",
+    url: PROFILE_PREVIEW_URL,
+    readyExpression: `document.querySelector(".profile-identity h1")?.textContent?.trim() === "ADA" &&
+      document.querySelectorAll(".profile-summary-stat").length === 5 &&
+      document.querySelectorAll(".profile-activity-cell").length === 364 &&
+      document.querySelectorAll(".profile-insight-list > div").length === 5 &&
+      document.querySelectorAll(".profile-invocation-list li").length === 1`,
+    auditExpression: profileVisualAuditExpression,
+    validate: validateProfileMetrics,
   },
   {
     id: "automations",
@@ -445,30 +798,326 @@ function activeActivityReflectionVisualAuditExpression() {
       highlightText: highlight.textContent?.trim() ?? null,
       animationName: sweepStyle.animationName,
       animationDuration: sweepStyle.animationDuration,
+      animationDelay: sweepStyle.animationDelay,
+      animationTimingFunction: sweepStyle.animationTimingFunction,
       highlightAnimationName: highlightStyle.animationName,
       maskImage: sweepStyle.maskImage || sweepStyle.webkitMaskImage,
+      maskWaveCount: ((sweepStyle.maskImage || sweepStyle.webkitMaskImage).match(/rgb\\(0, 0, 0\\)/g) ?? []).length,
       pointerEvents: sweepStyle.pointerEvents,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
 }
 
+function userMessageNavigationVisualAuditExpression() {
+  return `(() => {
+    const timeline = document.querySelector(".timeline");
+    const target = document.getElementById("user-message-preview-image-user-message");
+    const targetTurn = target?.closest(".timeline-virtual-item");
+    const marker = document.querySelectorAll(".user-message-navigator button")[2];
+    const activeTurn = [...document.querySelectorAll(".conversation-turn")].at(-1);
+    if (
+      !(timeline instanceof HTMLElement) ||
+      !(target instanceof HTMLElement) ||
+      !(targetTurn instanceof HTMLElement) ||
+      !(marker instanceof HTMLButtonElement) ||
+      !(activeTurn instanceof HTMLElement)
+    ) {
+      throw new Error("Âncora da terceira mensagem do usuário está ausente.");
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      targetGap:
+        target.getBoundingClientRect().top - timeline.getBoundingClientRect().top,
+      targetOffsetWithinTurn:
+        target.getBoundingClientRect().top - targetTurn.getBoundingClientRect().top,
+      markerCurrent: marker.getAttribute("aria-current"),
+      expandedGroupCount: activeTurn.querySelectorAll(".agent-activity-group[open]").length,
+      scrollTop: timeline.scrollTop,
+      maximumScroll: timeline.scrollHeight - timeline.clientHeight,
+      expectedTargetGap: (() => {
+        const targetOffset =
+          timeline.scrollTop +
+          target.getBoundingClientRect().top -
+          timeline.getBoundingClientRect().top;
+        const expectedScroll = Math.min(
+          timeline.scrollHeight - timeline.clientHeight,
+          Math.max(0, targetOffset - 32),
+        );
+        return targetOffset - expectedScroll;
+      })(),
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function manualScrollOwnershipVisualAuditExpression() {
+  return `(() => {
+    const timeline = document.querySelector(".timeline");
+    const target = window.__previewManualScrollTarget;
+    if (!(timeline instanceof HTMLElement) || typeof target !== "number") {
+      throw new Error("Cenário de ownership do scroll não foi inicializado.");
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      targetScrollTop: target,
+      finalScrollTop: timeline.scrollTop,
+      drift: timeline.scrollTop - target,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function nestedScrollHandoffVisualAuditExpression() {
+  return `(() => {
+    const metrics = window.__previewNestedScrollMetrics;
+    if (metrics === undefined) {
+      throw new Error("Cenário de transferência do scroll aninhado não foi inicializado.");
+    }
+    return {
+      ...metrics,
+      viewport: { width: innerWidth, height: innerHeight },
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function liveCommandOutputVisualAuditExpression() {
+  return `(() => {
+    const output = document.querySelector(".command-live-output");
+    const card = output?.closest(".command-activity-card");
+    const scroll = card?.querySelector(".command-card-scroll");
+    const title = card?.querySelector(":scope > summary .activity-title-base");
+    const prompt = card?.querySelector(".command-card-prompt");
+    if (
+      !(card instanceof HTMLDetailsElement) ||
+      !(scroll instanceof HTMLElement) ||
+      !(output instanceof HTMLElement) ||
+      !(title instanceof HTMLElement) ||
+      !(prompt instanceof HTMLElement)
+    ) {
+      throw new Error("Detalhes ao vivo do comando em execução estão ausentes.");
+    }
+    const outputStyle = getComputedStyle(output);
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      title: title.textContent?.trim() ?? null,
+      prompt: prompt.textContent?.replace(/\\s+/g, " ").trim() ?? null,
+      outputText: output.textContent ?? "",
+      open: card.open,
+      hasFinalOutputView: card.querySelector(".thread-output-view") instanceof HTMLElement,
+      scrollable: scroll.scrollHeight > scroll.clientHeight,
+      followGap: scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop,
+      maximumHeight: getComputedStyle(scroll).maxHeight,
+      whiteSpace: outputStyle.whiteSpace,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      commandHorizontalOverflow: scroll.scrollWidth - scroll.clientWidth,
+    };
+  })()`;
+}
+
 function singleFileChangeVisualAuditExpression() {
   return `(() => {
-    const file = [...document.querySelectorAll(".diff-block .diff-file-identity code")].find(
-      (element) => element.textContent?.trim() === "setupBrowserPreview.ts",
+    const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
+      (element) => element.textContent?.trim() === "engine.rs",
     );
     const block = file?.closest(".diff-block");
     if (!(file instanceof HTMLElement) || !(block instanceof HTMLDetailsElement)) {
       throw new Error("Bloco direto da alteração única está ausente.");
     }
+    const groupedFile = [
+      ...document.querySelectorAll(".file-change-diff .diff-file-identity code"),
+    ].find((element) => element.textContent?.trim() === "setupBrowserPreview.ts");
+    const groupedBlock = groupedFile?.closest(".file-change-diff");
+    const groupedActivity = groupedBlock?.closest(".agent-activity-group");
+    const groupedSet = groupedBlock?.closest(".grouped-file-change-set");
+    const newFile = [
+      ...document.querySelectorAll(".file-change-diff .diff-file-identity code"),
+    ].find((element) => element.textContent?.trim() === "semantic.rs");
+    const newFileBlock = newFile?.closest(".file-change-diff");
+    const deletedFile = [
+      ...document.querySelectorAll(".file-change-diff .diff-file-identity code"),
+    ].find((element) => element.textContent?.trim() === "terminal_output.rs");
+    const deletedFileBlock = deletedFile?.closest(".file-change-diff");
+    if (
+      !(groupedFile instanceof HTMLElement) ||
+      !(groupedBlock instanceof HTMLDetailsElement) ||
+      !(groupedActivity instanceof HTMLDetailsElement) ||
+      !(groupedSet instanceof HTMLElement) ||
+      !(newFile instanceof HTMLElement) ||
+      !(newFileBlock instanceof HTMLDetailsElement) ||
+      !(deletedFile instanceof HTMLElement) ||
+      !(deletedFileBlock instanceof HTMLDetailsElement)
+    ) {
+      throw new Error("Alteração interna do grupo está ausente.");
+    }
+    const action = block.querySelector(".file-change-action");
+    const blockStyle = getComputedStyle(block);
     return {
       viewport: { width: innerWidth, height: innerHeight },
       fileName: file.textContent?.trim() ?? null,
+      action: action?.textContent?.trim() ?? null,
+      compact: block.classList.contains("file-change-diff"),
+      hasActivityIcon: block.querySelector(".activity-icon") instanceof HTMLElement,
+      borderTopWidth: blockStyle.borderTopWidth,
+      borderRadius: blockStyle.borderRadius,
+      backgroundColor: blockStyle.backgroundColor,
+      groupedAction: groupedBlock.querySelector(".file-change-action")?.textContent?.trim() ?? null,
+      groupedHasActivityIcon:
+        groupedBlock.querySelector(".activity-icon") instanceof HTMLElement,
+      groupedHasRedundantHeading:
+        groupedSet.querySelector(".grouped-file-change-heading") instanceof HTMLElement,
+      groupedDirectFileCount:
+        groupedSet.querySelectorAll(":scope > .file-change-list > .file-change-diff").length,
+      groupedNestedCollectionCount: groupedSet.querySelectorAll(".file-change-card").length,
+      newFileAction:
+        newFileBlock.querySelector(".file-change-action")?.textContent?.trim() ?? null,
+      newFileBadge: newFileBlock.querySelector(".change-kind")?.textContent?.trim() ?? null,
+      newFileAdditions:
+        newFileBlock.querySelector(".diff-stat.additions")?.textContent?.trim() ?? null,
+      newFileHasDeletions:
+        newFileBlock.querySelector(".diff-stat.deletions") instanceof HTMLElement,
+      deletedFileAction:
+        deletedFileBlock.querySelector(".file-change-action")?.textContent?.trim() ?? null,
+      deletedFileBadge:
+        deletedFileBlock.querySelector(".change-kind")?.textContent?.trim() ?? null,
+      deletedFileDeletions:
+        deletedFileBlock.querySelector(".diff-stat.deletions")?.textContent?.trim() ?? null,
+      deletedFileHasAdditions:
+        deletedFileBlock.querySelector(".diff-stat.additions") instanceof HTMLElement,
       open: block.open,
       aggregateContainerCount: document.querySelectorAll(".file-change-card").length,
       directDiffVisible:
         block.querySelector(".diff-viewport, .diff-empty-state") instanceof HTMLElement,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function syntaxHighlightedDiffVisualAuditExpression() {
+  return `(() => {
+    const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
+      (element) => element.textContent?.trim() === "engine.rs",
+    );
+    const block = file?.closest(".file-change-diff");
+    const viewport = block?.querySelector(".diff-viewport");
+    if (
+      !(file instanceof HTMLElement) ||
+      !(block instanceof HTMLDetailsElement) ||
+      !(viewport instanceof HTMLElement)
+    ) {
+      throw new Error("Diff Rust realçado está ausente.");
+    }
+    const tokens = [...viewport.querySelectorAll(".syntax-token")];
+    const tokenKinds = [
+      ...new Set(
+        tokens.flatMap((token) =>
+          [...token.classList].filter((className) => className.startsWith("token-")),
+        ),
+      ),
+    ].sort();
+    const tokenColors = [...new Set(tokens.map((token) => getComputedStyle(token).color))];
+    const addition = viewport.querySelector(".unified-diff-row.is-addition .unified-diff-code");
+    const deletion = viewport.querySelector(".unified-diff-row.is-deletion .unified-diff-code");
+    const context = viewport.querySelector(".unified-diff-row.is-context");
+    const rootStyle = getComputedStyle(document.documentElement);
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      tokenKinds,
+      tokenColorCount: tokenColors.length,
+      tokenCount: tokens.length,
+      contextHasSyntax: context?.querySelector(".syntax-token") instanceof HTMLElement,
+      additionBackground:
+        addition instanceof HTMLElement ? getComputedStyle(addition).backgroundColor : null,
+      deletionBackground:
+        deletion instanceof HTMLElement ? getComputedStyle(deletion).backgroundColor : null,
+      keywordColor: rootStyle.getPropertyValue("--syntax-keyword").trim(),
+      stringColor: rootStyle.getPropertyValue("--syntax-string").trim(),
+      codeText: viewport.querySelector(".unified-diff-code code")?.textContent ?? null,
+      codeInset:
+        addition instanceof HTMLElement
+          ? addition.getBoundingClientRect().left - viewport.getBoundingClientRect().left
+          : null,
+      newlineMetadataRows: [...viewport.querySelectorAll(".unified-diff-hunk")].filter(
+        (element) => element.textContent?.includes("No newline at end of file"),
+      ).length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      viewportHorizontalOverflow: viewport.scrollWidth - viewport.clientWidth,
+    };
+  })()`;
+}
+
+function syntaxHighlightedCreatedFileVisualAuditExpression() {
+  return `(() => {
+    const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
+      (element) => element.textContent?.trim() === "semantic.rs",
+    );
+    const block = file?.closest(".file-change-diff");
+    const viewport = block?.querySelector(".diff-viewport");
+    const code = viewport?.querySelector(".unified-diff-row.is-addition .unified-diff-code");
+    if (
+      !(file instanceof HTMLElement) ||
+      !(block instanceof HTMLDetailsElement) ||
+      !(viewport instanceof HTMLElement) ||
+      !(code instanceof HTMLElement)
+    ) {
+      throw new Error("Diff de arquivo Rust criado está ausente.");
+    }
+    const tokens = [...viewport.querySelectorAll(".syntax-token")];
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      tokenKinds: [
+        ...new Set(
+          tokens.flatMap((token) =>
+            [...token.classList].filter((className) => className.startsWith("token-")),
+          ),
+        ),
+      ].sort(),
+      tokenColorCount: new Set(tokens.map((token) => getComputedStyle(token).color)).size,
+      tokenCount: tokens.length,
+      additionRows: viewport.querySelectorAll(".unified-diff-row.is-addition").length,
+      deletionRows: viewport.querySelectorAll(".unified-diff-row.is-deletion").length,
+      newlineMetadataRows: [...viewport.querySelectorAll(".unified-diff-hunk")].filter(
+        (element) => element.textContent?.includes("No newline at end of file"),
+      ).length,
+      codeInset: code.getBoundingClientRect().left - viewport.getBoundingClientRect().left,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function highlightedToolOutputVisualAuditExpression() {
+  return `(() => {
+    const source = document.querySelector(".tool-source-output");
+    const search = document.querySelector(".tool-search-output");
+    if (!(source instanceof HTMLElement) || !(search instanceof HTMLElement)) {
+      throw new Error("Saídas tipadas de leitura e busca estão ausentes.");
+    }
+    const sourceTokens = [...source.querySelectorAll(".syntax-token")];
+    const searchTokens = [...search.querySelectorAll(".syntax-token")];
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      sourceLineNumbers: [...source.querySelectorAll(".tool-source-line-number")].map(
+        (element) => element.textContent?.trim() ?? "",
+      ),
+      sourceTokenKinds: [
+        ...new Set(
+          sourceTokens.flatMap((token) =>
+            [...token.classList].filter((className) => className.startsWith("token-")),
+          ),
+        ),
+      ].sort(),
+      searchTokenKinds: [
+        ...new Set(
+          searchTokens.flatMap((token) =>
+            [...token.classList].filter((className) => className.startsWith("token-")),
+          ),
+        ),
+      ].sort(),
+      sourceText: source.textContent ?? "",
+      searchText: search.textContent ?? "",
+      sourceHorizontalOverflow: source.scrollWidth - source.clientWidth,
+      searchHorizontalOverflow: search.scrollWidth - search.clientWidth,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
@@ -708,6 +1357,64 @@ function settingsVisualAuditExpression() {
   })()`;
 }
 
+function usageSettingsVisualAuditExpression() {
+  return `(() => {
+    const rectangle = (selector) => {
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Elemento ausente: " + selector);
+      }
+      const bounds = element.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    const page = document.querySelector(".settings-page");
+    const plan = document.querySelector(".usage-plan");
+    const autoTopUp = document.querySelector(".usage-auto-top-up-row");
+    const reset = document.querySelector(".usage-reset-row");
+    const resetButton = document.querySelector(".usage-reset-button");
+    const toggle = document.querySelector(".usage-switch");
+    const headings = [...document.querySelectorAll(".settings-section > h3")].map(
+      (heading) => heading.textContent?.trim() ?? "",
+    );
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      page: rectangle(".settings-page"),
+      plan: rectangle(".usage-plan"),
+      autoTopUp: rectangle(".usage-auto-top-up-row"),
+      reset: rectangle(".usage-reset-row"),
+      pageText: page?.textContent ?? "",
+      planText: plan?.textContent ?? "",
+      autoTopUpText: autoTopUp?.textContent ?? "",
+      resetText: reset?.textContent ?? "",
+      resetButtonText: resetButton?.textContent?.trim() ?? null,
+      switchAriaChecked: toggle?.getAttribute("aria-checked") ?? null,
+      sectionHeadings: headings,
+      meterCount: document.querySelectorAll(".usage-meter-row").length,
+      cardCount: document.querySelectorAll(".settings-card").length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      pageHorizontalOverflow:
+        page instanceof HTMLElement ? page.scrollWidth - page.clientWidth : null,
+    };
+  })()`;
+}
+
+function usageSettingsInteractionVisualAuditExpression() {
+  return `(() => ({
+    resetRows: document.querySelectorAll(".usage-reset-row").length,
+    successText: document.querySelector(".usage-inline-success")?.textContent?.trim() ?? null,
+    switchAriaChecked: document.querySelector(".usage-switch")?.getAttribute("aria-checked") ?? null,
+    autoTopUpText: document.querySelector(".usage-auto-top-up-row")?.textContent ?? "",
+    horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+  }))()`;
+}
+
 function outputDetailVisualAuditExpression() {
   return `(() => {
     const rectangle = (element, label) => {
@@ -785,6 +1492,78 @@ function settingsInteractionVisualAuditExpression() {
   })()`;
 }
 
+function profileVisualAuditExpression() {
+  return `(() => {
+    const rectangle = (selector) => {
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Elemento ausente: " + selector);
+      }
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+        display: style.display,
+        visibility: style.visibility,
+      };
+    };
+    const chrome = rectangle(".window-chrome");
+    const content = rectangle(".application-frame-content");
+    const controls = rectangle(".window-chrome-controls");
+    const sidebar = rectangle(".sidebar");
+    const surface = rectangle(".profile-page");
+    const profileContent = rectangle(".profile-page-content");
+    const avatar = rectangle(".profile-identity .account-avatar-profile");
+    const summary = rectangle(".profile-summary");
+    const activity = rectangle(".profile-activity-chart");
+    const activityGrid = rectangle(".profile-activity-grid");
+    const insights = rectangle(".profile-insights-grid");
+    const surfaceElement = document.querySelector(".profile-page-scroll");
+    if (!(surfaceElement instanceof HTMLElement)) {
+      throw new Error("Scroller do perfil ausente.");
+    }
+    const cells = [...document.querySelectorAll(".profile-activity-cell")];
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      chrome,
+      content,
+      controls,
+      sidebar,
+      surface,
+      profileContent,
+      avatar,
+      summary,
+      activity,
+      activityGrid,
+      insights,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      surfaceHorizontalOverflow: surfaceElement.scrollWidth - surfaceElement.clientWidth,
+      centeredInsetDifference: Math.abs(
+        profileContent.left - surface.left - (surface.right - profileContent.right),
+      ),
+      summaryStats: document.querySelectorAll(".profile-summary-stat").length,
+      activityCells: cells.length,
+      activeCells: cells.filter((cell) => cell.getAttribute("data-level") !== "0").length,
+      futureCells: cells.filter((cell) => cell.classList.contains("future")).length,
+      monthLabels: document.querySelectorAll(".profile-activity-months span").length,
+      activityTabs: document.querySelectorAll(".profile-activity-tabs button").length,
+      selectedActivityTabs: document.querySelectorAll(
+        '.profile-activity-tabs button[aria-pressed="true"]',
+      ).length,
+      insightRows: document.querySelectorAll(".profile-insight-list > div").length,
+      invocationRows: document.querySelectorAll(".profile-invocation-list li").length,
+      activeProfileTriggers: document.querySelectorAll(".sidebar-account-trigger.active").length,
+      planBadge: document.querySelector(".profile-plan-badge")?.textContent?.trim() ?? null,
+      loadingStates: document.querySelectorAll(".profile-skeleton, .profile-load-error").length,
+    };
+  })()`;
+}
+
 function automationsVisualAuditExpression() {
   return `(() => {
     const rectangle = (selector) => {
@@ -818,10 +1597,12 @@ function automationsVisualAuditExpression() {
     const heading = rectangle(".automations-header h1");
     const notice = rectangle(".automation-local-notice");
     const card = rectangle(".automation-card");
+    const mainPanel = document.querySelector(".main-panel");
     const surfaceElement = document.querySelector(".automations-view");
-    if (!(surfaceElement instanceof HTMLElement)) {
-      throw new Error("Superfície de Automações ausente.");
+    if (!(surfaceElement instanceof HTMLElement) || !(mainPanel instanceof HTMLElement)) {
+      throw new Error("Superfície de Automações ou painel principal ausente.");
     }
+    const mainPanelStyle = getComputedStyle(mainPanel);
     return {
       viewport: { width: innerWidth, height: innerHeight },
       chrome,
@@ -845,6 +1626,8 @@ function automationsVisualAuditExpression() {
       automationCards: document.querySelectorAll(".automation-card").length,
       runRows: document.querySelectorAll(".automation-run-row").length,
       primaryButtons: document.querySelectorAll(".automations-header .automation-primary-button").length,
+      sidebarDividerWidth: mainPanelStyle.borderLeftWidth,
+      sidebarDividerColor: mainPanelStyle.borderLeftColor,
     };
   })()`;
 }
@@ -1037,9 +1820,114 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
     metrics.highlightAnimationName === "activity-reflection-text",
     "o texto luminoso não acompanha a varredura",
   );
-  assert(metrics.animationDuration === "4s", "a velocidade da reflexão foi alterada");
+  assert(metrics.animationDuration === "2s", "o ciclo da reflexão não mede 2 segundos");
+  assert(metrics.animationDelay === "0.08s", "a reflexão não inicia quase imediatamente");
+  assert(
+    metrics.maskWaveCount >= 3,
+    `a reflexão não contém três ondas sequenciais (${JSON.stringify(metrics.maskImage)})`,
+  );
+  assert(
+    metrics.animationTimingFunction.includes("cubic-bezier"),
+    "a reflexão perdeu a curva fluida",
+  );
   assert(metrics.maskImage !== "none", "a reflexão perdeu a máscara luminosa");
   assert(metrics.pointerEvents === "none", "a reflexão passou a interceptar interação");
+}
+
+function validateUserMessageNavigationMetrics(metrics, viewport) {
+  const tolerance = 2;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado na navegação de mensagens em ${viewport.width}x${viewport.height}`,
+  );
+  assert(
+    metrics.horizontalOverflow <= tolerance,
+    "a navegação de mensagens criou overflow horizontal",
+  );
+  assert(
+    Math.abs(metrics.targetGap - metrics.expectedTargetGap) <= tolerance,
+    "o marcador não navegou para a posição atual possível da mensagem",
+  );
+  assert(
+    metrics.targetOffsetWithinTurn > 500,
+    "o cenário não validou uma mensagem posterior dentro do mesmo turno",
+  );
+  assert(metrics.markerCurrent === "true", "o marcador selecionado não ficou ativo");
+  assert(metrics.expandedGroupCount >= 1, "o turno não permaneceu expandido durante a navegação");
+}
+
+function validateManualScrollOwnershipMetrics(metrics, viewport) {
+  const tolerance = 2;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no ownership de scroll em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o scroll manual criou overflow horizontal");
+  assert(
+    Math.abs(metrics.drift) <= tolerance,
+    "uma medição virtual disputou o scroll manual e moveu o viewport",
+  );
+}
+
+function validateNestedScrollHandoffMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado na transferência de scroll em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o handoff de scroll criou overflow horizontal");
+  assert(metrics.styleReadCount === 0, "o wheel voltou a forçar leitura síncrona de estilos");
+  assert(
+    metrics.handoffDurationMs <= 16,
+    `três transferências de wheel excederam um frame: ${metrics.handoffDurationMs.toFixed(3)} ms`,
+  );
+  for (const [label, sample] of Object.entries({
+    comando: metrics.command,
+    diff: metrics.diff,
+    leitura: metrics.source,
+  })) {
+    assert(sample.defaultPrevented === true, `${label} não assumiu ownership do wheel excedente`);
+    assert(
+      Math.abs(sample.nestedScrollTop - sample.expectedNestedScroll) <= tolerance,
+      `${label} não terminou no limite vertical esperado`,
+    );
+    assert(
+      Math.abs(sample.timelineDelta - sample.expectedTimelineDelta) <= tolerance,
+      `${label} não transferiu exatamente o delta excedente para a timeline`,
+    );
+  }
+}
+
+function validateLiveCommandOutputMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado na saída ao vivo em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "a saída ao vivo criou overflow horizontal");
+  assert(
+    metrics.commandHorizontalOverflow <= tolerance,
+    "a saída ao vivo criou overflow horizontal no comando",
+  );
+  assert(metrics.open === true, "o comando em execução não ficou expandido");
+  assert(metrics.title === "Executando comando", "o comando aberto perdeu seu estado em execução");
+  assert(
+    metrics.prompt?.includes("Get-Content -LiteralPath src/ui/Timeline.tsx -Raw"),
+    "o comando original não aparece junto da saída ao vivo",
+  );
+  assert(
+    metrics.outputText.includes("stdout:") &&
+      metrics.outputText.includes("✓ 115 modules transformed.") &&
+      metrics.outputText.includes("computing gzip size...") &&
+      metrics.outputText.includes("stderr:") &&
+      metrics.outputText.includes("warning: release validation is still running"),
+    "stdout e stderr incrementais não estão visíveis antes da conclusão",
+  );
+  assert(metrics.hasFinalOutputView === false, "a prévia ao vivo foi confundida com a saída final");
+  assert(metrics.scrollable === true, "a saída longa não ativou a rolagem limitada");
+  assert(metrics.followGap <= 2, "a saída ao vivo não acompanhou a linha mais recente");
+  assert(metrics.maximumHeight === "205px", "a saída ao vivo perdeu seu limite vertical");
+  assert(metrics.whiteSpace === "pre-wrap", "a saída ao vivo não preserva quebras de linha");
 }
 
 function validateSingleFileChangeMetrics(metrics, viewport) {
@@ -1049,10 +1937,145 @@ function validateSingleFileChangeMetrics(metrics, viewport) {
     `viewport inesperado no arquivo único em ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.horizontalOverflow <= tolerance, "o arquivo único criou overflow horizontal");
-  assert(metrics.fileName === "setupBrowserPreview.ts", "o arquivo direto mudou de identidade");
-  assert(metrics.open === true, "a alteração única não abriu diretamente");
+  assert(metrics.fileName === "engine.rs", "o arquivo direto mudou de identidade");
+  assert(
+    metrics.action === "Arquivo editado",
+    "a alteração única perdeu o rótulo Arquivo editado",
+  );
+  assert(metrics.compact === true, "a alteração única não usa a apresentação compacta");
+  assert(metrics.hasActivityIcon === true, "a alteração única perdeu o ícone contextual");
+  assert(metrics.borderTopWidth === "0px", "a alteração única recuperou o contorno de cartão");
+  assert(metrics.borderRadius === "0px", "a alteração única recuperou cantos de balão");
+  assert(
+    metrics.backgroundColor === "rgba(0, 0, 0, 0)",
+    "a alteração única recuperou uma superfície de cartão",
+  );
+  assert(
+    metrics.groupedAction === "Arquivo editado",
+    "a alteração interna perdeu o rótulo Arquivo editado",
+  );
+  assert(
+    metrics.groupedHasActivityIcon === true,
+    "a alteração interna perdeu o ícone contextual do grupo",
+  );
+  assert(
+    metrics.groupedHasRedundantHeading === false,
+    "o grupo manteve o cabeçalho redundante de contagem de arquivos",
+  );
+  assert(
+    metrics.groupedDirectFileCount === 3,
+    "o grupo não expôs os arquivos imediatamente após a primeira expansão",
+  );
+  assert(
+    metrics.groupedNestedCollectionCount === 0,
+    "o grupo de arquivos manteve uma expansão intermediária redundante",
+  );
+  assert(
+    metrics.newFileAction === "Arquivo criado",
+    "o arquivo novo perdeu a semântica Arquivo criado",
+  );
+  assert(metrics.newFileBadge === "NOVO", "o arquivo novo perdeu o selo NOVO");
+  assert(metrics.newFileAdditions === "+338", "o arquivo novo perdeu a contagem de linhas");
+  assert(metrics.newFileHasDeletions === false, "o arquivo novo ainda exibe uma remoção zerada");
+  assert(
+    metrics.deletedFileAction === "Arquivo excluído",
+    "o arquivo excluído perdeu a semântica Arquivo excluído",
+  );
+  assert(metrics.deletedFileBadge === "EXCLUÍDO", "o arquivo excluído perdeu seu selo");
+  assert(
+    metrics.deletedFileDeletions === "−288",
+    "o arquivo excluído não exibe o total autoritativo de linhas removidas",
+  );
+  assert(
+    metrics.deletedFileHasAdditions === false,
+    "o arquivo excluído ainda exibe uma adição zerada",
+  );
+  assert(metrics.open === false, "a alteração única iniciou expandida");
   assert(metrics.aggregateContainerCount === 0, "a alteração única ainda criou um agrupador");
-  assert(metrics.directDiffVisible === true, "o diff do arquivo único não ficou visível");
+  assert(metrics.directDiffVisible === false, "o diff do arquivo único iniciou visível");
+}
+
+function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no diff colorido em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o diff colorido criou overflow horizontal");
+  assert(metrics.viewportHorizontalOverflow >= 0, "a viewport do diff perdeu sua largura rolável");
+  for (const kind of [
+    "token-attribute",
+    "token-constant",
+    "token-function",
+    "token-keyword",
+    "token-number",
+    "token-operator",
+    "token-punctuation",
+    "token-string",
+    "token-type",
+  ]) {
+    assert(metrics.tokenKinds.includes(kind), `o diff não produziu ${kind}`);
+  }
+  assert(metrics.tokenCount >= 20, "o diff produziu poucos tokens sintáticos");
+  assert(metrics.tokenColorCount >= 7, "a paleta sintática não possui cores distintas suficientes");
+  assert(metrics.contextHasSyntax === true, "linhas de contexto não receberam syntax highlighting");
+  assert(
+    metrics.additionBackground !== null &&
+      metrics.additionBackground !== "rgba(0, 0, 0, 0)",
+    "o realce removeu o fundo semântico de adição",
+  );
+  assert(
+    metrics.deletionBackground !== null &&
+      metrics.deletionBackground !== "rgba(0, 0, 0, 0)",
+    "o realce removeu o fundo semântico de remoção",
+  );
+  assert(
+    metrics.additionBackground !== metrics.deletionBackground,
+    "adição e remoção perderam distinção visual",
+  );
+  assert(metrics.keywordColor === "#d5a6ff", "keywords não usam a paleta sintática");
+  assert(metrics.stringColor === "#ffb38a", "strings não usam a paleta sintática");
+  assert(metrics.codeText?.includes("use std::time::Instant;"), "o diff perdeu o texto do código");
+  assert(metrics.codeInset !== null && metrics.codeInset <= 90, "o gutter do diff continua largo demais");
+  assert(metrics.newlineMetadataRows === 0, "metadados de newline ainda consomem linhas visuais");
+}
+
+function validateSyntaxHighlightedCreatedFileMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no arquivo criado colorido em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o arquivo criado gerou overflow horizontal");
+  for (const kind of ["token-attribute", "token-keyword", "token-number", "token-type"]) {
+    assert(metrics.tokenKinds.includes(kind), `o arquivo criado não produziu ${kind}`);
+  }
+  assert(metrics.tokenCount >= 20, "o arquivo criado produziu poucos tokens sintáticos");
+  assert(metrics.tokenColorCount >= 4, "o arquivo criado não usa uma paleta sintática suficiente");
+  assert(metrics.additionRows > 0, "o arquivo criado não renderizou linhas adicionadas");
+  assert(metrics.deletionRows === 0, "o arquivo criado inventou linhas removidas");
+  assert(metrics.newlineMetadataRows === 0, "o arquivo criado exibe metadado de newline redundante");
+  assert(metrics.codeInset <= 90, "o arquivo criado mantém um gutter largo demais");
+}
+
+function validateHighlightedToolOutputMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado nas saídas coloridas em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "as saídas tipadas criaram overflow global");
+  assert(
+    JSON.stringify(metrics.sourceLineNumbers) === JSON.stringify(["20", "21", "22", "23", "24", "25", "26", "27"]),
+    "a leitura de arquivo perdeu seus números de linha",
+  );
+  assert(metrics.sourceTokenKinds.includes("token-keyword"), "a leitura de arquivo não coloriu keywords");
+  assert(metrics.sourceTokenKinds.includes("token-string"), "a leitura de arquivo não coloriu strings");
+  assert(metrics.searchTokenKinds.includes("token-keyword"), "a busca não coloriu os trechos encontrados");
+  assert(metrics.sourceText.includes("const continuation"), "a leitura perdeu o código original");
+  assert(metrics.searchText.includes("src/ui/syntax/diffHighlighter.test.ts:20"), "a busca perdeu a localização");
+  assert(metrics.sourceHorizontalOverflow >= 0, "a leitura perdeu sua largura rolável");
+  assert(metrics.searchHorizontalOverflow >= 0, "a busca perdeu sua largura rolável");
 }
 
 function validateProjectOpenWorkspaceMetrics(metrics, viewport) {
@@ -1130,6 +2153,59 @@ function validateSettingsMetrics(metrics, viewport) {
   assert(metrics.navigationLabels.includes("Perfil"), "a página Perfil deixou as configurações");
 }
 
+function validateUsageSettingsMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "Uso e faturamento criou overflow horizontal");
+  assert(
+    metrics.pageHorizontalOverflow !== null && metrics.pageHorizontalOverflow <= tolerance,
+    "o conteúdo de Uso e faturamento criou overflow interno horizontal",
+  );
+  assert(metrics.page.width >= 500, "a página Uso e faturamento ficou estreita demais");
+  assert(metrics.plan.right <= viewport.width + tolerance, "o cartão do plano ultrapassa a tela");
+  assert(
+    metrics.autoTopUp.right <= viewport.width + tolerance,
+    "a recarga automática ultrapassa a tela",
+  );
+  assert(metrics.reset.right <= viewport.width + tolerance, "a redefinição ultrapassa a tela");
+  assert(metrics.cardCount >= 5, "faltam seções funcionais em Uso e faturamento");
+  assert(metrics.meterCount >= 4, "faltam limites gerais ou do GPT-5.3-Codex-Spark");
+  assert(metrics.planText.includes("R$ 525,00/mês"), "o preço mensal localizado não foi exibido");
+  assert(
+    metrics.autoTopUpText.includes("Até 40% de desconto"),
+    "a oferta de recarga automática não foi exibida",
+  );
+  assert(metrics.switchAriaChecked === "false", "o switch de recarga não reflete o estado inicial");
+  assert(
+    metrics.resetButtonText === "Usar redefinição",
+    "a ação de usar redefinição não foi renderizada",
+  );
+  assert(metrics.resetText.includes("Redefinição completa"), "o título do reset não foi exibido");
+  assert(
+    metrics.sectionHeadings.includes("Limites gerais de uso") &&
+      metrics.sectionHeadings.includes("Limites de uso do GPT-5.3-Codex-Spark") &&
+      metrics.sectionHeadings.includes("Redefinições do limite de uso"),
+    "a estrutura oficial de limites e redefinições está incompleta",
+  );
+}
+
+function validateUsageSettingsInteractionMetrics(metrics) {
+  const tolerance = 1;
+  assert(
+    metrics.horizontalOverflow <= tolerance,
+    "a interação de Uso e faturamento criou overflow horizontal",
+  );
+  assert(metrics.resetRows === 0, "a redefinição consumida continuou disponível");
+  assert(
+    metrics.successText === "Limites de uso redefinidos.",
+    "o sucesso da redefinição não foi anunciado",
+  );
+  assert(metrics.switchAriaChecked === "true", "a recarga automática não foi habilitada");
+  assert(
+    metrics.autoTopUpText.includes("Recarrega para 250 créditos"),
+    "a configuração ativa da recarga automática não foi refletida",
+  );
+}
+
 function validateOutputDetailMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(metrics.horizontalOverflow <= tolerance, "o menu criou overflow horizontal global");
@@ -1153,6 +2229,43 @@ function validateSettingsInteractionMetrics(metrics) {
   assert(metrics.savingAnnounced === true, "o salvamento não foi anunciado de forma acessível");
   assert(metrics.thirdPreferenceChecked === false, "a preferência não foi atualizada de imediato");
   assert(metrics.visibleStatus === false, "o salvamento exibiu um status que desloca a página");
+}
+
+function validateProfileMetrics(metrics, viewport) {
+  const tolerance = 1;
+  validateChromeMetrics(metrics, viewport);
+  assert(metrics.horizontalOverflow <= tolerance, "o perfil criou overflow horizontal global");
+  assert(
+    metrics.surfaceHorizontalOverflow <= tolerance,
+    "a superfície do perfil possui overflow horizontal",
+  );
+  assert(
+    Math.abs(metrics.surface.top - metrics.chrome.bottom) <= tolerance,
+    "o perfil não começa imediatamente abaixo do chrome",
+  );
+  assert(metrics.profileContent.width <= 733, "o conteúdo do perfil ultrapassou 732 px");
+  assert(
+    metrics.profileContent.width <= metrics.surface.width,
+    "o conteúdo do perfil ultrapassa sua superfície",
+  );
+  assert(metrics.centeredInsetDifference <= 3, "o conteúdo do perfil não está centralizado");
+  assert(Math.abs(metrics.avatar.width - 80) <= tolerance, "o avatar do perfil não mede 80 px");
+  assert(Math.abs(metrics.avatar.height - 80) <= tolerance, "o avatar do perfil não mede 80 px");
+  assert(metrics.summary.height >= 60, "o resumo do perfil ficou baixo demais");
+  assert(metrics.summaryStats === 5, "o resumo não contém as cinco métricas oficiais");
+  assert(metrics.activityCells === 364, "o calendário não contém 52 semanas completas");
+  assert(metrics.activeCells >= 60, "a atividade de preview ficou visualmente vazia");
+  assert(metrics.futureCells === 6, "os seis dias futuros da última semana não foram isolados");
+  assert(metrics.monthLabels >= 10, "os rótulos mensais do calendário estão incompletos");
+  assert(metrics.activityTabs === 3, "as três agregações de atividade estão ausentes");
+  assert(metrics.selectedActivityTabs === 1, "a agregação ativa não é única");
+  assert(metrics.insightRows === 5, "os cinco insights oficiais não foram renderizados");
+  assert(metrics.invocationRows === 1, "o plugin mais usado do preview está ausente");
+  assert(metrics.activeProfileTriggers === 1, "a navegação não marca o perfil como ativo");
+  assert(metrics.planBadge === "Pro", "o badge de plano do perfil está incorreto");
+  assert(metrics.loadingStates === 0, "o perfil permaneceu em loading ou erro");
+  assert(metrics.activity.top > metrics.summary.bottom, "o gráfico sobrepõe o resumo");
+  assert(metrics.insights.top > metrics.activityGrid.bottom, "os insights sobrepõem o calendário");
 }
 
 function validateAutomationsMetrics(metrics, viewport) {
@@ -1196,6 +2309,11 @@ function validateAutomationsMetrics(metrics, viewport) {
   assert(metrics.automationCards >= 1, "nenhum cartão de Automação foi renderizado");
   assert(metrics.runRows >= 2, "fila e histórico não renderizaram as execuções");
   assert(metrics.primaryButtons === 1, "o botão principal de nova Automação está ausente");
+  assert(metrics.sidebarDividerWidth === "1px", "o divisor da sidebar perdeu a espessura padrão");
+  assert(
+    metrics.sidebarDividerColor === "rgba(255, 255, 255, 0.04)",
+    "o divisor da sidebar está mais aceso do que os demais separadores sutis",
+  );
 }
 
 function validateAutomationEditorMetrics(metrics, viewport) {

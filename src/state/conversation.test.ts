@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { applyStreamDeltas, readLatestTurnFailure, removeItem, upsertItem } from "./conversation";
+import {
+  applyCommandStreamDeltasToThread,
+  applyStreamDeltas,
+  readLatestTurnFailure,
+  removeItem,
+  upsertItem,
+} from "./conversation";
 
 describe("conversation reducer", () => {
   it("rejects an id that changes semantic type", () => {
@@ -12,6 +18,7 @@ describe("conversation reducer", () => {
         name: "read_file",
         description: "Read",
         status: "completed",
+        outputPresentation: { type: "sourceFile", path: "src/main.rs" },
         output: { id: "output-1", preview: "ok", byteLength: 2, nextCursor: null },
       }),
     ).toThrow(/mudou/u);
@@ -114,4 +121,108 @@ describe("conversation reducer", () => {
       },
     ]);
   });
+
+  it("applies live command operations without corrupting Unicode", () => {
+    const command = {
+      type: "commandExecution" as const,
+      id: "command-a",
+      command: "build",
+      cwd: ".",
+      processId: null,
+      startedAt: 1,
+      source: "agent" as const,
+      status: "inProgress" as const,
+      aggregatedOutput: null,
+      liveOutput: { stdout: "", stderr: "", truncated: false },
+      exitCode: null,
+      durationMs: null,
+    };
+    const result = applyStreamDeltas(
+      [command],
+      [
+        commandDelta("stdout", { type: "append", delta: "loading 10%" }),
+        commandDelta("stdout", { type: "clearCurrentLine" }),
+        commandDelta("stdout", { type: "append", delta: "done😀" }),
+        commandDelta("stdout", { type: "backspace" }),
+        commandDelta("stderr", { type: "append", delta: "warning" }),
+        commandDelta("stderr", { type: "truncated" }),
+      ],
+    );
+
+    expect(result).toEqual([
+      {
+        ...command,
+        liveOutput: { stdout: "done", stderr: "warning", truncated: true },
+      },
+    ]);
+  });
+
+  it("routes background command deltas to their persisted turn", () => {
+    const thread = {
+      id: "thread-a",
+      mode: "codex" as const,
+      preview: "Build",
+      name: null,
+      cwd: ".",
+      projectPath: ".",
+      createdAt: 1,
+      updatedAt: 2,
+      recencyAt: 2,
+      status: { type: "idle" as const },
+      turns: [
+        {
+          id: "turn-a",
+          status: "completed" as const,
+          error: null,
+          createdAt: 1,
+          updatedAt: 2,
+          items: [
+            {
+              type: "commandExecution" as const,
+              id: "command-a",
+              command: "build",
+              cwd: ".",
+              processId: "session-a",
+              startedAt: 1,
+              source: "agent" as const,
+              status: "inProgress" as const,
+              aggregatedOutput: null,
+              liveOutput: { stdout: "start\n", stderr: "", truncated: false },
+              exitCode: null,
+              durationMs: null,
+            },
+          ],
+        },
+      ],
+    };
+
+    const updated = applyCommandStreamDeltasToThread(thread, [
+      commandDelta("stdout", { type: "append", delta: "done\n" }),
+    ]);
+
+    expect(updated.turns[0]?.items[0]).toMatchObject({
+      liveOutput: { stdout: "start\ndone\n", stderr: "", truncated: false },
+    });
+    expect(
+      applyCommandStreamDeltasToThread(thread, [
+        { ...commandDelta("stdout", { type: "append", delta: "ignored" }), turnId: "missing" },
+      ]),
+    ).toBe(thread);
+  });
 });
+
+function commandDelta(
+  stream: "stderr" | "stdout",
+  operation:
+    | { readonly type: "append"; readonly delta: string }
+    | { readonly type: "backspace" | "clearCurrentLine" | "truncated" },
+) {
+  return {
+    kind: "commandOutput" as const,
+    threadId: "thread-a",
+    turnId: "turn-a",
+    itemId: "command-a",
+    stream,
+    operation,
+  };
+}

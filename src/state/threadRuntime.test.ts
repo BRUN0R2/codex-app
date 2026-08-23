@@ -184,6 +184,22 @@ describe("thread runtime reducer", () => {
       { type: "agentMessage", id: "message-b", text: "B", phase: null },
     ]);
   });
+  it("leaves persisted background command deltas outside the active overlay map", () => {
+    const current = updateThreadRuntime(new Map(), "thread-a", (runtime) => runtime);
+    const result = applyThreadRuntimeStreamDeltas(current, [
+      {
+        kind: "commandOutput",
+        threadId: "thread-a",
+        turnId: "turn-old",
+        itemId: "background-command",
+        stream: "stdout",
+        operation: { type: "append", delta: "done" },
+      },
+    ]);
+
+    expect(result).toBe(current);
+    expect(result.get("thread-a")?.itemOverlays).toEqual([]);
+  });
 });
 
 function threadFixture(status: "completed" | "inProgress"): CodexThread {

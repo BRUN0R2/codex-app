@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::OnceLock;
+use std::sync::Weak;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -11,23 +12,30 @@ use super::apply_patch::parser::{ParsedPatch, parse_patch};
 use super::apply_patch::plan::{prepare_patch, preview_changes};
 use super::apply_patch::transaction::{PatchOutcome, commit_patch};
 use super::approval::ApprovalBroker;
+use super::file_diff::{line_stats, render_replacement_diff};
 use super::output::OutputSource;
 use super::output_compaction::{TextOutputKind, compact_command_output, compact_text};
-use super::storage::NativeStorage;
-use super::text::{truncate_utf8, truncate_utf8_marked};
+use super::storage::{MAX_OUTPUT_SEARCH_QUERY_BYTES, NativeStorage};
+use super::stream_notifications::StreamNotificationBatcher;
+use super::text::truncate_utf8;
 use crate::engine::{
-    ActivityStatus, ApprovalDecision, CommandApprovalRequest, CommandSource, FileChange,
-    FileChangeKind, PermissionProfile, PlanStep, PlanStepStatus, SandboxMode, ThreadItem,
+    ActivityStatus, ApprovalDecision, ApprovalPolicy, CommandApprovalRequest, CommandLiveOutput,
+    CommandSource, FileChange, FileChangeKind, PermissionProfile, PlanStep, PlanStepStatus,
+    SandboxMode, ThreadItem, ToolOutputPresentation,
 };
 use crate::error::AppError;
 
+mod command_output_stream;
+mod command_sessions;
 mod exec;
+pub(super) use self::command_sessions::CommandSessionManager;
+use self::command_sessions::{BackgroundCommandLease, BackgroundCommandStart, CommandStartOutcome};
 mod fs;
 mod read_cache;
 mod ripgrep;
 mod workspace;
 
-use self::exec::{CommandOutput, command_timeout, execute_command};
+use self::exec::{CommandOutput, command_timeout, command_yield_time};
 use self::fs::{edit_file, list_files, read_file, search_text, write_file};
 pub(super) use self::read_cache::ReadToolCache;
 use self::read_cache::{CachedReadOutput, ReadToolCacheKey};
@@ -52,9 +60,12 @@ const MAX_PLAN_STEPS: usize = 20;
 const MAX_PLAN_STEP_BYTES: usize = 1_024;
 const MAX_PLAN_EXPLANATION_BYTES: usize = 4_096;
 const MAX_TOOL_PATH_BYTES: usize = 4_096;
-pub(super) const MAX_DIFF_BYTES: usize = 131_072;
 const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 60 * 60;
 const MAX_COMMAND_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
+const DEFAULT_COMMAND_YIELD_MILLISECONDS: u64 = 10_000;
+const MIN_COMMAND_YIELD_MILLISECONDS: u64 = 250;
+const MAX_COMMAND_YIELD_MILLISECONDS: u64 = 30_000;
+const MAX_COMMAND_POLL_WAIT_SECONDS: u16 = 300;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Default)]
@@ -79,6 +90,7 @@ enum ToolOperation {
     WriteFile(WriteFileArgs),
     ReadOutput(ReadOutputArgs),
     ExecCommand(ExecCommandArgs),
+    PollCommand(PollCommandArgs),
     UpdatePlan {
         explanation: Option<String>,
         steps: Vec<PlanStep>,
@@ -90,9 +102,11 @@ pub struct ToolExecutionResult {
     pub provider_output: String,
     pub completed_item: ThreadItem,
     pub display_output: Option<OutputSource>,
+    pub background_command: Option<BackgroundCommandLease>,
 }
 
 pub struct ToolExecutionContext<'a> {
+    pub engine: Weak<super::NativeEngineInner>,
     pub app: &'a AppHandle,
     pub workspace: &'a Path,
     pub permissions: PermissionProfile,
@@ -101,6 +115,8 @@ pub struct ToolExecutionContext<'a> {
     pub approvals: &'a ApprovalBroker,
     pub storage: &'a NativeStorage,
     pub ripgrep: &'a Ripgrep,
+    pub command_sessions: &'a CommandSessionManager,
+    pub stream_deltas: &'a StreamNotificationBatcher,
     pub(super) read_cache: &'a ReadToolCache,
 }
 
@@ -144,21 +160,45 @@ struct WriteFileArgs {
     overwrite: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecCommandArgs {
     command: String,
     cwd: String,
     reason: String,
+    parallel_safe: bool,
+    #[serde(default)]
+    yield_time_ms: Option<u64>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PollCommandArgs {
+    session_id: String,
+    cursor: Option<u64>,
+    wait_seconds: u16,
+}
+
+#[derive(Debug)]
 struct ReadOutputArgs {
     output_id: String,
+    selector: ReadOutputSelector,
+}
+
+#[derive(Debug)]
+enum ReadOutputSelector {
+    Page { cursor: Option<String> },
+    Search { query: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReadOutputArgs {
+    output_id: String,
     cursor: Option<String>,
+    query: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,8 +274,15 @@ impl ToolRegistry {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Workspace-relative file path." },
-                        "old_text": { "type": "string", "minLength": 1 },
-                        "new_text": { "type": "string" },
+                        "old_text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "The exact existing fragment to replace. Keep unchanged surrounding lines outside this fragment unless they are needed to make the match unique."
+                        },
+                        "new_text": {
+                            "type": "string",
+                            "description": "The complete replacement for old_text. Include every intended line exactly once and do not repeat unchanged boundary lines."
+                        },
                         "expected_occurrences": { "type": "integer", "minimum": 1, "maximum": MAX_EDIT_OCCURRENCES }
                     },
                     "required": ["path", "old_text", "new_text", "expected_occurrences"],
@@ -258,13 +305,23 @@ impl ToolRegistry {
             ),
             function_tool(
                 "exec_command",
-                "Run one non-interactive PowerShell command in the workspace. Output is spooled outside the conversation contract and remains available through read_output. Detached processes and external windows are unsupported; child processes remain headless and joined to the command lifetime. Workspace-write mode asks the user first.",
+                "Run one non-interactive PowerShell command in the workspace. Commands that outlive yield_time_ms continue in an engine-owned background session that can be checked with poll_command while other work proceeds. Full output is spooled for read_output after completion. External windows remain unsupported and child processes stay headless. Workspace-write mode asks the user first.",
                 json!({
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "minLength": 1 },
                         "cwd": { "type": "string", "description": "Workspace-relative working directory, or . for the root." },
                         "reason": { "type": "string", "minLength": 1, "description": "A concise user-facing reason." },
+                        "parallel_safe": {
+                            "type": "boolean",
+                            "description": "Set true only when this command is independent of every other command emitted in the same response, does not mutate shared files or configuration, and does not depend on another command's output. Otherwise set false. Parallel execution is additionally restricted by the active permission profile."
+                        },
+                        "yield_time_ms": {
+                            "type": ["integer", "null"],
+                            "minimum": MIN_COMMAND_YIELD_MILLISECONDS,
+                            "maximum": MAX_COMMAND_YIELD_MILLISECONDS,
+                            "description": "Maximum foreground wait before a still-running command returns a session_id. Use null for the 10000 ms default. Commands that finish sooner return normally; use a shorter value for known long-running independent work."
+                        },
                         "timeout_seconds": {
                             "type": ["integer", "null"],
                             "minimum": 1,
@@ -272,20 +329,55 @@ impl ToolRegistry {
                             "description": "Execution budget in seconds, chosen by the agent from the command's expected worst-case duration. Use null for the safe one-hour default. Do not guess short limits for recursive searches, builds, tests, installs, or external tools; long-running work can request up to seven days."
                         }
                     },
-                    "required": ["command", "cwd", "reason", "timeout_seconds"],
+                    "required": ["command", "cwd", "reason", "parallel_safe", "yield_time_ms", "timeout_seconds"],
+                    "additionalProperties": false
+                }),
+            ),
+            function_tool(
+                "poll_command",
+                "Wait for new output or terminal status from an engine-owned command session. Polling is read-only, serialized per session, and may run alongside unrelated tools or polls for other sessions.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Session identifier returned by exec_command."
+                        },
+                        "cursor": {
+                            "type": ["integer", "null"],
+                            "minimum": 0,
+                            "description": "Last observed revision, or null for the first poll."
+                        },
+                        "wait_seconds": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": MAX_COMMAND_POLL_WAIT_SECONDS,
+                            "description": "Maximum wait for output or completion. Use 0 for an immediate status check."
+                        }
+                    },
+                    "required": ["session_id", "cursor", "wait_seconds"],
                     "additionalProperties": false
                 }),
             ),
             function_tool(
                 "read_output",
-                "Read one UTF-8 chunk from a previously stored tool or command output. Start with a null cursor and follow next_cursor until it is null.",
+                "Retrieve a stored tool or command output. Set query to an exact text fragment to return only matching lines; otherwise set query to null and read one raw UTF-8 page using cursor.",
                 json!({
                     "type": "object",
                     "properties": {
                         "output_id": { "type": "string", "minLength": 1 },
-                        "cursor": { "type": ["string", "null"] }
+                        "cursor": {
+                            "type": ["string", "null"],
+                            "description": "Raw page cursor. Use null for the first page and whenever query is not null."
+                        },
+                        "query": {
+                            "type": ["string", "null"],
+                            "maxLength": MAX_OUTPUT_SEARCH_QUERY_BYTES,
+                            "description": "Exact text fragment to search without loading unrelated pages, or null for raw paging."
+                        }
                     },
-                    "required": ["output_id", "cursor"],
+                    "required": ["output_id", "cursor", "query"],
                     "additionalProperties": false
                 }),
             ),
@@ -322,7 +414,7 @@ impl ToolRegistry {
             json!({
                 "type": "custom",
                 "name": "apply_patch",
-                "description": "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+                "description": "Edit files with the supplied patch grammar. Send raw patch text, never JSON. `@@` opens a change block and never closes one: before another `@@`, file marker, or `*** End Patch`, every block must contain at least one `+` or `-` line. Never emit a trailing or standalone `@@`. A valid block is `@@\\n context\\n-old\\n+new`, with no closing marker. Prefix unchanged context with one space and include boundary lines exactly once. To append, keep context and `+` lines in the same block.",
                 "format": {
                     "type": "grammar",
                     "syntax": "lark",
@@ -373,6 +465,7 @@ impl ToolRegistry {
             "exec_command" => {
                 let args: ExecCommandArgs = decode_arguments(name, arguments)?;
                 command_timeout(&args)?;
+                command_yield_time(&args)?;
                 let description = format!(
                     "Run {}",
                     truncate_utf8(&args.command, MAX_TOOL_DESCRIPTION_BYTES)
@@ -383,9 +476,32 @@ impl ToolRegistry {
                     ToolOperation::ExecCommand(args),
                 )
             }
+            "poll_command" => {
+                let args: PollCommandArgs = decode_arguments(name, arguments)?;
+                validate_identifier("command session id", &args.session_id)?;
+                if args.wait_seconds > MAX_COMMAND_POLL_WAIT_SECONDS {
+                    return Err(AppError::Tool(format!(
+                        "command poll wait must not exceed {MAX_COMMAND_POLL_WAIT_SECONDS} seconds"
+                    )));
+                }
+                let description = format!("Poll command {}", args.session_id);
+                (
+                    "poll_command",
+                    description,
+                    ToolOperation::PollCommand(args),
+                )
+            }
             "read_output" => {
-                let args: ReadOutputArgs = decode_arguments(name, arguments)?;
-                let description = format!("Read stored output {}", args.output_id);
+                let raw: RawReadOutputArgs = decode_arguments(name, arguments)?;
+                let args = normalize_read_output_args(raw)?;
+                let description = match &args.selector {
+                    ReadOutputSelector::Page { .. } => {
+                        format!("Read stored output {}", args.output_id)
+                    }
+                    ReadOutputSelector::Search { .. } => {
+                        format!("Search stored output {}", args.output_id)
+                    }
+                };
                 ("read_output", description, ToolOperation::ReadOutput(args))
             }
             "update_plan" => {
@@ -443,14 +559,31 @@ impl PreparedTool {
         self.name
     }
 
-    pub fn is_parallel_safe(&self) -> bool {
-        matches!(
-            &self.operation,
+    pub fn supports_parallel_execution(&self, permissions: PermissionProfile) -> bool {
+        match &self.operation {
             ToolOperation::ReadFile(_)
-                | ToolOperation::ListFiles(_)
-                | ToolOperation::SearchText(_)
-                | ToolOperation::ReadOutput(_)
-        )
+            | ToolOperation::ListFiles(_)
+            | ToolOperation::SearchText(_)
+            | ToolOperation::ReadOutput(_)
+            | ToolOperation::PollCommand(_) => true,
+            ToolOperation::ExecCommand(args) => {
+                args.parallel_safe
+                    && permissions.sandbox == SandboxMode::DangerFullAccess
+                    && permissions.approvals == ApprovalPolicy::Never
+            }
+            _ => false,
+        }
+    }
+
+    fn output_presentation(&self) -> ToolOutputPresentation {
+        match &self.operation {
+            ToolOperation::ListFiles(_) => ToolOutputPresentation::FileList,
+            ToolOperation::ReadFile(args) => ToolOutputPresentation::SourceFile {
+                path: args.path.clone(),
+            },
+            ToolOperation::SearchText(_) => ToolOutputPresentation::SearchResults,
+            _ => ToolOutputPresentation::PlainText,
+        }
     }
 
     fn read_cache_key(
@@ -482,6 +615,7 @@ impl PreparedTool {
                 source: CommandSource::Agent,
                 status: ActivityStatus::InProgress,
                 aggregated_output: None,
+                live_output: Some(CommandLiveOutput::default()),
                 exit_code: None,
                 duration_ms: None,
             },
@@ -491,6 +625,7 @@ impl PreparedTool {
                     path: args.path.clone(),
                     kind: FileChangeKind::Update { move_path: None },
                     diff: diff_preview(&args.old_text, &args.new_text),
+                    line_stats: Some(line_stats(&args.old_text, &args.new_text)),
                 }],
                 status: ActivityStatus::InProgress,
             },
@@ -504,6 +639,7 @@ impl PreparedTool {
                         FileChangeKind::Add
                     },
                     diff: diff_preview("", &args.content),
+                    line_stats: Some(line_stats("", &args.content)),
                 }],
                 status: ActivityStatus::InProgress,
             },
@@ -517,6 +653,7 @@ impl PreparedTool {
                 name: self.name.into(),
                 description: self.description.clone(),
                 status: ActivityStatus::InProgress,
+                output_presentation: self.output_presentation(),
                 output: None,
             },
         }
@@ -541,6 +678,7 @@ impl PreparedTool {
                     steps: steps.clone(),
                 },
                 display_output: None,
+                background_command: None,
             });
         }
         let workspace = canonical_workspace(context.workspace).await?;
@@ -597,22 +735,38 @@ impl PreparedTool {
                 .get_or_execute(
                     self.read_cache_key(&workspace, context.thread_id)?,
                     || async {
-                        context
-                            .storage
-                            .read_output_for_thread(
-                                context.thread_id.to_string(),
-                                args.output_id.clone(),
-                                args.cursor.clone(),
-                            )
-                            .await
-                            .map(|response| {
-                                CachedReadOutput::output_page(format!(
-                                    "output_id: {}\nnext_cursor: {}\nchunk:\n{}",
-                                    response.output_id,
-                                    response.next_cursor.as_deref().unwrap_or("null"),
-                                    response.chunk
-                                ))
-                            })
+                        match &args.selector {
+                            ReadOutputSelector::Page { cursor } => context
+                                .storage
+                                .read_output_for_thread(
+                                    context.thread_id.to_string(),
+                                    args.output_id.clone(),
+                                    cursor.clone(),
+                                )
+                                .await
+                                .map(|response| {
+                                    CachedReadOutput::output_page(format!(
+                                        "output_id: {}\nnext_cursor: {}\nchunk:\n{}",
+                                        response.output_id,
+                                        response.next_cursor.as_deref().unwrap_or("null"),
+                                        response.chunk
+                                    ))
+                                }),
+                            ReadOutputSelector::Search { query } => context
+                                .storage
+                                .search_output_for_thread(
+                                    context.thread_id.to_string(),
+                                    args.output_id.clone(),
+                                    query.clone(),
+                                )
+                                .await
+                                .map(|response| {
+                                    CachedReadOutput::text(
+                                        response.render(),
+                                        TextOutputKind::SearchOutput,
+                                    )
+                                }),
+                        }
                     },
                 )
                 .await
@@ -671,10 +825,42 @@ impl PreparedTool {
                         }
                     }
                 }
-                execute_command(&workspace, args, context.ripgrep, cancellation)
-                    .await
-                    .map(|output| ToolResult::StoredOutput(StoredToolOutput::Command(output)))
+                match context
+                    .command_sessions
+                    .start(
+                        context.engine.clone(),
+                        Some(context.app.clone()),
+                        workspace.clone(),
+                        args.clone(),
+                        context.ripgrep.clone(),
+                        Some(context.stream_deltas.clone()),
+                        self.item_id.clone(),
+                        context.thread_id.into(),
+                        context.turn_id.into(),
+                        self.started_at_ms(),
+                        command_yield_time(args)?,
+                        cancellation,
+                    )
+                    .await?
+                {
+                    CommandStartOutcome::Completed(output) => {
+                        Ok(ToolResult::StoredOutput(StoredToolOutput::Command(output)))
+                    }
+                    CommandStartOutcome::Running(session) => {
+                        Ok(ToolResult::BackgroundCommand(session))
+                    }
+                }
             }
+            ToolOperation::PollCommand(args) => context
+                .command_sessions
+                .poll(
+                    context.thread_id,
+                    &args.session_id,
+                    args.cursor,
+                    Duration::from_secs(u64::from(args.wait_seconds)),
+                )
+                .await
+                .map(|output| ToolResult::StoredOutput(StoredToolOutput::OutputPage(output))),
             ToolOperation::UpdatePlan { .. } => {
                 return Err(AppError::Tool(
                     "update_plan must complete before filesystem tool execution".into(),
@@ -683,6 +869,32 @@ impl PreparedTool {
         };
 
         match execution {
+            Ok(ToolResult::BackgroundCommand(session)) => {
+                let ToolOperation::ExecCommand(args) = &self.operation else {
+                    return Err(AppError::State(
+                        "background command result escaped a non-command tool".into(),
+                    ));
+                };
+                let session_id = session.lease.session_id().to_owned();
+                Ok(ToolExecutionResult {
+                    provider_output: session.provider_output,
+                    completed_item: ThreadItem::CommandExecution {
+                        id: self.item_id.clone(),
+                        command: args.command.clone(),
+                        cwd: display_workspace_path(&workspace, &args.cwd),
+                        process_id: Some(session_id),
+                        started_at: Some(self.started_at_ms()),
+                        source: CommandSource::Agent,
+                        status: ActivityStatus::InProgress,
+                        aggregated_output: None,
+                        live_output: Some(session.live_output),
+                        exit_code: None,
+                        duration_ms: None,
+                    },
+                    display_output: None,
+                    background_command: Some(session.lease),
+                })
+            }
             Ok(ToolResult::Patch(outcome)) => Ok(ToolExecutionResult {
                 provider_output: outcome.output,
                 completed_item: ThreadItem::FileChange {
@@ -691,6 +903,7 @@ impl PreparedTool {
                     status: ActivityStatus::Completed,
                 },
                 display_output: None,
+                background_command: None,
             }),
             Ok(ToolResult::MutationConfirmation(provider_output)) => {
                 self.complete_mutation_confirmation(&workspace, started_at, provider_output)
@@ -719,6 +932,7 @@ impl PreparedTool {
                 Some(duration),
             ),
             display_output: None,
+            background_command: None,
         })
     }
 
@@ -728,14 +942,15 @@ impl PreparedTool {
         started_at: Instant,
         output: StoredToolOutput,
     ) -> Result<ToolExecutionResult, AppError> {
-        let (output, provider_output, exit_code) = output.into_output().await?;
+        let output = output.into_output().await?;
         let duration = elapsed_millis(started_at)?;
-        let status = activity_status_for_exit_code(exit_code);
-        let completed_item = self.finish_item(workspace, status, exit_code, Some(duration));
+        let completed_item =
+            self.finish_item(workspace, output.status, output.exit_code, Some(duration));
         Ok(ToolExecutionResult {
-            provider_output,
+            provider_output: output.provider_output,
             completed_item,
-            display_output: Some(output),
+            display_output: Some(output.source),
+            background_command: None,
         })
     }
 
@@ -761,6 +976,7 @@ impl PreparedTool {
                 source: CommandSource::Agent,
                 status,
                 aggregated_output: None,
+                live_output: None,
                 exit_code,
                 duration_ms,
             },
@@ -770,6 +986,7 @@ impl PreparedTool {
                     path: args.path.clone(),
                     kind: FileChangeKind::Update { move_path: None },
                     diff: diff_preview(&args.old_text, &args.new_text),
+                    line_stats: Some(line_stats(&args.old_text, &args.new_text)),
                 }],
                 status,
             },
@@ -783,6 +1000,7 @@ impl PreparedTool {
                         FileChangeKind::Add
                     },
                     diff: diff_preview("", &args.content),
+                    line_stats: Some(line_stats("", &args.content)),
                 }],
                 status,
             },
@@ -796,6 +1014,7 @@ impl PreparedTool {
                 name: self.name.into(),
                 description: self.description.clone(),
                 status,
+                output_presentation: self.output_presentation(),
                 output: None,
             },
         }
@@ -818,6 +1037,7 @@ impl PreparedTool {
                 .map_or_else(|| output.clone(), OutputSource::provider_output),
             completed_item: self.finish_item(workspace, status, exit_code, duration_ms),
             display_output,
+            background_command: None,
         }
     }
 
@@ -834,12 +1054,14 @@ impl PreparedTool {
                 | ToolOperation::ListFiles(_)
                 | ToolOperation::SearchText(_)
                 | ToolOperation::ReadOutput(_)
+                | ToolOperation::PollCommand(_)
                 | ToolOperation::ExecCommand(_)
         )
     }
 }
 
 enum ToolResult {
+    BackgroundCommand(BackgroundCommandStart),
     StoredOutput(StoredToolOutput),
     MutationConfirmation(String),
     Patch(PatchOutcome),
@@ -854,35 +1076,68 @@ enum StoredToolOutput {
     Command(CommandOutput),
 }
 
+struct CompletedStoredOutput {
+    source: OutputSource,
+    provider_output: String,
+    exit_code: Option<i32>,
+    status: ActivityStatus,
+}
+
 impl StoredToolOutput {
-    async fn into_output(self) -> Result<(OutputSource, String, Option<i32>), AppError> {
+    async fn into_output(self) -> Result<CompletedStoredOutput, AppError> {
         match self {
             Self::Text { output, kind } => {
                 let compacted = compact_text(&output, kind);
                 let source = OutputSource::text(output);
                 let provider_output =
                     source.provider_output_with_preview(&compacted.text, compacted.complete);
-                Ok((source, provider_output, None))
+                Ok(CompletedStoredOutput {
+                    source,
+                    provider_output,
+                    exit_code: None,
+                    status: ActivityStatus::Completed,
+                })
             }
             Self::OutputPage(output) => {
                 let provider_output = output.clone();
-                Ok((OutputSource::text(output), provider_output, None))
+                Ok(CompletedStoredOutput {
+                    source: OutputSource::text(output),
+                    provider_output,
+                    exit_code: None,
+                    status: ActivityStatus::Completed,
+                })
             }
             Self::Command(output) => {
-                let exit_code = output.exit_code;
+                let exit_code = output.exit_code();
+                let status = if output.failed() {
+                    ActivityStatus::Failed
+                } else {
+                    activity_status_for_exit_code(exit_code)
+                };
+                let header = output.resource_header();
+                let failure_message = output.failure_message();
                 let (source, provider_output) = tokio::task::spawn_blocking(move || {
                     let mut stdout = output.stdout;
                     let mut stderr = output.stderr;
-                    let compacted = compact_command_output(exit_code, &mut stdout, &mut stderr)?;
-                    let source = OutputSource::command(exit_code, stdout, stderr)?;
-                    let provider_output =
+                    let compacted =
+                        compact_command_output(exit_code.unwrap_or(-1), &mut stdout, &mut stderr)?;
+                    let source = OutputSource::command(&header, stdout, stderr)?;
+                    let mut provider_output =
                         source.provider_output_with_preview(&compacted.text, compacted.complete);
+                    if let Some(message) = failure_message {
+                        provider_output = format!("{message}\n\n{provider_output}");
+                    }
                     Ok::<_, std::io::Error>((source, provider_output))
                 })
                 .await
                 .map_err(|error| AppError::Tool(format!("output spool task failed: {error}")))?
                 .map_err(|error| AppError::Tool(format!("could not assemble output: {error}")))?;
-                Ok((source, provider_output, Some(exit_code)))
+                Ok(CompletedStoredOutput {
+                    source,
+                    provider_output,
+                    exit_code,
+                    status,
+                })
             }
         }
     }
@@ -924,6 +1179,34 @@ fn decode_arguments<T: for<'de> Deserialize<'de>>(
 ) -> Result<T, AppError> {
     serde_json::from_str(arguments)
         .map_err(|error| AppError::Tool(format!("invalid `{name}` arguments: {error}")))
+}
+
+fn normalize_read_output_args(raw: RawReadOutputArgs) -> Result<ReadOutputArgs, AppError> {
+    let selector = match raw.query {
+        Some(query) => {
+            if raw.cursor.is_some() {
+                return Err(AppError::Tool(
+                    "read_output cursor must be null when query is provided".into(),
+                ));
+            }
+            if query.trim().is_empty() || query.len() > MAX_OUTPUT_SEARCH_QUERY_BYTES {
+                return Err(AppError::Tool(format!(
+                    "read_output query must contain between 1 and {MAX_OUTPUT_SEARCH_QUERY_BYTES} bytes"
+                )));
+            }
+            if query.chars().any(char::is_control) {
+                return Err(AppError::Tool(
+                    "read_output query cannot contain control characters".into(),
+                ));
+            }
+            ReadOutputSelector::Search { query }
+        }
+        None => ReadOutputSelector::Page { cursor: raw.cursor },
+    };
+    Ok(ReadOutputArgs {
+        output_id: raw.output_id,
+        selector,
+    })
 }
 
 fn normalize_plan(args: UpdatePlanArgs) -> Result<(Option<String>, Vec<PlanStep>), AppError> {
@@ -993,10 +1276,7 @@ fn validate_identifier(label: &str, value: &str) -> Result<(), AppError> {
 }
 
 fn diff_preview(old: &str, new: &str) -> String {
-    truncate_utf8_marked(
-        &format!("--- before\n+++ after\n-{}\n+{}", old, new),
-        MAX_DIFF_BYTES,
-    )
+    render_replacement_diff("before", "after", old, new)
 }
 
 fn elapsed_millis(started_at: Instant) -> Result<u64, AppError> {
@@ -1015,6 +1295,7 @@ fn activity_status_for_exit_code(exit_code: Option<i32>) -> ActivityStatus {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::io::Write as _;
     use std::path::Path;
 
     use serde_json::Value;
@@ -1025,11 +1306,14 @@ mod tests {
     use crate::error::AppError;
 
     use super::super::output_compaction::TextOutputKind;
-    use super::fs::atomic_write;
+    use super::exec::CommandTermination;
+    use super::fs::{atomic_write, edit_file, write_file};
     use super::workspace::resolve_write_target;
     use super::{
-        MAX_COMMAND_TIMEOUT_SECONDS, Ripgrep, SearchTextArgs, StoredToolOutput, ToolOperation,
-        ToolRegistry, activity_status_for_exit_code, execute_patch_operation, search_text,
+        CommandOutput, EditFileArgs, MAX_COMMAND_POLL_WAIT_SECONDS, MAX_COMMAND_TIMEOUT_SECONDS,
+        ReadOutputArgs, ReadOutputSelector, Ripgrep, SearchTextArgs, StoredToolOutput,
+        ToolOperation, ToolRegistry, WriteFileArgs, activity_status_for_exit_code,
+        execute_patch_operation, search_text,
     };
 
     #[test]
@@ -1049,10 +1333,72 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn command_termination_preserves_spools_and_status() {
+        for (termination, expected_header, expected_status, expected_exit_code) in [
+            (
+                CommandTermination::Exited(0),
+                "exit_code: 0",
+                ActivityStatus::Completed,
+                Some(0),
+            ),
+            (
+                CommandTermination::Exited(17),
+                "exit_code: 17",
+                ActivityStatus::Failed,
+                Some(17),
+            ),
+            (
+                CommandTermination::Cancelled,
+                "status: cancelled",
+                ActivityStatus::Failed,
+                None,
+            ),
+            (
+                CommandTermination::TimedOut {
+                    timeout_seconds: 60,
+                },
+                "status: timed_out\ntimeout_seconds: 60",
+                ActivityStatus::Failed,
+                None,
+            ),
+        ] {
+            let mut stdout = tempfile::tempfile().expect("stdout spool should exist");
+            let mut stderr = tempfile::tempfile().expect("stderr spool should exist");
+            stdout
+                .write_all(b"stdout-tail")
+                .expect("stdout should write");
+            stderr
+                .write_all(b"stderr-tail")
+                .expect("stderr should write");
+
+            let output = StoredToolOutput::Command(CommandOutput {
+                termination,
+                stdout,
+                stderr,
+            })
+            .into_output()
+            .await
+            .expect("command output should assemble");
+
+            assert_eq!(output.exit_code, expected_exit_code);
+            assert_eq!(output.status, expected_status);
+            assert!(
+                output
+                    .source
+                    .reference()
+                    .preview
+                    .starts_with(expected_header)
+            );
+            assert!(output.source.reference().preview.contains("stdout-tail"));
+            assert!(output.source.reference().preview.contains("stderr-tail"));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn externalizes_tool_output_instead_of_rejecting_it() {
         let output = "x".repeat(2 * 1_048_576);
 
-        let (source, provider_output, exit_code) = StoredToolOutput::Text {
+        let output = StoredToolOutput::Text {
             output: output.clone(),
             kind: TextOutputKind::ReadFile,
         }
@@ -1060,10 +1406,15 @@ mod tests {
         .await
         .expect("large tool output should remain available as a resource");
 
-        assert_eq!(source.reference().byte_length, output.len() as u64);
-        assert!(provider_output.contains(&source.reference().id));
-        assert!(provider_output.len() < 12 * 1_024);
-        assert_eq!(exit_code, None);
+        assert_eq!(output.source.reference().byte_length, 2 * 1_048_576);
+        assert!(
+            output
+                .provider_output
+                .contains(&output.source.reference().id)
+        );
+        assert!(output.provider_output.len() < 12 * 1_024);
+        assert_eq!(output.exit_code, None);
+        assert!(matches!(output.status, ActivityStatus::Completed));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1073,15 +1424,15 @@ mod tests {
             "x".repeat(64 * 1_024)
         );
 
-        let (source, provider_output, exit_code) =
-            StoredToolOutput::OutputPage(output_page.clone())
-                .into_output()
-                .await
-                .expect("an output page should remain directly readable");
+        let output = StoredToolOutput::OutputPage(output_page.clone())
+            .into_output()
+            .await
+            .expect("an output page should remain directly readable");
 
-        assert_eq!(provider_output, output_page);
-        assert!(source.reference().next_cursor.is_some());
-        assert_eq!(exit_code, None);
+        assert_eq!(output.provider_output, output_page);
+        assert!(output.source.reference().next_cursor.is_some());
+        assert_eq!(output.exit_code, None);
+        assert!(matches!(output.status, ActivityStatus::Completed));
     }
 
     #[test]
@@ -1094,6 +1445,16 @@ mod tests {
 
         assert_eq!(tool["type"], "custom");
         assert_eq!(tool["name"], "apply_patch");
+        assert!(
+            tool["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("`@@` opens a change block"))
+        );
+        assert!(
+            tool["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("Never emit a trailing"))
+        );
         assert_eq!(tool["format"]["type"], "grammar");
         assert_eq!(tool["format"]["syntax"], "lark");
         assert_eq!(
@@ -1122,7 +1483,50 @@ mod tests {
     }
 
     #[test]
-    fn only_read_only_workspace_tools_are_parallel_safe() {
+    fn stored_output_retrieval_selects_search_or_raw_paging_explicitly() {
+        let registry = ToolRegistry;
+        let page = registry
+            .prepare(
+                "output-page".into(),
+                "read_output",
+                r#"{"output_id":"output-1","cursor":null,"query":null}"#,
+            )
+            .expect("raw output paging should prepare");
+        let search = registry
+            .prepare(
+                "output-search".into(),
+                "read_output",
+                r#"{"output_id":"output-1","cursor":null,"query":"error"}"#,
+            )
+            .expect("targeted output search should prepare");
+
+        assert!(matches!(
+            page.operation,
+            ToolOperation::ReadOutput(ReadOutputArgs {
+                selector: ReadOutputSelector::Page { cursor: None },
+                ..
+            })
+        ));
+        assert!(matches!(
+            search.operation,
+            ToolOperation::ReadOutput(ReadOutputArgs {
+                selector: ReadOutputSelector::Search { ref query },
+                ..
+            }) if query == "error"
+        ));
+        assert!(
+            registry
+                .prepare(
+                    "output-invalid".into(),
+                    "read_output",
+                    r#"{"output_id":"output-1","cursor":"2","query":"error"}"#,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parallel_execution_requires_an_explicitly_safe_operation_and_profile() {
         let registry = ToolRegistry;
         let read = registry
             .prepare(
@@ -1142,27 +1546,51 @@ mod tests {
             .prepare(
                 "command-1".into(),
                 "exec_command",
-                r#"{"command":"Get-Date","cwd":".","reason":"test"}"#,
+                r#"{"command":"Get-Date","cwd":".","reason":"test","parallel_safe":true,"yield_time_ms":null,"timeout_seconds":null}"#,
             )
             .expect("exec_command should prepare");
+        let exclusive_command = registry
+            .prepare(
+                "command-2".into(),
+                "exec_command",
+                r#"{"command":"Get-Date","cwd":".","reason":"test","parallel_safe":false,"yield_time_ms":null,"timeout_seconds":null}"#,
+            )
+            .expect("exclusive exec_command should prepare");
+        let poll = registry
+            .prepare(
+                "poll-1".into(),
+                "poll_command",
+                r#"{"session_id":"019d-session","cursor":null,"wait_seconds":5}"#,
+            )
+            .expect("poll_command should prepare");
 
-        assert!(read.is_parallel_safe());
-        assert!(search.is_parallel_safe());
-        assert!(!command.is_parallel_safe());
+        for permissions in [
+            PermissionProfile::read_only(),
+            PermissionProfile::workspace_write(),
+            PermissionProfile::full_access(),
+        ] {
+            assert!(read.supports_parallel_execution(permissions));
+            assert!(search.supports_parallel_execution(permissions));
+            assert!(poll.supports_parallel_execution(permissions));
+        }
+        assert!(command.supports_parallel_execution(PermissionProfile::full_access()));
+        assert!(!command.supports_parallel_execution(PermissionProfile::workspace_write()));
+        assert!(!command.supports_parallel_execution(PermissionProfile::read_only()));
+        assert!(!exclusive_command.supports_parallel_execution(PermissionProfile::full_access()));
     }
 
     #[test]
     fn command_timeout_can_cover_long_running_autonomous_work() {
         let registry = ToolRegistry;
         let extended = format!(
-            r#"{{"command":"Get-Date","cwd":".","reason":"test","timeout_seconds":{MAX_COMMAND_TIMEOUT_SECONDS}}}"#
+            r#"{{"command":"Get-Date","cwd":".","reason":"test","parallel_safe":false,"yield_time_ms":null,"timeout_seconds":{MAX_COMMAND_TIMEOUT_SECONDS}}}"#
         );
         registry
             .prepare("command-long".into(), "exec_command", &extended)
             .expect("the seven-day command timeout should prepare");
 
         let excessive = format!(
-            r#"{{"command":"Get-Date","cwd":".","reason":"test","timeout_seconds":{}}}"#,
+            r#"{{"command":"Get-Date","cwd":".","reason":"test","parallel_safe":false,"yield_time_ms":null,"timeout_seconds":{}}}"#,
             MAX_COMMAND_TIMEOUT_SECONDS + 1
         );
         assert!(
@@ -1173,7 +1601,43 @@ mod tests {
     }
 
     #[test]
-    fn exec_command_timeout_schema_is_required_and_nullable() {
+    fn poll_command_schema_is_bounded_and_strict() {
+        let definition = ToolRegistry
+            .definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "poll_command")
+            .expect("poll_command should be advertised");
+        let parameters = &definition["parameters"];
+
+        assert_eq!(
+            parameters["required"],
+            serde_json::json!(["session_id", "cursor", "wait_seconds"])
+        );
+        assert_eq!(parameters["properties"]["cursor"]["minimum"], 0);
+        assert_eq!(
+            parameters["properties"]["wait_seconds"]["maximum"],
+            MAX_COMMAND_POLL_WAIT_SECONDS
+        );
+        ToolRegistry
+            .prepare(
+                "poll-valid".into(),
+                "poll_command",
+                r#"{"session_id":"019d-session","cursor":3,"wait_seconds":0}"#,
+            )
+            .expect("an immediate poll should prepare");
+        assert!(
+            ToolRegistry
+                .prepare(
+                    "poll-too-long".into(),
+                    "poll_command",
+                    r#"{"session_id":"019d-session","cursor":null,"wait_seconds":301}"#,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn exec_command_schema_is_explicit_and_strict() {
         let definition = ToolRegistry
             .definitions()
             .into_iter()
@@ -1183,7 +1647,53 @@ mod tests {
 
         assert_eq!(
             parameters["required"],
-            serde_json::json!(["command", "cwd", "reason", "timeout_seconds"])
+            serde_json::json!([
+                "command",
+                "cwd",
+                "reason",
+                "parallel_safe",
+                "yield_time_ms",
+                "timeout_seconds"
+            ])
+        );
+        assert_eq!(
+            parameters["properties"]
+                .as_object()
+                .expect("exec command properties should be an object")
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "command",
+                "cwd",
+                "parallel_safe",
+                "reason",
+                "timeout_seconds",
+                "yield_time_ms",
+            ])
+        );
+        assert_eq!(parameters["properties"]["parallel_safe"]["type"], "boolean");
+        assert!(
+            parameters["properties"]["parallel_safe"]["description"]
+                .as_str()
+                .is_some_and(|description| {
+                    description.contains("independent")
+                        && description.contains("does not mutate shared files")
+                        && description.contains("permission profile")
+                })
+        );
+        assert_eq!(
+            parameters["properties"]["yield_time_ms"]["type"],
+            serde_json::json!(["integer", "null"])
+        );
+        assert!(
+            parameters["properties"]["yield_time_ms"]["description"]
+                .as_str()
+                .is_some_and(|description| {
+                    description.contains("foreground wait")
+                        && description.contains("session_id")
+                        && description.contains("10000 ms default")
+                })
         );
         assert_eq!(
             parameters["properties"]["timeout_seconds"]["type"],
@@ -1202,7 +1712,7 @@ mod tests {
             .prepare(
                 "command-default-timeout".into(),
                 "exec_command",
-                r#"{"command":"Get-Date","cwd":".","reason":"test","timeout_seconds":null}"#,
+                r#"{"command":"Get-Date","cwd":".","reason":"test","parallel_safe":false,"yield_time_ms":null,"timeout_seconds":null}"#,
             )
             .expect("a null timeout should use the default");
     }
@@ -1582,5 +2092,46 @@ mod tests {
             .await
             .expect("written file should be readable");
         assert_eq!(contents, "second");
+    }
+
+    #[tokio::test]
+    async fn file_tools_round_trip_portuguese_as_utf8_without_bom() {
+        const ORIGINAL: &str = "ação, coração, maçã, português e ÁÉÍÓÚ\n";
+        const UPDATED: &str = "ação, edição, maçã, português e ÁÉÍÓÚ\n";
+
+        let directory = TempDir::new().expect("temporary workspace should exist");
+        let workspace = tokio::fs::canonicalize(directory.path())
+            .await
+            .expect("workspace should canonicalize");
+        write_file(
+            &workspace,
+            &WriteFileArgs {
+                path: "português.txt".into(),
+                content: ORIGINAL.into(),
+                overwrite: false,
+            },
+        )
+        .await
+        .expect("UTF-8 file should be created");
+        edit_file(
+            &workspace,
+            &EditFileArgs {
+                path: "português.txt".into(),
+                old_text: "coração".into(),
+                new_text: "edição".into(),
+                expected_occurrences: 1,
+            },
+        )
+        .await
+        .expect("UTF-8 file should be edited");
+
+        let bytes = tokio::fs::read(workspace.join("português.txt"))
+            .await
+            .expect("UTF-8 file should be readable");
+        assert!(!bytes.starts_with(&[0xef, 0xbb, 0xbf]));
+        assert_eq!(
+            std::str::from_utf8(&bytes).expect("file tool output should be valid UTF-8"),
+            UPDATED
+        );
     }
 }

@@ -52,8 +52,12 @@ export function ReviewPanel(props: ReviewPanelProps) {
             {stats().fileCount}{" "}
             {stats().fileCount === 1 ? "arquivo alterado" : "arquivos alterados"}
           </span>
-          <span class="review-stat additions">+{stats().additions}</span>
-          <span class="review-stat deletions">−{stats().deletions}</span>
+          <Show when={stats().additions > 0}>
+            <span class="review-stat additions">+{stats().additions}</span>
+          </Show>
+          <Show when={stats().deletions > 0}>
+            <span class="review-stat deletions">−{stats().deletions}</span>
+          </Show>
         </div>
       </div>
 
@@ -76,8 +80,12 @@ export function ReviewPanel(props: ReviewPanelProps) {
                     {entry.change.kind.type === "add" ? "NOVO" : "EXCLUÍDO"}
                   </span>
                 </Show>
-                <span class="review-stat additions">+{entry.document.stats.additions}</span>
-                <span class="review-stat deletions">−{entry.document.stats.deletions}</span>
+                <Show when={entry.stats.additions > 0}>
+                  <span class="review-stat additions">+{entry.stats.additions}</span>
+                </Show>
+                <Show when={entry.stats.deletions > 0}>
+                  <span class="review-stat deletions">−{entry.stats.deletions}</span>
+                </Show>
               </button>
             )}
           </For>
@@ -92,8 +100,12 @@ export function ReviewPanel(props: ReviewPanelProps) {
               <>
                 <header class="review-file-header">
                   <code title={entry().change.path}>{entry().change.path}</code>
-                  <span class="review-stat additions">+{entry().document.stats.additions}</span>
-                  <span class="review-stat deletions">−{entry().document.stats.deletions}</span>
+                  <Show when={entry().stats.additions > 0}>
+                    <span class="review-stat additions">+{entry().stats.additions}</span>
+                  </Show>
+                  <Show when={entry().stats.deletions > 0}>
+                    <span class="review-stat deletions">−{entry().stats.deletions}</span>
+                  </Show>
                 </header>
                 <Show
                   when={entry().document.unifiedRows.length > 0}

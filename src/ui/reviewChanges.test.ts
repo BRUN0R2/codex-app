@@ -8,6 +8,7 @@ import {
   ReviewDocumentStore,
   ReviewStatisticsStore,
   summarizeReviewChanges,
+  summarizeReviewDocuments,
 } from "./reviewChanges";
 
 describe("review changes", () => {
@@ -65,6 +66,7 @@ describe("review changes", () => {
       path: "src/App.tsx",
       diff: "@@ -1 +1 @@\n-old\n+new",
       kind: { type: "update" as const, movePath: null },
+      lineStats: null,
     };
     const first = store.project([firstChange]);
     const unchanged = store.project([{ ...firstChange }]);
@@ -81,12 +83,34 @@ describe("review changes", () => {
       path: "src/App.tsx",
       diff: "@@ -1 +1 @@\n-old\n+new",
       kind: { type: "update" as const, movePath: null },
+      lineStats: null,
     };
 
     expect(store.summarize([change])).toEqual({ additions: 1, deletions: 1, fileCount: 1 });
     expect(store.summarize([{ ...change }])).toEqual({
       additions: 1,
       deletions: 1,
+      fileCount: 1,
+    });
+  });
+
+  it("keeps authoritative totals when the visual diff is only a bounded preview", () => {
+    const change = {
+      path: "src/removed.rs",
+      diff: "@@ -1,1 +0,0 @@\n-first\n[diff truncated]",
+      kind: { type: "delete" as const },
+      lineStats: { additions: 0, deletions: 288 },
+    };
+    const documents = new ReviewDocumentStore().project([change]);
+
+    expect(new ReviewStatisticsStore().summarize([change])).toEqual({
+      additions: 0,
+      deletions: 288,
+      fileCount: 1,
+    });
+    expect(summarizeReviewDocuments(documents)).toEqual({
+      additions: 0,
+      deletions: 288,
       fileCount: 1,
     });
   });
@@ -107,7 +131,7 @@ function fileChange(id: string, path: string, diff: string): VisibleThreadTurn["
   return {
     type: "fileChange",
     id,
-    changes: [{ path, diff, kind: { type: "update", movePath: null } }],
+    changes: [{ path, diff, kind: { type: "update", movePath: null }, lineStats: null }],
     status: "completed",
   };
 }

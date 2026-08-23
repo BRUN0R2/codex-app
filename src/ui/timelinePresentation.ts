@@ -1,4 +1,4 @@
-import type { ActivityStatus, TurnStatus } from "../contracts/types";
+import type { ActivityStatus, CommandLiveOutput, FileChange, TurnStatus } from "../contracts/types";
 
 export type ThinkingPresentation = "activity" | "none" | "standalone";
 export const LONG_COMMAND_DURATION_THRESHOLD_MS = 10_000;
@@ -113,6 +113,19 @@ export function toolActivityTitle(
   return activityStateTitle("ferramenta", status);
 }
 
+export function commandPollActivityTitle(status: ActivityStatus): string {
+  switch (status) {
+    case "completed":
+      return "Comando verificado";
+    case "declined":
+      return "Verificação do comando recusada";
+    case "failed":
+      return "Falha ao verificar comando";
+    case "inProgress":
+      return "Verificando comando";
+  }
+}
+
 export function terminalReadActivityTitle(status: ActivityStatus): string {
   switch (status) {
     case "completed":
@@ -127,7 +140,18 @@ export function terminalReadActivityTitle(status: ActivityStatus): string {
 }
 
 export function fileChangeGroupTitle(changeCount: number): string {
-  return `${changeCount} arquivos alterados`;
+  return changeCount === 1 ? "1 arquivo alterado" : `${changeCount} arquivos alterados`;
+}
+
+export function fileChangeActionLabel(kind: FileChange["kind"]["type"]): string {
+  switch (kind) {
+    case "add":
+      return "Arquivo criado";
+    case "delete":
+      return "Arquivo excluído";
+    case "update":
+      return "Arquivo editado";
+  }
 }
 
 export function commandOutputText(output: string | null | undefined): string | null {
@@ -152,6 +176,23 @@ export function commandOutputText(output: string | null | undefined): string | n
   const stderr = body.slice(marker.index + marker[0].length).trimEnd();
   const visible = [stdout, stderr].filter(Boolean).join("\n");
   return visible.length > 0 ? visible : null;
+}
+
+export function commandLiveOutputText(output: CommandLiveOutput | null): string | null {
+  if (output === null) {
+    return null;
+  }
+  const sections: string[] = [];
+  if (output.stdout.length > 0) {
+    sections.push(output.stderr.length > 0 ? `stdout:\n${output.stdout}` : output.stdout);
+  }
+  if (output.stderr.length > 0) {
+    sections.push(`stderr:\n${output.stderr}`);
+  }
+  if (output.truncated) {
+    sections.push("[Prévia ao vivo limitada; a saída completa estará disponível ao concluir.]");
+  }
+  return sections.length === 0 ? null : sections.join("\n");
 }
 
 export function toolOutputText(output: string | null | undefined): string | null {

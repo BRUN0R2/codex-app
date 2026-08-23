@@ -11,6 +11,7 @@ import type {
   Automation,
   AutomationInput,
   AutomationRun,
+  AutoTopUpSettingsSnapshot,
   ChatGptMode,
   ChatModelOption,
   CodexModel,
@@ -25,6 +26,8 @@ import type {
   RuntimeDiagnostic,
   RuntimeStatus,
   ThreadSummary,
+  UsageResetCreditsResponse,
+  UsageResetRedemptionResponse,
 } from "../contracts/types";
 import {
   archiveThread as archiveThreadCommand,
@@ -34,6 +37,8 @@ import {
   deleteThread as deleteThreadCommand,
   describeDiagnosticError,
   describeError,
+  disableAutoTopUp as disableAutoTopUpCommand,
+  enableAutoTopUp as enableAutoTopUpCommand,
   forkThread as forkThreadCommand,
   inspectAttachments,
   interruptTurn,
@@ -47,8 +52,11 @@ import {
   openExternalUrl,
   readAccount,
   readAccountProfile,
+  readAutoTopUpSettings,
   readRateLimits,
   readThread,
+  readUsageResets,
+  redeemUsageReset as redeemUsageResetCommand,
   reportFrontendDiagnostic,
   respondToServerRequest,
   resumeThread,
@@ -62,6 +70,7 @@ import {
   subscribeToEvents,
   unarchiveThread as unarchiveThreadCommand,
   updateAutomation as updateAutomationCommand,
+  updateAutoTopUp as updateAutoTopUpCommand,
   updateConfig,
 } from "../infrastructure/codexClient";
 import { createAccountProfileRefreshCoordinator } from "./accountProfileRefresh";
@@ -75,7 +84,12 @@ import {
   upsertAutomation,
   upsertAutomationRun,
 } from "./automations";
-import { readLatestTurnFailure, removeItem, upsertItem } from "./conversation";
+import {
+  applyCommandStreamDeltasToThread,
+  readLatestTurnFailure,
+  removeItem,
+  upsertItem,
+} from "./conversation";
 import {
   type InitializationStage,
   InitializationTimeoutError,
@@ -188,12 +202,24 @@ export function createAppController(): AppController {
   });
   const [engine, setEngine] = createSignal<EngineStartResponse | null>(null);
   const [account, setAccount] = createSignal<AccountReadResponse>();
+  const [accountProfile, setAccountProfile] = createSignal<AccountProfileResponse | null>(null);
+  const [accountProfileError, setAccountProfileError] = createSignal<string | null>(null);
+  const [accountProfileLoading, setAccountProfileLoading] = createSignal(false);
   const [chatModels, setChatModels] = createSignal<readonly ChatModelOption[]>([]);
   const [models, setModels] = createSignal<readonly CodexModel[]>([]);
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
   const [rateLimits, setRateLimits] = createSignal<AccountRateLimitsResponse | null>(null);
   const [rateLimitsError, setRateLimitsError] = createSignal<string | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = createSignal(false);
+  const [usageResets, setUsageResets] = createSignal<UsageResetCreditsResponse | null>(null);
+  const [usageResetsError, setUsageResetsError] = createSignal<string | null>(null);
+  const [usageResetsLoading, setUsageResetsLoading] = createSignal(false);
+  const [usageResetRedeemingId, setUsageResetRedeemingId] = createSignal<string | null>(null);
+  const [autoTopUpSettings, setAutoTopUpSettings] = createSignal<AutoTopUpSettingsSnapshot | null>(
+    null,
+  );
+  const [autoTopUpError, setAutoTopUpError] = createSignal<string | null>(null);
+  const [autoTopUpLoading, setAutoTopUpLoading] = createSignal(false);
   const [threads, setThreads] = createSignal<readonly ThreadSummary[]>([]);
   const [threadsNextCursor, setThreadsNextCursor] = createSignal<string | null>(null);
   const [archivedThreads, setArchivedThreads] = createSignal<readonly ThreadSummary[]>([]);
@@ -254,6 +280,7 @@ export function createAppController(): AppController {
   const [workspace, setWorkspace] = createSignal<string | null>(null);
   let loginId: string | null = null;
   let diagnosticSequence = 0;
+  let pendingAccountProfileReads = 0;
   let pendingRateLimitReads = 0;
   let disposed = false;
   let unsubscribe: (() => void) | null = null;
@@ -309,6 +336,20 @@ export function createAppController(): AppController {
     ),
   );
   const signedIn = createMemo(() => account()?.account !== null && account() !== undefined);
+  createEffect(() => {
+    if (signedIn()) {
+      return;
+    }
+    batch(() => {
+      setUsageResets(null);
+      setUsageResetsError(null);
+      setUsageResetsLoading(false);
+      setUsageResetRedeemingId(null);
+      setAutoTopUpSettings(null);
+      setAutoTopUpError(null);
+      setAutoTopUpLoading(false);
+    });
+  });
   const hasOlderHistory = createMemo(() => historyCursor() !== null);
   const rateLimitRefresh = createRateLimitRefreshCoordinator({
     getSessionKey: () => (signedIn() ? "chatgpt" : null),
@@ -338,10 +379,26 @@ export function createAppController(): AppController {
     }
   }
 
+  async function readAccountProfileWithStatus(): Promise<AccountProfileResponse> {
+    pendingAccountProfileReads += 1;
+    batch(() => {
+      setAccountProfileLoading(true);
+      setAccountProfileError(null);
+    });
+    try {
+      return await readAccountProfile();
+    } finally {
+      pendingAccountProfileReads = Math.max(0, pendingAccountProfileReads - 1);
+      setAccountProfileLoading(pendingAccountProfileReads > 0);
+    }
+  }
+
   const accountProfileRefresh = createAccountProfileRefreshCoordinator({
-    getSessionKey: () => (signedIn() ? "chatgpt" : null),
-    read: readAccountProfile,
+    getSessionKey: () => accountSessionKey(account()),
+    read: readAccountProfileWithStatus,
     apply: (profile: AccountProfileResponse) => {
+      setAccountProfile(profile);
+      setAccountProfileError(null);
       setAccount((current) => {
         if (current?.account === null || current?.account === undefined) {
           return current;
@@ -350,16 +407,28 @@ export function createAppController(): AppController {
           ...current,
           account: {
             ...current.account,
-            name: profile.name ?? current.account.name,
+            name: profile.displayName ?? current.account.name,
             picture: profile.picture ?? current.account.picture,
           },
         };
       });
     },
     reportError: (reason) => {
-      addDiagnostic({ stream: "runtime", message: describeError(reason) });
+      const message = describeError(reason);
+      setAccountProfileError(message);
+      addDiagnostic({ stream: "runtime", message });
     },
   });
+  function invalidateAccountProfileSession(): void {
+    accountProfileRefresh.invalidateSession();
+    pendingAccountProfileReads = 0;
+    batch(() => {
+      setAccountProfile(null);
+      setAccountProfileError(null);
+      setAccountProfileLoading(false);
+    });
+  }
+
   const selectedRuntime = createMemo<ThreadRuntimeState | null>(() => {
     const threadId = currentThread()?.id;
     return threadId === undefined ? null : (threadRuntime().get(threadId) ?? null);
@@ -526,7 +595,7 @@ export function createAppController(): AppController {
       if (!isCurrentInitialization(revision)) {
         return;
       }
-      accountProfileRefresh.invalidateSession();
+      invalidateAccountProfileSession();
       rateLimitRefresh.invalidateSession();
       if (accountSessionKey(account()) !== accountSessionKey(currentAccount)) {
         invalidateAuthenticatedStateLoad();
@@ -546,7 +615,7 @@ export function createAppController(): AppController {
       const message = describeError(reason);
       invalidateAuthenticatedStateLoad();
       invalidateModelCatalogs();
-      accountProfileRefresh.invalidateSession();
+      invalidateAccountProfileSession();
       rateLimitRefresh.invalidateSession();
       if (isRetryableInitializationFailure(reason, stage)) {
         const delay = initializationRetryDelay(attempt);
@@ -602,7 +671,7 @@ export function createAppController(): AppController {
     invalidateAuthenticatedStateLoad();
     invalidateModelCatalogs();
     batch(() => {
-      accountProfileRefresh.invalidateSession();
+      invalidateAccountProfileSession();
       rateLimitRefresh.invalidateSession();
       setEngine(null);
       setAccount(undefined);
@@ -876,8 +945,23 @@ export function createAppController(): AppController {
 
   function handleNotification(notification: EngineNotification): void {
     if (isStreamNotification(notification)) {
-      for (const delta of streamDeltasFromNotification(notification)) {
+      const deltas = streamDeltasFromNotification(notification);
+      for (const delta of deltas) {
         streamDeltas.enqueue(delta);
+      }
+      const commandDeltas = deltas.filter(
+        (delta): delta is Extract<StreamDelta, { readonly kind: "commandOutput" }> =>
+          delta.kind === "commandOutput",
+      );
+      if (commandDeltas.length > 0) {
+        updateCachedThread(notification.params.threadId, (thread) =>
+          applyCommandStreamDeltasToThread(thread, commandDeltas),
+        );
+        setCurrentThread((current) =>
+          current?.id === notification.params.threadId
+            ? applyCommandStreamDeltasToThread(current, commandDeltas)
+            : current,
+        );
       }
       return;
     }
@@ -1117,7 +1201,7 @@ export function createAppController(): AppController {
     const promise = predecessor
       .then(async () => {
         const currentAccount = await readAccount();
-        accountProfileRefresh.invalidateSession();
+        invalidateAccountProfileSession();
         rateLimitRefresh.invalidateSession();
         if (accountSessionKey(account()) !== accountSessionKey(currentAccount)) {
           invalidateAuthenticatedStateLoad();
@@ -1202,7 +1286,7 @@ export function createAppController(): AppController {
   async function logout(): Promise<boolean> {
     try {
       const response = await withPending(() => logoutCommand());
-      accountProfileRefresh.invalidateSession();
+      invalidateAccountProfileSession();
       rateLimitRefresh.invalidateSession();
       invalidateAuthenticatedStateLoad();
       invalidateModelCatalogs();
@@ -2050,6 +2134,117 @@ export function createAppController(): AppController {
     return rateLimitRefresh.refresh();
   }
 
+  async function refreshUsageResets(): Promise<boolean> {
+    if (!signedIn()) {
+      return false;
+    }
+    setUsageResetsLoading(true);
+    setUsageResetsError(null);
+    try {
+      setUsageResets(await readUsageResets());
+      return true;
+    } catch (reason) {
+      const message = describeError(reason);
+      setUsageResetsError(message);
+      addDiagnostic({ stream: "runtime", message });
+      return false;
+    } finally {
+      setUsageResetsLoading(false);
+    }
+  }
+
+  async function redeemUsageReset(
+    creditId: string | null,
+    redeemRequestId: string,
+  ): Promise<UsageResetRedemptionResponse | null> {
+    if (!signedIn() || usageResetRedeemingId() !== null) {
+      return null;
+    }
+    setUsageResetRedeemingId(creditId ?? "automatic");
+    setUsageResetsError(null);
+    try {
+      const response = await redeemUsageResetCommand(creditId, redeemRequestId);
+      if (response.code === "reset" || response.code === "already_redeemed") {
+        await Promise.all([refreshUsageResets(), rateLimitRefresh.refresh()]);
+      } else {
+        setUsageResetsError(usageResetRedemptionError(response.code));
+      }
+      return response;
+    } catch (reason) {
+      const message = describeError(reason);
+      setUsageResetsError(message);
+      addDiagnostic({ stream: "runtime", message });
+      return null;
+    } finally {
+      setUsageResetRedeemingId(null);
+    }
+  }
+
+  async function refreshAutoTopUpSettings(): Promise<boolean> {
+    if (!signedIn()) {
+      return false;
+    }
+    setAutoTopUpLoading(true);
+    setAutoTopUpError(null);
+    try {
+      setAutoTopUpSettings(await readAutoTopUpSettings());
+      return true;
+    } catch (reason) {
+      const message = describeError(reason);
+      setAutoTopUpError(message);
+      addDiagnostic({ stream: "runtime", message });
+      return false;
+    } finally {
+      setAutoTopUpLoading(false);
+    }
+  }
+
+  async function enableAutoTopUp(
+    rechargeThreshold: string,
+    rechargeTarget: string,
+    rechargeMonthlyLimit: string | null,
+  ): Promise<boolean> {
+    return mutateAutoTopUp(() =>
+      enableAutoTopUpCommand(rechargeThreshold, rechargeTarget, rechargeMonthlyLimit),
+    );
+  }
+
+  async function updateAutoTopUp(
+    rechargeThreshold: string,
+    rechargeTarget: string,
+    rechargeMonthlyLimit: string | null,
+  ): Promise<boolean> {
+    return mutateAutoTopUp(() =>
+      updateAutoTopUpCommand(rechargeThreshold, rechargeTarget, rechargeMonthlyLimit),
+    );
+  }
+
+  async function disableAutoTopUp(): Promise<boolean> {
+    return mutateAutoTopUp(disableAutoTopUpCommand);
+  }
+
+  async function mutateAutoTopUp(
+    operation: () => Promise<AutoTopUpSettingsSnapshot>,
+  ): Promise<boolean> {
+    if (!signedIn() || autoTopUpLoading()) {
+      return false;
+    }
+    setAutoTopUpLoading(true);
+    setAutoTopUpError(null);
+    try {
+      setAutoTopUpSettings(await operation());
+      void rateLimitRefresh.refresh();
+      return true;
+    } catch (reason) {
+      const message = describeError(reason);
+      setAutoTopUpError(message);
+      addDiagnostic({ stream: "runtime", message });
+      return false;
+    } finally {
+      setAutoTopUpLoading(false);
+    }
+  }
+
   async function saveClipboard(dataBase64: string): Promise<Attachment | null> {
     try {
       return await savePastedImage(dataBase64);
@@ -2308,6 +2503,9 @@ export function createAppController(): AppController {
 
   return {
     account,
+    accountProfile,
+    accountProfileError,
+    accountProfileLoading,
     activePlan,
     activeTurnId,
     approvals,
@@ -2346,6 +2544,13 @@ export function createAppController(): AppController {
     rateLimits,
     rateLimitsError,
     rateLimitsLoading,
+    usageResets,
+    usageResetsError,
+    usageResetsLoading,
+    usageResetRedeemingId,
+    autoTopUpSettings,
+    autoTopUpError,
+    autoTopUpLoading,
     runtimeStatus,
     signedIn,
     safetyBuffering,
@@ -2384,6 +2589,12 @@ export function createAppController(): AppController {
     refreshAccountProfile: accountProfileRefresh.refreshIfStale,
     refreshRateLimits,
     refreshRateLimitsIfStale: rateLimitRefresh.refreshIfStale,
+    refreshUsageResets,
+    redeemUsageReset,
+    refreshAutoTopUpSettings,
+    enableAutoTopUp,
+    updateAutoTopUp,
+    disableAutoTopUp,
     reportError,
     removeProject: removeProjectFromSidebar,
     renameThread,
@@ -2409,6 +2620,22 @@ export function createAppController(): AppController {
   };
 }
 
+function usageResetRedemptionError(code: string): string {
+  switch (code) {
+    case "expired":
+    case "credit_expired":
+      return "Esta redefinição expirou e não pode mais ser usada.";
+    case "not_available":
+    case "no_credits_available":
+      return "Não há uma redefinição disponível para usar.";
+    case "ineligible":
+    case "not_eligible":
+      return "Esta conta não está elegível para usar a redefinição.";
+    default:
+      return `Não foi possível usar a redefinição da conta (${code}).`;
+  }
+}
+
 type StreamNotification = Extract<
   EngineNotification,
   {
@@ -2431,6 +2658,15 @@ function streamDeltasFromNotification(notification: StreamNotification): readonl
           threadId: notification.params.threadId,
           itemId: delta.itemId,
           delta: delta.delta,
+        };
+      case "commandOutput":
+        return {
+          kind: "commandOutput",
+          threadId: notification.params.threadId,
+          turnId: notification.params.turnId,
+          itemId: delta.itemId,
+          stream: delta.stream,
+          operation: delta.operation,
         };
       case "reasoningSummary":
       case "reasoningText":

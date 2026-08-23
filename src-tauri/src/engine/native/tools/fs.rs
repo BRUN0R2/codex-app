@@ -24,6 +24,15 @@ const RIPGREP_THREADS_PER_SEARCH: &str = "2";
 const MAX_SEARCH_STDERR_BYTES: usize = 32 * 1_024;
 const MAX_SEARCH_OUTPUT_LINE_BYTES: usize = MAX_TOOL_PATH_BYTES + MAX_SEARCH_LINE_BYTES + 128;
 
+fn search_query_variants(query: &str) -> Vec<String> {
+    let normalized = query.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized.contains('\n') {
+        vec![normalized.clone(), normalized.replace('\n', "\r\n")]
+    } else {
+        vec![normalized]
+    }
+}
+
 pub(super) async fn read_file(workspace: &Path, args: &ReadFileArgs) -> Result<String, AppError> {
     let start =
         usize::try_from(args.start_line).map_err(|error| AppError::Tool(error.to_string()))?;
@@ -97,34 +106,38 @@ pub(super) async fn search_text(
         relative_root.as_str()
     };
     let maximum_columns = MAX_SEARCH_LINE_BYTES.to_string();
+    let queries = search_query_variants(&args.query);
     let mut command = headless_command(ripgrep.executable()?);
+    command.current_dir(workspace).args([
+        "--fixed-strings",
+        "--line-number",
+        "--with-filename",
+        "--no-heading",
+        "--color=never",
+        "--no-config",
+        "--no-require-git",
+        "--hidden",
+        "--max-columns-preview",
+        "--path-separator=/",
+        "--encoding=utf-8",
+        "--glob=!.git/**",
+        "--threads",
+        RIPGREP_THREADS_PER_SEARCH,
+        "--max-columns",
+        maximum_columns.as_str(),
+    ]);
+    if queries.len() > 1 {
+        command.arg("--multiline");
+    }
+    command.arg(if args.case_sensitive {
+        "--case-sensitive"
+    } else {
+        "--ignore-case"
+    });
+    for query in &queries {
+        command.arg("--regexp").arg(query);
+    }
     command
-        .current_dir(workspace)
-        .args([
-            "--fixed-strings",
-            "--line-number",
-            "--with-filename",
-            "--no-heading",
-            "--color=never",
-            "--no-config",
-            "--no-require-git",
-            "--hidden",
-            "--max-columns-preview",
-            "--path-separator=/",
-            "--encoding=utf-8",
-            "--glob=!.git/**",
-            "--threads",
-            RIPGREP_THREADS_PER_SEARCH,
-            "--max-columns",
-            maximum_columns.as_str(),
-        ])
-        .arg(if args.case_sensitive {
-            "--case-sensitive"
-        } else {
-            "--ignore-case"
-        })
-        .arg("--regexp")
-        .arg(&args.query)
         .arg("--")
         .arg(search_root)
         .stdin(Stdio::null())
@@ -519,6 +532,43 @@ mod tests {
         .expect("case-insensitive search should succeed");
         assert!(insensitive.contains("visible.txt:1:Needle[0]"));
         assert!(insensitive.contains("visible.txt:2:needle[0]"));
+    }
+
+    #[tokio::test]
+    async fn ripgrep_search_supports_literal_multiline_queries_across_lf_and_crlf() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let workspace_path =
+            std::fs::canonicalize(workspace.path()).expect("workspace should canonicalize");
+        std::fs::write(
+            workspace.path().join("lf.rs"),
+            "const ação: &str = \"ready\";\nlet value = ação.len();\n",
+        )
+        .expect("LF fixture should be written");
+        std::fs::write(
+            workspace.path().join("crlf.rs"),
+            "const ação: &str = \"ready\";\r\nlet value = ação.len();\r\n",
+        )
+        .expect("CRLF fixture should be written");
+        let ripgrep = test_ripgrep();
+        let (_sender, mut cancellation) = watch::channel(false);
+
+        let output = search_text(
+            &ripgrep,
+            &workspace_path,
+            &SearchTextArgs {
+                path: ".".into(),
+                query: "const ação: &str = \"ready\";\r\nlet value = ação.len();".into(),
+                case_sensitive: true,
+            },
+            &mut cancellation,
+        )
+        .await
+        .expect("multiline search should succeed");
+
+        for path in ["lf.rs", "crlf.rs"] {
+            assert!(output.contains(&format!("{path}:1:const ação: &str = \"ready\";")));
+            assert!(output.contains(&format!("{path}:2:let value = ação.len();")));
+        }
     }
 
     #[tokio::test]

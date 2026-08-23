@@ -5,11 +5,13 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::engine::{FileChange, FileChangeKind};
+use crate::engine::{FileChange, FileChangeKind, FileChangeLineStats};
 use crate::error::AppError;
 
-use super::super::tools::MAX_DIFF_BYTES;
-use super::parser::{ParsedPatch, PatchHunk, UpdateChunk};
+use super::super::file_diff::{
+    line_stats, render_replacement_diff, text_line_count, truncate_diff,
+};
+use super::parser::{ParsedPatch, PatchHunk, UpdateChunk, UpdateLine};
 
 pub(in crate::engine::native) fn preview_changes(parsed: &ParsedPatch) -> Vec<FileChange> {
     parsed
@@ -21,7 +23,8 @@ pub(in crate::engine::native) fn preview_changes(parsed: &ParsedPatch) -> Vec<Fi
                 FileChange {
                     path: relative.clone(),
                     kind: FileChangeKind::Add,
-                    diff: truncate_diff(&render_add_diff(&relative, contents)),
+                    diff: render_add_diff(&relative, contents),
+                    line_stats: Some(line_stats("", contents)),
                 }
             }
             PatchHunk::Delete { path } => {
@@ -29,7 +32,8 @@ pub(in crate::engine::native) fn preview_changes(parsed: &ParsedPatch) -> Vec<Fi
                 FileChange {
                     path: relative.clone(),
                     kind: FileChangeKind::Delete,
-                    diff: truncate_diff(&format!("*** Delete File: {relative}\n")),
+                    diff: format!("--- a/{relative}\n+++ /dev/null\n"),
+                    line_stats: None,
                 }
             }
             PatchHunk::Update {
@@ -49,6 +53,7 @@ pub(in crate::engine::native) fn preview_changes(parsed: &ParsedPatch) -> Vec<Fi
                         move_path.as_deref(),
                         chunks,
                     )),
+                    line_stats: Some(update_line_stats(chunks)),
                 }
             }
         })
@@ -115,7 +120,8 @@ pub(in crate::engine::native) async fn prepare_patch(
                 thread_changes.push(FileChange {
                     path: relative.clone(),
                     kind: FileChangeKind::Add,
-                    diff: truncate_diff(&render_add_diff(&relative, &contents)),
+                    diff: render_add_diff(&relative, &contents),
+                    line_stats: Some(line_stats("", &contents)),
                 });
                 changes.push(PreparedChange::Write {
                     original,
@@ -125,10 +131,12 @@ pub(in crate::engine::native) async fn prepare_patch(
             ResolvedHunk::Delete { relative, path } => {
                 let original = snapshot(path).await?;
                 require_existing_file(&original, &relative, "delete")?;
+                let (diff, line_stats) = render_delete_diff(&relative, &original.bytes);
                 thread_changes.push(FileChange {
                     path: relative.clone(),
                     kind: FileChangeKind::Delete,
-                    diff: truncate_diff(&format!("*** Delete File: {relative}\n")),
+                    diff,
+                    line_stats,
                 });
                 changes.push(PreparedChange::Delete { original });
             }
@@ -158,6 +166,7 @@ pub(in crate::engine::native) async fn prepare_patch(
                     path: relative,
                     kind,
                     diff,
+                    line_stats: Some(update_line_stats(&chunks)),
                 });
 
                 if let Some(destination) = move_path {
@@ -464,14 +473,18 @@ fn apply_chunks(relative: &str, bytes: &[u8], chunks: &[UpdateChunk]) -> Result<
     let mut document = TextDocument::parse(text);
     let mut cursor = 0usize;
     for chunk in chunks {
-        let position = locate_chunk(&document.lines, chunk, cursor).ok_or_else(|| {
-            AppError::Tool(format!("context not found while updating `{relative}`"))
-        })??;
-        let old_len = chunk.old_lines.len();
+        let old_lines = chunk.old_lines().collect::<Vec<_>>();
+        let new_lines = chunk.new_lines().map(str::to_string).collect::<Vec<_>>();
+        let new_len = new_lines.len();
+        let position =
+            locate_chunk(&document.lines, chunk, &old_lines, cursor).ok_or_else(|| {
+                AppError::Tool(format!("context not found while updating `{relative}`"))
+            })??;
+        let old_len = old_lines.len();
         document
             .lines
-            .splice(position..position + old_len, chunk.new_lines.clone());
-        cursor = position + chunk.new_lines.len();
+            .splice(position..position + old_len, new_lines);
+        cursor = position + new_len;
     }
     Ok(document.render().into_bytes())
 }
@@ -479,20 +492,21 @@ fn apply_chunks(relative: &str, bytes: &[u8], chunks: &[UpdateChunk]) -> Result<
 fn locate_chunk(
     lines: &[String],
     chunk: &UpdateChunk,
+    old_lines: &[&str],
     start: usize,
 ) -> Option<Result<usize, AppError>> {
     let candidates = if let Some(context) = &chunk.context {
-        let anchors = best_matches(lines, std::slice::from_ref(context), start, false);
+        let anchors = best_matches(lines, &[context.as_str()], start, false);
         let mut positions = BTreeSet::new();
         for anchor in anchors {
-            if chunk.old_lines.is_empty() {
+            if old_lines.is_empty() {
                 positions.insert(if chunk.end_of_file {
                     lines.len()
                 } else {
                     anchor + 1
                 });
             } else if let Some(position) =
-                best_matches(lines, &chunk.old_lines, anchor + 1, chunk.end_of_file)
+                best_matches(lines, old_lines, anchor + 1, chunk.end_of_file)
                     .into_iter()
                     .next()
             {
@@ -500,14 +514,14 @@ fn locate_chunk(
             }
         }
         positions
-    } else if chunk.old_lines.is_empty() {
+    } else if old_lines.is_empty() {
         BTreeSet::from([if chunk.end_of_file {
             lines.len()
         } else {
             start.min(lines.len())
         }])
     } else {
-        best_matches(lines, &chunk.old_lines, start, chunk.end_of_file)
+        best_matches(lines, old_lines, start, chunk.end_of_file)
             .into_iter()
             .collect()
     };
@@ -519,7 +533,7 @@ fn locate_chunk(
     }
 }
 
-fn best_matches(lines: &[String], pattern: &[String], start: usize, eof: bool) -> Vec<usize> {
+fn best_matches(lines: &[String], pattern: &[&str], start: usize, eof: bool) -> Vec<usize> {
     if pattern.is_empty() || pattern.len() > lines.len() || start > lines.len() {
         return Vec::new();
     }
@@ -539,7 +553,7 @@ fn best_matches(lines: &[String], pattern: &[String], start: usize, eof: bool) -
     Vec::new()
 }
 
-fn sequence_matches(lines: &[String], pattern: &[String], position: usize, mode: u8) -> bool {
+fn sequence_matches(lines: &[String], pattern: &[&str], position: usize, mode: u8) -> bool {
     lines[position..position + pattern.len()]
         .iter()
         .zip(pattern)
@@ -610,51 +624,61 @@ impl TextDocument {
 }
 
 fn render_add_diff(relative: &str, contents: &str) -> String {
-    let mut output = format!("*** Add File: {relative}\n");
-    for line in contents.strip_suffix('\n').unwrap_or(contents).split('\n') {
-        output.push('+');
-        output.push_str(line);
-        output.push('\n');
+    render_replacement_diff("/dev/null", &format!("b/{relative}"), "", contents)
+}
+
+fn render_delete_diff(relative: &str, contents: &[u8]) -> (String, Option<FileChangeLineStats>) {
+    match std::str::from_utf8(contents) {
+        Ok(contents) => (
+            render_replacement_diff(&format!("a/{relative}"), "/dev/null", contents, ""),
+            Some(FileChangeLineStats {
+                additions: 0,
+                deletions: text_line_count(contents),
+            }),
+        ),
+        Err(_) => (
+            truncate_diff(&format!(
+                "diff --git a/{relative} b/{relative}\nBinary file a/{relative} deleted\n"
+            )),
+            None,
+        ),
     }
-    output
 }
 
 fn render_update_diff(relative: &str, move_path: Option<&str>, chunks: &[UpdateChunk]) -> String {
-    let mut output = format!("*** Update File: {relative}\n");
-    if let Some(move_path) = move_path {
-        output.push_str(&format!("*** Move to: {move_path}\n"));
-    }
+    let destination = move_path.unwrap_or(relative);
+    let mut output = format!("--- a/{relative}\n+++ b/{destination}\n");
     for chunk in chunks {
         match &chunk.context {
             Some(context) => output.push_str(&format!("@@ {context}\n")),
             None => output.push_str("@@\n"),
         }
-        for line in &chunk.old_lines {
-            output.push('-');
-            output.push_str(line);
+        for line in &chunk.lines {
+            let (marker, value) = match line {
+                UpdateLine::Addition(value) => ('+', value),
+                UpdateLine::Context(value) => (' ', value),
+                UpdateLine::Deletion(value) => ('-', value),
+            };
+            output.push(marker);
+            output.push_str(value);
             output.push('\n');
-        }
-        for line in &chunk.new_lines {
-            output.push('+');
-            output.push_str(line);
-            output.push('\n');
-        }
-        if chunk.end_of_file {
-            output.push_str("*** End of File\n");
         }
     }
     output
 }
 
-fn truncate_diff(value: &str) -> String {
-    if value.len() <= MAX_DIFF_BYTES {
-        return value.to_string();
-    }
-    let mut end = MAX_DIFF_BYTES;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n[diff truncated]", &value[..end])
+fn update_line_stats(chunks: &[UpdateChunk]) -> FileChangeLineStats {
+    chunks.iter().flat_map(|chunk| &chunk.lines).fold(
+        FileChangeLineStats::default(),
+        |mut stats, line| {
+            match line {
+                UpdateLine::Addition(_) => stats.additions += 1,
+                UpdateLine::Deletion(_) => stats.deletions += 1,
+                UpdateLine::Context(_) => {}
+            }
+            stats
+        },
+    )
 }
 
 fn display_relative(path: &Path) -> Result<String, AppError> {
@@ -698,9 +722,12 @@ mod tests {
         )
         .await
         .expect("update source should exist");
-        tokio::fs::write(workspace.path().join("src/delete.txt"), "delete me\n")
-            .await
-            .expect("delete source should exist");
+        tokio::fs::write(
+            workspace.path().join("src/delete.txt"),
+            "first\nsecond\nthird",
+        )
+        .await
+        .expect("delete source should exist");
         tokio::fs::write(workspace.path().join("src/move.txt"), "move me\n")
             .await
             .expect("move source should exist");
@@ -756,10 +783,64 @@ mod tests {
             prepared.thread_changes[1].kind,
             FileChangeKind::Delete
         ));
+        assert_eq!(
+            prepared.thread_changes[1].line_stats,
+            Some(crate::engine::FileChangeLineStats {
+                additions: 0,
+                deletions: 3,
+            })
+        );
+        assert!(prepared.thread_changes[1].diff.contains("@@ -1,3 +0,0 @@"));
+        assert!(
+            prepared.thread_changes[1]
+                .diff
+                .contains("-first\n-second\n-third\n")
+        );
+        assert_eq!(
+            prepared.thread_changes[2].line_stats,
+            Some(crate::engine::FileChangeLineStats {
+                additions: 1,
+                deletions: 1,
+            })
+        );
+        assert!(
+            prepared.thread_changes[2]
+                .diff
+                .contains(" heading\n-old\n+new\n")
+        );
         assert!(matches!(
             &prepared.thread_changes[3].kind,
             FileChangeKind::Update { move_path: Some(path) } if path == "src/moved.txt"
         ));
+    }
+
+    #[tokio::test]
+    async fn keeps_exact_deleted_line_stats_when_the_diff_preview_is_truncated() {
+        let workspace = TempDir::new().expect("workspace should exist");
+        let line_count = 20_000;
+        tokio::fs::write(
+            workspace.path().join("large.txt"),
+            "removed line\n".repeat(line_count),
+        )
+        .await
+        .expect("delete source should exist");
+        let parsed = parse_patch("*** Begin Patch\n*** Delete File: large.txt\n*** End Patch")
+            .expect("patch should parse");
+
+        let prepared = prepare_patch(workspace.path(), parsed)
+            .await
+            .expect("delete should prepare");
+        let change = &prepared.thread_changes[0];
+
+        assert_eq!(
+            change.line_stats,
+            Some(crate::engine::FileChangeLineStats {
+                additions: 0,
+                deletions: line_count,
+            })
+        );
+        assert!(change.diff.ends_with("[diff truncated]"));
+        assert!(change.diff.len() < "removed line\n".len() * line_count);
     }
 
     #[tokio::test]

@@ -1,13 +1,17 @@
 import { createEffect, createMemo, createSignal, Show } from "solid-js";
 
-import type { ThreadOutput } from "../contracts/types";
+import type { ThreadOutput, ToolOutputPresentation } from "../contracts/types";
 import { readOutput } from "../infrastructure/codexClient";
 import { utf8ByteLength } from "../utf8";
 import { frontendFailureMessage, useFrontendFailureReporter } from "./frontendFailure";
+import { ToolOutputContent } from "./ToolOutputContent";
+
+const PLAIN_TEXT_PRESENTATION: ToolOutputPresentation = { type: "plainText" };
 
 export function ThreadOutputView(props: {
   readonly format: (text: string) => string | null;
   readonly output: ThreadOutput;
+  readonly presentation?: ToolOutputPresentation | undefined;
 }) {
   const reportFailure = useFrontendFailureReporter();
   const [chunks, setChunks] = createSignal<readonly string[]>([props.output.preview]);
@@ -63,7 +67,14 @@ export function ThreadOutputView(props: {
 
   return (
     <div class="thread-output-view">
-      <Show when={text()}>{(visible) => <pre class="command-card-output">{visible()}</pre>}</Show>
+      <Show when={text()}>
+        {(visible) => (
+          <ToolOutputContent
+            presentation={props.presentation ?? PLAIN_TEXT_PRESENTATION}
+            text={visible()}
+          />
+        )}
+      </Show>
       <Show when={props.output.nextCursor !== null}>
         <div class="thread-output-pagination">
           <span>

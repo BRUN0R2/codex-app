@@ -26,9 +26,31 @@ pub(in crate::engine::native) enum PatchHunk {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::engine::native) struct UpdateChunk {
     pub context: Option<String>,
-    pub old_lines: Vec<String>,
-    pub new_lines: Vec<String>,
+    pub lines: Vec<UpdateLine>,
     pub end_of_file: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::engine::native) enum UpdateLine {
+    Addition(String),
+    Context(String),
+    Deletion(String),
+}
+
+impl UpdateChunk {
+    pub(in crate::engine::native) fn old_lines(&self) -> impl Iterator<Item = &str> {
+        self.lines.iter().filter_map(|line| match line {
+            UpdateLine::Addition(_) => None,
+            UpdateLine::Context(value) | UpdateLine::Deletion(value) => Some(value.as_str()),
+        })
+    }
+
+    pub(in crate::engine::native) fn new_lines(&self) -> impl Iterator<Item = &str> {
+        self.lines.iter().filter_map(|line| match line {
+            UpdateLine::Deletion(_) => None,
+            UpdateLine::Addition(value) | UpdateLine::Context(value) => Some(value.as_str()),
+        })
+    }
 }
 
 const BEGIN_PATCH: &str = "*** Begin Patch";
@@ -201,12 +223,9 @@ fn parse_update(cursor: &mut Cursor<'_>, path: &str) -> Result<PatchHunk, AppErr
             .ok_or_else(|| invalid(line_number, "change line is empty"))?;
         let chunk = current.get_or_insert_with(|| ChunkBuilder::new(None, line_number));
         match marker {
-            "+" => chunk.new_lines.push(value.to_string()),
-            "-" => chunk.old_lines.push(value.to_string()),
-            " " => {
-                chunk.old_lines.push(value.to_string());
-                chunk.new_lines.push(value.to_string());
-            }
+            "+" => chunk.lines.push(UpdateLine::Addition(value.to_string())),
+            "-" => chunk.lines.push(UpdateLine::Deletion(value.to_string())),
+            " " => chunk.lines.push(UpdateLine::Context(value.to_string())),
             _ => {
                 return Err(invalid(
                     line_number,
@@ -214,7 +233,6 @@ fn parse_update(cursor: &mut Cursor<'_>, path: &str) -> Result<PatchHunk, AppErr
                 ));
             }
         }
-        chunk.has_change_line = true;
         cursor.advance();
     }
     if let Some(chunk) = current {
@@ -232,10 +250,8 @@ fn parse_update(cursor: &mut Cursor<'_>, path: &str) -> Result<PatchHunk, AppErr
 
 struct ChunkBuilder {
     context: Option<String>,
-    old_lines: Vec<String>,
-    new_lines: Vec<String>,
+    lines: Vec<UpdateLine>,
     end_of_file: bool,
-    has_change_line: bool,
     header_line: usize,
 }
 
@@ -243,25 +259,32 @@ impl ChunkBuilder {
     fn new(context: Option<String>, header_line: usize) -> Self {
         Self {
             context,
-            old_lines: Vec::new(),
-            new_lines: Vec::new(),
+            lines: Vec::new(),
             end_of_file: false,
-            has_change_line: false,
             header_line,
         }
     }
 
     fn finish(self) -> Result<UpdateChunk, AppError> {
-        if !self.has_change_line {
+        if self.lines.is_empty() {
             return Err(invalid(
                 self.header_line,
-                "change context must contain at least one change line",
+                "empty change block: `@@` opens a block and never closes one; remove the trailing `@@` or add at least one `+` or `-` line",
+            ));
+        }
+        if !self
+            .lines
+            .iter()
+            .any(|line| !matches!(line, UpdateLine::Context(_)))
+        {
+            return Err(invalid(
+                self.header_line,
+                "change block contains only context; add at least one `+` or `-` line before the next marker, or remove the block",
             ));
         }
         Ok(UpdateChunk {
             context: self.context,
-            old_lines: self.old_lines,
-            new_lines: self.new_lines,
+            lines: self.lines,
             end_of_file: self.end_of_file,
         })
     }
@@ -342,8 +365,8 @@ mod tests {
                     && move_path == Path::new("src/b.rs")
                     && chunks.len() == 1
                     && chunks[0].context.as_deref() == Some("fn old()")
-                    && chunks[0].old_lines == ["old"]
-                    && chunks[0].new_lines == ["new"]
+                    && chunks[0].old_lines().collect::<Vec<_>>() == ["old"]
+                    && chunks[0].new_lines().collect::<Vec<_>>() == ["new"]
         ));
     }
 
@@ -370,13 +393,48 @@ mod tests {
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].context.as_deref(), Some("seção um"));
-        assert_eq!(chunks[0].old_lines, ["linha comum", "antigo"]);
-        assert_eq!(chunks[0].new_lines, ["linha comum", "novo"]);
+        assert_eq!(
+            chunks[0].old_lines().collect::<Vec<_>>(),
+            ["linha comum", "antigo"]
+        );
+        assert_eq!(
+            chunks[0].new_lines().collect::<Vec<_>>(),
+            ["linha comum", "novo"]
+        );
         assert!(!chunks[0].end_of_file);
         assert_eq!(chunks[1].context, None);
-        assert_eq!(chunks[1].old_lines, Vec::<String>::new());
-        assert_eq!(chunks[1].new_lines, ["fim"]);
+        assert_eq!(
+            chunks[1].old_lines().collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
+        assert_eq!(chunks[1].new_lines().collect::<Vec<_>>(), ["fim"]);
         assert!(chunks[1].end_of_file);
+    }
+
+    #[test]
+    fn parses_an_append_without_a_closing_context_marker() {
+        let patch = [
+            "*** Begin Patch",
+            "*** Update File: notes.txt",
+            " existing final line",
+            "+appended line",
+            "*** End Patch",
+        ]
+        .join("\n");
+        let parsed = parse_patch(&patch).expect("append patch should parse");
+        let PatchHunk::Update { chunks, .. } = &parsed.hunks[0] else {
+            panic!("expected update hunk");
+        };
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].old_lines().collect::<Vec<_>>(),
+            ["existing final line"]
+        );
+        assert_eq!(
+            chunks[0].new_lines().collect::<Vec<_>>(),
+            ["existing final line", "appended line"]
+        );
     }
 
     #[test]
@@ -396,6 +454,16 @@ mod tests {
                 "*** Begin Patch\n*** Update File: a.txt\n*** End Patch",
                 2,
                 "update hunk is empty",
+            ),
+            (
+                "*** Begin Patch\n*** Update File: a.txt\n@@ first\n context\n@@ second\n-old\n+new\n*** End Patch",
+                3,
+                "contains only context",
+            ),
+            (
+                "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n@@\n*** End Patch",
+                6,
+                "`@@` opens a block and never closes one",
             ),
             (
                 "*** Begin Patch\n*** Update File: a.txt\n@@\n?bad\n*** End Patch",

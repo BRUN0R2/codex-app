@@ -51,11 +51,11 @@ impl OutputSource {
         })
     }
 
-    pub fn command(exit_code: i32, mut stdout: File, mut stderr: File) -> io::Result<Self> {
+    pub fn command(header: &str, mut stdout: File, mut stderr: File) -> io::Result<Self> {
         stdout.seek(SeekFrom::Start(0))?;
         stderr.seek(SeekFrom::Start(0))?;
         let mut combined = tempfile::tempfile()?;
-        write!(combined, "exit_code: {exit_code}\nstdout:\n")?;
+        write!(combined, "{header}\nstdout:\n")?;
         io::copy(&mut stdout, &mut combined)?;
         combined.write_all(b"\nstderr:\n")?;
         io::copy(&mut stderr, &mut combined)?;
@@ -177,7 +177,8 @@ mod tests {
             .seek(SeekFrom::Start(0))
             .expect("stderr should rewind");
 
-        let source = OutputSource::command(0, stdout, stderr).expect("output should combine");
+        let source =
+            OutputSource::command("exit_code: 0", stdout, stderr).expect("output should combine");
         assert_eq!(
             source.reference().preview,
             "exit_code: 0\nstdout:\nok\nstderr:\nwarning"

@@ -57,6 +57,33 @@ describe("diff document", () => {
     expect(first.rows).toHaveLength(2);
   });
 
+  it("indexes syntax hunks and preserves source rows in split mode", () => {
+    const document = createDiffDocument(
+      "@@ -1,2 +1,2 @@\n-before\n+after\n context\n@@ -8 +8 @@\n-second\n+next",
+    );
+    const split = document.splitProjection();
+
+    expect(document.syntaxHunks.map((hunk) => hunk.lines)).toEqual([
+      ["before", "after", "context"],
+      ["second", "next"],
+    ]);
+    expect(document.syntaxLocation(0)).toBeNull();
+    expect(document.syntaxLocation(2)).toEqual({ hunkIndex: 0, lineIndex: 1 });
+    expect(document.syntaxLocation(4)).toBeNull();
+    expect(document.syntaxLocation(6)).toEqual({ hunkIndex: 1, lineIndex: 1 });
+    expect([split.leftSourceIndexes[1], split.rightSourceIndexes[1]]).toEqual([2, 3]);
+  });
+
+  it("hides newline metadata and sizes gutters from real line numbers", () => {
+    const document = createDiffDocument(
+      "@@ -998,1 +12003,1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file",
+    );
+
+    expect(document.unifiedRows.map((line) => line.type)).toEqual(["hunk", "deletion", "addition"]);
+    expect(document.oldLineNumberDigits).toBe(3);
+    expect(document.newLineNumberDigits).toBe(5);
+  });
+
   it("measures tab-expanded monospace columns deterministically", () => {
     expect(monospaceColumnCount("a\tb")).toBe(5);
   });
@@ -71,5 +98,20 @@ describe("diff document", () => {
 
     expect(document.unifiedRows).toHaveLength(lineCount + 1);
     expect(document.stats).toEqual({ additions: 0, deletions: 0 });
+  });
+
+  it("preserves the exact cardinality of replacement lines", () => {
+    const document = createDiffDocument(
+      "@@ -1,2 +1,3 @@\n-reason: String,\n-timeout_seconds: Option<u64>,\n+reason: String,\n+parallel_safe: bool,\n+timeout_seconds: Option<u64>,",
+    );
+
+    expect(
+      document.unifiedRows.filter((line) => line.content === "timeout_seconds: Option<u64>,"),
+    ).toHaveLength(2);
+    expect(
+      document.unifiedRows.filter(
+        (line) => line.type === "addition" && line.content === "timeout_seconds: Option<u64>,",
+      ),
+    ).toHaveLength(1);
   });
 });

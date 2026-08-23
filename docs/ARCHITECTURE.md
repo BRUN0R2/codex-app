@@ -39,12 +39,35 @@ O engine nativo divide ownership assim:
 - `automation.rs`: agenda, limites e transições determinísticas das Automações;
 - `tools/`: contratos e orquestração das ferramentas (`mod.rs`), operações de
   arquivo (`fs.rs`), resolução do `ripgrep` embarcado (`ripgrep.rs`), execução e
-  árvore de processos (`exec.rs`) e confinamento de paths no workspace
-  (`workspace.rs`);
+  árvore de processos (`exec.rs`), transcript incremental
+  (`command_output_stream.rs`), sessões longas e polling
+  (`command_sessions.rs`) e confinamento de paths no workspace (`workspace.rs`);
 - `approval.rs`: solicitações de uso único que aguardam decisão, cancelamento
   explícito ou encerramento, sem expiração arbitrária;
 - `storage.rs`: schema SQLite próprio, transações e configuração versionada;
 - `mod.rs`: ciclo de vida e ownership dos turnos em execução.
+
+Comandos longos permanecem no domínio do engine:
+
+```mermaid
+flowchart LR
+    Agent["Agente chama exec_command"] --> Manager["CommandSessionManager"]
+    Manager --> Process["Processo + spool integral"]
+    Process --> Transcript["Transcript limitado + deltas da timeline"]
+    Manager -->|termina antes do yield| Result["Resultado direto"]
+    Manager -->|ultrapassa o yield| Session["Sessão persistida inProgress"]
+    Session --> Work["Agente executa trabalho independente"]
+    Work --> Poll["poll_command por cursor"]
+    Process --> Finalizer["Finalizador após drenar stdout/stderr"]
+    Finalizer --> Transaction["Item + ThreadOutput em transação única"]
+    Transaction --> Event["Evento terminal roteado pelo turnId"]
+```
+
+A sessão devolvida ao agente possui uma licença exclusiva: commit confirma que
+o item inicial já foi persistido e publicado; abandono da licença descarta e
+cancela a sessão. A finalização não depende da tarefa continuar visível nem do
+agente permanecer bloqueado. Deltas carregam `turnId`, portanto uma sessão antiga
+atualiza sua própria tarefa sem contaminar o overlay da conversa selecionada.
 
 Um turno só se torna ativo após persistência e aquisição exclusiva do
 `thread_id`. Falha ao publicar seus eventos iniciais executa rollback antes de a
@@ -103,11 +126,22 @@ Fragmentos do mesmo turno na fronteira são reunidos por identidade, sem perder
 ordem ou duplicar conteúdo. Conversas arquivadas só são consultadas quando a
 página correspondente das configurações é realmente aberta.
 
-Deltas de texto atravessam `streamDeltas.ts`: o primeiro fragmento de cada item
-é aplicado imediatamente e os seguintes são coalescidos por frame. O runtime
-armazena somente overlays do turno ativo; `item.completed` descarta deltas
-pendentes, remove o item do overlay e torna o snapshot persistido imediatamente
-autoritativo. O histórico persistido permanece uma única fonte de verdade.
+`ProfileView.tsx` é uma superfície principal independente da conversa. O
+controller possui separadamente identidade carregada, estado de leitura e erro;
+o coordenador de perfil coalesce requisições e invalida por revisão/identidade
+da sessão. `profileActivity.ts` é uma projeção pura de 52 semanas que produz
+células, níveis, totais semanais, acumulados e rótulos mensais sem chamadas de
+rede ou acesso ao DOM. O componente apenas renderiza esse contrato e mantém a
+agregação selecionada localmente.
+
+Deltas de texto e de comando atravessam `streamDeltas.ts`: o primeiro fragmento
+de cada alvo é aplicado imediatamente e os seguintes são coalescidos por frame.
+Saída de comando usa operações tipadas por stream (`append`, `backspace`,
+`clearCurrentLine` e `truncated`), frames de no máximo 8 KiB e uma prévia
+transitória combinada de 256 KiB. O backend faz flush de todos os deltas antes de
+publicar qualquer item terminal; `item.completed` descarta o overlay e torna o
+snapshot persistido imediatamente autoritativo. A prévia ao vivo nunca entra no
+histórico nem no contexto do provider.
 `Markdown.tsx` usa modo append-only somente para IDs ainda presentes no overlay,
 consolida blocos estáveis sem comparar novamente todo o prefixo acumulado e
 sempre publica o valor terminal sem atraso. A timeline
@@ -116,9 +150,27 @@ permanece na posição persistida, inclusive steers enviados durante um turno;
 somente comandos, ferramentas, raciocínio e alterações entram nos blocos
 recolhíveis de trabalho.
 
+Blocos de código Markdown, diffs e leituras de arquivo compartilham o motor próprio em
+`ui/syntax/`. O registro fechado resolve dezenove linguagens sem autodetecção
+probabilística; o tokenizer preserva estado de comentários e strings multilinha,
+produz tokens tipados e nunca retorna HTML arbitrário. Markdown serializa esses
+tokens com escaping antes do sanitizador e usa o worker já existente somente
+acima de 32 KiB. Diffs aceitam o preview nativo completo de até 128 KiB e 4.096
+linhas; `read_file` recebe `sourceFile { path }` no contrato e conserva estado
+multiline, enquanto `search_text` colore cada trecho pela extensão do path do
+resultado. Listagens e saídas arbitrárias permanecem explicitamente tipadas como
+não-código. Nenhum renderer infere linguagem pelo conteúdo.
+
 Um `fileChange` com exatamente um arquivo não cria um segundo agrupador: o bloco
-do próprio arquivo é a superfície principal e inicia expandido. Somente itens
-com duas ou mais alterações exibem o contêiner agregado e sua lista de arquivos.
+do próprio arquivo é a superfície principal, inicia recolhido e mantém o mesmo
+ícone de edição usado nas listas. Uma coleção autônoma com duas ou mais
+alterações mantém um disclosure agregado; quando já está dentro de um grupo de
+atividades, os arquivos aparecem diretamente, sem cabeçalho intermediário de
+contagem. Os gutters usam a quantidade real de dígitos, e metadados
+`No newline at end of file` permanecem no diff canônico sem ocupar uma linha
+visual. Cada alteração carrega `lineStats` autoritativo calculado antes de
+truncar o preview; históricos internos anteriores ao campo derivam a estatística
+do diff persistido.
 
 A ordem visual da timeline e a ordem causal do provider são domínios distintos.
 Um steer é gravado imediatamente em `thread_items`, portanto aparece no instante
@@ -133,12 +185,24 @@ A timeline mantém uma janela explícita de turnos montados e expande o históri
 sob demanda sem alterar ordem, identificadores ou posição de leitura. Cada
 componente é identificado pelo turno persistido e nunca é reciclado pela posição
 relativa da janela para representar outro turno. Alturas medidas são
-arredondadas, reunidas por frame e aplicam no máximo uma correção de âncora por
-lote. Scroll, resize e sincronização de layout compartilham um único coordenador
-por frame; intenção recente do usuário sempre prevalece sobre acompanhamento
-automático do fim. Itens virtuais usam coordenadas inteiras de layout, sem
-`translate3d`, e toda expansão participa da única viewport principal. Assim não
-existe uma segunda área rolável disputando wheel, âncora ou altura.
+arredondadas, reunidas em uma microtask por ciclo de layout e aplicam no máximo
+uma correção de âncora por lote. Disclosures publicam uma revisão explícita de
+layout e medem imediatamente os turnos montados. O navegador lateral resolve a
+âncora DOM pelo `message.id`, não apenas o início do turno; isso distingue steers
+do mesmo turno e mantém a intenção até a geometria ficar estável. Para mensagens
+fora da janela, o offset do turno serve somente para montá-las e a âncora real
+faz o alinhamento final. Scroll, resize e sincronização compartilham um único
+coordenador por frame. Durante wheel, drag, teclado, navegação suave ou uma
+âncora pendente, o usuário possui o viewport e nenhuma medição pode escrever em
+`scrollTop`; correção de âncora só ocorre quando a leitura está estacionária.
+Itens virtuais usam coordenadas inteiras de layout, sem `translate3d`, e toda
+expansão participa da mesma política de viewport. Regiões de código limitadas,
+como comando, leitura e diff, declaram explicitamente
+`data-timeline-scroll-region`; não existe descoberta heurística com
+`getComputedStyle` durante wheel. Enquanto houver faixa interna elas consomem o
+movimento. Ao alcançar um limite, somente o excedente exato é transferido para a
+timeline no mesmo evento. O eixo vertical mantém chaining nativo para touch e o
+eixo horizontal do diff permanece contido.
 
 Cada conversa possui uma sessão visual própria e limitada por LRU, contendo
 posição de leitura, política de acompanhamento do fim e o índice de alturas já
@@ -152,7 +216,10 @@ metadados visuais; turnos e conteúdo persistido nunca são limitados por ela.
 
 `response.output_item.added` preserva a fase de mensagem antes do primeiro
 delta. Por isso “Pensando” aparece imediatamente, acompanha o título da atividade
-mais recente e desaparece quando a resposta final começa, sem montar cards vazios.
+mais recente e desaparece quando a resposta final começa, sem montar cards
+vazios. A atividade ativa usa uma única cópia visual mascarada por três ondas
+sequenciais em um ciclo de 2 s com atraso de 80 ms; a animação é GPU-only,
+respeita a política global de movimento reduzido e não duplica nós de texto.
 Disclosures de atividade, comando e diff nascem fechados e só montam o corpo
 pesado quando abertos. Chaves de expansão são hierárquicas e isoladas pelo
 identificador da conversa: sobrevivem à desmontagem temporária e à troca de
@@ -172,9 +239,13 @@ materializar linhas. O painel mantém uma lista de arquivos e um único document
 selecionado em uma viewport virtualizada: todas as linhas continuam navegáveis,
 mas somente a interseção visível e o overscan entram no DOM. A altura lógica é
 mapeada para um canvas físico limitado sem remover nenhuma posição da sequência.
-Realce sintático é aplicado apenas às linhas adicionadas ou removidas que estão
-visíveis; linhas patologicamente longas permanecem completas e escapadas, mas
-sem decoração sintática.
+Cada hunk pequeno é tokenizado como um bloco único para preservar estado entre
+linhas adicionadas, removidas e de contexto. O cache LRU pertence ao `DiffView`,
+é limitado por entradas e bytes estimados e não sobrevive à troca de documento
+ou path. Hunks acima de 256 linhas, 32 KiB, ou com uma linha acima de 4 KiB
+abandonam a captura durante o parse e usam texto puro. Assim, um diff de 150 mil
+linhas não conserva uma segunda cópia do conteúdo nem inicia trabalho sintático
+que nunca será exibido.
 
 O fluxo de produto possui duas camadas independentes: `ChatGPT | Codex` e,
 dentro do ChatGPT, `Chat | Work`. A troca salva o destino atual antes de
@@ -219,6 +290,9 @@ histórico e fila de revisão, mas não é proprietária da agenda.
 - continuidade consumer do Chat: `conversation_id` e `parent_message_id` na
   tabela SQLite `chat_conversations`; tokens de integridade e conduit não são
   persistidos.
+- snapshots de anexos: `attachments/<uuid>/` no diretório local de dados do
+  aplicativo. Seleção, colagem e envio convergem para o mesmo armazenamento
+  durável; caminhos externos não se tornam referências permanentes novas.
 - Automações e execuções: tabelas SQLite `automations` e `automation_runs`, com
   versão otimista, agenda, vínculo opcional a projeto/tarefa/turno e estado de
   revisão. Até 500 execuções por automação são retidas; a leitura inicial da UI
@@ -247,12 +321,15 @@ Leituras de arquivo e requisições possuem limites independentes; paths são
 canonicalizados e symlinks não podem escapar do workspace. Estados desconhecidos
 nunca viram fallback visual genérico.
 
-Saída de processos é solicitada em modo sem cor; no Windows, o PowerShell recebe
-configuração explícita de entrada, saída e comunicação nativa em UTF-8 sem BOM.
-Antes da persistência, sequências ANSI/OSC, carriage return de progresso,
-backspace e controles invisíveis são normalizados em streaming e não chegam ao
-contrato visual. A migração transacional do schema SQLite 1 para o 2 normaliza
-também saídas de comando antigas ao externalizá-las. A migração 2 para 3 cria
+Saída de processos é solicitada em modo sem cor; no Windows, o executor usa
+PowerShell 7 (`pwsh`) e configura explicitamente entrada, saída, comunicação
+nativa e cmdlets de arquivo em UTF-8 sem BOM. Saída visível que não seja UTF-8
+válido falha explicitamente, em vez de ser persistida com caracteres de
+substituição. Antes da persistência, sequências ANSI/OSC e controles invisíveis
+são removidos; carriage return e backspace viram operações semânticas aplicadas
+igualmente ao spool integral e à prévia visual ao vivo. A migração transacional
+do schema SQLite 1 para o 2
+normaliza também saídas de comando antigas ao externalizá-las. A migração 2 para 3 cria
 Automações e execuções de forma atômica. A migração 3 para 4 cria a fila
 persistente de steers; um schema incompleto ou não versionado é rejeitado em vez
 de ser reparado silenciosamente.
@@ -262,6 +339,14 @@ mantém um recurso por item em `output_resources` e o texto integral em
 `output_chunks`; o contrato do turno leva apenas uma prévia de 64 KiB, total de
 bytes e cursor de continuação. Fork cria IDs e blocos independentes, e exclusão
 usa as chaves estrangeiras para remover somente os recursos daquele thread.
+
+O provider recebe uma prévia separada do recurso integral. Logs de comandos bem
+sucedidos usam compactação semântica determinística para remover somente
+progresso de build e sucessos repetitivos reconhecidos; qualquer formato
+desconhecido permanece no caminho genérico. `read_output` recupera páginas
+brutas ou pesquisa um fragmento exato diretamente nos chunks, com escopo de
+tarefa validado e excertos limitados. Assim, recuperação continua reversível sem
+forçar um bloco de 64 KiB inteiro a entrar no contexto para localizar uma linha.
 
 O SQLite limita cada payload e cada página materializada, mas separa itens
 visuais da timeline dos itens enviados ao provider. O limite do provider cobre o

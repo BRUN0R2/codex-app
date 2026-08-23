@@ -13,6 +13,7 @@ import {
   decodeAutomation,
   decodeAutomationListResponse,
   decodeAutomationRun,
+  decodeAutoTopUpSettingsSnapshot,
   decodeCancelLoginResponse,
   decodeChatModelListResponse,
   decodeConfigUpdateResponse,
@@ -33,6 +34,8 @@ import {
   decodeThreadStartResponse,
   decodeThreadUnarchiveResponse,
   decodeTurnStartResponse,
+  decodeUsageResetCreditsResponse,
+  decodeUsageResetRedemptionResponse,
 } from "../contracts/decode";
 import type {
   AccountProfileResponse,
@@ -46,6 +49,7 @@ import type {
   AutomationInput,
   AutomationListResponse,
   AutomationRun,
+  AutoTopUpSettingsSnapshot,
   CancelLoginResponse,
   ChatModelListResponse,
   ConfigUpdate,
@@ -69,6 +73,8 @@ import type {
   ThreadStartResponse,
   ThreadUnarchiveResponse,
   TurnStartResponse,
+  UsageResetCreditsResponse,
+  UsageResetRedemptionResponse,
 } from "../contracts/types";
 
 export { describeDiagnosticError, describeError } from "./errorDescription";
@@ -144,6 +150,47 @@ export function readAccountProfile(): Promise<AccountProfileResponse> {
 
 export function readRateLimits(): Promise<AccountRateLimitsResponse> {
   return invokeDecoded("engine_account_rate_limits_read", decodeAccountRateLimitsResponse);
+}
+
+export function readUsageResets(): Promise<UsageResetCreditsResponse> {
+  return invokeDecoded("engine_account_usage_resets_read", decodeUsageResetCreditsResponse);
+}
+
+export function redeemUsageReset(
+  creditId: string | null,
+  redeemRequestId: string,
+): Promise<UsageResetRedemptionResponse> {
+  return invokeDecoded("engine_account_usage_reset_redeem", decodeUsageResetRedemptionResponse, {
+    request: { creditId, redeemRequestId },
+  });
+}
+
+export function readAutoTopUpSettings(): Promise<AutoTopUpSettingsSnapshot> {
+  return invokeDecoded("engine_account_auto_top_up_read", decodeAutoTopUpSettingsSnapshot);
+}
+
+export function enableAutoTopUp(
+  rechargeThreshold: string,
+  rechargeTarget: string,
+  rechargeMonthlyLimit: string | null,
+): Promise<AutoTopUpSettingsSnapshot> {
+  return invokeDecoded("engine_account_auto_top_up_enable", decodeAutoTopUpSettingsSnapshot, {
+    request: { rechargeMonthlyLimit, rechargeTarget, rechargeThreshold },
+  });
+}
+
+export function updateAutoTopUp(
+  rechargeThreshold: string,
+  rechargeTarget: string,
+  rechargeMonthlyLimit: string | null,
+): Promise<AutoTopUpSettingsSnapshot> {
+  return invokeDecoded("engine_account_auto_top_up_update", decodeAutoTopUpSettingsSnapshot, {
+    request: { rechargeMonthlyLimit, rechargeTarget, rechargeThreshold },
+  });
+}
+
+export function disableAutoTopUp(): Promise<AutoTopUpSettingsSnapshot> {
+  return invokeDecoded("engine_account_auto_top_up_disable", decodeAutoTopUpSettingsSnapshot);
 }
 
 export function loginWithChatGpt(): Promise<LoginResponse> {

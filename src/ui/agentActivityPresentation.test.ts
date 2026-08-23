@@ -34,6 +34,13 @@ describe("agent activity presentation", () => {
     expect(agentActivitySummaryLabel(items)).toBe("Executou comandos e pesquisou na web");
   });
 
+  it("classifies command polling as command activity", () => {
+    const items = [tool("poll-1", "poll_command", "Poll command session-1")];
+
+    expect(agentActivitySummaryLabel(items)).toBe("Executou um comando");
+    expect(summarizeAgentActivity(items).map(({ kind }) => kind)).toEqual(["commands"]);
+  });
+
   it("presents stored output reads as chat-terminal activity", () => {
     const items = [
       command("command-1"),
@@ -156,7 +163,7 @@ describe("agent activity presentation", () => {
     );
   });
 
-  it("only keeps a lone completed row grouped while it owns the current activity heading", () => {
+  it("groups a lone activity only while it owns the current heading", () => {
     const single = splitAgentActivityUnits([command("command-1")]);
     const singleFileChange = splitAgentActivityUnits([fileChange("change-1", "src/App.tsx")]);
     const multipleChanges = splitAgentActivityUnits([
@@ -164,6 +171,7 @@ describe("agent activity presentation", () => {
         path: "src/main.tsx",
         kind: { type: "add" },
         diff: "+export {};",
+        lineStats: { additions: 1, deletions: 0 },
       }),
     ]);
 
@@ -175,12 +183,17 @@ describe("agent activity presentation", () => {
     ).toBe(false);
     expect(
       single[0]?.kind === "activityGroup"
-        ? shouldRenderAgentActivityGroup(single[0].items, false, true)
+        ? shouldRenderAgentActivityGroup(single[0].items, true)
         : false,
     ).toBe(true);
     expect(
-      single[0]?.kind === "activityGroup"
-        ? shouldRenderAgentActivityGroup(single[0].items, true)
+      singleFileChange[0]?.kind === "activityGroup"
+        ? shouldRenderAgentActivityGroup(singleFileChange[0].items, false)
+        : true,
+    ).toBe(false);
+    expect(
+      singleFileChange[0]?.kind === "activityGroup"
+        ? shouldRenderAgentActivityGroup(singleFileChange[0].items, true)
         : false,
     ).toBe(true);
     expect(
@@ -188,11 +201,6 @@ describe("agent activity presentation", () => {
         ? shouldRenderAgentActivityGroup(multipleChanges[0].items, false)
         : false,
     ).toBe(true);
-    expect(
-      singleFileChange[0]?.kind === "activityGroup"
-        ? shouldRenderAgentActivityGroup(singleFileChange[0].items, true, true)
-        : true,
-    ).toBe(false);
   });
 
   it("uses a concise active label for the latest running activity", () => {
@@ -229,6 +237,7 @@ function command(id: string): Extract<AgentActivityItem, { type: "commandExecuti
     source: "agent",
     status: "completed",
     aggregatedOutput: null,
+    liveOutput: null,
     exitCode: 0,
     durationMs: 1,
   };
@@ -248,6 +257,7 @@ function fileChange(
         path,
         kind: { type: "update", movePath: null },
         diff: "-old\n+new",
+        lineStats: { additions: 1, deletions: 1 },
       },
       ...(extra === undefined ? [] : [extra]),
     ],
@@ -269,6 +279,7 @@ function tool(
     name,
     description,
     status: "completed",
+    outputPresentation: { type: "plainText" },
     output: null,
   };
 }

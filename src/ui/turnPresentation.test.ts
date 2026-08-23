@@ -156,6 +156,7 @@ function command(id: string): Extract<VisibleThreadItem, { readonly type: "comma
     source: "agent",
     status: "completed",
     aggregatedOutput: null,
+    liveOutput: null,
     exitCode: 0,
     durationMs: 1,
   };

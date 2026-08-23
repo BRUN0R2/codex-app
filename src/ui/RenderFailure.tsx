@@ -1,5 +1,7 @@
 import { onMount } from "solid-js";
 
+import { describeError } from "../infrastructure/errorDescription";
+
 import { CodexGlyph } from "./CodexGlyph";
 
 export function ApplicationRenderFailure(props: {
@@ -57,5 +59,5 @@ export function TimelineTurnRenderFailure(props: {
 }
 
 export function renderFailureMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
+  return describeError(reason);
 }

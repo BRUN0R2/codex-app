@@ -1,3 +1,4 @@
+import type { ProjectRecord } from "../contracts/types";
 import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 import { normalizeProjectPath, pathsEqual } from "./projects";
 
@@ -7,6 +8,11 @@ const MAX_PINNED_PROJECTS = 32;
 interface StoredProjectPins {
   readonly version: 1;
   readonly projectPaths: readonly string[];
+}
+
+export interface ProjectPinPartition {
+  readonly pinnedProjects: readonly ProjectRecord[];
+  readonly unpinnedProjects: readonly ProjectRecord[];
 }
 
 export function loadPinnedProjectPaths(): readonly string[] {
@@ -49,6 +55,21 @@ export function removePinnedProjectPath(
   path: string,
 ): readonly string[] {
   return projectPaths.filter((entry) => !pathsEqual(entry, path));
+}
+
+export function partitionProjectsByPinnedPaths(
+  projects: readonly ProjectRecord[],
+  pinnedProjectPaths: readonly string[],
+): ProjectPinPartition {
+  const pinnedProjects: ProjectRecord[] = [];
+  const unpinnedProjects: ProjectRecord[] = [];
+  for (const project of projects) {
+    const destination = pinnedProjectPaths.some((path) => pathsEqual(path, project.path))
+      ? pinnedProjects
+      : unpinnedProjects;
+    destination.push(project);
+  }
+  return { pinnedProjects, unpinnedProjects };
 }
 
 function decodeProjectPins(value: unknown): StoredProjectPins {

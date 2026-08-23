@@ -6,7 +6,8 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell};
 
 use super::{
-    ListFilesArgs, ReadFileArgs, ReadOutputArgs, SearchTextArgs, StoredToolOutput, ToolOperation,
+    ListFilesArgs, ReadFileArgs, ReadOutputArgs, ReadOutputSelector, SearchTextArgs,
+    StoredToolOutput, ToolOperation,
 };
 use crate::engine::native::output_compaction::TextOutputKind;
 use crate::error::AppError;
@@ -41,9 +42,13 @@ enum ReadToolOperationKey {
         query: String,
         case_sensitive: bool,
     },
-    ReadOutput {
+    ReadOutputPage {
         output_id: String,
         cursor: Option<String>,
+    },
+    SearchOutput {
+        output_id: String,
+        query: String,
     },
 }
 
@@ -109,16 +114,24 @@ impl ReadToolCacheKey {
                 query: query.clone(),
                 case_sensitive: *case_sensitive,
             },
-            ToolOperation::ReadOutput(ReadOutputArgs { output_id, cursor }) => {
-                ReadToolOperationKey::ReadOutput {
+            ToolOperation::ReadOutput(ReadOutputArgs {
+                output_id,
+                selector,
+            }) => match selector {
+                ReadOutputSelector::Page { cursor } => ReadToolOperationKey::ReadOutputPage {
                     output_id: output_id.clone(),
                     cursor: cursor.clone(),
-                }
-            }
+                },
+                ReadOutputSelector::Search { query } => ReadToolOperationKey::SearchOutput {
+                    output_id: output_id.clone(),
+                    query: query.clone(),
+                },
+            },
             ToolOperation::ApplyPatch(_)
             | ToolOperation::EditFile(_)
             | ToolOperation::WriteFile(_)
             | ToolOperation::ExecCommand(_)
+            | ToolOperation::PollCommand(_)
             | ToolOperation::UpdatePlan { .. } => return None,
         };
         Some(Self {
@@ -206,15 +219,15 @@ mod tests {
 
         let mut output_ids = BTreeSet::new();
         for result in results {
-            let (source, provider_output, exit_code) = result
+            let output = result
                 .expect("coalesced read should succeed")
                 .into_stored_output()
                 .into_output()
                 .await
                 .expect("each result should materialize independently");
-            assert_eq!(provider_output, "shared result");
-            assert_eq!(exit_code, None);
-            output_ids.insert(source.reference().id);
+            assert_eq!(output.provider_output, "shared result");
+            assert_eq!(output.exit_code, None);
+            output_ids.insert(output.source.reference().id);
         }
         assert_eq!(executions.load(Ordering::Relaxed), 1);
         assert_eq!(output_ids.len(), 8);
