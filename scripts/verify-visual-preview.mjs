@@ -1853,7 +1853,7 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
     metrics.highlightAnimationName === "activity-reflection-text",
     "o texto luminoso não acompanha a varredura",
   );
-  assert(metrics.animationDuration === "4.2s", "o ciclo sequencial não mede 4,2 segundos");
+  assert(metrics.animationDuration === "2s", "o ciclo sequencial não mede 2 segundos");
   assert(metrics.animationDelay === "0.08s", "a reflexão não inicia quase imediatamente");
   assert(
     metrics.maskWaveCount === 1,

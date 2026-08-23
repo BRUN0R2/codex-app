@@ -3722,7 +3722,7 @@ pre {
   inset: 0;
   width: 100%;
   overflow: hidden;
-  animation: activity-reflection-sweep 4.2s cubic-bezier(0.35, 0, 0.25, 1) 80ms infinite;
+  animation: activity-reflection-sweep 2s cubic-bezier(0.35, 0, 0.25, 1) 80ms infinite;
   color: var(--color-token-text-primary);
   mask-image: linear-gradient(
     90deg,
@@ -3750,7 +3750,7 @@ pre {
 }
 
 .activity-title-highlight {
-  animation: activity-reflection-text 4.2s cubic-bezier(0.35, 0, 0.25, 1) 80ms infinite;
+  animation: activity-reflection-text 2s cubic-bezier(0.35, 0, 0.25, 1) 80ms infinite;
   transform: translate3d(115%, 0, 0);
   will-change: transform;
 }

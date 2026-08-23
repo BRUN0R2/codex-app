@@ -219,7 +219,7 @@ delta. Por isso “Pensando” aparece imediatamente, acompanha o título da ati
 mais recente e desaparece quando a resposta final começa, sem montar cards
 vazios. A atividade ativa usa uma única cópia visual e uma única faixa de
 reflexo. A mesma faixa atravessa o texto três vezes sem sobreposição, com pausas
-explícitas dentro de um ciclo de 4,2 s e atraso inicial de 80 ms. A animação é
+explícitas dentro de um ciclo de 2 s e atraso inicial de 80 ms. A animação é
 GPU-only, respeita a política global de movimento reduzido e não duplica nós de
 texto.
 Disclosures de atividade, comando e diff nascem fechados e só montam o corpo
