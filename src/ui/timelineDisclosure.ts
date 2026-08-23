@@ -7,6 +7,7 @@ export type TimelineDisclosureKey = string & {
 };
 
 export interface TimelineDisclosureStore {
+  readonly countOpenDescendants: (key: TimelineDisclosureKey) => number;
   readonly read: (key: TimelineDisclosureKey, fallback?: boolean) => boolean;
   readonly setOpen: (key: TimelineDisclosureKey, open: boolean) => void;
 }
@@ -15,6 +16,15 @@ export function createTimelineDisclosureStore(): TimelineDisclosureStore {
   const [entries, setEntries] = createSignal<ReadonlyMap<string, boolean>>(new Map());
 
   return {
+    countOpenDescendants(key) {
+      let count = 0;
+      for (const [currentKey, open] of entries()) {
+        if (open && currentKey !== key && currentKey.startsWith(key)) {
+          count += 1;
+        }
+      }
+      return count;
+    },
     read(key, fallback = false) {
       return entries().get(key) ?? fallback;
     },

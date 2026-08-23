@@ -1,6 +1,12 @@
-import type { VariableSizeVirtualizer } from "./variableSizeVirtualizer";
+import type { VariableSizeVirtualizer, VirtualAnchor } from "./variableSizeVirtualizer";
+
+export interface TimelineViewportAnchor {
+  readonly anchor: VirtualAnchor;
+  readonly viewportOffset: number;
+}
 
 export interface TimelineViewportSnapshot {
+  readonly anchor: TimelineViewportAnchor | null;
   readonly followingLatest: boolean;
   readonly scrollTop: number;
 }
@@ -11,6 +17,7 @@ export interface TimelineThreadSession extends TimelineViewportSnapshot {
 
 export interface TimelineThreadActivation {
   readonly keysChanged: boolean;
+  readonly measurementsReset: boolean;
   readonly session: TimelineThreadSession;
 }
 
@@ -18,8 +25,13 @@ export interface TimelineTurnReference {
   readonly id: string;
 }
 
-interface TimelineThreadSessionRecord extends TimelineThreadSession {
+interface TimelineThreadSessionRecord {
+  anchor: TimelineViewportAnchor | null;
+  followingLatest: boolean;
+  layoutSignature: string | null;
+  scrollTop: number;
   sourceTurns: readonly TimelineTurnReference[] | null;
+  virtualizer: VariableSizeVirtualizer;
 }
 
 export class TimelineThreadSessionStore {
@@ -35,7 +47,11 @@ export class TimelineThreadSessionStore {
     this.#capacity = capacity;
   }
 
-  activate(threadId: string, turns: readonly TimelineTurnReference[]): TimelineThreadActivation {
+  activate(
+    threadId: string,
+    turns: readonly TimelineTurnReference[],
+    layoutSignature: string | null = null,
+  ): TimelineThreadActivation {
     if (threadId.length === 0) {
       throw new Error("Timeline sessions require a non-empty thread id.");
     }
@@ -43,7 +59,9 @@ export class TimelineThreadSessionStore {
     const session =
       current ??
       ({
+        anchor: null,
         followingLatest: true,
+        layoutSignature,
         scrollTop: 0,
         sourceTurns: null,
         virtualizer: this.#createVirtualizer(),
@@ -52,9 +70,17 @@ export class TimelineThreadSessionStore {
       session.sourceTurns === turns
         ? false
         : session.virtualizer.setKeys(turns.map((turn) => `${threadId}\u0000${turn.id}`));
+    const measurementsReset =
+      session.layoutSignature !== null &&
+      layoutSignature !== null &&
+      session.layoutSignature !== layoutSignature &&
+      session.virtualizer.resetMeasurements();
+    if (layoutSignature !== null) {
+      session.layoutSignature = layoutSignature;
+    }
     session.sourceTurns = turns;
     this.#touch(threadId, session);
-    return { keysChanged, session };
+    return { keysChanged, measurementsReset, session };
   }
 
   save(threadId: string, snapshot: TimelineViewportSnapshot): void {
@@ -65,12 +91,18 @@ export class TimelineThreadSessionStore {
     if (!Number.isFinite(snapshot.scrollTop) || snapshot.scrollTop < 0) {
       throw new Error("Timeline scroll position must be a non-negative finite number.");
     }
-    this.#touch(threadId, {
-      followingLatest: snapshot.followingLatest,
-      scrollTop: snapshot.scrollTop,
-      sourceTurns: current.sourceTurns,
-      virtualizer: current.virtualizer,
-    });
+    if (
+      snapshot.anchor !== null &&
+      (!Number.isFinite(snapshot.anchor.viewportOffset) ||
+        !Number.isFinite(snapshot.anchor.anchor.offsetWithinItem) ||
+        snapshot.anchor.anchor.offsetWithinItem < 0)
+    ) {
+      throw new Error("Timeline viewport anchor must contain finite offsets.");
+    }
+    current.anchor = snapshot.anchor;
+    current.followingLatest = snapshot.followingLatest;
+    current.scrollTop = snapshot.scrollTop;
+    this.#touch(threadId, current);
   }
 
   #touch(threadId: string, session: TimelineThreadSessionRecord): void {

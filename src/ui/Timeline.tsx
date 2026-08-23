@@ -33,6 +33,7 @@ type TimelineController = Pick<
 import { projectName } from "../state/projects";
 import type { VisibleThreadTurn } from "../state/visibleTurnSequence";
 import { fileName, toolIconName, toolLabel } from "./activityLabels";
+import { ActivityVirtualizerStore, shouldDeferActivityContent } from "./activityVirtualization";
 import {
   type AgentActivityItem,
   type AgentActivityKind,
@@ -41,6 +42,7 @@ import {
   activeAgentActivity,
   agentActivityRenderUnitIdentity,
   agentActivitySummaryLabel,
+  type ImageViewItem,
   isTerminalReadTool,
   shouldRenderAgentActivityGroup,
   summarizeAgentActivity,
@@ -65,6 +67,10 @@ import {
   userMessageAnchor,
   userMessageCopyText,
 } from "./TimelineMessages";
+import {
+  TimelineActivityContext,
+  type TimelineActivityContextValue,
+} from "./timelineActivityContext";
 import { createTimelineDisclosureStore } from "./timelineDisclosure";
 import {
   handleTimelineDetailsToggle,
@@ -98,18 +104,19 @@ import {
 import {
   calculateTimelineScrollbar,
   findTimelineAnchorIndex,
-  hasRecentTimelineUserScrollIntent,
   isTimelineNearEnd,
   normalizeTimelineWheelDelta,
   resolveNestedTimelineWheelTransfer,
+  resolveTimelineAnchorCorrection,
   resolveTimelineFollowing,
   resolveTimelineMessageOffset,
   resolveTimelineRestorationTop,
   type ScrollbarMetrics,
   shouldPreserveTimelineAnchor,
   shouldSynchronizeTimelineToEnd,
+  TimelineProgrammaticScrollTracker,
 } from "./timelineScroll";
-import { TimelineThreadSessionStore } from "./timelineSession";
+import { TimelineThreadSessionStore, type TimelineViewportAnchor } from "./timelineSession";
 import { presentTurnFailure } from "./turnFailure";
 import {
   asTurnMessageBlock,
@@ -119,6 +126,7 @@ import {
   type TurnWorkItem,
 } from "./turnPresentation";
 import { type UserMessageEntry, UserMessageNavigator } from "./UserMessageNavigator";
+import { VirtualizedActivityList } from "./VirtualizedActivityList";
 import { VariableSizeVirtualizer } from "./variableSizeVirtualizer";
 
 interface StarterSuggestion {
@@ -155,13 +163,19 @@ const STARTER_SUGGESTIONS: readonly StarterSuggestion[] = [
 ];
 
 const TIMELINE_ESTIMATED_TURN_HEIGHT = 498;
-const TIMELINE_VIRTUAL_OVERSCAN_PX = 900;
+const TIMELINE_MINIMUM_VIRTUAL_OVERSCAN_PX = 900;
+const TIMELINE_VIRTUAL_OVERSCAN_VIEWPORTS = 1.5;
 const TIMELINE_HISTORY_LOAD_THRESHOLD_PX = 640;
 const TIMELINE_SESSION_CACHE_CAPACITY: number = 16;
+const ACTIVITY_ESTIMATED_ITEM_HEIGHT = 30;
+const ACTIVITY_SESSION_CACHE_CAPACITY = 256;
+const ACTIVITY_ITEM_VIRTUALIZATION_THRESHOLD = 48;
+const ACTIVITY_OPEN_DISCLOSURE_VIRTUALIZATION_THRESHOLD = 4;
 const USER_MESSAGE_NAVIGATION_MAX_FRAMES: number = 8;
-const USER_MESSAGE_NAVIGATION_QUIET_FRAMES: number = 2;
+const USER_MESSAGE_NAVIGATION_QUIET_FRAMES: number = 8;
 const USER_MESSAGE_SCROLL_INSET_PX: number = 32;
 const TIMELINE_SCROLL_REGION_SELECTOR = "[data-timeline-scroll-region]";
+const IMAGE_OUTPUT_PRESENTATION = { type: "image" } as const;
 
 interface TimelineUserMessageEntry extends UserMessageEntry {
   readonly turnIndex: number;
@@ -169,6 +183,17 @@ interface TimelineUserMessageEntry extends UserMessageEntry {
 
 interface PendingUserMessageNavigation {
   readonly message: TimelineUserMessageEntry;
+  readonly threadId: string;
+}
+
+interface CapturedTimelineViewportAnchor extends TimelineViewportAnchor {
+  readonly contentOffset: number;
+  readonly threadId: string;
+}
+
+interface PendingHistoryLayout {
+  readonly firstTurnKey: string | null;
+  readonly listOffset: number;
   readonly threadId: string;
 }
 
@@ -185,14 +210,15 @@ export function Timeline(props: {
   let animationFrame: number | undefined;
   let pendingLayoutSynchronization = false;
   let pendingUserScrollMeasurement = false;
-  let historyRevealFrame: number | undefined;
   let timelineRestorationFrame: number | undefined;
+  let activityContentResumeTimer: number | undefined;
+  let previousActivityScrollTop = 0;
   let userMessageNavigationFrame: number | undefined;
   let pendingUserMessageNavigation: PendingUserMessageNavigation | undefined;
+  let pendingHistoryLayout: PendingHistoryLayout | undefined;
+  let pendingVirtualAnchorCorrection: CapturedTimelineViewportAnchor | undefined;
   let virtualMeasurementGeneration = 0;
   let virtualMeasurementScheduledGeneration: number | undefined;
-  let lastUserScrollIntentAt = Number.NEGATIVE_INFINITY;
-  let smoothScrollTarget: number | null = null;
   let activeTimelineThreadId: string | null = null;
   let timelineTransitionRevision = 0;
   let timelineLayoutRevision = 0;
@@ -205,11 +231,18 @@ export function Timeline(props: {
   const [followingLatest, setFollowingLatest] = createSignal(true);
   const [showScrollToEnd, setShowScrollToEnd] = createSignal(false);
   const [activeUserMessageIndex, setActiveUserMessageIndex] = createSignal(0);
+  const [activityContentDeferred, setActivityContentDeferred] = createSignal(false);
   const [clock, setClock] = createSignal(Date.now());
+  const [timelineLayoutWidth, setTimelineLayoutWidth] = createSignal(0);
   const timelineSessions = new TimelineThreadSessionStore(
     () => new VariableSizeVirtualizer(TIMELINE_ESTIMATED_TURN_HEIGHT),
     TIMELINE_SESSION_CACHE_CAPACITY,
   );
+  const activitySessions = new ActivityVirtualizerStore(
+    ACTIVITY_ESTIMATED_ITEM_HEIGHT,
+    ACTIVITY_SESSION_CACHE_CAPACITY,
+  );
+  const programmaticScroll = new TimelineProgrammaticScrollTracker();
   let virtualizer = new VariableSizeVirtualizer(TIMELINE_ESTIMATED_TURN_HEIGHT);
   const [virtualRevision, setVirtualRevision] = createSignal(0);
   const [virtualViewport, setVirtualViewport] = createSignal({ offset: 0, size: 1 });
@@ -223,27 +256,56 @@ export function Timeline(props: {
   const disclosureContext: TimelineDisclosureContextValue = {
     keyPrefix: () => timelineDisclosureNamespacePrefix(props.controller.currentThread()?.id ?? ""),
     onLayoutChange: () => {
-      timelineLayoutRevision += 1;
+      recordTimelineLayoutChange();
       queueMicrotask(measureMountedVirtualTurns);
-      const pending = pendingUserMessageNavigation;
-      if (pending !== undefined) {
-        cancelUserMessageNavigationFrame();
-        scheduleMountedUserMessageNavigation(
-          pending.message,
-          pending.threadId,
-          USER_MESSAGE_NAVIGATION_MAX_FRAMES,
-          timelineLayoutRevision,
-        );
-      }
     },
     store: disclosures,
   };
   const reportFrontendFailure = (reason: unknown) => props.controller.reportError(reason);
   const pendingVirtualMeasurements = new Map<string, number>();
+  const timelineLayoutSignature = createMemo(() => {
+    const width = timelineLayoutWidth();
+    if (width <= 0) {
+      return null;
+    }
+    const preferences = props.controller.config()?.config.desktop;
+    return [width, preferences?.uiFontSize ?? 14, preferences?.diffDisplay ?? "unified"].join(":");
+  });
+  const activityContext: TimelineActivityContextValue = {
+    adjustScrollBy: (delta) => {
+      if (scrollElement === undefined || !Number.isFinite(delta) || delta === 0) {
+        return;
+      }
+      scrollTimelineTo(scrollElement.scrollTop + delta);
+    },
+    contentDeferred: activityContentDeferred,
+    layoutSignature: timelineLayoutSignature,
+    notifyLayoutChange: disclosureContext.onLayoutChange,
+    sessions: activitySessions,
+    shouldPreserveAnchor: () => !followingLatest() && !programmaticTimelineNavigationActive(),
+    viewport: () => {
+      virtualRevision();
+      const viewport = virtualViewport();
+      return scrollElement === undefined
+        ? null
+        : {
+            element: scrollElement,
+            scrollTop: scrollElement.scrollTop,
+            size: viewport.size,
+          };
+    },
+  };
   const virtualRange = createMemo(() => {
     virtualRevision();
     const viewport = virtualViewport();
-    return virtualizer.range(viewport.offset, viewport.size, TIMELINE_VIRTUAL_OVERSCAN_PX);
+    return virtualizer.range(
+      viewport.offset,
+      viewport.size,
+      Math.max(
+        TIMELINE_MINIMUM_VIRTUAL_OVERSCAN_PX,
+        viewport.size * TIMELINE_VIRTUAL_OVERSCAN_VIEWPORTS,
+      ),
+    );
   });
   const virtualTurns = createMemo(() => {
     const range = virtualRange();
@@ -282,7 +344,10 @@ export function Timeline(props: {
     }),
   );
 
-  function readMountedUserMessageOffset(messageId: string): number | null {
+  function readMountedUserMessageOffset(
+    messageId: string,
+    virtualListTop: number | null = null,
+  ): number | null {
     if (virtualListElement === undefined) {
       return null;
     }
@@ -292,76 +357,127 @@ export function Timeline(props: {
     }
     return Math.max(
       0,
-      anchor.getBoundingClientRect().top - virtualListElement.getBoundingClientRect().top,
+      anchor.getBoundingClientRect().top -
+        (virtualListTop ?? virtualListElement.getBoundingClientRect().top),
     );
   }
 
-  function readUserMessageOffset(message: TimelineUserMessageEntry): number {
+  function recordTimelineLayoutChange(): void {
+    timelineLayoutRevision += 1;
+    const pending = pendingUserMessageNavigation;
+    if (pending === undefined) {
+      return;
+    }
+    cancelUserMessageNavigationFrame();
+    scheduleMountedUserMessageNavigation(
+      pending.message,
+      pending.threadId,
+      USER_MESSAGE_NAVIGATION_MAX_FRAMES,
+      timelineLayoutRevision,
+    );
+  }
+
+  function readUserMessageOffset(
+    message: TimelineUserMessageEntry,
+    virtualListTop: number | null = null,
+  ): number {
     return resolveTimelineMessageOffset(
-      readMountedUserMessageOffset(message.id),
+      readMountedUserMessageOffset(message.id, virtualListTop),
       virtualizer.offsetOf(message.turnIndex),
     );
   }
 
-  function measureActiveUserMessage(): void {
+  function captureTimelineViewportAnchor(
+    threadId = activeTimelineThreadId ?? props.controller.currentThread()?.id ?? null,
+    listOffsetOverride: number | null = null,
+  ): CapturedTimelineViewportAnchor | null {
+    if (threadId === null || scrollElement === undefined || virtualListElement === undefined) {
+      return null;
+    }
+    const listOffset = listOffsetOverride ?? virtualListElement.offsetTop;
+    const virtualOffset = Math.max(0, scrollElement.scrollTop - listOffset);
+    const anchor = virtualizer.anchorAt(virtualOffset);
+    const anchorOffset = anchor === null ? null : virtualizer.resolveAnchorOffset(anchor);
+    if (anchor === null || anchorOffset === null) {
+      return null;
+    }
+    const contentOffset = listOffset + anchorOffset;
+    return {
+      anchor,
+      contentOffset,
+      threadId,
+      viewportOffset: contentOffset - scrollElement.scrollTop,
+    };
+  }
+
+  function resolveCapturedTimelineAnchorOffset(captured: TimelineViewportAnchor): number | null {
+    if (virtualListElement === undefined) {
+      return null;
+    }
+    const virtualOffset = virtualizer.resolveAnchorOffset(captured.anchor);
+    return virtualOffset === null ? null : virtualListElement.offsetTop + virtualOffset;
+  }
+
+  function readActiveUserMessageIndex(input: {
+    readonly clientHeight: number;
+    readonly scrollHeight: number;
+    readonly scrollTop: number;
+    readonly virtualListTop: number;
+  }): number {
     const messages = userMessages();
-    if (scrollElement === undefined || virtualListElement === undefined || messages.length === 0) {
-      setActiveUserMessageIndex(0);
-      return;
+    const list = virtualListElement;
+    if (messages.length === 0 || list === undefined) {
+      return 0;
     }
     if (
       isTimelineNearEnd({
-        clientHeight: scrollElement.clientHeight,
-        scrollHeight: scrollElement.scrollHeight,
-        scrollTop: scrollElement.scrollTop,
+        clientHeight: input.clientHeight,
+        scrollHeight: input.scrollHeight,
+        scrollTop: input.scrollTop,
       })
     ) {
-      setActiveUserMessageIndex(messages.length - 1);
-      return;
+      return messages.length - 1;
     }
-    virtualRevision();
-    const viewportTop = Math.max(0, scrollElement.scrollTop - virtualListElement.offsetTop + 112);
-    setActiveUserMessageIndex(
-      findTimelineAnchorIndex(
-        messages.length,
-        (index) => {
-          const message = messages[index];
-          return message === undefined ? Number.MAX_SAFE_INTEGER : readUserMessageOffset(message);
-        },
-        viewportTop,
-      ),
+    const viewportTop = Math.max(0, input.scrollTop - list.offsetTop + 112);
+    return findTimelineAnchorIndex(
+      messages.length,
+      (index) => {
+        const message = messages[index];
+        return message === undefined
+          ? Number.MAX_SAFE_INTEGER
+          : readUserMessageOffset(message, input.virtualListTop);
+      },
+      viewportTop,
     );
   }
 
   async function revealOlderTurns(): Promise<void> {
     const threadId = props.controller.currentThread()?.id ?? null;
     if (
-      scrollElement === undefined ||
       threadId === null ||
+      virtualListElement === undefined ||
       !props.controller.hasOlderHistory() ||
       props.controller.historyLoading()
     ) {
       return;
     }
-    const previousScrollHeight = scrollElement.scrollHeight;
-    const previousScrollTop = scrollElement.scrollTop;
     setActiveTimelineFollowing(false);
+    const firstTurn = props.controller.persistedTurns()[0];
+    const pendingLayout = {
+      firstTurnKey: firstTurn === undefined ? null : virtualTurnKey(firstTurn.id),
+      listOffset: virtualListElement.offsetTop,
+      threadId,
+    } satisfies PendingHistoryLayout;
+    pendingHistoryLayout = pendingLayout;
     const loaded = await props.controller.loadOlderHistory();
-    if (!loaded || props.controller.currentThread()?.id !== threadId) {
+    if (!loaded && pendingHistoryLayout === pendingLayout) {
+      pendingHistoryLayout = undefined;
       return;
     }
-    if (historyRevealFrame !== undefined) {
-      cancelAnimationFrame(historyRevealFrame);
-    }
-    historyRevealFrame = requestAnimationFrame(() => {
-      historyRevealFrame = undefined;
-      if (scrollElement === undefined || props.controller.currentThread()?.id !== threadId) {
-        return;
+    requestAnimationFrame(() => {
+      if (pendingHistoryLayout === pendingLayout) {
+        pendingHistoryLayout = undefined;
       }
-      scrollTimelineTo(
-        previousScrollTop + Math.max(0, scrollElement.scrollHeight - previousScrollHeight),
-      );
-      scheduleTimelineFrame(false, false);
     });
   }
 
@@ -386,44 +502,78 @@ export function Timeline(props: {
     }
     const maximumScroll = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
     const target = Math.min(maximumScroll, Math.max(0, top));
+    if (Math.abs(scrollElement.scrollTop - target) <= 1) {
+      programmaticScroll.cancel();
+      return;
+    }
     if (behavior === "auto") {
-      // Direct assignments have no animation lifecycle to consume. Keeping a target here
-      // makes a later real user scroll look programmatic and re-enables auto-follow.
-      smoothScrollTarget = null;
+      programmaticScroll.begin("instant", target);
       scrollElement.scrollTop = target;
       return;
     }
-    if (Math.abs(scrollElement.scrollTop - target) <= 1) {
-      smoothScrollTarget = null;
-      return;
-    }
-    smoothScrollTarget = target;
+    programmaticScroll.begin("smooth", target);
     scrollElement.scrollTo({ behavior, top: target });
   }
 
-  function consumeSmoothScroll(): boolean {
-    if (scrollElement === undefined || smoothScrollTarget === null) {
-      return false;
-    }
-    if (Math.abs(scrollElement.scrollTop - smoothScrollTarget) <= 1) {
-      smoothScrollTarget = null;
-    }
-    return true;
+  function consumeProgrammaticScroll(): boolean {
+    return scrollElement === undefined
+      ? false
+      : programmaticScroll.consume(scrollElement.scrollTop);
   }
 
   function saveActiveTimelineViewport(nextFollowingLatest = followingLatest()): void {
     if (activeTimelineThreadId === null || scrollElement === undefined) {
       return;
     }
+    const capturedAnchor = captureTimelineViewportAnchor(activeTimelineThreadId);
     timelineSessions.save(activeTimelineThreadId, {
+      anchor:
+        capturedAnchor === null
+          ? null
+          : {
+              anchor: capturedAnchor.anchor,
+              viewportOffset: capturedAnchor.viewportOffset,
+            },
       followingLatest: nextFollowingLatest,
       scrollTop: Math.max(0, scrollElement.scrollTop),
     });
   }
 
   function setActiveTimelineFollowing(nextFollowingLatest: boolean): void {
-    setFollowingLatest(nextFollowingLatest);
-    saveActiveTimelineViewport(nextFollowingLatest);
+    if (followingLatest() !== nextFollowingLatest) {
+      setFollowingLatest(nextFollowingLatest);
+    }
+  }
+
+  function cancelActivityContentDeferral(): void {
+    if (activityContentResumeTimer !== undefined) {
+      window.clearTimeout(activityContentResumeTimer);
+      activityContentResumeTimer = undefined;
+    }
+    setActivityContentDeferred(false);
+  }
+
+  function updateActivityContentDeferral(scrollTop: number, viewportSize: number): void {
+    const scrollDelta = scrollTop - previousActivityScrollTop;
+    previousActivityScrollTop = scrollTop;
+    if (programmaticTimelineNavigationActive() && dragState === undefined) {
+      cancelActivityContentDeferral();
+      return;
+    }
+    const largeJump = shouldDeferActivityContent(scrollDelta, viewportSize);
+    if (!largeJump && !activityContentDeferred()) {
+      return;
+    }
+    if (largeJump) {
+      setActivityContentDeferred(true);
+    }
+    if (activityContentResumeTimer !== undefined) {
+      window.clearTimeout(activityContentResumeTimer);
+    }
+    activityContentResumeTimer = window.setTimeout(() => {
+      activityContentResumeTimer = undefined;
+      setActivityContentDeferred(false);
+    }, 90);
   }
 
   function cancelUserMessageNavigationFrame(): void {
@@ -445,10 +595,6 @@ export function Timeline(props: {
       cancelAnimationFrame(animationFrame);
       animationFrame = undefined;
     }
-    if (historyRevealFrame !== undefined) {
-      cancelAnimationFrame(historyRevealFrame);
-      historyRevealFrame = undefined;
-    }
     if (timelineRestorationFrame !== undefined) {
       cancelAnimationFrame(timelineRestorationFrame);
       timelineRestorationFrame = undefined;
@@ -458,8 +604,10 @@ export function Timeline(props: {
     pendingLayoutSynchronization = false;
     pendingUserScrollMeasurement = false;
     pendingVirtualMeasurements.clear();
-    smoothScrollTarget = null;
-    lastUserScrollIntentAt = Number.NEGATIVE_INFINITY;
+    pendingHistoryLayout = undefined;
+    pendingVirtualAnchorCorrection = undefined;
+    cancelActivityContentDeferral();
+    programmaticScroll.cancel();
     if (
       dragState !== undefined &&
       scrollbarThumbElement?.hasPointerCapture(dragState.pointerId) === true
@@ -473,6 +621,7 @@ export function Timeline(props: {
   function activateTimelineThread(
     threadId: string | null,
     persistedTurns: readonly VisibleThreadTurn[],
+    layoutSignature: string | null,
   ): void {
     saveActiveTimelineViewport();
     const transitionRevision = cancelPendingTimelineWork();
@@ -488,19 +637,27 @@ export function Timeline(props: {
 
     const viewportSize = Math.max(1, scrollElement?.clientHeight ?? 1);
     const session =
-      threadId === null ? null : timelineSessions.activate(threadId, persistedTurns).session;
+      threadId === null
+        ? null
+        : timelineSessions.activate(threadId, persistedTurns, layoutSignature).session;
     virtualizer =
       session?.virtualizer ?? new VariableSizeVirtualizer(TIMELINE_ESTIMATED_TURN_HEIGHT);
     const following = session?.followingLatest ?? true;
     const savedScrollTop = session?.scrollTop ?? 0;
-    const initialMaximumScroll = Math.max(0, virtualizer.totalSize() - viewportSize);
-    const initialScrollTop = resolveTimelineRestorationTop({
+    previousActivityScrollTop = Math.max(0, scrollElement?.scrollTop ?? 0);
+    const savedAnchor = session?.anchor ?? null;
+    const savedAnchorOffset =
+      savedAnchor === null ? null : virtualizer.resolveAnchorOffset(savedAnchor.anchor);
+    const initialVirtualOffset = resolveTimelineRestorationTop({
       followingLatest: following,
-      maximumScroll: initialMaximumScroll,
-      savedScrollTop,
+      maximumScroll: Math.max(0, virtualizer.totalSize() - viewportSize),
+      savedScrollTop:
+        savedAnchor === null || savedAnchorOffset === null
+          ? savedScrollTop
+          : Math.max(0, savedAnchorOffset - savedAnchor.viewportOffset),
     });
     setFollowingLatest(following);
-    setVirtualViewport({ offset: initialScrollTop, size: viewportSize });
+    setVirtualViewport({ offset: initialVirtualOffset, size: viewportSize });
     setVirtualRevision((revision) => revision + 1);
 
     timelineRestorationFrame = requestAnimationFrame(() => {
@@ -513,11 +670,20 @@ export function Timeline(props: {
         return;
       }
       const maximumScroll = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+      const anchoredScrollTop =
+        session?.anchor === null || session?.anchor === undefined
+          ? null
+          : (() => {
+              const contentOffset = resolveCapturedTimelineAnchorOffset(session.anchor);
+              return contentOffset === null
+                ? null
+                : Math.max(0, contentOffset - session.anchor.viewportOffset);
+            })();
       scrollTimelineTo(
         resolveTimelineRestorationTop({
           followingLatest: following,
           maximumScroll,
-          savedScrollTop,
+          savedScrollTop: anchoredScrollTop ?? savedScrollTop,
         }),
       );
       pendingLayoutSynchronization = false;
@@ -533,6 +699,81 @@ export function Timeline(props: {
 
   function virtualTurnKey(turnId: string): string {
     return `${props.controller.currentThread()?.id ?? ""}\u0000${turnId}`;
+  }
+
+  function programmaticTimelineNavigationActive(): boolean {
+    return (
+      timelineRestorationFrame !== undefined ||
+      programmaticScroll.smoothActive() ||
+      pendingUserMessageNavigation !== undefined
+    );
+  }
+
+  function commitVirtualizerChange(anchor: CapturedTimelineViewportAnchor | null): void {
+    const preserveAnchor =
+      anchor !== null &&
+      !followingLatest() &&
+      !programmaticTimelineNavigationActive() &&
+      virtualizer.resolveAnchorOffset(anchor.anchor) !== null;
+    if (preserveAnchor) {
+      pendingVirtualAnchorCorrection ??= anchor;
+      const nextAnchorOffset = virtualizer.resolveAnchorOffset(anchor.anchor);
+      if (nextAnchorOffset !== null) {
+        const viewport = virtualViewport();
+        setVirtualViewport({
+          offset: Math.max(0, nextAnchorOffset - anchor.viewportOffset),
+          size: viewport.size,
+        });
+      }
+    } else if (followingLatest()) {
+      const viewport = virtualViewport();
+      setVirtualViewport({
+        offset: Math.max(0, virtualizer.totalSize() - viewport.size),
+        size: viewport.size,
+      });
+    }
+    setVirtualRevision((revision) => revision + 1);
+    synchronizeScroll();
+  }
+
+  function applyPendingVirtualAnchorCorrection(): void {
+    const pending = pendingVirtualAnchorCorrection;
+    pendingVirtualAnchorCorrection = undefined;
+    if (
+      pending === undefined ||
+      pending.threadId !== props.controller.currentThread()?.id ||
+      scrollElement === undefined
+    ) {
+      return;
+    }
+    const nextAnchorOffset = resolveCapturedTimelineAnchorOffset(pending);
+    if (nextAnchorOffset === null) {
+      return;
+    }
+    const anchorDelta = nextAnchorOffset - pending.contentOffset;
+    if (
+      !shouldPreserveTimelineAnchor({
+        anchorDelta,
+        followingLatest: followingLatest(),
+        programmaticNavigationActive: programmaticTimelineNavigationActive(),
+      })
+    ) {
+      return;
+    }
+    const previousScrollTop = scrollElement.scrollTop;
+    scrollTimelineTo(
+      resolveTimelineAnchorCorrection({
+        currentScrollTop: previousScrollTop,
+        nextAnchorOffset,
+        previousAnchorOffset: pending.contentOffset,
+      }),
+    );
+    if (dragState !== undefined) {
+      dragState = {
+        ...dragState,
+        startScrollTop: dragState.startScrollTop + scrollElement.scrollTop - previousScrollTop,
+      };
+    }
   }
 
   function measureMountedVirtualTurns(): void {
@@ -569,64 +810,69 @@ export function Timeline(props: {
         }),
       );
       pendingVirtualMeasurements.clear();
-      const batch = virtualizer.measureBatch(measurements, virtualViewport().offset);
-      measuredTimelineLayoutRevision = timelineLayoutRevision;
+      const anchor = captureTimelineViewportAnchor();
+      const batch = virtualizer.measureBatch(measurements);
       if (!batch.changed) {
+        measuredTimelineLayoutRevision = timelineLayoutRevision;
         return;
       }
-      if (
-        scrollElement !== undefined &&
-        shouldPreserveTimelineAnchor({
-          anchorDelta: batch.anchorDelta,
-          followingLatest: followingLatest(),
-          recentUserIntent: hasRecentTimelineUserScrollIntent(
-            lastUserScrollIntentAt,
-            performance.now(),
-          ),
-          scrollInteractionActive:
-            dragState !== undefined ||
-            smoothScrollTarget !== null ||
-            pendingUserMessageNavigation !== undefined,
-        })
-      ) {
-        scrollTimelineTo(scrollElement.scrollTop + batch.anchorDelta);
-      }
-      setVirtualRevision((revision) => revision + 1);
-      synchronizeScroll();
+      recordTimelineLayoutChange();
+      measuredTimelineLayoutRevision = timelineLayoutRevision;
+      commitVirtualizerChange(anchor);
     });
   }
 
   function measureScroll(userInitiated: boolean): void {
-    if (scrollElement === undefined) {
+    if (scrollElement === undefined || virtualListElement === undefined) {
       return;
     }
-    updateVirtualViewport();
+    const clientHeight = scrollElement.clientHeight;
+    const scrollHeight = scrollElement.scrollHeight;
+    const scrollTop = scrollElement.scrollTop;
+    updateActivityContentDeferral(scrollTop, clientHeight);
     const trackHeight = scrollbarTrackElement?.clientHeight ?? 0;
+    const virtualListTop = virtualListElement.getBoundingClientRect().top;
+    const nextViewport = {
+      offset: Math.max(0, scrollTop - virtualListElement.offsetTop),
+      size: Math.max(1, clientHeight),
+    };
     const nextScrollbar = calculateTimelineScrollbar({
-      clientHeight: scrollElement.clientHeight,
-      scrollHeight: scrollElement.scrollHeight,
-      scrollTop: scrollElement.scrollTop,
+      clientHeight,
+      scrollHeight,
+      scrollTop,
       trackHeight,
     });
-    setScrollbar((current) =>
-      sameScrollbarMetrics(current, nextScrollbar) ? current : nextScrollbar,
-    );
     const isNearEnd = isTimelineNearEnd({
-      clientHeight: scrollElement.clientHeight,
-      scrollHeight: scrollElement.scrollHeight,
-      scrollTop: scrollElement.scrollTop,
+      clientHeight,
+      scrollHeight,
+      scrollTop,
     });
-    setShowScrollToEnd(!isNearEnd);
     const nextFollowingLatest = resolveTimelineFollowing({
       followingLatest: followingLatest(),
       nearEnd: isNearEnd,
       userInitiated,
     });
+    const nextActiveUserMessageIndex = readActiveUserMessageIndex({
+      clientHeight,
+      scrollHeight,
+      scrollTop,
+      virtualListTop,
+    });
+
+    setScrollbar((current) =>
+      sameScrollbarMetrics(current, nextScrollbar) ? current : nextScrollbar,
+    );
+    setShowScrollToEnd(!isNearEnd);
     setActiveTimelineFollowing(nextFollowingLatest);
-    measureActiveUserMessage();
+    setActiveUserMessageIndex(nextActiveUserMessageIndex);
+    setVirtualViewport((current) =>
+      current.offset === nextViewport.offset && current.size === nextViewport.size
+        ? current
+        : nextViewport,
+    );
     if (
       userInitiated &&
-      scrollElement.scrollTop <= TIMELINE_HISTORY_LOAD_THRESHOLD_PX &&
+      scrollTop <= TIMELINE_HISTORY_LOAD_THRESHOLD_PX &&
       props.controller.hasOlderHistory() &&
       !props.controller.historyLoading()
     ) {
@@ -634,10 +880,9 @@ export function Timeline(props: {
     }
   }
 
-  function markUserScrollIntent(): void {
+  function claimTimelineScrollOwnership(): void {
     cancelPendingUserMessageNavigation();
-    smoothScrollTarget = null;
-    lastUserScrollIntentAt = performance.now();
+    programmaticScroll.cancel();
   }
 
   function readNestedTimelineScrollRegion(target: EventTarget | null): HTMLElement | null {
@@ -648,10 +893,6 @@ export function Timeline(props: {
     return region !== null && region !== scrollElement && scrollElement.contains(region)
       ? region
       : null;
-  }
-
-  function targetsNestedScrollableContent(target: EventTarget | null): boolean {
-    return readNestedTimelineScrollRegion(target) !== null;
   }
 
   function handleTimelineKeyDown(event: KeyboardEvent): void {
@@ -666,21 +907,17 @@ export function Timeline(props: {
       case "Home":
       case "PageDown":
       case "PageUp":
-        markUserScrollIntent();
+        claimTimelineScrollOwnership();
         return;
     }
   }
 
   function handleTimelinePointerDown(event: PointerEvent): void {
-    if (
-      !event.isPrimary ||
-      (event.pointerType === "mouse" && event.button !== 0 && event.button !== 1)
-    ) {
+    if (!event.isPrimary) {
       return;
     }
-    markUserScrollIntent();
-    if (targetsNestedScrollableContent(event.target)) {
-      setActiveTimelineFollowing(false);
+    if (event.pointerType === "touch" || (event.pointerType === "mouse" && event.button === 1)) {
+      claimTimelineScrollOwnership();
     }
   }
 
@@ -688,13 +925,10 @@ export function Timeline(props: {
     if (event.ctrlKey || event.shiftKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
       return;
     }
-    markUserScrollIntent();
+    claimTimelineScrollOwnership();
     const nestedRegion = readNestedTimelineScrollRegion(event.target);
     if (nestedRegion === null) {
       return;
-    }
-    if (followingLatest()) {
-      setActiveTimelineFollowing(false);
     }
     if (scrollElement === undefined || !event.cancelable) {
       return;
@@ -718,15 +952,10 @@ export function Timeline(props: {
     scheduleTimelineFrame(true, false);
   }
 
-  function handleTimelineFocusIn(event: FocusEvent): void {
-    if (targetsNestedScrollableContent(event.target)) {
-      setActiveTimelineFollowing(false);
-    }
-  }
-
   function handleTimelineClick(event: MouseEvent): void {
     const target = event.target instanceof Element ? event.target : null;
     if (target?.closest("[data-timeline-disclosure]")) {
+      claimTimelineScrollOwnership();
       setActiveTimelineFollowing(false);
     }
   }
@@ -746,19 +975,23 @@ export function Timeline(props: {
       if (scrollElement === undefined) {
         return;
       }
+      applyPendingVirtualAnchorCorrection();
+      if (shouldMeasureAsUserScroll) {
+        measureScroll(true);
+      }
       if (
         shouldSynchronizeTimelineToEnd({
           followingLatest: followingLatest(),
           layoutRequested: shouldSynchronizeLayout,
-          recentUserIntent: hasRecentTimelineUserScrollIntent(
-            lastUserScrollIntentAt,
-            performance.now(),
-          ),
         })
       ) {
         scrollTimelineTo(scrollElement.scrollHeight);
+        measureScroll(false);
+        return;
       }
-      measureScroll(shouldMeasureAsUserScroll);
+      if (!shouldMeasureAsUserScroll) {
+        measureScroll(false);
+      }
     });
   }
 
@@ -856,7 +1089,6 @@ export function Timeline(props: {
         const alignedLayoutRevision = timelineLayoutRevision;
         scrollTimelineTo(
           virtualListElement.offsetTop + mountedOffset - USER_MESSAGE_SCROLL_INSET_PX,
-          "smooth",
         );
         scheduleUserMessageNavigationCompletion(
           message,
@@ -907,7 +1139,7 @@ export function Timeline(props: {
     if (scrollElement === undefined || scrollbarTrackElement === undefined) {
       return;
     }
-    smoothScrollTarget = null;
+    programmaticScroll.cancel();
     const metrics = scrollbar();
     const maximumThumbTop = Math.max(0, scrollbarTrackElement.clientHeight - metrics.thumbHeight);
     scrollElement.scrollTop =
@@ -927,6 +1159,7 @@ export function Timeline(props: {
       return;
     }
     event.preventDefault();
+    claimTimelineScrollOwnership();
     const track = scrollbarTrackElement.getBoundingClientRect();
     setScrollTopFromThumb(event.clientY - track.top - scrollbar().thumbHeight / 2, true);
   }
@@ -936,7 +1169,7 @@ export function Timeline(props: {
       return;
     }
     event.preventDefault();
-    markUserScrollIntent();
+    claimTimelineScrollOwnership();
     dragState = {
       pointerId: event.pointerId,
       startScrollTop: scrollElement.scrollTop,
@@ -965,12 +1198,27 @@ export function Timeline(props: {
     setScrollTopFromThumb(targetThumbTop, true);
   }
 
-  function handleScrollbarThumbPointerUp(event: PointerEvent): void {
-    if (dragState?.pointerId !== event.pointerId || scrollbarThumbElement === undefined) {
+  function endScrollbarThumbDrag(pointerId: number, releaseCapture: boolean): void {
+    if (dragState?.pointerId !== pointerId) {
       return;
     }
-    scrollbarThumbElement.releasePointerCapture(event.pointerId);
     dragState = undefined;
+    if (releaseCapture && scrollbarThumbElement?.hasPointerCapture(pointerId) === true) {
+      scrollbarThumbElement.releasePointerCapture(pointerId);
+    }
+    scheduleTimelineFrame(true, false);
+  }
+
+  function handleScrollbarThumbPointerUp(event: PointerEvent): void {
+    endScrollbarThumbDrag(event.pointerId, true);
+  }
+
+  function handleScrollbarThumbPointerCancel(event: PointerEvent): void {
+    endScrollbarThumbDrag(event.pointerId, true);
+  }
+
+  function handleScrollbarThumbLostPointerCapture(event: PointerEvent): void {
+    endScrollbarThumbDrag(event.pointerId, false);
   }
 
   function handleScrollbarKeyDown(event: KeyboardEvent): void {
@@ -1000,7 +1248,7 @@ export function Timeline(props: {
       default:
         return;
     }
-    markUserScrollIntent();
+    claimTimelineScrollOwnership();
     event.preventDefault();
     scheduleTimelineFrame(true, false);
   }
@@ -1009,7 +1257,7 @@ export function Timeline(props: {
     if (scrollElement === undefined) {
       return;
     }
-    markUserScrollIntent();
+    claimTimelineScrollOwnership();
     scrollElement.scrollBy({ top: delta });
     scheduleTimelineFrame(true, false);
   }
@@ -1017,37 +1265,66 @@ export function Timeline(props: {
   createEffect(() => {
     const threadId = props.controller.currentThread()?.id ?? null;
     const persistedTurns = props.controller.persistedTurns();
+    const layoutSignature = timelineLayoutSignature();
     if (activeTimelineThreadId !== threadId) {
-      activateTimelineThread(threadId, persistedTurns);
+      activateTimelineThread(threadId, persistedTurns, layoutSignature);
       return;
     }
-    if (threadId !== null && timelineSessions.activate(threadId, persistedTurns).keysChanged) {
-      setVirtualRevision((revision) => revision + 1);
-      scheduleTimelineFrame(false, false);
+    if (threadId !== null) {
+      const historyLayout =
+        pendingHistoryLayout?.threadId === threadId ? pendingHistoryLayout : undefined;
+      const anchor = captureTimelineViewportAnchor(threadId, historyLayout?.listOffset ?? null);
+      const activation = timelineSessions.activate(threadId, persistedTurns, layoutSignature);
+      virtualizer = activation.session.virtualizer;
+      if (activation.keysChanged || activation.measurementsReset) {
+        const historyWasPrepended =
+          activation.keysChanged &&
+          historyLayout?.firstTurnKey !== null &&
+          historyLayout?.firstTurnKey !== undefined &&
+          (virtualizer.resolveAnchorOffset({
+            key: historyLayout.firstTurnKey,
+            offsetWithinItem: 0,
+          }) ?? 0) > 0;
+        if (historyWasPrepended) {
+          pendingHistoryLayout = undefined;
+        }
+        commitVirtualizerChange(anchor);
+      }
     }
   });
+
+  function synchronizeTimelineLayoutWidth(): void {
+    if (contentElement === undefined) {
+      return;
+    }
+    const width = Math.max(0, Math.round(contentElement.clientWidth));
+    setTimelineLayoutWidth((current) => (current === width ? current : width));
+  }
 
   onMount(() => {
     if (scrollElement === undefined || contentElement === undefined) {
       return;
     }
-    const handleScroll = () =>
-      scheduleTimelineFrame(
-        !consumeSmoothScroll() &&
-          hasRecentTimelineUserScrollIntent(lastUserScrollIntentAt, performance.now()),
-        false,
-      );
+    const handleScroll = () => scheduleTimelineFrame(!consumeProgrammaticScroll(), false);
+    const handleScrollEnd = () => programmaticScroll.finish();
+    const handleResize = () => {
+      synchronizeTimelineLayoutWidth();
+      synchronizeScroll();
+    };
     scrollElement.addEventListener("scroll", handleScroll, { passive: true });
-    resizeObserver = new ResizeObserver(synchronizeScroll);
+    scrollElement.addEventListener("scrollend", handleScrollEnd);
+    resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(scrollElement);
     resizeObserver.observe(contentElement);
     if (scrollbarTrackElement !== undefined) {
       resizeObserver.observe(scrollbarTrackElement);
     }
+    synchronizeTimelineLayoutWidth();
     synchronizeScroll();
     const clockInterval = window.setInterval(() => setClock(Date.now()), 1_000);
     onCleanup(() => window.clearInterval(clockInterval));
     onCleanup(() => scrollElement?.removeEventListener("scroll", handleScroll));
+    onCleanup(() => scrollElement?.removeEventListener("scrollend", handleScrollEnd));
   });
 
   onCleanup(() => {
@@ -1057,15 +1334,16 @@ export function Timeline(props: {
     if (animationFrame !== undefined) {
       cancelAnimationFrame(animationFrame);
     }
-    if (historyRevealFrame !== undefined) {
-      cancelAnimationFrame(historyRevealFrame);
-    }
     if (timelineRestorationFrame !== undefined) {
       cancelAnimationFrame(timelineRestorationFrame);
     }
     virtualMeasurementGeneration += 1;
     virtualMeasurementScheduledGeneration = undefined;
     pendingVirtualMeasurements.clear();
+    pendingHistoryLayout = undefined;
+    pendingVirtualAnchorCorrection = undefined;
+    cancelActivityContentDeferral();
+    programmaticScroll.cancel();
   });
 
   createEffect(() => {
@@ -1087,155 +1365,158 @@ export function Timeline(props: {
   return (
     <FrontendFailureContext.Provider value={reportFrontendFailure}>
       <TimelineDisclosureContext.Provider value={disclosureContext}>
-        <div class="timeline-frame">
-          <UserMessageNavigator
-            activeIndex={activeUserMessageIndex()}
-            messages={userMessages()}
-            onSelect={scrollToUserMessage}
-          />
-          <section
-            aria-label="Conversa"
-            class="timeline"
-            id="conversation-timeline"
-            onClick={handleTimelineClick}
-            onFocusIn={handleTimelineFocusIn}
-            onKeyDown={handleTimelineKeyDown}
-            onPointerDown={handleTimelinePointerDown}
-            onWheel={handleTimelineWheel}
-            ref={scrollElement}
-            // biome-ignore lint/a11y/noNoninteractiveTabindex: the official desktop keeps the scroll viewport keyboard-focusable for Home, End, PageUp, and PageDown.
-            tabIndex={0}
-          >
-            <div class="timeline-inner" ref={contentElement}>
-              <Show
-                keyed
-                when={props.controller.currentThread()?.id}
-                fallback={
-                  <EmptyConversation
-                    mode={props.controller.conversationMode()}
-                    onSelectSuggestion={props.onSelectSuggestion}
-                    workspace={props.controller.workspace()}
-                  />
-                }
-              >
-                {(_threadId) => (
-                  <Show
-                    when={props.controller.turns().length > 0}
-                    fallback={
-                      <EmptyConversation
-                        mode={props.controller.conversationMode()}
-                        onSelectSuggestion={props.onSelectSuggestion}
-                        workspace={props.controller.workspace()}
-                      />
-                    }
-                  >
-                    <Show when={props.controller.hasOlderHistory()}>
-                      <button
-                        class="timeline-history-button"
-                        disabled={props.controller.historyLoading()}
-                        onClick={() => void revealOlderTurns()}
-                        type="button"
-                      >
-                        {props.controller.historyLoading()
-                          ? "Carregando histórico…"
-                          : "Carregar turnos anteriores"}
-                      </button>
-                    </Show>
-                    <div
-                      class="timeline-virtual-list"
-                      ref={virtualListElement}
-                      style={{ height: `${virtualTotalSize()}px` }}
+        <TimelineActivityContext.Provider value={activityContext}>
+          <div class="timeline-frame">
+            <UserMessageNavigator
+              activeIndex={activeUserMessageIndex()}
+              messages={userMessages()}
+              onSelect={scrollToUserMessage}
+            />
+            <section
+              aria-label="Conversa"
+              class="timeline"
+              id="conversation-timeline"
+              onClick={handleTimelineClick}
+              onKeyDown={handleTimelineKeyDown}
+              onPointerDown={handleTimelinePointerDown}
+              onWheel={handleTimelineWheel}
+              ref={scrollElement}
+              // biome-ignore lint/a11y/noNoninteractiveTabindex: the official desktop keeps the scroll viewport keyboard-focusable for Home, End, PageUp, and PageDown.
+              tabIndex={0}
+            >
+              <div class="timeline-inner" ref={contentElement}>
+                <Show
+                  keyed
+                  when={props.controller.currentThread()?.id}
+                  fallback={
+                    <EmptyConversation
+                      mode={props.controller.conversationMode()}
+                      onSelectSuggestion={props.onSelectSuggestion}
+                      workspace={props.controller.workspace()}
+                    />
+                  }
+                >
+                  {(_threadId) => (
+                    <Show
+                      when={props.controller.turns().length > 0}
+                      fallback={
+                        <EmptyConversation
+                          mode={props.controller.conversationMode()}
+                          onSelectSuggestion={props.onSelectSuggestion}
+                          workspace={props.controller.workspace()}
+                        />
+                      }
                     >
-                      <For each={virtualTurnIds()}>
-                        {(turnId, relativeIndex) => (
-                          <VirtualConversationTurn
-                            clock={clock()}
-                            diffDisplay={props.controller.config()?.config.desktop.diffDisplay}
-                            isItemStreaming={props.controller.isItemStreaming}
-                            measurementKey={virtualTurnKey(turnId)}
-                            onMeasure={measureVirtualTurn}
-                            top={virtualOffset(virtualRange().start + relativeIndex())}
-                            turn={() => readVirtualTurn(virtualTurnsById(), turnId)}
-                            turnId={turnId}
-                          />
-                        )}
-                      </For>
-                    </div>
-                  </Show>
-                )}
-              </Show>
-            </div>
-          </section>
-          <div
-            aria-hidden={!scrollbar().scrollable}
-            class="surface-scrollbar"
-            classList={{ "is-hidden": !scrollbar().scrollable }}
-          >
-            <button
-              aria-controls="conversation-timeline"
-              aria-label="Rolar conversa para cima"
-              class="surface-scrollbar-arrow up"
-              disabled={!scrollbar().scrollable || scrollbar().thumbTop <= 0.5}
-              onClick={() => scrollTimelineBy(-64)}
-              title="Rolar para cima"
-              type="button"
-            >
-              <span aria-hidden="true" class="surface-scrollbar-arrow-glyph" />
-            </button>
+                      <Show when={props.controller.hasOlderHistory()}>
+                        <button
+                          class="timeline-history-button"
+                          disabled={props.controller.historyLoading()}
+                          onClick={() => void revealOlderTurns()}
+                          type="button"
+                        >
+                          {props.controller.historyLoading()
+                            ? "Carregando histórico…"
+                            : "Carregar turnos anteriores"}
+                        </button>
+                      </Show>
+                      <div
+                        class="timeline-virtual-list"
+                        ref={virtualListElement}
+                        style={{ height: `${virtualTotalSize()}px` }}
+                      >
+                        <For each={virtualTurnIds()}>
+                          {(turnId, relativeIndex) => (
+                            <VirtualConversationTurn
+                              clock={clock()}
+                              diffDisplay={props.controller.config()?.config.desktop.diffDisplay}
+                              isItemStreaming={props.controller.isItemStreaming}
+                              measurementKey={virtualTurnKey(turnId)}
+                              onMeasure={measureVirtualTurn}
+                              top={virtualOffset(virtualRange().start + relativeIndex())}
+                              turn={() => readVirtualTurn(virtualTurnsById(), turnId)}
+                              turnId={turnId}
+                            />
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                  )}
+                </Show>
+              </div>
+            </section>
             <div
-              aria-controls="conversation-timeline"
-              aria-label="Posição na conversa"
-              aria-orientation="vertical"
-              aria-valuemax={Math.round(scrollbar().maximumScroll)}
-              aria-valuemin={0}
-              aria-valuenow={Math.round(scrollElement?.scrollTop ?? 0)}
-              class="surface-scrollbar-track"
-              onKeyDown={handleScrollbarKeyDown}
-              onPointerDown={handleScrollbarTrackPointerDown}
-              ref={scrollbarTrackElement}
-              role="scrollbar"
-              tabIndex={scrollbar().scrollable ? 0 : -1}
+              aria-hidden={!scrollbar().scrollable}
+              class="surface-scrollbar"
+              classList={{ "is-hidden": !scrollbar().scrollable }}
             >
+              <button
+                aria-controls="conversation-timeline"
+                aria-label="Rolar conversa para cima"
+                class="surface-scrollbar-arrow up"
+                disabled={!scrollbar().scrollable || scrollbar().thumbTop <= 0.5}
+                onClick={() => scrollTimelineBy(-64)}
+                title="Rolar para cima"
+                type="button"
+              >
+                <span aria-hidden="true" class="surface-scrollbar-arrow-glyph" />
+              </button>
               <div
-                class="surface-scrollbar-thumb"
-                onPointerDown={handleScrollbarThumbPointerDown}
-                onPointerMove={handleScrollbarThumbPointerMove}
-                onPointerUp={handleScrollbarThumbPointerUp}
-                ref={scrollbarThumbElement}
-                style={{
-                  height: `${scrollbar().thumbHeight}px`,
-                  transform: `translateY(${scrollbar().thumbTop}px)`,
-                }}
-              />
+                aria-controls="conversation-timeline"
+                aria-label="Posição na conversa"
+                aria-orientation="vertical"
+                aria-valuemax={Math.round(scrollbar().maximumScroll)}
+                aria-valuemin={0}
+                aria-valuenow={Math.round(scrollElement?.scrollTop ?? 0)}
+                class="surface-scrollbar-track"
+                onKeyDown={handleScrollbarKeyDown}
+                onPointerDown={handleScrollbarTrackPointerDown}
+                ref={scrollbarTrackElement}
+                role="scrollbar"
+                tabIndex={scrollbar().scrollable ? 0 : -1}
+              >
+                <div
+                  class="surface-scrollbar-thumb"
+                  onLostPointerCapture={handleScrollbarThumbLostPointerCapture}
+                  onPointerCancel={handleScrollbarThumbPointerCancel}
+                  onPointerDown={handleScrollbarThumbPointerDown}
+                  onPointerMove={handleScrollbarThumbPointerMove}
+                  onPointerUp={handleScrollbarThumbPointerUp}
+                  ref={scrollbarThumbElement}
+                  style={{
+                    height: `${scrollbar().thumbHeight}px`,
+                    transform: `translateY(${scrollbar().thumbTop}px)`,
+                  }}
+                />
+              </div>
+              <button
+                aria-controls="conversation-timeline"
+                aria-label="Rolar conversa para baixo"
+                class="surface-scrollbar-arrow down"
+                disabled={
+                  !scrollbar().scrollable ||
+                  scrollbar().thumbTop + scrollbar().thumbHeight >=
+                    (scrollbarTrackElement?.clientHeight ?? 0) - 0.5
+                }
+                onClick={() => scrollTimelineBy(64)}
+                title="Rolar para baixo"
+                type="button"
+              >
+                <span aria-hidden="true" class="surface-scrollbar-arrow-glyph" />
+              </button>
             </div>
-            <button
-              aria-controls="conversation-timeline"
-              aria-label="Rolar conversa para baixo"
-              class="surface-scrollbar-arrow down"
-              disabled={
-                !scrollbar().scrollable ||
-                scrollbar().thumbTop + scrollbar().thumbHeight >=
-                  (scrollbarTrackElement?.clientHeight ?? 0) - 0.5
-              }
-              onClick={() => scrollTimelineBy(64)}
-              title="Rolar para baixo"
-              type="button"
-            >
-              <span aria-hidden="true" class="surface-scrollbar-arrow-glyph" />
-            </button>
+            <Show when={showScrollToEnd()}>
+              <button
+                aria-label="Ir para o fim da conversa"
+                class="scroll-to-end-button"
+                onClick={() => scrollToEnd("smooth")}
+                title="Ir para o fim da conversa"
+                type="button"
+              >
+                <Icon name="chevronDown" size={16} />
+              </button>
+            </Show>
           </div>
-          <Show when={showScrollToEnd()}>
-            <button
-              aria-label="Ir para o fim da conversa"
-              class="scroll-to-end-button"
-              onClick={() => scrollToEnd("smooth")}
-              title="Ir para o fim da conversa"
-              type="button"
-            >
-              <Icon name="chevronDown" size={16} />
-            </button>
-          </Show>
-        </div>
+        </TimelineActivityContext.Provider>
       </TimelineDisclosureContext.Provider>
     </FrontendFailureContext.Provider>
   );
@@ -1602,6 +1883,9 @@ function WorkTimelineUnit(props: {
           />
         )}
       </Match>
+      <Match when={asImageViewGroup(unit())}>
+        {(group) => <ImageViewGroup disclosureKey={group().key} items={group().items} />}
+      </Match>
       <Match when={asAgentActivityItem(unit())}>
         {(itemUnit) => (
           <TimelineItem
@@ -1616,6 +1900,12 @@ function WorkTimelineUnit(props: {
   );
 }
 
+function asImageViewGroup(
+  unit: AgentActivityRenderUnit,
+): Extract<AgentActivityRenderUnit, { readonly kind: "imageView" }> | null {
+  return unit.kind === "imageView" ? unit : null;
+}
+
 function asAgentActivityGroup(
   unit: AgentActivityRenderUnit,
 ): Extract<AgentActivityRenderUnit, { readonly kind: "activityGroup" }> | null {
@@ -1626,6 +1916,53 @@ function asAgentActivityItem(
   unit: AgentActivityRenderUnit,
 ): Extract<AgentActivityRenderUnit, { readonly kind: "item" }> | null {
   return unit.kind === "item" ? unit : null;
+}
+
+function ImageViewGroup(props: {
+  readonly disclosureKey: string;
+  readonly items: readonly ImageViewItem[];
+}) {
+  const disclosure = useTimelineDisclosure(() => props.disclosureKey);
+  const label = () =>
+    props.items.length === 1 ? "Visualizou uma imagem" : `Visualizou ${props.items.length} imagens`;
+
+  return (
+    <details
+      class="activity-card image-view-group"
+      onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
+      open={disclosure.isOpen()}
+    >
+      <summary class="activity-summary" data-timeline-disclosure="">
+        <span class="activity-icon">
+          <Icon name="image" size={13} />
+        </span>
+        <span class="activity-title">{label()}</span>
+        <span class="activity-chevron">
+          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+        </span>
+      </summary>
+      <Show when={disclosure.isOpen()}>
+        <section aria-label={label()} class="image-view-grid">
+          <For each={props.items}>
+            {(item) => (
+              <Show
+                when={item.output}
+                fallback={<span class="tool-image-output-error">Imagem indisponível.</span>}
+              >
+                {(output) => (
+                  <ThreadOutputView
+                    format={toolOutputText}
+                    output={output()}
+                    presentation={IMAGE_OUTPUT_PRESENTATION}
+                  />
+                )}
+              </Show>
+            )}
+          </For>
+        </section>
+      </Show>
+    </details>
+  );
 }
 
 function AgentActivityGroup(props: {
@@ -1701,22 +2038,27 @@ function AgentActivityGroup(props: {
         <Show when={disclosure.isOpen()}>
           <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
             <div class="agent-activity-viewport">
-              <div class="agent-activity-list">
-                <For each={itemIdentities()}>
-                  {(itemIdentity) => (
-                    <TimelineItem
-                      clock={props.clock}
-                      diffDisplay={props.diffDisplay}
-                      item={readTimelineValue(
-                        itemsByIdentity(),
-                        itemIdentity,
-                        "item do grupo de atividade",
-                      )}
-                      variant="grouped"
-                    />
-                  )}
-                </For>
-              </div>
+              <VirtualizedActivityList
+                groupKey={disclosure.storageKey()}
+                itemKeys={itemIdentities()}
+                renderItem={(itemIdentity) => (
+                  <TimelineItem
+                    clock={props.clock}
+                    diffDisplay={props.diffDisplay}
+                    item={readTimelineValue(
+                      itemsByIdentity(),
+                      itemIdentity,
+                      "item do grupo de atividade",
+                    )}
+                    variant="grouped"
+                  />
+                )}
+                virtualize={
+                  itemIdentities().length > ACTIVITY_ITEM_VIRTUALIZATION_THRESHOLD ||
+                  disclosure.openDescendantCount() >
+                    ACTIVITY_OPEN_DISCLOSURE_VIRTUALIZATION_THRESHOLD
+                }
+              />
             </div>
           </TimelineDisclosureContext.Provider>
         </Show>

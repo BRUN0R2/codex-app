@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
   "description": "Minimal permissions for the main Codex App window",
-  "windows": ["main"],
+  "webviews": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

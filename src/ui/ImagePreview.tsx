@@ -17,7 +17,7 @@ export function ImagePreview(props: ImagePreviewProps) {
   const viewer = useImageViewer();
   const [resolvedSource] = createResource(() => props.source, resolveImageSource);
   const label = () => `Abrir ${props.name ?? (props.alt || "imagem")}`;
-  const failure = () => resolvedSource.error as unknown | undefined;
+  const failure = (): unknown => resolvedSource.error;
   const source = () => (resolvedSource.state === "ready" ? resolvedSource() : undefined);
   const title = () => {
     const reason = failure();

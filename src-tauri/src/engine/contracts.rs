@@ -773,6 +773,7 @@ pub struct CommandLiveOutput {
 )]
 pub enum ToolOutputPresentation {
     FileList,
+    Image,
     #[default]
     PlainText,
     SearchResults,

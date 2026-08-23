@@ -67,6 +67,7 @@ for (let sessionIndex = 0; sessionIndex < TIMELINE_SESSION_COUNT; sessionIndex +
   }
   session.virtualizer.measure(`${threadId}\u0000${firstTurn.id}`, 600 + sessionIndex);
   timelineSessions.save(threadId, {
+    anchor: null,
     followingLatest: sessionIndex % 2 === 0,
     scrollTop: sessionIndex * 1_000,
   });

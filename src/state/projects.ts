@@ -1,6 +1,7 @@
 import type { ProjectRecord } from "../contracts/types";
 import type { IconName } from "../ui/Icon";
 import { PROFILE_STORAGE_KEYS } from "./profileStorage";
+import { normalizeProjectColor } from "./projectColor";
 
 const STORAGE_KEY = PROFILE_STORAGE_KEYS.projects;
 const MAX_PROJECTS = 32;
@@ -66,13 +67,15 @@ export function updateProject(
   updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
 ): readonly ProjectRecord[] {
   const normalized = normalizeProjectPath(path);
+  const normalizedColor =
+    updates.color === undefined ? undefined : normalizeProjectColor(updates.color);
   return projects.map((project) => {
     if (pathsEqual(project.path, normalized)) {
       return {
         ...project,
         ...(updates.name !== undefined ? { name: updates.name } : {}),
         ...(updates.icon !== undefined ? { icon: updates.icon } : {}),
-        ...(updates.color !== undefined ? { color: updates.color } : {}),
+        ...(normalizedColor !== undefined ? { color: normalizedColor } : {}),
       };
     }
     return project;
@@ -110,7 +113,7 @@ function decodeStoredProjects(value: unknown): StoredProjects {
       throw new Error(`O nome do projeto ${index + 1} é inválido.`);
     }
     const icon = typeof project.icon === "string" ? (project.icon as IconName) : undefined;
-    const color = typeof project.color === "string" ? project.color : undefined;
+    const color = project.color === undefined ? undefined : normalizeProjectColor(project.color);
     const comparison = normalizeForComparison(path);
     if (seen.has(comparison)) {
       throw new Error(`O projeto ${index + 1} está duplicado.`);

@@ -44,7 +44,7 @@ configuração ou armazenamento do aplicativo. Em 23 de agosto de 2026 ele cont�
   (`v4.4.3`);
 - `openai-codex`, revisão
   `1e6185e52214a879a8b94f3743f47f57135dc64b`;
-- módulos selecionados de perfil, uso e execução de comandos extraídos do
+- módulos selecionados de perfil, uso, navegador e execução de comandos extraídos do
   `app.asar` do Codex Desktop `26.818.5229.0` em
   `codex-desktop-26.818.5229.0/`.
 
@@ -58,6 +58,11 @@ spool já existente. No Windows, `build.rs` usa a API oficial
 `WindowsAttributes::new_without_app_manifest` do `tauri-build` e fornece um único
 manifesto ao linker, evitando tanto import ausente de `TaskDialogIndirect` quanto
 recurso `MANIFEST` duplicado.
+
+O navegador interno também não adicionou crate. Ele habilita somente a feature
+`unstable` do `tauri` já fixado para acessar `Window::add_child`, a API necessária
+para child webviews nativos no Tauri 2. A superfície continua atrás de comandos
+e validações próprios; nenhuma API instável é exposta ao frontend.
 
 ## Dependências transitivas
 

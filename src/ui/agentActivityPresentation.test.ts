@@ -76,19 +76,25 @@ describe("agent activity presentation", () => {
     );
   });
 
-  it("groups every typed activity without name-based presentation exceptions", () => {
+  it("projects consecutive image views as the official dedicated image group", () => {
     const units = splitAgentActivityUnits([
       command("command-1"),
       webSearch("search-1"),
       tool("image-1", "view_image"),
+      tool("image-2", "view_image"),
       command("command-2"),
     ]);
 
-    expect(units.map(({ kind }) => kind)).toEqual(["activityGroup"]);
+    expect(units.map(({ kind }) => kind)).toEqual(["activityGroup", "imageView", "activityGroup"]);
     expect(units[0]?.kind === "activityGroup" ? units[0].items.map(({ id }) => id) : []).toEqual([
       "command-1",
       "search-1",
+    ]);
+    expect(units[1]?.kind === "imageView" ? units[1].items.map(({ id }) => id) : []).toEqual([
       "image-1",
+      "image-2",
+    ]);
+    expect(units[2]?.kind === "activityGroup" ? units[2].items.map(({ id }) => id) : []).toEqual([
       "command-2",
     ]);
   });

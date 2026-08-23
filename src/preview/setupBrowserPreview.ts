@@ -9,6 +9,7 @@ import type {
   AutomationListResponse,
   AutomationRun,
   AutoTopUpSettingsSnapshot,
+  BrowserTabSnapshot,
   ChatModelListResponse,
   CodexModel,
   CodexThread,
@@ -210,7 +211,7 @@ const PREVIEW_ENGINE = {
       "scheduledAutomations",
     ],
   },
-  schemaVersion: 17,
+  schemaVersion: 18,
   config: PREVIEW_CONFIG,
   diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
   permissionProfiles: [
@@ -710,10 +711,22 @@ const PREVIEW_CONTEXT_THREAD = {
           name: "view_image",
           description: "Visualizou uma imagem",
           status: "completed",
-          outputPresentation: { type: "plainText" },
+          outputPresentation: { type: "image" },
           output: previewOutput(
             "preview-image-output",
             JSON.stringify({ image_url: PREVIEW_IMAGE_ONE }),
+          ),
+        },
+        {
+          type: "toolExecution",
+          id: "preview-image-tool-2",
+          name: "view_image",
+          description: "Visualizou uma imagem",
+          status: "completed",
+          outputPresentation: { type: "image" },
+          output: previewOutput(
+            "preview-image-output-2",
+            JSON.stringify({ image_url: PREVIEW_IMAGE_TWO }),
           ),
         },
         {
@@ -860,6 +873,183 @@ const PREVIEW_CHAT_REFERENCE_THREAD = {
   ],
 } as const satisfies CodexThread;
 
+const PREVIEW_TIMELINE_STRESS_ACTIVITY_COUNT = 180;
+
+function previewTimelineStressSource(index: number): string {
+  return Array.from(
+    { length: 72 },
+    (_, lineIndex) =>
+      `${lineIndex + 1}: export const stressValue${index}_${lineIndex + 1}: number = ${index + lineIndex};`,
+  ).join("\n");
+}
+
+function previewTimelineStressDiff(index: number): string {
+  return [
+    "@@ -1,90 +1,90 @@",
+    ...Array.from({ length: 90 }, (_, lineIndex) => [
+      `-const previous_${index}_${lineIndex} = ${lineIndex};`,
+      `+const optimized_${index}_${lineIndex} = ${lineIndex + 1};`,
+    ]).flat(),
+  ].join("\n");
+}
+
+function previewTimelineStressActivities(): readonly VisibleThreadItem[] {
+  return Array.from({ length: PREVIEW_TIMELINE_STRESS_ACTIVITY_COUNT }, (_, index) => {
+    const ordinal = index + 1;
+    switch (index % 3) {
+      case 0:
+        return {
+          type: "commandExecution",
+          id: `timeline-stress-command-${ordinal}`,
+          command: `pnpm exec benchmark --case timeline-${ordinal}`,
+          cwd: PREVIEW_WORKSPACE,
+          processId: null,
+          startedAt: null,
+          source: "agent",
+          status: "completed",
+          aggregatedOutput: previewOutput(
+            `timeline-stress-command-output-${ordinal}`,
+            Array.from(
+              { length: 96 },
+              (_, lineIndex) =>
+                `sample ${lineIndex + 1}: ${(ordinal * (lineIndex + 1)).toFixed(3)} ms`,
+            ).join("\n"),
+          ),
+          liveOutput: null,
+          exitCode: 0,
+          durationMs: ordinal * 7,
+        } satisfies VisibleThreadItem;
+      case 1:
+        return {
+          type: "toolExecution",
+          id: `timeline-stress-tool-${ordinal}`,
+          name: "read_file",
+          description: `Leu src/stress/module-${ordinal}.ts`,
+          status: "completed",
+          outputPresentation: {
+            type: "sourceFile",
+            path: `src/stress/module-${ordinal}.ts`,
+          },
+          output: previewOutput(
+            `timeline-stress-tool-output-${ordinal}`,
+            previewTimelineStressSource(ordinal),
+          ),
+        } satisfies VisibleThreadItem;
+      case 2:
+        return {
+          type: "fileChange",
+          id: `timeline-stress-change-${ordinal}`,
+          status: "completed",
+          changes: [
+            {
+              path: `src/stress/module-${ordinal}.ts`,
+              kind: { type: "update", movePath: null },
+              lineStats: { additions: 90, deletions: 90 },
+              diff: previewTimelineStressDiff(ordinal),
+            },
+          ],
+        } satisfies VisibleThreadItem;
+      default:
+        throw new Error("O gerador de estresse da timeline produziu uma categoria inválida.");
+    }
+  });
+}
+
+const PREVIEW_TIMELINE_STRESS_THREAD = {
+  id: "preview-timeline-stress-thread",
+  mode: "codex",
+  preview: "Estresse de timeline expandida",
+  name: "Estresse de timeline expandida",
+  cwd: PREVIEW_WORKSPACE,
+  projectPath: PREVIEW_WORKSPACE,
+  createdAt: PREVIEW_NOW_SECONDS - 900,
+  updatedAt: PREVIEW_NOW_SECONDS - 30,
+  recencyAt: PREVIEW_NOW_SECONDS - 30,
+  status: { type: "idle" },
+  turns: [
+    {
+      id: "preview-timeline-stress-turn",
+      status: "completed",
+      error: null,
+      createdAt: PREVIEW_NOW_SECONDS - 900,
+      updatedAt: PREVIEW_NOW_SECONDS - 30,
+      items: [
+        {
+          type: "userMessage",
+          id: "timeline-stress-user-message",
+          content: [
+            {
+              type: "text",
+              text: "Expanda todas as ferramentas e mantenha a conversa fluida ao trocar de chat.",
+            },
+          ],
+        },
+        {
+          type: "agentMessage",
+          id: "timeline-stress-commentary",
+          text: "Executando um lote grande de leituras, comandos e alterações para validar a timeline.",
+          phase: "commentary",
+        },
+        ...previewTimelineStressActivities(),
+        {
+          type: "agentMessage",
+          id: "timeline-stress-final-answer",
+          text: "Cenário de estresse concluído.",
+          phase: "finalAnswer",
+        },
+      ],
+    },
+  ],
+} as const satisfies CodexThread;
+
+const PREVIEW_TIMELINE_LIGHT_THREAD = {
+  id: "preview-timeline-light-thread",
+  mode: "codex",
+  preview: "Chat leve de controle",
+  name: "Chat leve de controle",
+  cwd: PREVIEW_WORKSPACE,
+  projectPath: PREVIEW_WORKSPACE,
+  createdAt: PREVIEW_NOW_SECONDS - 600,
+  updatedAt: PREVIEW_NOW_SECONDS - 60,
+  recencyAt: PREVIEW_NOW_SECONDS - 60,
+  status: { type: "idle" },
+  turns: [
+    {
+      id: "preview-timeline-light-turn",
+      status: "completed",
+      error: null,
+      createdAt: PREVIEW_NOW_SECONDS - 600,
+      updatedAt: PREVIEW_NOW_SECONDS - 60,
+      items: [
+        {
+          type: "userMessage",
+          id: "timeline-light-user-message",
+          content: [{ type: "text", text: "Confirme que este chat permanece leve." }],
+        },
+        {
+          type: "agentMessage",
+          id: "timeline-light-final-answer",
+          text: "Chat de controle pronto.",
+          phase: "finalAnswer",
+        },
+      ],
+    },
+  ],
+} as const satisfies CodexThread;
+
+const PREVIEW_TIMELINE_STRESS_THREADS = {
+  data: [
+    previewThreadSummary(PREVIEW_TIMELINE_STRESS_THREAD),
+    previewThreadSummary(PREVIEW_TIMELINE_LIGHT_THREAD),
+  ],
+  nextCursor: null,
+} as const satisfies ThreadListResponse;
+
+const PREVIEW_TIMELINE_STRESS_THREADS_BY_ID = new Map<string, CodexThread>([
+  [PREVIEW_TIMELINE_STRESS_THREAD.id, PREVIEW_TIMELINE_STRESS_THREAD],
+  [PREVIEW_TIMELINE_LIGHT_THREAD.id, PREVIEW_TIMELINE_LIGHT_THREAD],
+]);
+
 const PREVIEW_THREADS = {
   data: [previewThreadSummary(PREVIEW_CONTEXT_THREAD)],
   nextCursor: null,
@@ -994,12 +1184,15 @@ let previewApplicationPreferences: ApplicationPreferences = {
 export function setupBrowserPreview(): void {
   const previewParameters = new URLSearchParams(window.location.search);
   const preferenceUpdateDelay = previewDelay(previewParameters.get("preferenceDelay"));
-  const previewThread =
-    previewParameters.get("chatReference") === "1"
+  const timelineStressPreview = previewParameters.get("timelineStress") === "1";
+  const previewThread = timelineStressPreview
+    ? PREVIEW_TIMELINE_STRESS_THREAD
+    : previewParameters.get("chatReference") === "1"
       ? PREVIEW_CHAT_REFERENCE_THREAD
       : PREVIEW_CONTEXT_THREAD;
-  const previewThreads =
-    previewThread === PREVIEW_CONTEXT_THREAD
+  const previewThreads = timelineStressPreview
+    ? PREVIEW_TIMELINE_STRESS_THREADS
+    : previewThread === PREVIEW_CONTEXT_THREAD
       ? PREVIEW_THREADS
       : ({
           data: [previewThreadSummary(previewThread)],
@@ -1011,10 +1204,60 @@ export function setupBrowserPreview(): void {
     document.documentElement.setAttribute("data-window-chrome-preview", "true");
   }
   saveProjects(PREVIEW_PROJECTS);
+  const previewBrowserTabs = new Map<string, BrowserTabSnapshot>();
 
   mockIPC(
     (command, args) => {
       switch (command) {
+        case "browser_tab_create": {
+          const browserTabId = readPreviewRequestString(args, "browserTabId");
+          const existing = previewBrowserTabs.get(browserTabId);
+          if (existing !== undefined) {
+            return existing;
+          }
+          const snapshot = {
+            browserTabId,
+            conversationId: readPreviewRequestString(args, "conversationId"),
+            url: readPreviewRequestString(args, "url"),
+            title: null,
+            canGoBack: false,
+            canGoForward: false,
+            isLoading: false,
+          } satisfies BrowserTabSnapshot;
+          previewBrowserTabs.set(browserTabId, snapshot);
+          return snapshot;
+        }
+        case "browser_tab_navigate": {
+          const browserTabId = readPreviewRequestString(args, "browserTabId");
+          const current = previewBrowserTabs.get(browserTabId);
+          if (current === undefined) {
+            throw new Error("A aba solicitada não existe na prévia do navegador.");
+          }
+          const snapshot = {
+            ...current,
+            url: readPreviewRequestString(args, "url"),
+            title: "Página de prévia",
+            canGoBack: current.url !== "about:blank",
+            isLoading: false,
+          } satisfies BrowserTabSnapshot;
+          previewBrowserTabs.set(browserTabId, snapshot);
+          return snapshot;
+        }
+        case "browser_tab_back":
+        case "browser_tab_forward":
+        case "browser_tab_reload": {
+          const browserTabId = readPreviewRequestString(args, "browserTabId");
+          const snapshot = previewBrowserTabs.get(browserTabId);
+          if (snapshot === undefined) {
+            throw new Error("A aba solicitada não existe na prévia do navegador.");
+          }
+          return snapshot;
+        }
+        case "browser_tab_close":
+          previewBrowserTabs.delete(readPreviewRequestString(args, "browserTabId"));
+          return { applied: true };
+        case "browser_surface_sync":
+          return { applied: true };
         case "engine_start": {
           return PREVIEW_ENGINE;
         }
@@ -1111,12 +1354,19 @@ export function setupBrowserPreview(): void {
           );
           return { applied: true };
         }
-        case "engine_thread_resume":
+        case "engine_thread_resume": {
+          const resumedThread = timelineStressPreview
+            ? PREVIEW_TIMELINE_STRESS_THREADS_BY_ID.get(readPreviewRequestString(args, "threadId"))
+            : previewThread;
+          if (resumedThread === undefined) {
+            throw new Error("A tarefa solicitada não existe na prévia de estresse.");
+          }
           return {
-            thread: previewThread,
-            cwd: previewThread.cwd,
+            thread: resumedThread,
+            cwd: resumedThread.cwd,
             nextCursor: null,
           };
+        }
         case "engine_account_rate_limits_read":
           return PREVIEW_RATE_LIMITS;
         case "engine_account_usage_resets_read":

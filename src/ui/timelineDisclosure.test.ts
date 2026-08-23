@@ -61,6 +61,26 @@ describe("timeline disclosure state", () => {
     });
   });
 
+  it("counts only open descendants inside one disclosure subtree", () => {
+    createRoot((dispose) => {
+      const disclosures = createTimelineDisclosureStore();
+      const parentKey = timelineDisclosureStorageKey("thread:one", "activity:1");
+      const firstChild = timelineDisclosureChildKey(parentKey, "command:1");
+      const secondChild = timelineDisclosureChildKey(parentKey, "tool:2");
+      const unrelated = timelineDisclosureStorageKey("thread:one", "activity:2");
+
+      disclosures.setOpen(parentKey, true);
+      disclosures.setOpen(firstChild, true);
+      disclosures.setOpen(secondChild, true);
+      disclosures.setOpen(unrelated, true);
+
+      expect(disclosures.countOpenDescendants(parentKey)).toBe(2);
+      disclosures.setOpen(parentKey, false);
+      expect(disclosures.countOpenDescendants(parentKey)).toBe(0);
+      dispose();
+    });
+  });
+
   it("isolates identical disclosure keys between timeline conversations", () => {
     createRoot((dispose) => {
       const disclosures = createTimelineDisclosureStore();

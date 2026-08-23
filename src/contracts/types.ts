@@ -43,7 +43,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 17;
+  readonly schemaVersion: 18;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -289,7 +289,7 @@ export interface CommandLiveOutput {
 }
 
 export type ToolOutputPresentation =
-  | { readonly type: "fileList" | "plainText" | "searchResults" }
+  | { readonly type: "fileList" | "image" | "plainText" | "searchResults" }
   | { readonly type: "sourceFile"; readonly path: string };
 
 export type ThreadItem =
@@ -429,6 +429,29 @@ export interface TurnStartResponse {
 
 export interface OperationAck {
   readonly applied: true;
+}
+
+export interface BrowserTabSnapshot {
+  readonly browserTabId: string;
+  readonly conversationId: string;
+  readonly url: string;
+  readonly title: string | null;
+  readonly canGoBack: boolean;
+  readonly canGoForward: boolean;
+  readonly isLoading: boolean;
+}
+
+export interface BrowserNewWindowNotification {
+  readonly browserTabId: string;
+  readonly conversationId: string;
+  readonly url: string;
+}
+
+export interface BrowserSurfaceBounds {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
 }
 
 export interface AutomationInput {

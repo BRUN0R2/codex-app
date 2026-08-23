@@ -3,6 +3,11 @@ export interface VirtualRange {
   readonly start: number;
 }
 
+export interface VirtualAnchor {
+  readonly key: string;
+  readonly offsetWithinItem: number;
+}
+
 export interface MeasurementChange {
   readonly delta: number;
   readonly index: number;
@@ -14,7 +19,6 @@ export interface VirtualMeasurement {
 }
 
 export interface MeasurementBatch {
-  readonly anchorDelta: number;
   readonly changed: boolean;
 }
 
@@ -55,16 +59,42 @@ export class VariableSizeVirtualizer {
     this.#sourceKeys = keys;
     this.#indexByKey = new Map(keys.map((key, index) => [key, index]));
     this.#sizes = Float64Array.from(keys, (key) => this.#measuredByKey.get(key) ?? this.#estimate);
-    this.#tree = new Float64Array(keys.length + 1);
-    for (let index = 0; index < this.#sizes.length; index += 1) {
-      const cursor = index + 1;
-      this.#tree[cursor] = (this.#tree[cursor] ?? 0) + (this.#sizes[index] ?? this.#estimate);
-      const parent = cursor + (cursor & -cursor);
-      if (parent < this.#tree.length) {
-        this.#tree[parent] = (this.#tree[parent] ?? 0) + (this.#tree[cursor] ?? 0);
-      }
-    }
+    this.#rebuildTree();
     return true;
+  }
+
+  anchorAt(offset: number): VirtualAnchor | null {
+    if (this.#keys.length === 0) {
+      return null;
+    }
+    const safeOffset = Number.isFinite(offset)
+      ? Math.min(this.totalSize(), Math.max(0, offset))
+      : 0;
+    const index = this.#indexAt(safeOffset);
+    const key = this.#keys[index];
+    const size = this.#sizes[index];
+    if (key === undefined || size === undefined) {
+      return null;
+    }
+    return {
+      key,
+      offsetWithinItem: Math.min(size, Math.max(0, safeOffset - this.offsetOf(index))),
+    };
+  }
+
+  resolveAnchorOffset(anchor: VirtualAnchor): number | null {
+    const index = this.#indexByKey.get(anchor.key);
+    if (
+      index === undefined ||
+      !Number.isFinite(anchor.offsetWithinItem) ||
+      anchor.offsetWithinItem < 0
+    ) {
+      return null;
+    }
+    const size = this.#sizes[index];
+    return size === undefined
+      ? null
+      : this.offsetOf(index) + Math.min(size, anchor.offsetWithinItem);
   }
 
   measure(key: string, size: number): MeasurementChange | null {
@@ -84,10 +114,7 @@ export class VariableSizeVirtualizer {
     return { delta, index };
   }
 
-  measureBatch(
-    measurements: readonly VirtualMeasurement[],
-    anchorOffset: number,
-  ): MeasurementBatch {
+  measureBatch(measurements: readonly VirtualMeasurement[]): MeasurementBatch {
     const ordered = measurements
       .map((measurement) => ({
         ...measurement,
@@ -98,8 +125,6 @@ export class VariableSizeVirtualizer {
           measurement.index !== undefined,
       )
       .sort((left, right) => left.index - right.index);
-    const safeAnchorOffset = Number.isFinite(anchorOffset) ? Math.max(0, anchorOffset) : 0;
-    let anchorDelta = 0;
     let changed = false;
 
     for (const measurement of ordered) {
@@ -108,13 +133,19 @@ export class VariableSizeVirtualizer {
         continue;
       }
       changed = true;
-      const previousBottom = this.offsetOf(change.index + 1) - change.delta;
-      if (previousBottom <= safeAnchorOffset + anchorDelta) {
-        anchorDelta += change.delta;
-      }
     }
 
-    return { anchorDelta, changed };
+    return { changed };
+  }
+
+  resetMeasurements(): boolean {
+    if (this.#measuredByKey.size === 0) {
+      return false;
+    }
+    this.#measuredByKey.clear();
+    this.#sizes.fill(this.#estimate);
+    this.#rebuildTree();
+    return true;
   }
 
   offsetOf(index: number): number {
@@ -148,6 +179,18 @@ export class VariableSizeVirtualizer {
   #add(index: number, delta: number): void {
     for (let cursor = index + 1; cursor < this.#tree.length; cursor += cursor & -cursor) {
       this.#tree[cursor] = (this.#tree[cursor] ?? 0) + delta;
+    }
+  }
+
+  #rebuildTree(): void {
+    this.#tree = new Float64Array(this.#keys.length + 1);
+    for (let index = 0; index < this.#sizes.length; index += 1) {
+      const cursor = index + 1;
+      this.#tree[cursor] = (this.#tree[cursor] ?? 0) + (this.#sizes[index] ?? this.#estimate);
+      const parent = cursor + (cursor & -cursor);
+      if (parent < this.#tree.length) {
+        this.#tree[parent] = (this.#tree[parent] ?? 0) + (this.#tree[cursor] ?? 0);
+      }
     }
   }
 

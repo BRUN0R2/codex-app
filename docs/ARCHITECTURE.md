@@ -47,6 +47,14 @@ O engine nativo divide ownership assim:
 - `storage.rs`: schema SQLite próprio, transações e configuração versionada;
 - `mod.rs`: ciclo de vida e ownership dos turnos em execução.
 
+`src-tauri/src/browser.rs` permanece fora do engine porque administra uma
+superfície desktop, não contexto do provider. `BrowserManager` possui os child
+webviews nativos, histórico, carregamento, título, visibilidade e bounds. Cada
+aba pertence a uma conversa e nenhum webview remoto recebe as capabilities IPC
+do webview local `main`. Comandos que manipulam webviews são assíncronos para
+não bloquear o dispatcher da janela; callbacks WebView2 apenas atualizam estado
+e enfileiram a emissão depois de retornar, evitando reentrância no IPC.
+
 Comandos longos permanecem no domínio do engine:
 
 ```mermaid
@@ -112,6 +120,13 @@ O composer mantém rascunhos efêmeros com ownership por `thread_id`; telas de
 nova conversa usam uma chave separada por modo e workspace. Trocar de tarefa
 salva e restaura somente o rascunho correspondente, incluindo anexos.
 
+O navegador interno também possui estado isolado por conversa. O controller
+frontend restaura abas lazy a partir de um schema local fechado, adota o webview
+nativo existente de forma idempotente e coalesce sincronizações de bounds pela
+assinatura conversa/aba/retângulo. O painel implementa abas, endereço,
+voltar/avançar, recarregar e abertura externa sem iframe; fechar ou ocultar a
+superfície esconde o child webview no mesmo ciclo de vida.
+
 A inicialização possui uma revisão monotônica que impede tentativas antigas de
 sobrescrever estado novo. Falhas transitórias de registro de eventos, timeout ou
 comando nativo retryable são repetidas com backoff limitado; erros permanentes de
@@ -172,6 +187,12 @@ visual. Cada alteração carrega `lineStats` autoritativo calculado antes de
 truncar o preview; históricos internos anteriores ao campo derivam a estatística
 do diff persistido.
 
+Resultados `view_image` usam a apresentação contratual `image`. O frontend
+aceita somente o envelope fechado `{ image_url }`, MIME de imagem seguro em data
+URL ou HTTP(S) sem credenciais, e nunca imprime o payload bruto. Chamadas
+consecutivas são projetadas como uma unidade “Visualizou N imagens”, preservando
+uma miniatura por chamada e a identidade do primeiro item, como no fluxo oficial.
+
 A ordem visual da timeline e a ordem causal do provider são domínios distintos.
 Um steer é gravado imediatamente em `thread_items`, portanto aparece no instante
 em que o usuário o enviou, mas seu payload do provider entra primeiro em
@@ -185,34 +206,56 @@ A timeline mantém uma janela explícita de turnos montados e expande o históri
 sob demanda sem alterar ordem, identificadores ou posição de leitura. Cada
 componente é identificado pelo turno persistido e nunca é reciclado pela posição
 relativa da janela para representar outro turno. Alturas medidas são
-arredondadas, reunidas em uma microtask por ciclo de layout e aplicam no máximo
-uma correção de âncora por lote. Disclosures publicam uma revisão explícita de
-layout e medem imediatamente os turnos montados. O navegador lateral resolve a
-âncora DOM pelo `message.id`, não apenas o início do turno; isso distingue steers
-do mesmo turno e mantém a intenção até a geometria ficar estável. Para mensagens
-fora da janela, o offset do turno serve somente para montá-las e a âncora real
-faz o alinhamento final. Scroll, resize e sincronização compartilham um único
-coordenador por frame. Durante wheel, drag, teclado, navegação suave ou uma
-âncora pendente, o usuário possui o viewport e nenhuma medição pode escrever em
-`scrollTop`; correção de âncora só ocorre quando a leitura está estacionária.
-Itens virtuais usam coordenadas inteiras de layout, sem `translate3d`, e toda
-expansão participa da mesma política de viewport. Regiões de código limitadas,
-como comando, leitura e diff, declaram explicitamente
+arredondadas e reunidas em uma microtask por ciclo de layout. Antes de qualquer
+mutação do índice, a timeline captura a identidade do turno, o ponto interno da
+leitura e sua posição no viewport; depois atualiza a janela virtual e aplica no
+máximo uma compensação no frame seguinte, antes da pintura. Essa compensação
+preserva o conteúdo sob o olhar sem desfazer o delta mais recente de wheel,
+teclado, touch ou drag. Navegações instantâneas e suaves possuem proveniência
+explícita e são consumidas pelo destino real ou por `scrollend`; não existe janela
+temporal que confunda uma correção de layout com intenção do usuário. Disclosures
+publicam uma revisão explícita de layout e medem imediatamente os turnos
+montados. O navegador lateral resolve a âncora DOM pelo `message.id`, não apenas
+o início do turno; isso distingue steers do mesmo turno e mantém a intenção até a
+geometria ficar estável. Para mensagens fora da janela, o offset do turno serve
+somente para montá-las e a âncora real faz o alinhamento final. Scroll, resize,
+medição e sincronização compartilham um único coordenador por frame, que reúne
+leituras antes das escritas para não forçar layout no caminho quente. Itens
+virtuais usam coordenadas inteiras de layout, sem `translate3d`, e toda expansão
+participa da mesma política de viewport. Regiões de código limitadas, como
+comando, leitura e diff, declaram explicitamente
 `data-timeline-scroll-region`; não existe descoberta heurística com
 `getComputedStyle` durante wheel. Enquanto houver faixa interna elas consomem o
 movimento. Ao alcançar um limite, somente o excedente exato é transferido para a
-timeline no mesmo evento. O eixo vertical mantém chaining nativo para touch e o
-eixo horizontal do diff permanece contido.
+timeline no mesmo evento. Um wheel totalmente interno não altera a política de
+acompanhamento da conversa. O eixo vertical mantém chaining nativo para touch e
+o eixo horizontal do diff permanece contido.
+
+Grupos de trabalho longos possuem uma segunda janela virtual por atividade. A
+virtualização entra quando há mais de 48 unidades ou mais de quatro disclosures
+descendentes abertos; grupos pequenos continuam integralmente semânticos para
+busca e acessibilidade. Alturas ficam em uma LRU por grupo/conversa e são
+invalidadas pela mesma assinatura de layout da timeline. Um overscan de um
+viewport evita montagem excessiva. Saltos acima do limiar de velocidade montam
+placeholders leves e retomam o conteúdo 90 ms depois do último movimento; scroll
+deliberado e navegação programática mantêm o conteúdo real. O hub de
+`ResizeObserver` reúne todas as entradas e entrega um único lote no frame
+seguinte, eliminando loops de observação e correções repetidas.
 
 Cada conversa possui uma sessão visual própria e limitada por LRU, contendo
-posição de leitura, política de acompanhamento do fim e o índice de alturas já
-medidas. A troca salva a sessão anterior, invalida frames e medições pendentes,
-pré-calcula a janela com o índice correto e restaura a posição uma única vez no
-frame seguinte. Retornar a uma conversa não reutiliza estimativas ou intenção de
-scroll de outra tarefa. A sessão também conserva a identidade imutável da
-projeção de turnos; quando ela não mudou, não recria chaves nem percorre os
-1.000+ itens apenas para confirmar igualdade. A expulsão da cache remove somente
-metadados visuais; turnos e conteúdo persistido nunca são limitados por ela.
+posição numérica, âncora identificável, política de acompanhamento do fim e o
+índice de alturas já medidas. A troca salva a sessão anterior, invalida frames e
+medições pendentes, pré-calcula a janela pelo turno ancorado e restaura a posição
+uma única vez no frame seguinte. A assinatura de medição inclui largura, tamanho
+de fonte e modo de diff; qualquer mudança invalida alturas dependentes do layout
+sem perder a identidade da leitura. O prepend de histórico usa a posição atual
+no instante em que a sequência muda, não o `scrollTop` anterior ao I/O, e também
+considera mudanças no conteúdo que antecede a lista. Retornar a uma conversa não
+reutiliza estimativas ou intenção de scroll de outra tarefa. A sessão conserva a
+identidade imutável da projeção de turnos; quando ela não mudou, não recria
+chaves nem percorre os 1.000+ itens apenas para confirmar igualdade. A expulsão
+da cache remove somente metadados visuais; turnos e conteúdo persistido nunca
+são limitados por ela.
 
 `response.output_item.added` preserva a fase de mensagem antes do primeiro
 delta. Por isso “Pensando” aparece imediatamente, acompanha o título da atividade

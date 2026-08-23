@@ -49,26 +49,37 @@ describe("variable-size timeline virtualizer", () => {
   it("batches measurements into one deterministic anchor correction", () => {
     const virtualizer = new VariableSizeVirtualizer(100);
     virtualizer.setKeys(["a", "b", "c", "d"]);
+    const anchor = virtualizer.anchorAt(250);
 
     expect(
-      virtualizer.measureBatch(
-        [
-          { key: "c", size: 160 },
-          { key: "a", size: 130 },
-          { key: "b", size: 80 },
-        ],
-        250,
-      ),
-    ).toEqual({ anchorDelta: 10, changed: true });
+      virtualizer.measureBatch([
+        { key: "c", size: 160 },
+        { key: "a", size: 130 },
+        { key: "b", size: 80 },
+      ]),
+    ).toEqual({ changed: true });
+    expect(anchor).toEqual({ key: "c", offsetWithinItem: 50 });
+    expect(anchor === null ? null : virtualizer.resolveAnchorOffset(anchor)).toBe(260);
     expect(virtualizer.offsetOf(3)).toBe(370);
     expect(
-      virtualizer.measureBatch(
-        [
-          { key: "a", size: 130.1 },
-          { key: "b", size: 80.2 },
-        ],
-        260,
-      ),
-    ).toEqual({ anchorDelta: 0, changed: false });
+      virtualizer.measureBatch([
+        { key: "a", size: 130.1 },
+        { key: "b", size: 80.2 },
+      ]),
+    ).toEqual({ changed: false });
+  });
+
+  it("keeps an anchor attached to its key across prepends and measurement resets", () => {
+    const virtualizer = new VariableSizeVirtualizer(100);
+    virtualizer.setKeys(["b", "c"]);
+    virtualizer.measure("b", 180);
+    const anchor = virtualizer.anchorAt(210);
+
+    expect(anchor).toEqual({ key: "c", offsetWithinItem: 30 });
+    virtualizer.setKeys(["a", "b", "c"]);
+    expect(anchor === null ? null : virtualizer.resolveAnchorOffset(anchor)).toBe(310);
+    expect(virtualizer.resetMeasurements()).toBe(true);
+    expect(anchor === null ? null : virtualizer.resolveAnchorOffset(anchor)).toBe(230);
+    expect(virtualizer.resetMeasurements()).toBe(false);
   });
 });

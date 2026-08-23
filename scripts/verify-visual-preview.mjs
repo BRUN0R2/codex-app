@@ -11,6 +11,8 @@ const VITE_ENTRY = path.join(PROJECT_ROOT, "node_modules", "vite", "bin", "vite.
 const PREVIEW_PORT = 1420;
 const HOME_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1`;
 const CHAT_REFERENCE_PREVIEW_URL = `${HOME_PREVIEW_URL}&chatReference=1`;
+const TIMELINE_STRESS_PREVIEW_URL = `${HOME_PREVIEW_URL}&timelineStress=1`;
+const BROWSER_PANEL_PREVIEW_URL = `${TIMELINE_STRESS_PREVIEW_URL}&browser=1`;
 const SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=general`;
 const USAGE_SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=usage`;
 const SETTINGS_INTERACTION_PREVIEW_URL = `${SETTINGS_PREVIEW_URL}&preferenceDelay=400`;
@@ -22,6 +24,12 @@ const VIEWPORTS = [
   { width: 1280, height: 820 },
   { width: 1920, height: 1080 },
 ];
+const REQUESTED_SCENARIOS = new Set(
+  (process.env.CODEX_VISUAL_SCENARIOS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0),
+);
 const SCENARIOS = [
   {
     id: "composer-fast-mode",
@@ -64,10 +72,16 @@ const SCENARIOS = [
         group?.click();
         queueMicrotask(() => {
           document.querySelectorAll(".user-message-navigator button")[2]?.click();
+          requestAnimationFrame(() => {
+            window.__previewUserMessageNavigationRequested = true;
+          });
         });
       }));
     })()`,
     readyExpression: `(() => {
+      if (window.__previewUserMessageNavigationRequested !== true) {
+        return false;
+      }
       const timeline = document.querySelector(".timeline");
       const target = document.getElementById("user-message-preview-image-user-message");
       const marker = document.querySelectorAll(".user-message-navigator button")[2];
@@ -105,20 +119,62 @@ const SCENARIOS = [
         if (!(timeline instanceof HTMLElement)) {
           return;
         }
-        timeline.scrollTop = Math.min(700, timeline.scrollHeight - timeline.clientHeight);
+        timeline.scrollTop = 0;
         requestAnimationFrame(() => {
-          const target = Math.max(0, timeline.scrollTop - 180);
-          timeline.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -180 }));
-          timeline.scrollTop = target;
-          window.__previewManualScrollTarget = target;
-          const item = document.querySelector(".timeline-virtual-item");
-          if (item instanceof HTMLElement) {
-            const padding = Number.parseFloat(getComputedStyle(item).paddingBottom) || 0;
-            item.style.paddingBottom = (padding + 320) + "px";
+          const items = [...document.querySelectorAll(".timeline-virtual-item")];
+          const first = items[0];
+          const anchor = items[1];
+          if (!(first instanceof HTMLElement) || !(anchor instanceof HTMLElement)) {
+            return;
           }
-          setTimeout(() => {
-            window.__previewManualScrollReady = true;
-          }, 300);
+          const timelineTop = timeline.getBoundingClientRect().top;
+          const anchorContentTop =
+            timeline.scrollTop + anchor.getBoundingClientRect().top - timelineTop;
+          timeline.scrollTop = Math.min(
+            timeline.scrollHeight - timeline.clientHeight,
+            Math.max(0, anchorContentTop + 200),
+          );
+          requestAnimationFrame(() => {
+            const target = Math.max(0, timeline.scrollTop - 80);
+            timeline.dispatchEvent(
+              new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -80 }),
+            );
+            timeline.scrollTop = target;
+            requestAnimationFrame(() => {
+              const mountedFirst = document.querySelector(
+                '.timeline-virtual-item[data-virtual-turn-id="' +
+                  first.getAttribute("data-virtual-turn-id") +
+                  '"]',
+              );
+              const mountedAnchor = document.querySelector(
+                '.timeline-virtual-item[data-virtual-turn-id="' +
+                  anchor.getAttribute("data-virtual-turn-id") +
+                  '"]',
+              );
+              if (
+                !(mountedFirst instanceof HTMLElement) ||
+                !(mountedAnchor instanceof HTMLElement)
+              ) {
+                return;
+              }
+              window.__previewManualScrollState = {
+                anchorId: mountedAnchor.getAttribute("data-virtual-turn-id"),
+                beforeAnchorGap:
+                  mountedAnchor.getBoundingClientRect().top -
+                  timeline.getBoundingClientRect().top,
+                beforeItemHeight: mountedFirst.getBoundingClientRect().height,
+                beforeScrollTop: timeline.scrollTop,
+                firstId: mountedFirst.getAttribute("data-virtual-turn-id"),
+              };
+              const growth = document.createElement("div");
+              growth.dataset.previewScrollGrowth = "";
+              growth.style.height = "320px";
+              mountedFirst.append(growth);
+              setTimeout(() => {
+                window.__previewManualScrollReady = true;
+              }, 300);
+            });
+          });
         });
       }));
     })()`,
@@ -132,103 +188,21 @@ const SCENARIOS = [
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
       (button) => button.textContent?.includes("Inspecionar janela de contexto"),
     )`,
-    prepareExpression: `(() => {
-      const threadButton = [...document.querySelectorAll(".thread-main")].find(
-        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
-      );
-      threadButton?.click();
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        document.querySelectorAll(".agent-activity-group:not([open]) > summary").forEach(
-          (summary) => summary.click(),
-        );
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          const command = [...document.querySelectorAll(".command-activity-card")].find(
-            (details) => details.querySelector(":scope > summary .activity-title.is-running") !== null,
-          );
-          const source = [...document.querySelectorAll(".tool-activity-card")].find(
-            (details) => details.textContent?.includes("diffHighlighter.test.ts"),
-          );
-          const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
-            (element) => element.textContent?.trim() === "semantic.rs",
-          );
-          const diff = file?.closest(".file-change-diff");
-          for (const details of [command, source, diff]) {
-            if (details instanceof HTMLDetailsElement && !details.open) {
-              details.querySelector(":scope > summary")?.click();
-            }
-          }
-          requestAnimationFrame(() => requestAnimationFrame(() => {
-            const timeline = document.querySelector(".timeline");
-            const commandScroll = command?.querySelector(".command-card-scroll");
-            const sourceScroll = source?.querySelector(".command-card-scroll");
-            const diffScroll = diff?.querySelector(".diff-viewport");
-            if (
-              !(timeline instanceof HTMLElement) ||
-              !(commandScroll instanceof HTMLElement) ||
-              !(sourceScroll instanceof HTMLElement) ||
-              !(diffScroll instanceof HTMLElement)
-            ) {
-              return;
-            }
-            const maximumTimelineScroll = timeline.scrollHeight - timeline.clientHeight;
-            const baseTimelineScroll = Math.round(
-              Math.min(maximumTimelineScroll, Math.max(400, maximumTimelineScroll * 0.6)),
-            );
-            const originalGetComputedStyle = window.getComputedStyle;
-            let styleReadCount = 0;
-            window.getComputedStyle = (...args) => {
-              styleReadCount += 1;
-              return originalGetComputedStyle.apply(window, args);
-            };
-            const run = (region, requestedTop, deltaY) => {
-              timeline.scrollTop = baseTimelineScroll;
-              region.scrollTop = requestedTop;
-              const nestedStart = region.scrollTop;
-              const maximumNestedScroll = Math.max(0, region.scrollHeight - region.clientHeight);
-              const desiredNestedScroll = nestedStart + deltaY;
-              const expectedNestedScroll = Math.min(
-                maximumNestedScroll,
-                Math.max(0, desiredNestedScroll),
-              );
-              const expectedTimelineDelta = desiredNestedScroll - expectedNestedScroll;
-              const wheel = new WheelEvent("wheel", {
-                bubbles: true,
-                cancelable: true,
-                deltaMode: 0,
-                deltaY,
-              });
-              region.dispatchEvent(wheel);
-              return {
-                defaultPrevented: wheel.defaultPrevented,
-                expectedNestedScroll,
-                expectedTimelineDelta,
-                nestedScrollTop: region.scrollTop,
-                timelineDelta: timeline.scrollTop - baseTimelineScroll,
-              };
-            };
-            try {
-              const handoffStartedAt = performance.now();
-              const commandMetrics = run(commandScroll, 40, -100);
-              const diffMetrics = run(diffScroll, 0, -120);
-              const sourceMetrics = run(sourceScroll, 0, -80);
-              window.__previewNestedScrollMetrics = {
-                command: commandMetrics,
-                diff: diffMetrics,
-                handoffDurationMs: performance.now() - handoffStartedAt,
-                source: sourceMetrics,
-                styleReadCount,
-              };
-            } finally {
-              window.getComputedStyle = originalGetComputedStyle;
-            }
-            window.__previewNestedScrollReady = true;
-          }));
-        }));
-      }));
-    })()`,
+    prepareExpression: nestedScrollHandoffPrepareExpression(),
     readyExpression: `window.__previewNestedScrollReady === true`,
     auditExpression: nestedScrollHandoffVisualAuditExpression,
     validate: validateNestedScrollHandoffMetrics,
+  },
+  {
+    id: "nested-scroll-following",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: nestedScrollFollowingPrepareExpression(),
+    readyExpression: `window.__previewNestedFollowReady === true`,
+    auditExpression: nestedScrollFollowingVisualAuditExpression,
+    validate: validateNestedScrollFollowingMetrics,
   },
   {
     id: "live-command-output",
@@ -280,9 +254,16 @@ const SCENARIOS = [
         );
       }));
     })()`,
-    readyExpression: `[...document.querySelectorAll(".file-change-diff .diff-file-identity code")].some(
-      (element) => element.textContent?.trim() === "engine.rs",
-    )`,
+    readyExpression: `(() => {
+      const files = new Set(
+        [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].map(
+          (element) => element.textContent?.trim(),
+        ),
+      );
+      return ["engine.rs", "setupBrowserPreview.ts", "semantic.rs", "terminal_output.rs"].every(
+        (file) => files.has(file),
+      );
+    })()`,
     auditExpression: singleFileChangeVisualAuditExpression,
     validate: validateSingleFileChangeMetrics,
   },
@@ -321,31 +302,9 @@ const SCENARIOS = [
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
       (button) => button.textContent?.includes("Inspecionar janela de contexto"),
     )`,
-    prepareExpression: `(() => {
-      const threadButton = [...document.querySelectorAll(".thread-main")].find(
-        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
-      );
-      threadButton?.click();
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        document.querySelectorAll(".agent-activity-group:not([open]) > summary").forEach(
-          (summary) => summary.click(),
-        );
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
-            (element) => element.textContent?.trim() === "semantic.rs",
-          );
-          const block = file?.closest(".file-change-diff");
-          if (block instanceof HTMLDetailsElement && !block.open) {
-            block.querySelector(":scope > summary")?.click();
-          }
-        }));
-      }));
-    })()`,
-    readyExpression: `[...document.querySelectorAll(".file-change-diff .diff-file-identity code")].some(
-      (element) =>
-        element.textContent?.trim() === "semantic.rs" &&
-        element.closest(".file-change-diff")?.querySelector(".syntax-token") !== null,
-    )`,
+    prepareExpression: previewFileDetailPrepareExpression("semantic.rs"),
+    readyExpression: `window.__previewCreatedFileMetrics !== undefined ||
+      window.__previewCreatedFileError !== undefined`,
     auditExpression: syntaxHighlightedCreatedFileVisualAuditExpression,
     validate: validateSyntaxHighlightedCreatedFileMetrics,
   },
@@ -355,29 +314,8 @@ const SCENARIOS = [
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
       (button) => button.textContent?.includes("Inspecionar janela de contexto"),
     )`,
-    prepareExpression: `(() => {
-      const threadButton = [...document.querySelectorAll(".thread-main")].find(
-        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
-      );
-      threadButton?.click();
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        document.querySelectorAll(".agent-activity-group:not([open]) > summary").forEach(
-          (summary) => summary.click(),
-        );
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          for (const text of ["diffHighlighter.test.ts", "Search syntax highlighter usage"]) {
-            const card = [...document.querySelectorAll(".tool-activity-card")].find(
-              (element) => element.textContent?.includes(text),
-            );
-            if (card instanceof HTMLDetailsElement && !card.open) {
-              card.querySelector(":scope > summary")?.click();
-            }
-          }
-        }));
-      }));
-    })()`,
-    readyExpression: `document.querySelector(".tool-source-output .syntax-token") !== null &&
-      document.querySelector(".tool-search-output .syntax-token") !== null`,
+    prepareExpression: previewHighlightedToolOutputsPrepareExpression(),
+    readyExpression: `window.__previewHighlightedToolMetrics !== undefined`,
     auditExpression: highlightedToolOutputVisualAuditExpression,
     validate: validateHighlightedToolOutputMetrics,
   },
@@ -451,9 +389,44 @@ const SCENARIOS = [
         (button) => button.textContent?.includes("Editar projeto"),
       );
       editButton?.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const input = document.querySelector(".hex-text-input");
+        if (!(input instanceof HTMLInputElement)) {
+          return;
+        }
+        const valueSetter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          "value",
+        )?.set;
+        valueSetter?.call(input, "DE4B4E");
+        input.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          composed: true,
+          data: "DE4B4E",
+          inputType: "insertText",
+        }));
+        window.__previewProjectColorUpdated = true;
+      }));
     })()`,
-    readyExpression: `document.querySelector(".project-color-side-panel") !== null &&
-      document.querySelector(".inline-color-picker") !== null`,
+    readyExpression: `(() => {
+      const input = document.querySelector(".hex-text-input");
+      const preview = document.querySelector(".project-icon-preview");
+      if (
+        window.__previewProjectColorUpdated !== true ||
+        !(input instanceof HTMLInputElement) ||
+        !(preview instanceof HTMLElement) ||
+        !/^[0-9A-F]{6}$/.test(input.value) ||
+        document.querySelector(".project-color-side-panel") === null ||
+        document.querySelector(".inline-color-picker") === null
+      ) {
+        return false;
+      }
+      const expected = "rgb(" +
+        Number.parseInt(input.value.slice(0, 2), 16) + ", " +
+        Number.parseInt(input.value.slice(2, 4), 16) + ", " +
+        Number.parseInt(input.value.slice(4, 6), 16) + ")";
+      return getComputedStyle(preview).color === expected;
+    })()`,
     auditExpression: projectColorEditorVisualAuditExpression,
     validate: validateProjectColorEditorMetrics,
   },
@@ -549,6 +522,85 @@ const SCENARIOS = [
     auditExpression: automationEditorVisualAuditExpression,
     validate: validateAutomationEditorMetrics,
   },
+  {
+    id: "browser-panel",
+    url: BROWSER_PANEL_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de timeline expandida"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Estresse de timeline expandida"),
+      );
+      threadButton?.click();
+    })()`,
+    readyExpression: `document.querySelector(".browser-panel") !== null &&
+      document.querySelector(".browser-native-surface") !== null &&
+      document.querySelector(".browser-tab[role='presentation']") !== null`,
+    auditExpression: browserPanelVisualAuditExpression,
+    validate: validateBrowserPanelMetrics,
+  },
+  {
+    id: "browser-panel-lifecycle",
+    url: BROWSER_PANEL_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de timeline expandida"),
+    )`,
+    prepareExpression: `(() => {
+      void (async () => {
+        try {
+          const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+          const threadButton = [...document.querySelectorAll(".thread-main")].find(
+            (button) => button.textContent?.includes("Estresse de timeline expandida"),
+          );
+          threadButton?.click();
+          let closeButton;
+          for (let index = 0; index < 30; index += 1) {
+            await frame();
+            closeButton = document.querySelector('[aria-label="Fechar navegador"]');
+            if (closeButton !== null) break;
+          }
+          if (!(closeButton instanceof HTMLButtonElement)) {
+            throw new Error("O navegador não abriu para validar sua desmontagem.");
+          }
+          closeButton.click();
+          await frame();
+          await frame();
+        } catch (error) {
+          window.__previewBrowserPanelLifecycleError =
+            error instanceof Error ? error.stack ?? error.message : String(error);
+        }
+        window.__previewBrowserPanelClosed = true;
+      })();
+    })()`,
+    readyExpression: `window.__previewBrowserPanelClosed === true &&
+      document.querySelector(".browser-panel") === null`,
+    auditExpression: browserPanelLifecycleVisualAuditExpression,
+    validate: validateBrowserPanelLifecycleMetrics,
+  },
+  {
+    id: "image-view-group",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: imageViewGroupPrepareExpression(),
+    readyExpression: `window.__previewImageViewReady === true`,
+    auditExpression: imageViewGroupVisualAuditExpression,
+    validate: validateImageViewGroupMetrics,
+  },
+  {
+    id: "timeline-performance-stress",
+    url: TIMELINE_STRESS_PREVIEW_URL,
+    readyTimeoutMs: 30_000,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de timeline expandida"),
+    )`,
+    prepareExpression: timelinePerformanceStressPrepareExpression(),
+    readyExpression: `window.__timelinePerformanceStressReady === true`,
+    auditExpression: timelinePerformanceStressAuditExpression,
+    validate: validateTimelinePerformanceStressMetrics,
+  },
 ];
 
 async function main() {
@@ -575,11 +627,13 @@ async function main() {
       [
         "--headless=new",
         "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
         "--disable-breakpad",
         "--disable-component-update",
         "--disable-default-apps",
         "--disable-features=Translate",
-        "--disable-gpu",
+        "--disable-renderer-backgrounding",
         "--disable-sync",
         "--hide-scrollbars",
         "--metrics-recording-only",
@@ -602,7 +656,18 @@ async function main() {
     await mkdir(ARTIFACT_DIRECTORY, { recursive: true });
 
     const reports = [];
-    for (const scenario of SCENARIOS) {
+    const scenarios =
+      REQUESTED_SCENARIOS.size === 0
+        ? SCENARIOS
+        : SCENARIOS.filter((scenario) => REQUESTED_SCENARIOS.has(scenario.id));
+    if (scenarios.length !== (REQUESTED_SCENARIOS.size || SCENARIOS.length)) {
+      const knownScenarios = new Set(SCENARIOS.map((scenario) => scenario.id));
+      const unknownScenarios = [...REQUESTED_SCENARIOS].filter(
+        (scenarioId) => !knownScenarios.has(scenarioId),
+      );
+      throw new Error(`Cenários visuais desconhecidos: ${unknownScenarios.join(", ")}`);
+    }
+    for (const scenario of scenarios) {
       for (const viewport of VIEWPORTS) {
         reports.push(await auditViewport(debugPort, viewport, scenario));
       }
@@ -654,7 +719,12 @@ async function auditViewport(debugPort, viewport, scenario) {
     );
     if (scenario.prepareExpression !== undefined) {
       await client.evaluate(scenario.prepareExpression, false);
-      await waitForPreview(client, scenario.readyExpression, scenario.id);
+      await waitForPreview(
+        client,
+        scenario.readyExpression,
+        scenario.id,
+        scenario.readyTimeoutMs,
+      );
     }
     await client.evaluate(
       `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(async () => {
@@ -685,8 +755,8 @@ async function auditViewport(debugPort, viewport, scenario) {
   }
 }
 
-async function waitForPreview(client, readyExpression, scenarioId) {
-  const deadline = Date.now() + 15_000;
+async function waitForPreview(client, readyExpression, scenarioId, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const ready = await client.evaluate(
       `document.readyState === "complete" && (${readyExpression})`,
@@ -702,6 +772,7 @@ async function waitForPreview(client, readyExpression, scenarioId) {
       `({
         title: document.title,
         body: document.body?.innerText?.slice(0, 4000) ?? "",
+        timelineStressProgress: window.__timelineStressProgress ?? null,
         failures: [...document.querySelectorAll(
           ".bootstrap-failure, .render-failure, .frontend-failure, [role='alert']",
         )].map((element) => element.textContent?.trim() ?? ""),
@@ -710,9 +781,921 @@ async function waitForPreview(client, readyExpression, scenarioId) {
     )
     .catch(() => null);
   throw new Error(
-    `A prévia visual de ${scenarioId} não ficou pronta dentro de 15 segundos.\n` +
+    `A prévia visual de ${scenarioId} não ficou pronta dentro de ${timeoutMs / 1000} segundos.\n` +
       `Diagnóstico: ${JSON.stringify(diagnostics)}`,
   );
+}
+
+function browserPanelVisualAuditExpression() {
+  return `(() => {
+    const panel = document.querySelector(".browser-panel");
+    const tabs = document.querySelector(".browser-tab-strip");
+    const toolbar = document.querySelector(".browser-toolbar");
+    const address = document.querySelector(".browser-address");
+    const surface = document.querySelector(".browser-native-surface");
+    if (
+      !(panel instanceof HTMLElement) ||
+      !(tabs instanceof HTMLElement) ||
+      !(toolbar instanceof HTMLElement) ||
+      !(address instanceof HTMLElement) ||
+      !(surface instanceof HTMLElement)
+    ) {
+      throw new Error("A superfície do navegador interno está incompleta.");
+    }
+    const rectangle = (element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      panel: rectangle(panel),
+      tabs: rectangle(tabs),
+      toolbar: rectangle(toolbar),
+      address: rectangle(address),
+      surface: rectangle(surface),
+      tabCount: panel.querySelectorAll('[role="tab"]').length,
+      selectedTabs: panel.querySelectorAll('[role="tab"][aria-selected="true"]').length,
+      navigationButtons: panel.querySelectorAll(".browser-toolbar > .browser-toolbar-button").length,
+      addressInputs: panel.querySelectorAll('.browser-address input[aria-label="Pesquisar ou digitar endereço"]').length,
+      previewPages: panel.querySelectorAll(".browser-preview-page").length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function browserPanelLifecycleVisualAuditExpression() {
+  return `(() => {
+    if (window.__previewBrowserPanelLifecycleError !== undefined) {
+      throw new Error(window.__previewBrowserPanelLifecycleError);
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      panelCount: document.querySelectorAll(".browser-panel").length,
+      failureCount: document.querySelectorAll(
+        ".bootstrap-failure, .render-failure, .frontend-failure, [role='alert']",
+      ).length,
+      chatVisible: document.querySelector(".chat-page") !== null,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function imageViewGroupPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      try {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+        );
+        threadButton?.click();
+        let group;
+        for (let index = 0; index < 20; index += 1) {
+          await frame();
+          document.querySelectorAll('button[aria-label="Mostrar trabalho do agente"]').forEach(
+            (button) => button.click(),
+          );
+          const timeline = document.querySelector(".timeline");
+          if (timeline instanceof HTMLElement) {
+            timeline.scrollTop = timeline.scrollHeight - timeline.clientHeight;
+          }
+          group = document.querySelector(".image-view-group");
+          if (group instanceof HTMLDetailsElement) {
+            break;
+          }
+        }
+        if (!(group instanceof HTMLDetailsElement)) {
+          throw new Error("O agrupamento de imagens não foi montado.");
+        }
+        group.scrollIntoView({ block: "center" });
+        if (!group.open) {
+          group.querySelector(":scope > summary")?.click();
+        }
+        for (let index = 0; index < 20; index += 1) {
+          await frame();
+          if (group.querySelectorAll(".tool-image-preview img").length === 2) {
+            return;
+          }
+        }
+        throw new Error("As duas miniaturas não ficaram prontas.");
+      } catch (error) {
+        window.__previewImageViewError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      } finally {
+        window.__previewImageViewReady = true;
+      }
+    })();
+  })()`;
+}
+
+function previewFileDetailPrepareExpression(fileName) {
+  return `(() => {
+    void (async () => {
+      try {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+        );
+        threadButton?.click();
+        await frame();
+        const timeline = document.querySelector(".timeline");
+        if (!(timeline instanceof HTMLElement)) {
+          throw new Error("A timeline não foi montada.");
+        }
+        const marker = document.querySelectorAll(".user-message-navigator button")[1];
+        if (!(marker instanceof HTMLButtonElement)) {
+          throw new Error("O marcador da mensagem anterior ao arquivo criado está ausente.");
+        }
+        marker.click();
+        await frame();
+        await frame();
+        await frame();
+        // Stay below the production high-velocity deferral threshold so each
+        // interval is materialized exactly as it is during deliberate reading.
+        const step = 140;
+        let discoveredActivityGroups = 0;
+        let discoveredTurnHeaders = 0;
+        let openedActivityGroups = 0;
+        let openedTurnHeaders = 0;
+        let largestScrollHeight = timeline.scrollHeight;
+        const discoveredActivityTitles = new Set();
+        const discoveredFileNames = new Set();
+        for (let index = 0; index < 500; index += 1) {
+          await frame();
+          let disclosureOpened = false;
+          const turnHeaders = document.querySelectorAll(".turn-header-button");
+          discoveredTurnHeaders = Math.max(discoveredTurnHeaders, turnHeaders.length);
+          turnHeaders.forEach((button) => {
+            if (button.getAttribute("aria-expanded") === "false") {
+              openedTurnHeaders += 1;
+              button.click();
+              disclosureOpened = true;
+            }
+          });
+          const activityGroups = document.querySelectorAll(".agent-activity-group");
+          discoveredActivityGroups = Math.max(discoveredActivityGroups, activityGroups.length);
+          activityGroups.forEach((group) => {
+            if (group instanceof HTMLDetailsElement && !group.open) {
+              openedActivityGroups += 1;
+              group.querySelector(":scope > summary")?.click();
+              disclosureOpened = true;
+            }
+          });
+          document.querySelectorAll(".file-change-card:not([open]) > summary").forEach(
+            (summary) => {
+              summary.click();
+              disclosureOpened = true;
+            },
+          );
+          if (disclosureOpened) {
+            await new Promise((resolve) => setTimeout(resolve, 120));
+          }
+          await frame();
+          largestScrollHeight = Math.max(largestScrollHeight, timeline.scrollHeight);
+          document.querySelectorAll(".activity-title").forEach((element) => {
+            const title = element.textContent?.trim();
+            if (title) discoveredActivityTitles.add(title);
+          });
+          document.querySelectorAll(".diff-file-identity code").forEach((element) => {
+            const fileName = element.textContent?.trim();
+            if (fileName) discoveredFileNames.add(fileName);
+          });
+          const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
+            (element) => element.textContent?.trim() === ${JSON.stringify(fileName)},
+          );
+          const block = file?.closest(".file-change-diff");
+          if (block instanceof HTMLDetailsElement) {
+            if (!block.open) {
+              block.querySelector(":scope > summary")?.click();
+            }
+            await new Promise((resolve) => setTimeout(resolve, 120));
+            await frame();
+            await frame();
+            const currentFile = [...document.querySelectorAll(
+              ".file-change-diff .diff-file-identity code",
+            )].find(
+              (element) => element.textContent?.trim() === ${JSON.stringify(fileName)},
+            );
+            const currentBlock = currentFile?.closest(".file-change-diff");
+            const diffViewport = currentBlock?.querySelector(".diff-viewport");
+            const code = diffViewport?.querySelector(
+              ".unified-diff-row.is-addition .unified-diff-code",
+            );
+            if (
+              !(currentBlock instanceof HTMLDetailsElement) ||
+              !(diffViewport instanceof HTMLElement) ||
+              !(code instanceof HTMLElement)
+            ) {
+              throw new Error("O diff criado não materializou suas linhas visíveis.");
+            }
+            const tokens = [...diffViewport.querySelectorAll(".syntax-token")];
+            window.__previewCreatedFileMetrics = {
+              tokenKinds: [
+                ...new Set(
+                  tokens.flatMap((token) =>
+                    [...token.classList].filter((className) => className.startsWith("token-")),
+                  ),
+                ),
+              ].sort(),
+              tokenColorCount: new Set(tokens.map((token) => getComputedStyle(token).color)).size,
+              tokenCount: tokens.length,
+              additionRows: diffViewport.querySelectorAll(".unified-diff-row.is-addition").length,
+              deletionRows: diffViewport.querySelectorAll(".unified-diff-row.is-deletion").length,
+              newlineMetadataRows: [...diffViewport.querySelectorAll(".unified-diff-hunk")].filter(
+                (element) => element.textContent?.includes("No newline at end of file"),
+              ).length,
+              codeInset: code.getBoundingClientRect().left - diffViewport.getBoundingClientRect().left,
+              horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+            };
+            return;
+          }
+          const maximumScroll = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+          if (timeline.scrollTop >= maximumScroll - 1) {
+            break;
+          }
+          timeline.scrollTop = Math.min(maximumScroll, timeline.scrollTop + step);
+        }
+        throw new Error(
+          "O arquivo " +
+            ${JSON.stringify(fileName)} +
+            " não foi encontrado na timeline (scrollTop=" +
+            timeline.scrollTop +
+            ", scrollHeight=" +
+            timeline.scrollHeight +
+            ", turnHeaders=" +
+            document.querySelectorAll(".turn-header-button").length +
+            ", openTurnHeaders=" +
+            document.querySelectorAll('.turn-header-button[aria-expanded="true"]').length +
+            ", activityGroups=" +
+            document.querySelectorAll(".agent-activity-group").length +
+            ", discoveredTurnHeaders=" +
+            discoveredTurnHeaders +
+            ", openedTurnHeaders=" +
+            openedTurnHeaders +
+            ", discoveredActivityGroups=" +
+            discoveredActivityGroups +
+            ", openedActivityGroups=" +
+            openedActivityGroups +
+            ", largestScrollHeight=" +
+            largestScrollHeight +
+            ", markerCurrent=" +
+            marker.getAttribute("aria-current") +
+            ", activityTitles=" +
+            JSON.stringify([...discoveredActivityTitles]) +
+            ", fileNames=" +
+            JSON.stringify([...discoveredFileNames]) +
+            ").",
+        );
+      } catch (error) {
+        window.__previewCreatedFileError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      }
+    })();
+  })()`;
+}
+
+function previewHighlightedToolOutputsPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      threadButton?.click();
+      let positionedAtEnd = false;
+      for (let index = 0; index < 32; index += 1) {
+        await frame();
+        document.querySelectorAll('button[aria-label="Mostrar trabalho do agente"]').forEach(
+          (button) => button.click(),
+        );
+        const timeline = document.querySelector(".timeline");
+        if (timeline instanceof HTMLElement && !positionedAtEnd) {
+          timeline.scrollTop = timeline.scrollHeight - timeline.clientHeight;
+          positionedAtEnd = true;
+        }
+        document.querySelectorAll(".agent-activity-group:not([open]) > summary").forEach(
+          (summary) => summary.click(),
+        );
+        const sourceCard = [...document.querySelectorAll(".tool-activity-card")].find(
+          (element) => element.textContent?.includes("diffHighlighter.test.ts"),
+        );
+        const searchCard = [...document.querySelectorAll(".tool-activity-card")].find(
+          (element) => element.textContent?.includes("Search syntax highlighter usage"),
+        );
+        if (
+          sourceCard instanceof HTMLDetailsElement &&
+          searchCard instanceof HTMLDetailsElement
+        ) {
+          for (const card of [sourceCard, searchCard]) {
+            if (!card.open) {
+              card.querySelector(":scope > summary")?.click();
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          const source = document.querySelector(".tool-source-output");
+          const search = document.querySelector(".tool-search-output");
+          if (source instanceof HTMLElement && search instanceof HTMLElement) {
+            const sourceTokens = [...source.querySelectorAll(".syntax-token")];
+            const searchTokens = [...search.querySelectorAll(".syntax-token")];
+            window.__previewHighlightedToolMetrics = {
+              sourceLineNumbers: [...source.querySelectorAll(".tool-source-line-number")].map(
+                (element) => element.textContent?.trim() ?? "",
+              ),
+              sourceTokenKinds: [
+                ...new Set(
+                  sourceTokens.flatMap((token) =>
+                    [...token.classList].filter((className) => className.startsWith("token-")),
+                  ),
+                ),
+              ].sort(),
+              searchTokenKinds: [
+                ...new Set(
+                  searchTokens.flatMap((token) =>
+                    [...token.classList].filter((className) => className.startsWith("token-")),
+                  ),
+                ),
+              ].sort(),
+              sourceText: source.textContent ?? "",
+              searchText: search.textContent ?? "",
+              sourceHorizontalOverflow: source.scrollWidth - source.clientWidth,
+              searchHorizontalOverflow: search.scrollWidth - search.clientWidth,
+              horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+            };
+            return;
+          }
+        }
+        if (timeline instanceof HTMLElement) {
+          timeline.scrollTop = Math.max(0, timeline.scrollTop - 140);
+        }
+      }
+    })();
+  })()`;
+}
+
+function imageViewGroupVisualAuditExpression() {
+  return `(() => {
+    if (window.__previewImageViewError !== undefined) {
+      throw new Error(window.__previewImageViewError);
+    }
+    const group = document.querySelector(".image-view-group");
+    if (!(group instanceof HTMLDetailsElement)) {
+      throw new Error("O agrupamento de imagens está ausente.");
+    }
+    const images = [...group.querySelectorAll(".tool-image-preview img")];
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      label: group.querySelector(":scope > summary .activity-title")?.textContent?.trim() ?? null,
+      open: group.open,
+      imageCount: images.length,
+      uniqueSources: new Set(images.map((image) => image.getAttribute("src"))).size,
+      rawDataUrlText: group.querySelector("pre")?.textContent?.includes("image_url") === true,
+      previewButtons: group.querySelectorAll(".tool-image-preview").length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function nestedScrollHandoffPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      try {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+        );
+        threadButton?.click();
+        for (let index = 0; index < 16; index += 1) {
+          await frame();
+          document.querySelectorAll('button[aria-label="Mostrar trabalho do agente"]').forEach(
+            (button) => button.click(),
+          );
+          const timeline = document.querySelector(".timeline");
+          if (timeline instanceof HTMLElement) {
+            timeline.scrollTop = timeline.scrollHeight - timeline.clientHeight;
+          }
+          document.querySelectorAll(".agent-activity-group:not([open]) > summary").forEach(
+            (summary) => summary.click(),
+          );
+          const command = [...document.querySelectorAll(".command-activity-card")].find(
+            (details) => details.querySelector(":scope > summary .activity-title.is-running") !== null,
+          );
+          const source = [...document.querySelectorAll(".tool-activity-card")].find(
+            (details) => details.textContent?.includes("diffHighlighter.test.ts"),
+          );
+          const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
+            (element) => element.textContent?.trim() === "semantic.rs",
+          );
+          const diff = file?.closest(".file-change-diff");
+          if (command instanceof HTMLDetailsElement) {
+            for (const details of [command, source, diff]) {
+              if (!(details instanceof HTMLDetailsElement)) {
+                continue;
+              }
+              if (!details.open) {
+                details.querySelector(":scope > summary")?.click();
+              }
+            }
+            await frame();
+            await frame();
+            const timeline = document.querySelector(".timeline");
+            const commandScroll = command.querySelector(".command-card-scroll");
+            const sourceScroll =
+              source instanceof HTMLDetailsElement
+                ? source.querySelector(".command-card-scroll")
+                : commandScroll;
+            const diffScroll =
+              diff instanceof HTMLDetailsElement
+                ? diff.querySelector(".diff-viewport")
+                : commandScroll;
+            if (
+              !(timeline instanceof HTMLElement) ||
+              !(commandScroll instanceof HTMLElement) ||
+              !(sourceScroll instanceof HTMLElement) ||
+              !(diffScroll instanceof HTMLElement)
+            ) {
+              throw new Error("As regiões aninhadas não materializaram seu conteúdo.");
+            }
+            const maximumTimelineScroll = timeline.scrollHeight - timeline.clientHeight;
+            const baseTimelineScroll = Math.round(
+              Math.min(maximumTimelineScroll, Math.max(400, maximumTimelineScroll * 0.6)),
+            );
+            const originalGetComputedStyle = window.getComputedStyle;
+            let styleReadCount = 0;
+            window.getComputedStyle = (...args) => {
+              styleReadCount += 1;
+              return originalGetComputedStyle.apply(window, args);
+            };
+            const run = (region, requestedTop, deltaY) => {
+              timeline.scrollTop = baseTimelineScroll;
+              region.scrollTop = requestedTop;
+              const nestedStart = region.scrollTop;
+              const maximumNestedScroll = Math.max(0, region.scrollHeight - region.clientHeight);
+              const desiredNestedScroll = nestedStart + deltaY;
+              const expectedNestedScroll = Math.min(
+                maximumNestedScroll,
+                Math.max(0, desiredNestedScroll),
+              );
+              const expectedTimelineDelta = desiredNestedScroll - expectedNestedScroll;
+              const wheel = new WheelEvent("wheel", {
+                bubbles: true,
+                cancelable: true,
+                deltaMode: 0,
+                deltaY,
+              });
+              region.dispatchEvent(wheel);
+              return {
+                defaultPrevented: wheel.defaultPrevented,
+                expectedNestedScroll,
+                expectedTimelineDelta,
+                nestedScrollTop: region.scrollTop,
+                timelineDelta: timeline.scrollTop - baseTimelineScroll,
+              };
+            };
+            try {
+              const handoffStartedAt = performance.now();
+              window.__previewNestedScrollMetrics = {
+                command: run(commandScroll, 40, -100),
+                diff: run(diffScroll, 0, -120),
+                handoffDurationMs: performance.now() - handoffStartedAt,
+                source: run(sourceScroll, 0, -80),
+                styleReadCount,
+              };
+            } finally {
+              window.getComputedStyle = originalGetComputedStyle;
+            }
+            return;
+          }
+        }
+        throw new Error("As atividades-alvo do scroll aninhado não foram montadas.");
+      } catch (error) {
+        window.__previewNestedScrollError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      } finally {
+        window.__previewNestedScrollReady = true;
+      }
+    })();
+  })()`;
+}
+
+function nestedScrollFollowingPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      try {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+        );
+        threadButton?.click();
+        let command;
+        for (let index = 0; index < 16; index += 1) {
+          await frame();
+          document.querySelectorAll('button[aria-label="Mostrar trabalho do agente"]').forEach(
+            (button) => button.click(),
+          );
+          const timeline = document.querySelector(".timeline");
+          if (timeline instanceof HTMLElement) {
+            timeline.scrollTop = timeline.scrollHeight - timeline.clientHeight;
+          }
+          document.querySelectorAll(".agent-activity-group:not([open]) > summary").forEach(
+            (summary) => summary.click(),
+          );
+          command = [...document.querySelectorAll(".command-activity-card")].find(
+            (details) => details.querySelector(":scope > summary .activity-title.is-running") !== null,
+          );
+          if (command instanceof HTMLDetailsElement) {
+            break;
+          }
+        }
+        if (!(command instanceof HTMLDetailsElement)) {
+          throw new Error("O comando ativo não foi montado para o teste de acompanhamento.");
+        }
+        if (!command.open) {
+          command.querySelector(":scope > summary")?.click();
+        }
+        await frame();
+        await frame();
+        const timeline = document.querySelector(".timeline");
+        const region = command.querySelector(".command-card-scroll");
+        if (!(timeline instanceof HTMLElement) || !(region instanceof HTMLElement)) {
+          throw new Error("A saída interna do comando ativo está ausente.");
+        }
+        timeline.scrollTop = timeline.scrollHeight - timeline.clientHeight;
+        await frame();
+        await frame();
+        await frame();
+        const maximumNestedScroll = Math.max(0, region.scrollHeight - region.clientHeight);
+        const nestedStart = Math.round(maximumNestedScroll / 2);
+        const deltaY = Math.min(40, Math.max(1, maximumNestedScroll / 4));
+        region.scrollTop = nestedStart;
+        const timelineStart = timeline.scrollTop;
+        const wheel = new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          deltaMode: 0,
+          deltaY,
+        });
+        region.dispatchEvent(wheel);
+        if (!wheel.defaultPrevented) {
+          region.scrollTop = nestedStart + deltaY;
+        }
+        const growth = document.createElement("div");
+        growth.dataset.previewNestedFollowGrowth = "";
+        growth.style.height = "160px";
+        document.querySelector(".timeline-virtual-item:last-child")?.append(growth);
+        for (let index = 0; index < 10; index += 1) {
+          await frame();
+          if (
+            Math.abs(timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop) <= 2 &&
+            Math.abs(timeline.scrollTop - timelineStart - 160) <= 2
+          ) {
+            break;
+          }
+        }
+        window.__previewNestedFollowMetrics = {
+          defaultPrevented: wheel.defaultPrevented,
+          distanceToEnd: timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop,
+          expectedNestedDelta: deltaY,
+          nestedDelta: region.scrollTop - nestedStart,
+          timelineDelta: timeline.scrollTop - timelineStart,
+        };
+      } catch (error) {
+        window.__previewNestedFollowError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      } finally {
+        window.__previewNestedFollowReady = true;
+      }
+    })();
+  })()`;
+}
+
+function timelinePerformanceStressPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      try {
+        window.__timelineStressProgress = { phase: "starting" };
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const waitUntil = async (label, predicate, timeoutMs) => {
+          const deadline = performance.now() + timeoutMs;
+          while (!predicate()) {
+            if (performance.now() > deadline) {
+              throw new Error("Tempo esgotado preparando " + label + ".");
+            }
+            await frame();
+          }
+        };
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Estresse de timeline expandida"),
+        );
+        threadButton?.click();
+        await waitUntil(
+          "o primeiro turno do estresse",
+          () => document.querySelector(".conversation-turn") !== null,
+          3000,
+        );
+        document.querySelector('button[aria-label="Mostrar trabalho do agente"]')?.click();
+        await frame();
+        document.querySelector(".agent-activity-group:not([open]) > summary")?.click();
+        await waitUntil(
+          "a lista virtualizada de atividades",
+          () => document.querySelector(".agent-activity-virtual-list") !== null,
+          3000,
+        );
+        window.__timelineStressProgress = { phase: "activity-list-ready" };
+        const timeline = document.querySelector(".timeline");
+        if (!(timeline instanceof HTMLElement)) {
+          throw new Error("A timeline do cenário de estresse está ausente.");
+        }
+        const claimScrollOwnership = () => {
+          timeline.dispatchEvent(
+            new WheelEvent("wheel", {
+              bubbles: true,
+              cancelable: true,
+              deltaMode: 0,
+              deltaY: -1,
+            }),
+          );
+        };
+        const visited = new Set();
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          claimScrollOwnership();
+          timeline.scrollTop = 0;
+          await new Promise((resolve) => setTimeout(resolve, 180));
+          await frame();
+          if (
+            timeline.scrollTop <= 1 &&
+            document.querySelector(".agent-activity-scroll-placeholder") === null
+          ) {
+            break;
+          }
+        }
+        if (timeline.scrollTop > 1) {
+          throw new Error("A timeline não estabilizou no topo antes da expansão.");
+        }
+        const expansionStarted = performance.now();
+        window.__timelineStressProgress = { phase: "expanding" };
+        let iterations = 0;
+        let passes = 1;
+        while (visited.size < 3 && iterations < 24) {
+          let opened = false;
+          for (const wrapper of document.querySelectorAll(".agent-activity-virtual-item")) {
+            const key = wrapper.getAttribute("data-virtual-activity-key");
+            if (key === null || visited.has(key)) {
+              continue;
+            }
+            const details = wrapper.querySelector("details");
+            if (!(details instanceof HTMLDetailsElement)) {
+              continue;
+            }
+            if (!details.open) {
+              details.querySelector(":scope > summary")?.click();
+            }
+            visited.add(key);
+            opened = true;
+            break;
+          }
+          window.__timelineStressProgress = {
+            iterations,
+            phase: "expanding-visible-item",
+            scrollHeight: timeline.scrollHeight,
+            scrollTop: timeline.scrollTop,
+            visited: visited.size,
+          };
+          await new Promise((resolve) => setTimeout(resolve, opened ? 16 : 100));
+          iterations += 1;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 140));
+        const expansionMs = performance.now() - expansionStarted;
+        window.__timelineStressProgress = {
+          expansionMs,
+          phase: "expansion-complete",
+          visited: visited.size,
+        };
+
+        const frameIntervals = [];
+        const longTasks = [];
+        const observer = PerformanceObserver.supportedEntryTypes?.includes("longtask")
+          ? new PerformanceObserver((list) => {
+              longTasks.push(...list.getEntries().map((entry) => entry.duration));
+            })
+          : null;
+        observer?.observe({ type: "longtask" });
+        const rapidStarted = performance.now();
+        let previousFrame = rapidStarted;
+        let placeholderFrames = 0;
+        await new Promise((resolve) => {
+          const tick = (now) => {
+            frameIntervals.push(now - previousFrame);
+            previousFrame = now;
+            const maximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+            const phase = ((now - rapidStarted) % 700) / 700;
+            timeline.scrollTop = phase <= 0.5
+              ? maximum * phase * 2
+              : maximum * (2 - phase * 2);
+            if (document.querySelector(".agent-activity-scroll-placeholder") !== null) {
+              placeholderFrames += 1;
+            }
+            if (now - rapidStarted >= 1400) {
+              resolve();
+            } else {
+              requestAnimationFrame(tick);
+            }
+          };
+          requestAnimationFrame(tick);
+        });
+        observer?.disconnect();
+        const rapidElapsed = performance.now() - rapidStarted;
+        const sortedFrames = frameIntervals.slice(1).sort((left, right) => left - right);
+        const percentile = (value) =>
+          sortedFrames[Math.min(sortedFrames.length - 1, Math.floor(sortedFrames.length * value))] ?? 0;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        window.__timelineStressProgress = { phase: "rapid-scroll-complete" };
+
+        const lightButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Chat leve de controle"),
+        );
+        lightButton?.click();
+        window.__timelineStressProgress = { phase: "opening-light-thread" };
+        await waitUntil(
+          "o chat leve de controle",
+          () => document.body.textContent?.includes("Chat de controle pronto."),
+          3000,
+        );
+        const reopenStarted = performance.now();
+        const reopenButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Estresse de timeline expandida"),
+        );
+        reopenButton?.click();
+        window.__timelineStressProgress = { phase: "reopening-stress-thread" };
+        await waitUntil(
+          "a reabertura da lista virtualizada",
+          () =>
+            document.querySelector(".agent-activity-group[open]") !== null &&
+            document.querySelector(".agent-activity-virtual-item") !== null,
+          5000,
+        );
+        await frame();
+        await frame();
+        const reopenMs = performance.now() - reopenStarted;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        window.__timelineStressProgress = { phase: "stress-thread-restored", reopenMs };
+
+        const restoredTimeline = document.querySelector(".timeline");
+        if (!(restoredTimeline instanceof HTMLElement)) {
+          throw new Error("A timeline restaurada está ausente.");
+        }
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          restoredTimeline.dispatchEvent(
+            new WheelEvent("wheel", {
+              bubbles: true,
+              cancelable: true,
+              deltaMode: 0,
+              deltaY: -1,
+            }),
+          );
+          restoredTimeline.scrollTop = 0;
+          await new Promise((resolve) => setTimeout(resolve, 180));
+          await frame();
+          await frame();
+          if (
+            restoredTimeline.scrollTop <= 1 &&
+            document.querySelector(".agent-activity-scroll-placeholder") === null
+          ) {
+            break;
+          }
+        }
+        if (restoredTimeline.scrollTop > 1) {
+          throw new Error(
+            "A timeline não liberou o ownership manual no topo (scrollTop=" +
+              restoredTimeline.scrollTop +
+              ").",
+          );
+        }
+        const timelineTop = restoredTimeline.getBoundingClientRect().top;
+        const topWrappers = [...document.querySelectorAll(".agent-activity-virtual-item")];
+        const sourceAtTop = topWrappers.find(
+          (element) => element.querySelector("details[open] > summary") !== null,
+        );
+        const sourceBottom = sourceAtTop?.getBoundingClientRect().bottom;
+        const targetAtTop =
+          sourceBottom === undefined
+            ? undefined
+            : topWrappers.find((element) => {
+                const distance = element.getBoundingClientRect().top - sourceBottom;
+                return distance >= 160 && distance <= restoredTimeline.clientHeight - 20;
+              });
+        const sourceKey = sourceAtTop?.getAttribute("data-virtual-activity-key") ?? null;
+        const targetKey = targetAtTop?.getAttribute("data-virtual-activity-key") ?? null;
+        if (
+          !(sourceAtTop instanceof HTMLElement) ||
+          !(targetAtTop instanceof HTMLElement) ||
+          sourceBottom === undefined ||
+          sourceKey === null ||
+          targetKey === null
+        ) {
+          throw new Error(
+            "As chaves da âncora não foram materializadas no topo: " +
+              JSON.stringify({
+                sourceKey,
+                targetKey,
+                wrappers: topWrappers.map((element) => ({
+                  key: element.getAttribute("data-virtual-activity-key"),
+                  open: element.querySelector("details[open]") !== null,
+                  top: element.getBoundingClientRect().top,
+                })),
+              }),
+          );
+        }
+        let visualDriftPx = null;
+        {
+          restoredTimeline.scrollTop = Math.min(
+            restoredTimeline.scrollHeight - restoredTimeline.clientHeight,
+            restoredTimeline.scrollTop + sourceBottom - timelineTop + 60,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 180));
+          await frame();
+          await frame();
+          const positionedWrappers = [...document.querySelectorAll(
+            ".agent-activity-virtual-item",
+          )];
+          const source = positionedWrappers.find(
+            (element) => element.getAttribute("data-virtual-activity-key") === sourceKey,
+          );
+          const target = positionedWrappers.find(
+            (element) => element.getAttribute("data-virtual-activity-key") === targetKey,
+          );
+          if (!(source instanceof HTMLElement) || !(target instanceof HTMLElement)) {
+            throw new Error("A virtualização substituiu a âncora posicionada antes da medição.");
+          }
+          const targetTop = target.getBoundingClientRect().top;
+          source.querySelector("details[open] > summary")?.click();
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          await frame();
+          await frame();
+          const currentTarget = [...document.querySelectorAll(
+            ".agent-activity-virtual-item",
+          )].find((element) => element.getAttribute("data-virtual-activity-key") === targetKey);
+          if (!(currentTarget instanceof HTMLElement)) {
+            throw new Error("A âncora-alvo deixou de ser materializada após o colapso.");
+          }
+          visualDriftPx = currentTarget.getBoundingClientRect().top - targetTop;
+        }
+
+        window.__timelinePerformanceStressMetrics = {
+          visitedItems: visited.size,
+          expansionIterations: iterations,
+          expansionMs,
+          expansionPasses: passes,
+          rapidFrames: sortedFrames.length,
+          rapidElapsedMs: rapidElapsed,
+          rapidAverageFps: sortedFrames.length / (rapidElapsed / 1000),
+          rapidMedianFrameMs: percentile(0.5),
+          rapidP95FrameMs: percentile(0.95),
+          rapidP99FrameMs: percentile(0.99),
+          rapidMaximumFrameMs: sortedFrames.at(-1) ?? 0,
+          rapidFramesOver20Ms: sortedFrames.filter((value) => value > 20).length,
+          rapidFramesOver34Ms: sortedFrames.filter((value) => value > 34).length,
+          rapidLongTasks: longTasks.length,
+          rapidLongTaskTotalMs: longTasks.reduce((total, value) => total + value, 0),
+          placeholderFrames,
+          reopenMs,
+          visualDriftPx,
+          domNodes: document.getElementsByTagName("*").length,
+          mountedActivityItems: document.querySelectorAll(".agent-activity-virtual-item").length,
+          mountedSourceRows: document.querySelectorAll(".tool-source-line").length,
+          mountedDiffRows: document.querySelectorAll(".diff-virtual-row").length,
+          settledPlaceholders: document.querySelectorAll(".agent-activity-scroll-placeholder").length,
+          horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+        };
+      } catch (error) {
+        window.__timelinePerformanceStressError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      } finally {
+        window.__timelinePerformanceStressReady = true;
+      }
+    })();
+  })()`;
+}
+
+function timelinePerformanceStressAuditExpression() {
+  return `(() => {
+    if (window.__timelinePerformanceStressError !== undefined) {
+      throw new Error(window.__timelinePerformanceStressError);
+    }
+    if (window.__timelinePerformanceStressMetrics === undefined) {
+      throw new Error("As métricas de estresse da timeline estão ausentes.");
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      ...window.__timelinePerformanceStressMetrics,
+    };
+  })()`;
 }
 
 function composerFastModeVisualAuditExpression() {
@@ -883,15 +1866,31 @@ function userMessageNavigationVisualAuditExpression() {
 function manualScrollOwnershipVisualAuditExpression() {
   return `(() => {
     const timeline = document.querySelector(".timeline");
-    const target = window.__previewManualScrollTarget;
-    if (!(timeline instanceof HTMLElement) || typeof target !== "number") {
+    const state = window.__previewManualScrollState;
+    if (!(timeline instanceof HTMLElement) || state === undefined) {
       throw new Error("Cenário de ownership do scroll não foi inicializado.");
     }
+    const first = document.querySelector(
+      '.timeline-virtual-item[data-virtual-turn-id="' + state.firstId + '"]',
+    );
+    const anchor = document.querySelector(
+      '.timeline-virtual-item[data-virtual-turn-id="' + state.anchorId + '"]',
+    );
+    if (!(first instanceof HTMLElement) || !(anchor instanceof HTMLElement)) {
+      throw new Error("Os itens de referência do scroll manual foram desmontados.");
+    }
+    const finalAnchorGap =
+      anchor.getBoundingClientRect().top - timeline.getBoundingClientRect().top;
+    const heightDelta = first.getBoundingClientRect().height - state.beforeItemHeight;
+    const scrollCompensation = timeline.scrollTop - state.beforeScrollTop;
     return {
       viewport: { width: innerWidth, height: innerHeight },
-      targetScrollTop: target,
+      beforeScrollTop: state.beforeScrollTop,
       finalScrollTop: timeline.scrollTop,
-      drift: timeline.scrollTop - target,
+      heightDelta,
+      scrollCompensation,
+      compensationError: scrollCompensation - heightDelta,
+      visualDrift: finalAnchorGap - state.beforeAnchorGap,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
@@ -899,9 +1898,29 @@ function manualScrollOwnershipVisualAuditExpression() {
 
 function nestedScrollHandoffVisualAuditExpression() {
   return `(() => {
+    if (window.__previewNestedScrollError !== undefined) {
+      throw new Error(window.__previewNestedScrollError);
+    }
     const metrics = window.__previewNestedScrollMetrics;
     if (metrics === undefined) {
       throw new Error("Cenário de transferência do scroll aninhado não foi inicializado.");
+    }
+    return {
+      ...metrics,
+      viewport: { width: innerWidth, height: innerHeight },
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function nestedScrollFollowingVisualAuditExpression() {
+  return `(() => {
+    if (window.__previewNestedFollowError !== undefined) {
+      throw new Error(window.__previewNestedFollowError);
+    }
+    const metrics = window.__previewNestedFollowMetrics;
+    if (metrics === undefined) {
+      throw new Error("Cenário de acompanhamento após scroll interno não foi inicializado.");
     }
     return {
       ...metrics,
@@ -1078,6 +2097,15 @@ function syntaxHighlightedDiffVisualAuditExpression() {
 
 function syntaxHighlightedCreatedFileVisualAuditExpression() {
   return `(() => {
+    if (window.__previewCreatedFileError !== undefined) {
+      throw new Error(window.__previewCreatedFileError);
+    }
+    if (window.__previewCreatedFileMetrics !== undefined) {
+      return {
+        viewport: { width: innerWidth, height: innerHeight },
+        ...window.__previewCreatedFileMetrics,
+      };
+    }
     const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
       (element) => element.textContent?.trim() === "semantic.rs",
     );
@@ -1117,6 +2145,12 @@ function syntaxHighlightedCreatedFileVisualAuditExpression() {
 
 function highlightedToolOutputVisualAuditExpression() {
   return `(() => {
+    if (window.__previewHighlightedToolMetrics !== undefined) {
+      return {
+        viewport: { width: innerWidth, height: innerHeight },
+        ...window.__previewHighlightedToolMetrics,
+      };
+    }
     const source = document.querySelector(".tool-source-output");
     const search = document.querySelector(".tool-search-output");
     if (!(source instanceof HTMLElement) || !(search instanceof HTMLElement)) {
@@ -1297,6 +2331,12 @@ function projectColorEditorVisualAuditExpression() {
     };
     const preview = document.querySelector(".project-icon-preview");
     const hexInput = document.querySelector(".hex-text-input");
+    const badge = document.querySelector(".color-hex-badge");
+    const hueBar = document.querySelector(".hue-bar");
+    const hueCursor = document.querySelector(".hue-cursor");
+    const hsvBox = document.querySelector(".hsv-box");
+    const hueBounds = hueBar?.getBoundingClientRect();
+    const cursorBounds = hueCursor?.getBoundingClientRect();
     return {
       viewport: { width: innerWidth, height: innerHeight },
       container: rectangle(".project-edit-container"),
@@ -1309,6 +2349,12 @@ function projectColorEditorVisualAuditExpression() {
       dialogCount: document.querySelectorAll('.project-edit-container[role="dialog"]').length,
       previewColor: preview instanceof HTMLElement ? getComputedStyle(preview).color : null,
       hexValue: hexInput instanceof HTMLInputElement ? hexInput.value : null,
+      badgeText: badge?.textContent?.trim() ?? null,
+      boxColor: hsvBox instanceof HTMLElement ? getComputedStyle(hsvBox).backgroundColor : null,
+      hueCursorRightGap:
+        hueBounds !== undefined && cursorBounds !== undefined
+          ? hueBounds.right - cursorBounds.right
+          : null,
     };
   })()`;
 }
@@ -1887,7 +2933,7 @@ function validateUserMessageNavigationMetrics(metrics, viewport) {
   );
   assert(
     Math.abs(metrics.targetGap - metrics.expectedTargetGap) <= tolerance,
-    "o marcador não navegou para a posição atual possível da mensagem",
+    `o marcador não navegou para a posição atual possível da mensagem: ${JSON.stringify(metrics)}`,
   );
   assert(
     metrics.targetOffsetWithinTurn > 500,
@@ -1905,8 +2951,14 @@ function validateManualScrollOwnershipMetrics(metrics, viewport) {
   );
   assert(metrics.horizontalOverflow <= tolerance, "o scroll manual criou overflow horizontal");
   assert(
-    Math.abs(metrics.drift) <= tolerance,
-    "uma medição virtual disputou o scroll manual e moveu o viewport",
+    Math.abs(metrics.visualDrift) <= tolerance,
+    "uma medição virtual deslocou o conteúdo que o usuário estava lendo",
+  );
+  assert(
+    Math.abs(metrics.compensationError) <= tolerance,
+    `a correção de âncora não compensou exatamente a mudança de altura acima do viewport ` +
+      `(altura ${metrics.heightDelta.toFixed(3)} px, scroll ` +
+      `${metrics.scrollCompensation.toFixed(3)} px, erro ${metrics.compensationError.toFixed(3)} px)`,
   );
 }
 
@@ -1937,6 +2989,31 @@ function validateNestedScrollHandoffMetrics(metrics, viewport) {
       `${label} não transferiu exatamente o delta excedente para a timeline`,
     );
   }
+}
+
+function validateNestedScrollFollowingMetrics(metrics, viewport) {
+  const tolerance = 2;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no acompanhamento de scroll interno em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o scroll interno criou overflow horizontal");
+  assert(
+    metrics.defaultPrevented === false,
+    "uma região interna impediu wheel que cabia integralmente em sua própria faixa",
+  );
+  assert(
+    Math.abs(metrics.nestedDelta - metrics.expectedNestedDelta) <= tolerance,
+    "a região interna não consumiu integralmente seu próprio wheel",
+  );
+  assert(
+    Math.abs(metrics.timelineDelta - 160) <= tolerance,
+    `a timeline deslocou ${metrics.timelineDelta}px em vez de 160px após o crescimento (distância final ${metrics.distanceToEnd}px)`,
+  );
+  assert(
+    Math.abs(metrics.distanceToEnd) <= tolerance,
+    "a timeline ficou destacada do fim após crescimento de conteúdo",
+  );
 }
 
 function validateLiveCommandOutputMetrics(metrics, viewport) {
@@ -2148,8 +3225,18 @@ function validateProjectColorEditorMetrics(metrics, viewport) {
   assert(metrics.colorPanel.width >= 200, "o painel de cores ficou estreito");
   assert(metrics.picker.width <= metrics.colorPanel.width, "o seletor ultrapassa o painel de cores");
   assert(metrics.hueBar.height >= 14, "a faixa de matiz ficou baixa demais");
-  assert(metrics.previewColor === "rgb(74, 222, 128)", "a prévia não reflete a cor do projeto");
-  assert(metrics.hexValue === "4ADE80", "o campo HEX não preserva a cor do projeto");
+  assert(/^[0-9A-F]{6}$/u.test(metrics.hexValue ?? ""), "o campo HEX saiu de #RRGGBB");
+  const expectedPreviewColor = `rgb(${Number.parseInt(metrics.hexValue.slice(0, 2), 16)}, ${Number.parseInt(metrics.hexValue.slice(2, 4), 16)}, ${Number.parseInt(metrics.hexValue.slice(4, 6), 16)})`;
+  assert(
+    metrics.previewColor === expectedPreviewColor,
+    `ícone (${metrics.previewColor}) e campo HEX (${expectedPreviewColor}) divergiram`,
+  );
+  assert(metrics.badgeText === `#${metrics.hexValue}`, "badge e campo HEX divergiram");
+  assert(/^rgb\(255, 0, \d+\)$/u.test(metrics.boxColor ?? ""), "o quadrado HSV não chegou à matiz vermelha final");
+  assert(
+    metrics.hueCursorRightGap !== null && Math.abs(metrics.hueCursorRightGap) <= tolerance,
+    "o cursor de matiz não permaneceu no fim da faixa",
+  );
 }
 
 function validateSettingsMetrics(metrics, viewport) {
@@ -2380,6 +3467,90 @@ function validateAutomationEditorMetrics(metrics, viewport) {
   assert(metrics.namedFields >= 6, "os campos essenciais do editor não foram renderizados");
   assert(metrics.footerButtons === 2, "as ações de cancelar e salvar não foram renderizadas");
   assert(metrics.switchAriaChecked === "true", "o switch inicial não expõe aria-checked");
+}
+
+function validateBrowserPanelMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "o navegador criou overflow horizontal global");
+  assert(metrics.panel.top >= 34 - tolerance, "o navegador invadiu o chrome da janela");
+  assert(metrics.panel.right <= viewport.width + tolerance, "o navegador ultrapassou a borda direita");
+  assert(metrics.panel.bottom <= viewport.height + tolerance, "o navegador ultrapassou a altura útil");
+  assert(metrics.panel.width >= 420, "o navegador ficou estreito demais");
+  assert(
+    Math.abs(metrics.surface.right - metrics.panel.right) <= tolerance &&
+      metrics.surface.left >= metrics.panel.left &&
+      metrics.surface.left - metrics.panel.left <= tolerance,
+    `a superfície nativa (${metrics.surface.left}–${metrics.surface.right}) não acompanha o painel (${metrics.panel.left}–${metrics.panel.right})`,
+  );
+  assert(metrics.surface.height >= 180, "a superfície nativa ficou baixa demais");
+  assert(metrics.tabs.bottom <= metrics.toolbar.top + tolerance, "as abas sobrepõem a barra de endereço");
+  assert(metrics.toolbar.bottom <= metrics.surface.top + tolerance, "a barra sobrepõe o conteúdo web");
+  assert(metrics.address.width >= 180, "a barra de endereço ficou estreita demais");
+  assert(metrics.tabCount >= 1, "o navegador não criou a aba inicial");
+  assert(metrics.selectedTabs === 1, "o navegador não possui uma única aba ativa");
+  assert(metrics.navigationButtons === 4, "faltam controles de navegação na barra");
+  assert(metrics.addressInputs === 1, "a barra de endereço não possui um único campo");
+  assert(metrics.previewPages === 1, "a prévia não expõe a superfície substituta do webview nativo");
+}
+
+function validateBrowserPanelLifecycleMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no ciclo do navegador em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.panelCount === 0, "o painel do navegador permaneceu montado após fechar");
+  assert(metrics.failureCount === 0, "fechar o navegador produziu uma falha de renderização");
+  assert(metrics.chatVisible === true, "o chat não voltou após fechar o navegador");
+  assert(metrics.horizontalOverflow <= tolerance, "fechar o navegador criou overflow horizontal");
+}
+
+function validateImageViewGroupMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no agrupamento de imagens em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o agrupamento de imagens criou overflow");
+  assert(metrics.label === "Visualizou 2 imagens", "o plural do agrupamento está incorreto");
+  assert(metrics.open === true, "o agrupamento de imagens não permaneceu expandido");
+  assert(metrics.imageCount === 2, "o agrupamento não renderizou as duas imagens");
+  assert(metrics.previewButtons === 2, "as miniaturas não são duas ações clicáveis");
+  assert(metrics.uniqueSources === 2, "as miniaturas foram deduplicadas incorretamente");
+  assert(metrics.rawDataUrlText === false, "a data URL bruta ainda aparece como texto");
+}
+
+function validateTimelinePerformanceStressMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no estresse da timeline em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.visitedItems === 3, "o estresse não abriu uma atividade de cada categoria");
+  assert(metrics.expansionIterations < 1200, "a expansão virtualizada não convergiu");
+  assert(metrics.expansionMs <= 20_000, "a expansão virtualizada ultrapassou 20 s");
+  assert(metrics.rapidFrames >= 60, "o teste rápido coletou poucos frames");
+  assert(metrics.placeholderFrames > 0, "a rolagem rápida não ativou a materialização adaptativa");
+  assert(metrics.rapidP95FrameMs <= 20, "o P95 do scroll rápido ultrapassou 20 ms");
+  assert(metrics.rapidP99FrameMs <= 34, "o P99 do scroll rápido ultrapassou 34 ms");
+  assert(metrics.rapidMaximumFrameMs <= 50, "o scroll rápido produziu um frame acima de 50 ms");
+  assert(
+    metrics.rapidFramesOver34Ms <= 1,
+    `o scroll rápido teve ${metrics.rapidFramesOver34Ms} frames acima de 34 ms (P95 ${metrics.rapidP95FrameMs.toFixed(2)} ms, P99 ${metrics.rapidP99FrameMs.toFixed(2)} ms, máximo ${metrics.rapidMaximumFrameMs.toFixed(2)} ms)`,
+  );
+  assert(metrics.rapidLongTasks === 0, "o scroll rápido produziu long tasks");
+  assert(metrics.reopenMs <= 1_200, "a reabertura do chat expandido ultrapassou 1,2 s");
+  assert(metrics.visualDriftPx !== null, "o cenário não encontrou uma âncora interna mensurável");
+  assert(Math.abs(metrics.visualDriftPx) <= tolerance, "a âncora interna mudou de posição visual");
+  assert(metrics.domNodes <= 7_000, "a timeline virtualizada excedeu 7 mil nós DOM");
+  assert(
+    metrics.mountedActivityItems <= 80,
+    `${metrics.mountedActivityItems} atividades permaneceram montadas`,
+  );
+  assert(metrics.mountedSourceRows <= 800, "linhas demais de ferramentas permaneceram montadas");
+  assert(metrics.mountedDiffRows <= 500, "linhas demais de diff permaneceram montadas");
+  assert(metrics.settledPlaceholders === 0, "placeholders permaneceram após o scroll estabilizar");
+  assert(metrics.horizontalOverflow <= tolerance, "o estresse criou overflow horizontal");
 }
 
 function validateChromeMetrics(metrics, viewport) {

@@ -8,7 +8,7 @@ O único backend é `NativeEngine`:
 - provider: `ChatGPT Codex`;
 - autenticação: `ChatGPT OAuth`;
 - armazenamento: `sqlite`;
-- schema IPC: versão `15`.
+- schema IPC: versão `18`.
 
 Não existe variável de ambiente para trocar backend nem execução de binário
 genérico. O único sidecar é o `rg.exe` 15.2.0 fixado por manifesto e hash para a
@@ -22,13 +22,14 @@ integração.
 | --- | --- |
 | lifecycle | `engine_start` |
 | diagnóstico | `engine_runtime_diagnostic_report` |
-| conta | `engine_account_read`, `engine_account_profile_read`, `engine_account_rate_limits_read`, `engine_login_chatgpt`, `engine_login_cancel`, `engine_logout` |
+| conta | `engine_account_read`, `engine_account_profile_read`, `engine_account_rate_limits_read`, `engine_account_usage_resets_read`, `engine_account_usage_reset_redeem`, `engine_account_auto_top_up_read`, `engine_account_auto_top_up_enable`, `engine_account_auto_top_up_update`, `engine_account_auto_top_up_disable`, `engine_login_chatgpt`, `engine_login_cancel`, `engine_logout` |
 | tarefas | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive`, `engine_thread_unarchive`, `engine_thread_delete`, `engine_thread_fork` |
 | saídas | `engine_output_read` |
 | turnos | `engine_turn_start`, `engine_turn_steer`, `engine_turn_interrupt` |
 | automações | `engine_automation_list`, `engine_automation_create`, `engine_automation_update`, `engine_automation_delete`, `engine_automation_run_now`, `engine_automation_run_mark_reviewed` |
 | preferências | `application_preferences_read`, `application_preferences_update` |
 | integração desktop | `application_workspace_open` |
+| navegador interno | `browser_tab_create`, `browser_tab_navigate`, `browser_tab_back`, `browser_tab_forward`, `browser_tab_reload`, `browser_tab_close`, `browser_surface_sync` |
 | configuração | `engine_config_update`, `engine_model_list`, `engine_chat_model_list` |
 | aprovação | `engine_server_request_respond` |
 | anexos | `attachment_inspect`, `attachment_read_image`, `attachment_save_pasted_image` |
@@ -43,12 +44,16 @@ arbitrários diretamente.
 
 ## Eventos
 
-Quatro canais Tauri possuem payloads fechados:
+Seis canais Tauri possuem payloads fechados:
 
 - `engine://runtime-status`: `starting`, `ready`, `failed` ou `stopped`;
 - `engine://runtime-diagnostic`: falhas operacionais não ocultáveis;
 - `engine://notification`: autenticação, tarefas, turnos, itens e deltas;
 - `engine://server-request`: somente `approval.command`.
+- `browser://state`: snapshot estrito da aba após navegação, carregamento ou
+  mudança de título;
+- `browser://new-window`: URL HTTP(S) validada que deve virar uma nova aba
+  controlada, nunca uma janela remota autônoma.
 
 Notificações suportadas:
 
@@ -63,6 +68,16 @@ Notificações suportadas:
 Qualquer método diferente falha na fronteira TypeScript e gera diagnóstico
 visível.
 
+O navegador usa child webviews nativos, limitados a dezesseis abas e vinculados
+à conversa proprietária. URLs aceitam somente `http`, `https` ou `about:blank`,
+sem credenciais embutidas; bounds devem ser finitos e respeitar a superfície
+mínima/máxima. A capability Tauri autoriza somente o webview local `main`.
+Webviews remotos não recebem comandos IPC, permissões de arquivo ou opener. A
+sincronização de bounds oculta todas as abas inativas antes de mostrar a aba
+selecionada. Os sete comandos são assíncronos: `add_child`, navegação, bounds,
+visibilidade e fechamento são despachados fora do handler principal, e eventos
+de página/título são emitidos somente depois que o callback WebView2 retorna.
+
 A versão IPC 15 adiciona saída transitória de comandos ao
 `item.streamDeltas`. Cada delta identifica `stdout` ou `stderr` e carrega uma
 operação fechada: `append`, `backspace`, `clearCurrentLine` ou `truncated`.
@@ -75,6 +90,19 @@ explicitamente `sourceFile { path }`, `searchResults`, `fileList` ou `plainText`
 a UI nunca extrai path da descrição nem tenta adivinhar linguagem pelo conteúdo.
 Dados internos anteriores recebem `plainText` durante a desserialização e voltam
 ao frontend com o campo explícito.
+
+A versão IPC 17 adiciona estatísticas explícitas de diff, o perfil analítico da
+conta, preço do plano, créditos de redefinição e configuração de recarga
+automática. Todos os campos atravessam decoders fechados, com limites e nulidade
+declarados; indisponibilidade parcial de estatísticas permanece um estado do
+contrato, não um payload alternativo inferido pela interface.
+
+A versão IPC 18 adiciona a apresentação `image` para resultados de ferramenta.
+O payload continua armazenado como recurso paginado, mas a interface valida o
+envelope `{ image_url }` e renderiza uma prévia segura em vez de expor a data URL
+como texto. Registros anteriores de `view_image` com `plainText` recebem a mesma
+apresentação por uma migração determinística baseada no nome fechado da
+ferramenta, nunca por heurística sobre a descrição ou o conteúdo.
 
 A sincronização Rust↔TypeScript é travada por fixtures golden em
 `src/contracts/fixtures/`: `cargo test` falha se o contrato Rust mudar sem
@@ -321,6 +349,15 @@ persistido; política, recuperação e atomicidade pertencem integralmente ao Ru
 | `apply_patch` | não | sim | sim |
 | `exec_command` | não | aprovação | sem aprovação |
 | `poll_command` | sim | sim | sim |
+
+As definições são construídas uma vez em `OnceLock` e codificadas por perfil,
+sem remontar ou clonar o catálogo a cada rodada. O perfil somente leitura não
+anuncia `edit_file`, `write_file`, `apply_patch` nem `exec_command`, capacidades
+que seriam rejeitadas de qualquer forma. Chamadas puras idênticas dentro do
+mesmo trecho consecutivo de leitura possuem uma líder canônica: a execução, a
+saída persistida e o payload volumoso ocorrem uma vez; duplicatas recebem apenas
+uma referência curta ao `call_id` líder. Qualquer comando ou mutação encerra o
+domínio de deduplicação, e operações com efeito nunca são coalescidas.
 
 Todos os paths de ferramenta são relativos ao workspace. Escritas são atômicas,
 arquivos são UTF-8 e comandos são não interativos. O engine não possui uma

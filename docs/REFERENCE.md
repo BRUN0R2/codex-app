@@ -295,6 +295,14 @@ envio e responderam `OK.`. O desktop próprio registrou `8,5k / 258k` tokens
 (3%) e o oficial indicou 8%; a diferença é esperada porque cada aplicação monta
 seu próprio contexto e conjunto de capacidades.
 
+No bundle oficial de 23 de agosto, chamadas consecutivas de visualização são
+projetadas como uma única atividade com contador e lista ordenada de imagens.
+O navegador conserva abas por conversa, reutiliza hosts webview, mantém
+voltar/avançar/recarregar/endereço e restaura o estado visual ao retornar à
+tarefa. Foram portadas essas fronteiras sem copiar implementação: o aplicativo
+local usa contratos próprios, child webviews Tauri, schema persistido fechado e
+isolamento de capabilities para conteúdo remoto.
+
 ## Cobertura funcional
 
 A comparação do aplicativo próprio com o Codex CLI `0.146.0`, o protocolo
@@ -313,8 +321,9 @@ produto. O estado atual é:
 | Fork, arquivamento, desarquivamento e exclusão de tarefa | implementada |
 | Markdown sanitizado, scroll medido e janela de contexto | implementada |
 | Automações recorrentes, execução manual, pausa, histórico e fila de revisão | implementada |
+| Navegador interno nativo, abas por tarefa, histórico e painel responsivo | implementada |
 | Worktrees e fluxo Git completo de diff, revisão e commit | não implementada |
-| Terminal e navegador integrados, plugins, skills e MCP | não implementada |
+| Terminal integrado, plugins, skills e MCP | não implementada |
 
 O aplicativo executa o fluxo essencial moderno de um agente Codex para PC sem
 depender da CLI. As superfícies ainda ausentes não são representadas por botões

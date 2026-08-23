@@ -4,6 +4,7 @@
 )]
 
 mod attachments;
+mod browser;
 mod command_validation;
 mod commands;
 mod desktop_integration;
@@ -157,6 +158,7 @@ pub fn run() {
             }
         })
         .manage(EngineManager::default())
+        .manage(browser::BrowserManager::default())
         .setup(|app| {
             let preferences = ApplicationPreferencesState::load(app.handle())?;
             if !app.manage(preferences) {
@@ -177,6 +179,13 @@ pub fn run() {
             attachments::attachment_inspect,
             attachments::attachment_read_image,
             attachments::attachment_save_pasted_image,
+            browser::browser_tab_create,
+            browser::browser_tab_navigate,
+            browser::browser_tab_back,
+            browser::browser_tab_forward,
+            browser::browser_tab_reload,
+            browser::browser_tab_close,
+            browser::browser_surface_sync,
             desktop_integration::preferences::application_preferences_read,
             desktop_integration::preferences::application_preferences_update,
             commands::application_workspace_open,

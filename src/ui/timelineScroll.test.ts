@@ -3,15 +3,16 @@ import { describe, expect, it } from "vitest";
 import {
   calculateTimelineScrollbar,
   findTimelineAnchorIndex,
-  hasRecentTimelineUserScrollIntent,
   isTimelineNearEnd,
   normalizeTimelineWheelDelta,
   resolveNestedTimelineWheelTransfer,
+  resolveTimelineAnchorCorrection,
   resolveTimelineFollowing,
   resolveTimelineMessageOffset,
   resolveTimelineRestorationTop,
   shouldPreserveTimelineAnchor,
   shouldSynchronizeTimelineToEnd,
+  TimelineProgrammaticScrollTracker,
 } from "./timelineScroll";
 
 describe("timeline scroll metrics", () => {
@@ -60,54 +61,71 @@ describe("timeline scroll metrics", () => {
     ).toBe(false);
   });
 
-  it("recognizes only recent user scroll input", () => {
-    expect(hasRecentTimelineUserScrollIntent(1_000, 1_500)).toBe(true);
-    expect(hasRecentTimelineUserScrollIntent(1_000, 1_601)).toBe(false);
-    expect(hasRecentTimelineUserScrollIntent(Number.NEGATIVE_INFINITY, 1_000)).toBe(false);
-  });
-
-  it("never lets a layout frame fight recent user scroll intent", () => {
+  it("synchronizes layout changes only while following the latest content", () => {
     expect(
       shouldSynchronizeTimelineToEnd({
         followingLatest: true,
         layoutRequested: true,
-        recentUserIntent: true,
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       shouldSynchronizeTimelineToEnd({
-        followingLatest: true,
+        followingLatest: false,
         layoutRequested: true,
-        recentUserIntent: false,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
-  it("never applies anchor correction while manual scroll owns the viewport", () => {
+  it("preserves the visual anchor during manual scroll but not during navigation", () => {
     expect(
       shouldPreserveTimelineAnchor({
         anchorDelta: 240,
         followingLatest: false,
-        recentUserIntent: true,
-        scrollInteractionActive: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldPreserveTimelineAnchor({
-        anchorDelta: 240,
-        followingLatest: false,
-        recentUserIntent: false,
-        scrollInteractionActive: true,
-      }),
-    ).toBe(false);
-    expect(
-      shouldPreserveTimelineAnchor({
-        anchorDelta: 240,
-        followingLatest: false,
-        recentUserIntent: false,
-        scrollInteractionActive: false,
+        programmaticNavigationActive: false,
       }),
     ).toBe(true);
+    expect(
+      shouldPreserveTimelineAnchor({
+        anchorDelta: 240,
+        followingLatest: false,
+        programmaticNavigationActive: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldPreserveTimelineAnchor({
+        anchorDelta: 240,
+        followingLatest: true,
+        programmaticNavigationActive: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("adds layout compensation to the user's latest position instead of stale input", () => {
+    expect(
+      resolveTimelineAnchorCorrection({
+        currentScrollTop: 180,
+        nextAnchorOffset: 720,
+        previousAnchorOffset: 400,
+      }),
+    ).toBe(500);
+  });
+
+  it("classifies programmatic scroll by explicit target rather than elapsed time", () => {
+    const tracker = new TimelineProgrammaticScrollTracker();
+
+    tracker.begin("instant", 320);
+    expect(tracker.consume(320)).toBe(true);
+    expect(tracker.consume(280)).toBe(false);
+
+    tracker.begin("smooth", 900);
+    expect(tracker.smoothActive()).toBe(true);
+    expect(tracker.consume(540)).toBe(true);
+    expect(tracker.consume(900)).toBe(true);
+    expect(tracker.smoothActive()).toBe(false);
+
+    tracker.begin("smooth", 1_200);
+    tracker.cancel();
+    expect(tracker.consume(1_000)).toBe(false);
   });
 
   it("normalizes pixel, line, and page wheel deltas", () => {

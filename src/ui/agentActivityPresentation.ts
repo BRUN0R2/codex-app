@@ -5,6 +5,8 @@ export type AgentActivityItem = Extract<
   { readonly type: "commandExecution" | "fileChange" | "toolExecution" }
 >;
 
+export type ImageViewItem = Extract<VisibleThreadItem, { readonly type: "toolExecution" }>;
+
 export type AgentActivityKind =
   | "calledTools"
   | "fileChanges"
@@ -18,6 +20,11 @@ export type AgentActivityRenderUnit =
       readonly kind: "activityGroup";
       readonly key: string;
       readonly items: readonly AgentActivityItem[];
+    }
+  | {
+      readonly kind: "imageView";
+      readonly key: string;
+      readonly items: readonly ImageViewItem[];
     }
   | {
       readonly kind: "item";
@@ -79,6 +86,7 @@ export function splitAgentActivityUnits(
 ): readonly AgentActivityRenderUnit[] {
   const units: AgentActivityRenderUnit[] = [];
   let activityItems: AgentActivityItem[] = [];
+  let imageItems: ImageViewItem[] = [];
 
   const flushActivity = () => {
     if (activityItems.length === 0) {
@@ -93,18 +101,38 @@ export function splitAgentActivityUnits(
     activityItems = [];
   };
 
+  const flushImages = () => {
+    if (imageItems.length === 0) {
+      return;
+    }
+    units.push({
+      kind: "imageView",
+      key: `image-view:${imageItems[0]?.id ?? "start"}`,
+      items: imageItems,
+    });
+    imageItems = [];
+  };
+
   for (const item of items) {
     if (item.type === "reasoning") {
       continue;
     }
+    if (isImageViewItem(item)) {
+      flushActivity();
+      imageItems.push(item);
+      continue;
+    }
     if (isGroupableActivityItem(item)) {
+      flushImages();
       activityItems.push(item);
       continue;
     }
     flushActivity();
+    flushImages();
     units.push({ kind: "item", key: item.id, item });
   }
   flushActivity();
+  flushImages();
   return units;
 }
 
@@ -278,6 +306,9 @@ function sameAgentActivityRenderUnit(
   if (left.kind === "item" && right.kind === "item") {
     return left.item === right.item;
   }
+  if (left.kind === "imageView" && right.kind === "imageView") {
+    return sameReferences(left.items, right.items);
+  }
   return (
     left.kind === "activityGroup" &&
     right.kind === "activityGroup" &&
@@ -293,6 +324,10 @@ function isGroupableActivityItem(item: VisibleThreadItem): item is AgentActivity
   return (
     item.type === "commandExecution" || item.type === "fileChange" || item.type === "toolExecution"
   );
+}
+
+function isImageViewItem(item: VisibleThreadItem): item is ImageViewItem {
+  return item.type === "toolExecution" && item.name.toLowerCase() === "view_image";
 }
 
 function activeFileChangeLabel(

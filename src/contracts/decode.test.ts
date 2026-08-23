@@ -9,6 +9,8 @@ import {
   decodeAutomationListResponse,
   decodeAutomationRun,
   decodeAutoTopUpSettingsSnapshot,
+  decodeBrowserNewWindowNotification,
+  decodeBrowserTabSnapshot,
   decodeChatModelListResponse,
   decodeEngineNotification,
   decodeEngineStartResponse,
@@ -69,6 +71,35 @@ function configFixture(
 }
 
 describe("decodificação dos contratos nativos", () => {
+  it("mantém os eventos do navegador fechados e rejeita URLs privilegiadas", () => {
+    const snapshot = {
+      browserTabId: "browser-tab-1",
+      conversationId: "thread-1",
+      url: "https://example.com/path",
+      title: "Example",
+      canGoBack: true,
+      canGoForward: false,
+      isLoading: false,
+    };
+
+    expect(decodeBrowserTabSnapshot(snapshot)).toEqual(snapshot);
+    expect(
+      decodeBrowserNewWindowNotification({
+        browserTabId: snapshot.browserTabId,
+        conversationId: snapshot.conversationId,
+        url: "about:blank",
+      }),
+    ).toEqual({
+      browserTabId: snapshot.browserTabId,
+      conversationId: snapshot.conversationId,
+      url: "about:blank",
+    });
+    expect(() => decodeBrowserTabSnapshot({ ...snapshot, url: "file:///C:/secret.txt" })).toThrow(
+      "browser URL is not allowed",
+    );
+    expect(() => decodeBrowserTabSnapshot({ ...snapshot, future: true })).toThrow("expected keys");
+  });
+
   it("valida preferências de inicialização e bandeja", () => {
     const preferences = {
       schemaVersion: 1,
@@ -242,7 +273,7 @@ describe("decodificação dos contratos nativos", () => {
           "scheduledAutomations",
         ],
       },
-      schemaVersion: 17,
+      schemaVersion: 18,
       config: configFixture(),
       diagnosticLogPath: "C:\\Users\\Developer\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
@@ -269,7 +300,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 17,
+        schemaVersion: 18,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",

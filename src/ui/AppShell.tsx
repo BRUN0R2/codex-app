@@ -4,10 +4,12 @@ import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from
 import { openExternalUrl, openWorkspaceDirectory } from "../infrastructure/codexClient";
 import { isBrowserPreview } from "../platform/DesktopRuntime";
 import type { AppController } from "../state/appController";
+import { createBrowserController } from "../state/browserController";
 
 import { ApprovalCard } from "./ApprovalCard";
 import { AutomationsView } from "./AutomationsView";
 import { applyDesktopAppearance } from "./appearance";
+import { BrowserPanel } from "./BrowserPanel";
 import { Composer, type ComposerDraftRequest } from "./Composer";
 import { formatShortDate } from "./dateFormat";
 import { HomeComposerModeToggle } from "./HomeComposerModeToggle";
@@ -27,15 +29,18 @@ export function AppShell(props: { readonly controller: AppController }) {
   const [settingsPage, setSettingsPage] = createSignal<SettingsPage | null>(previewSettingsPage);
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
   const [reviewOpen, setReviewOpen] = createSignal(false);
+  const [browserOpen, setBrowserOpen] = createSignal(readPreviewBrowserOpen());
   const [activeSurface, setActiveSurface] = createSignal<"automations" | "chat" | "profile">(
     previewSurface,
   );
   const reviewChangeStore = new LatestTurnFileChangeStore();
+  const browserController = createBrowserController(props.controller.reportError);
   const reviewChanges = createMemo(() =>
     reviewChangeStore.project(props.controller.turns(), props.controller.activeTurnId()),
   );
 
   function openSettings(page?: SettingsPage): void {
+    setBrowserOpen(false);
     setSettingsPage(page ?? null);
     setSettingsOpen(true);
   }
@@ -52,6 +57,19 @@ export function AppShell(props: { readonly controller: AppController }) {
     if (event.key === "Escape" && reviewOpen()) {
       event.preventDefault();
       setReviewOpen(false);
+      return;
+    }
+    if (event.key === "Escape" && browserOpen()) {
+      event.preventDefault();
+      setBrowserOpen(false);
+      return;
+    }
+    if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "b") {
+      event.preventDefault();
+      if (props.controller.currentThread() !== null) {
+        setReviewOpen(false);
+        setBrowserOpen((value) => !value);
+      }
       return;
     }
     if (event.ctrlKey && event.key === ",") {
@@ -106,6 +124,7 @@ export function AppShell(props: { readonly controller: AppController }) {
   }
 
   onMount(() => {
+    browserController.start();
     window.addEventListener("keydown", handleKeyboardShortcut);
     if (chatDockElement !== undefined) {
       chatDockResizeObserver = new ResizeObserver(scheduleChatDockInset);
@@ -131,6 +150,7 @@ export function AppShell(props: { readonly controller: AppController }) {
     }
   });
   onCleanup(() => {
+    browserController.dispose();
     disposed = true;
     for (const unlisten of eventUnlisteners) {
       unlisten();
@@ -154,10 +174,12 @@ export function AppShell(props: { readonly controller: AppController }) {
         controller={props.controller}
         inert={settingsOpen()}
         onOpenAutomations={() => {
+          setBrowserOpen(false);
           setReviewOpen(false);
           setActiveSurface("automations");
         }}
         onOpenProfile={() => {
+          setBrowserOpen(false);
           setReviewOpen(false);
           setActiveSurface("profile");
         }}
@@ -174,6 +196,26 @@ export function AppShell(props: { readonly controller: AppController }) {
           />
         </Show>
         <div class="main-panel-content">
+          <Show
+            when={
+              activeSurface() === "chat" &&
+              !browserOpen() &&
+              props.controller.currentThread() !== null
+            }
+          >
+            <button
+              aria-label="Abrir navegador interno"
+              class="browser-panel-toggle"
+              onClick={() => {
+                setReviewOpen(false);
+                setBrowserOpen(true);
+              }}
+              title="Abrir navegador interno (Ctrl+Shift+B)"
+              type="button"
+            >
+              <Icon name="globe" size={15} />
+            </button>
+          </Show>
           <section
             class="chat-page"
             classList={{
@@ -192,7 +234,10 @@ export function AppShell(props: { readonly controller: AppController }) {
                 {(plan) => (
                   <PlanProgress
                     changes={reviewChanges()}
-                    onToggleReview={() => setReviewOpen((current) => !current)}
+                    onToggleReview={() => {
+                      setBrowserOpen(false);
+                      setReviewOpen((current) => !current);
+                    }}
                     plan={plan()}
                     reviewOpen={reviewOpen()}
                   />
@@ -213,6 +258,22 @@ export function AppShell(props: { readonly controller: AppController }) {
               />
             </div>
           </section>
+          <Show
+            keyed
+            when={
+              activeSurface() === "chat" && browserOpen()
+                ? props.controller.currentThread()?.id
+                : null
+            }
+          >
+            {(conversationId) => (
+              <BrowserPanel
+                controller={browserController}
+                conversationId={conversationId}
+                onClose={() => setBrowserOpen(false)}
+              />
+            )}
+          </Show>
           <Show when={activeSurface() === "automations"}>
             <AutomationsView
               controller={props.controller}
@@ -282,6 +343,14 @@ function readPreviewSurface(): "automations" | "chat" | "profile" {
   }
   const surface = new URLSearchParams(window.location.search).get("surface");
   return surface === "automations" || surface === "profile" ? surface : "chat";
+}
+
+function readPreviewBrowserOpen(): boolean {
+  return (
+    import.meta.env.DEV &&
+    isBrowserPreview() &&
+    new URLSearchParams(window.location.search).get("browser") === "1"
+  );
 }
 
 function UsageLimitBanner(props: { readonly controller: AppController }) {

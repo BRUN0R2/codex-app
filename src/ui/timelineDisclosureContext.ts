@@ -5,7 +5,9 @@ import type { TimelineDisclosureKey, TimelineDisclosureStore } from "./timelineD
 export interface TimelineDisclosureBinding {
   readonly descendantContext: TimelineDisclosureContextValue;
   readonly isOpen: () => boolean;
+  readonly openDescendantCount: () => number;
   readonly setOpen: (open: boolean) => void;
+  readonly storageKey: () => TimelineDisclosureKey;
   readonly toggle: () => void;
 }
 
@@ -65,7 +67,9 @@ export function useTimelineDisclosure(
       store: context.store,
     },
     isOpen,
+    openDescendantCount: () => context.store.countOpenDescendants(storageKey()),
     setOpen,
+    storageKey,
     toggle: () => setOpen(!isOpen()),
   };
 }

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { projectSearchOutput, projectSourceOutput } from "./ToolOutputContent";
+import {
+  projectImageToolOutput,
+  projectSearchOutput,
+  projectSourceOutput,
+} from "./toolOutputProjection";
 
 describe("tool output content", () => {
   it("preserves read_file line numbers, indentation and multiline syntax state", () => {
@@ -44,5 +48,20 @@ describe("tool output content", () => {
     ).toBe(true);
     expect(lines[1]?.type).toBe("match");
     expect(lines[2]).toEqual({ content: "No matches found.", type: "text" });
+  });
+
+  it("decodes only the closed view_image envelope and safe image origins", () => {
+    const svg =
+      "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%2F%3E";
+
+    expect(projectImageToolOutput(JSON.stringify({ image_url: svg }))).toBe(svg);
+    expect(
+      projectImageToolOutput(JSON.stringify({ image_url: "https://example.com/image.png" })),
+    ).toBe("https://example.com/image.png");
+    expect(
+      projectImageToolOutput(JSON.stringify({ image_url: "file:///C:/secret.png" })),
+    ).toBeNull();
+    expect(projectImageToolOutput(JSON.stringify({ image_url: svg, unexpected: true }))).toBeNull();
+    expect(projectImageToolOutput("not JSON")).toBeNull();
   });
 });

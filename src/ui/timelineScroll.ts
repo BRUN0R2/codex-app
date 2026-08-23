@@ -1,9 +1,11 @@
 const TIMELINE_END_THRESHOLD_PX = 24;
 const SCROLLBAR_MIN_THUMB_PX = 84;
 const SCROLLBAR_OVERFLOW_EPSILON_PX = 2;
-const TIMELINE_USER_SCROLL_INTENT_WINDOW_MS = 600;
+const TIMELINE_PROGRAMMATIC_SCROLL_EPSILON_PX = 1;
 const TIMELINE_WHEEL_LINE_PX = 16;
 const TIMELINE_WHEEL_TRANSFER_EPSILON_PX = 0.5;
+
+export type TimelineProgrammaticScrollKind = "instant" | "smooth";
 
 export interface NestedTimelineWheelTransfer {
   readonly nestedScrollTop: number;
@@ -53,17 +55,6 @@ export function isTimelineNearEnd(input: {
   return distanceToEnd <= TIMELINE_END_THRESHOLD_PX;
 }
 
-export function hasRecentTimelineUserScrollIntent(
-  lastUserScrollIntentAt: number,
-  now: number,
-): boolean {
-  return (
-    Number.isFinite(lastUserScrollIntentAt) &&
-    now >= lastUserScrollIntentAt &&
-    now - lastUserScrollIntentAt <= TIMELINE_USER_SCROLL_INTENT_WINDOW_MS
-  );
-}
-
 export function resolveTimelineFollowing(input: {
   readonly followingLatest: boolean;
   readonly nearEnd: boolean;
@@ -75,23 +66,72 @@ export function resolveTimelineFollowing(input: {
 export function shouldSynchronizeTimelineToEnd(input: {
   readonly followingLatest: boolean;
   readonly layoutRequested: boolean;
-  readonly recentUserIntent: boolean;
 }): boolean {
-  return input.layoutRequested && input.followingLatest && !input.recentUserIntent;
+  return input.layoutRequested && input.followingLatest;
 }
 
 export function shouldPreserveTimelineAnchor(input: {
   readonly anchorDelta: number;
   readonly followingLatest: boolean;
-  readonly recentUserIntent: boolean;
-  readonly scrollInteractionActive: boolean;
+  readonly programmaticNavigationActive: boolean;
 }): boolean {
-  return (
-    input.anchorDelta !== 0 &&
-    !input.followingLatest &&
-    !input.recentUserIntent &&
-    !input.scrollInteractionActive
-  );
+  return input.anchorDelta !== 0 && !input.followingLatest && !input.programmaticNavigationActive;
+}
+
+export function resolveTimelineAnchorCorrection(input: {
+  readonly currentScrollTop: number;
+  readonly nextAnchorOffset: number;
+  readonly previousAnchorOffset: number;
+}): number {
+  if (
+    !Number.isFinite(input.currentScrollTop) ||
+    input.currentScrollTop < 0 ||
+    !Number.isFinite(input.nextAnchorOffset) ||
+    !Number.isFinite(input.previousAnchorOffset)
+  ) {
+    throw new Error("Timeline anchor correction requires finite non-negative scroll metrics.");
+  }
+  return Math.max(0, input.currentScrollTop + input.nextAnchorOffset - input.previousAnchorOffset);
+}
+
+export class TimelineProgrammaticScrollTracker {
+  #pending: { readonly kind: TimelineProgrammaticScrollKind; readonly target: number } | null =
+    null;
+
+  begin(kind: TimelineProgrammaticScrollKind, target: number): void {
+    if (!Number.isFinite(target) || target < 0) {
+      throw new Error("Timeline programmatic scroll target must be a non-negative finite number.");
+    }
+    this.#pending = { kind, target };
+  }
+
+  cancel(): void {
+    this.#pending = null;
+  }
+
+  consume(scrollTop: number): boolean {
+    if (!Number.isFinite(scrollTop) || scrollTop < 0) {
+      throw new Error("Timeline scroll position must be a non-negative finite number.");
+    }
+    const pending = this.#pending;
+    if (pending === null) {
+      return false;
+    }
+    const reachedTarget =
+      Math.abs(scrollTop - pending.target) <= TIMELINE_PROGRAMMATIC_SCROLL_EPSILON_PX;
+    if (pending.kind === "instant" || reachedTarget) {
+      this.#pending = null;
+    }
+    return pending.kind === "smooth" || reachedTarget;
+  }
+
+  finish(): void {
+    this.#pending = null;
+  }
+
+  smoothActive(): boolean {
+    return this.#pending?.kind === "smooth";
+  }
 }
 
 export function normalizeTimelineWheelDelta(input: {

@@ -16,6 +16,8 @@ import type {
   AutomationListResponse,
   AutomationRun,
   AutoTopUpSettingsSnapshot,
+  BrowserNewWindowNotification,
+  BrowserTabSnapshot,
   CancelLoginResponse,
   ChatGptAccount,
   ChatModelListResponse,
@@ -188,7 +190,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [17] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [18] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -527,6 +529,36 @@ export function decodeTurnStartResponse(value: unknown): TurnStartResponse {
 export function decodeOperationAck(value: unknown): OperationAck {
   const object = exactRecord(value, "$", ["applied"]);
   return { applied: literal(object.applied, "$.applied", [true] as const) };
+}
+
+export function decodeBrowserTabSnapshot(value: unknown): BrowserTabSnapshot {
+  const object = exactRecord(value, "$", [
+    "browserTabId",
+    "canGoBack",
+    "canGoForward",
+    "conversationId",
+    "isLoading",
+    "title",
+    "url",
+  ]);
+  return {
+    browserTabId: identifier(object.browserTabId, "$.browserTabId"),
+    conversationId: identifier(object.conversationId, "$.conversationId"),
+    url: browserUrl(object.url, "$.url"),
+    title: object.title === null ? null : text(object.title, "$.title", 2_048),
+    canGoBack: booleanValue(object.canGoBack, "$.canGoBack"),
+    canGoForward: booleanValue(object.canGoForward, "$.canGoForward"),
+    isLoading: booleanValue(object.isLoading, "$.isLoading"),
+  };
+}
+
+export function decodeBrowserNewWindowNotification(value: unknown): BrowserNewWindowNotification {
+  const object = exactRecord(value, "$", ["browserTabId", "conversationId", "url"]);
+  return {
+    browserTabId: identifier(object.browserTabId, "$.browserTabId"),
+    conversationId: identifier(object.conversationId, "$.conversationId"),
+    url: browserUrl(object.url, "$.url"),
+  };
 }
 
 export function decodeAutomationListResponse(value: unknown): AutomationListResponse {
@@ -1645,6 +1677,7 @@ function decodeToolOutputPresentation(value: unknown, path: string): ToolOutputP
   const type = text(field(object, "type"), `${path}.type`, 32);
   switch (type) {
     case "fileList":
+    case "image":
     case "plainText":
     case "searchResults":
       exactRecord(object, path, ["type"]);
@@ -2086,6 +2119,24 @@ function urlText(value: unknown, path: string, protocols: readonly string[]): st
   }
   if (!protocols.includes(url.protocol)) {
     throw new ContractError(path, `URL protocol ${url.protocol} is not allowed`);
+  }
+  return decoded;
+}
+
+function browserUrl(value: unknown, path: string): string {
+  const decoded = text(value, path, 16_384);
+  let url: URL;
+  try {
+    url = new URL(decoded);
+  } catch {
+    throw new ContractError(path, "expected an absolute browser URL");
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:" && decoded !== "about:blank") ||
+    url.username.length > 0 ||
+    url.password.length > 0
+  ) {
+    throw new ContractError(path, "browser URL is not allowed");
   }
   return decoded;
 }

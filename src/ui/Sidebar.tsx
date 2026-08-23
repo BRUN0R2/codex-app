@@ -12,6 +12,12 @@ import { Portal } from "solid-js/web";
 
 import type { ProjectRecord, ThreadSummary } from "../contracts/types";
 import type { AppController } from "../state/appController";
+import {
+  hexToHsv,
+  hsvToHex,
+  hueFromHorizontalPosition,
+  normalizeProjectColor,
+} from "../state/projectColor";
 
 type SidebarController = Pick<
   AppController,
@@ -1191,7 +1197,7 @@ function InlineColorPicker(props: {
 
   const cursorX = () => `calc(7px + (${sat()} / 100) * (100% - 14px))`;
   const cursorY = () => `calc(7px + (${100 - val()} / 100) * (100% - 14px))`;
-  const hueX = () => `calc(7px + (${hue()} / 360) * (100% - 14px))`;
+  const hueX = () => `calc(7px + (${hue()} / 359) * (100% - 14px))`;
 
   function updateFromBox(event: PointerEvent) {
     if (boxRef === undefined) {
@@ -1223,7 +1229,7 @@ function InlineColorPicker(props: {
     }
     const rect = hueRef.getBoundingClientRect();
     const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-    const newHue = Math.round((x / rect.width) * 360);
+    const newHue = hueFromHorizontalPosition(x, rect.width);
     props.onChange(hsvToHex(newHue, sat(), val()));
   }
 
@@ -1276,7 +1282,7 @@ function InlineColorPicker(props: {
           onInput={(event) => {
             const raw = event.currentTarget.value.trim().replace(/^#/, "");
             if (/^[0-9A-Fa-f]{6}$/.test(raw)) {
-              props.onChange(`#${raw}`);
+              props.onChange(normalizeProjectColor(`#${raw}`));
             }
           }}
           type="text"
@@ -1285,96 +1291,6 @@ function InlineColorPicker(props: {
       </div>
     </div>
   );
-}
-
-function hsvToHex(h: number, s: number, v: number): string {
-  const satRatio = s / 100;
-  const valRatio = v / 100;
-  const i = Math.floor((h / 60) % 6);
-  const f = h / 60 - i;
-  const p = valRatio * (1 - satRatio);
-  const q = valRatio * (1 - f * satRatio);
-  const t = valRatio * (1 - (1 - f) * satRatio);
-  let r = 0;
-  let g = 0;
-  let b = 0;
-  switch (i) {
-    case 0:
-      r = valRatio;
-      g = t;
-      b = p;
-      break;
-    case 1:
-      r = q;
-      g = valRatio;
-      b = p;
-      break;
-    case 2:
-      r = p;
-      g = valRatio;
-      b = t;
-      break;
-    case 3:
-      r = p;
-      g = q;
-      b = valRatio;
-      break;
-    case 4:
-      r = t;
-      g = p;
-      b = valRatio;
-      break;
-    case 5:
-      r = valRatio;
-      g = p;
-      b = q;
-      break;
-  }
-  const toHex = (value: number) =>
-    Math.round(value * 255)
-      .toString(16)
-      .padStart(2, "0");
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-}
-
-function hexToHsv(hex: string): { h: number; s: number; v: number } {
-  let color = hex.replace(/^#/, "");
-  if (color.length === 3) {
-    color = color
-      .split("")
-      .map((character) => character + character)
-      .join("");
-  }
-  if (color.length !== 6) {
-    return { h: 140, s: 66, v: 87 };
-  }
-  const red = Number.parseInt(color.substring(0, 2), 16) / 255;
-  const green = Number.parseInt(color.substring(2, 4), 16) / 255;
-  const blue = Number.parseInt(color.substring(4, 6), 16) / 255;
-  const maximum = Math.max(red, green, blue);
-  const minimum = Math.min(red, green, blue);
-  const delta = maximum - minimum;
-  let hue = 0;
-  const saturation = maximum === 0 ? 0 : delta / maximum;
-  if (maximum !== minimum) {
-    switch (maximum) {
-      case red:
-        hue = (green - blue) / delta + (green < blue ? 6 : 0);
-        break;
-      case green:
-        hue = (blue - red) / delta + 2;
-        break;
-      case blue:
-        hue = (red - green) / delta + 4;
-        break;
-    }
-    hue /= 6;
-  }
-  return {
-    h: Math.round(hue * 360),
-    s: Math.round(saturation * 100),
-    v: Math.round(maximum * 100),
-  };
 }
 
 const SELECTABLE_ICONS_LIST: readonly IconName[] = [

@@ -305,7 +305,7 @@ O lote ficou 194,557 vezes mais rápido que as atualizações sequenciais já
 otimizadas nesse cenário. Este benchmark mede somente custo local de redução
 de estado; não representa TTFT de rede, tempo do modelo ou tempo de ferramentas.
 
-#### Saída de comando ao vivo e âncoras dinâmicas — 22 de agosto de 2026
+#### Saída de comando ao vivo e âncoras dinâmicas — 22–23 de agosto de 2026
 
 `exec_command` agora normaliza `stdout` e `stderr` enquanto drena os pipes. A UI
 recebe frames append de até 8 KiB, operações semânticas de carriage return e
@@ -334,24 +334,28 @@ conclui depois de duas geometrias quietas. A auditoria reproduz uma mensagem
 topo nos viewports menores e ao scroll máximo matematicamente possível no
 viewport de 1920 × 1080.
 
-O gate visual corrente cobre 21 cenários em três viewports, totalizando
-63 capturas. Além das regressões anteriores, valida saída ao vivo com auto-follow
-de `0 px`, exclusão com `−288`, ausência do cabeçalho agrupado redundante,
-navegação por âncora após expansão, ownership manual de scroll com drift `0` e
-handoff de wheel entre comando, diff e leitura. As três transferências levam
-`0,6–0,7 ms` juntas, não executam `getComputedStyle` e entregam exatamente
-`−60`, `−120` e `−80 px` à timeline. O gate também cobre arquivo criado de 338
-linhas colorido, `read_file`/`search_text` tipados, gutters compactos, três ondas
-de atividade não sobrepostas em 2 s e o perfil com largura de `732 px`, avatar
-de `80 px`, imagem efetivamente montada na página e na sidebar, 364 células,
-cinco métricas, cinco insights e zero overflow. O gate pausa a animação em seis
-pontos do ciclo e exige a sequência visível/oculta/visível/oculta/visível/oculta.
+O gate visual corrente cobre 26 cenários em três viewports, totalizando
+78 capturas. Além das regressões anteriores, valida saída ao vivo com auto-follow
+de `0 px`, exclusão com `−288`, ausência do cabeçalho agrupado redundante e
+navegação por âncora após expansão. Uma expansão real de conteúdo de `320 px`
+acima da leitura produz compensação de `320 px` e drift visual `0` durante wheel
+manual nos três viewports. Um wheel consumido integralmente por um comando não é
+cancelado, move somente a região interna em `40 px` e mantém a timeline seguindo
+o fim após crescimento adicional de `160 px`, com distância final `0`. O handoff
+entre comando, diff e leitura continua levando `0,6–0,7 ms` para as três
+transferências, sem `getComputedStyle`, e entrega exatamente `−60`, `−120` e
+`−80 px` à timeline. O gate também cobre arquivo criado de 338 linhas colorido,
+`read_file`/`search_text` tipados, gutters compactos, três ondas de atividade não
+sobrepostas em 2 s e o perfil com largura de `732 px`, avatar de `80 px`, imagem
+efetivamente montada na página e na sidebar, 364 células, cinco métricas, cinco
+insights e zero overflow. O gate pausa a animação em seis pontos do ciclo e exige
+a sequência visível/oculta/visível/oculta/visível/oculta.
 
-O build corrente produz app principal de `466,29 KiB` (`138,68 KiB` gzip),
-chunk auxiliar de `20,47 KiB` (`8,14 KiB` gzip), CSS de `129,31 KiB`
-(`23,81 KiB` gzip) e worker Markdown lazy de `63,48 KiB`. Contra o gate integral
+O build corrente produz app principal de `493,33 KiB` (`146,87 KiB` gzip),
+chunk auxiliar de `20,47 KiB` (`8,14 KiB` gzip), CSS de `133,92 KiB`
+(`24,52 KiB` gzip) e worker Markdown lazy de `63,48 KiB`. Contra o gate integral
 de 21 de agosto, o payload inicial agregado passou de `151,10 KiB` para
-`170,63 KiB` gzip, acréscimo de `19,53 KiB` (`12,93%`) para syntax, streaming,
+`179,53 KiB` gzip, acréscimo de `28,43 KiB` (`18,82%`) para syntax, streaming,
 navegação, perfil e demais superfícies novas. Nenhuma dependência, WASM ou worker
 de runtime adicional foi introduzido; o worker Markdown continua lazy.
 
@@ -698,13 +702,13 @@ canônica aberta permaneceu responsiva e não foi encerrada ou substituída.
 `pnpm verify` concluiu sem falhas no Windows com token de administrador e nível
 de integridade alto:
 
-- 291 arquivos de texto validados como UTF-8 sem BOM;
-- 56 arquivos e 282 testes frontend aprovados;
-- 21 cenários visuais em três viewports, totalizando 63 capturas;
+- 305 arquivos de texto validados como UTF-8 sem BOM;
+- 60 arquivos e 302 testes frontend aprovados;
+- 26 cenários visuais em três viewports, totalizando 78 capturas;
 - TypeScript estrito, Biome e build Vite de produção;
 - bootstrap/hash do ripgrep e auditoria de dependências transitivas;
 - `cargo check`, `rustfmt` e Clippy com warnings como erro;
-- 273 testes Rust aprovados e 8 benchmarks ignorados no fluxo comum por design;
+- 281 testes Rust aprovados e 9 benchmarks ignorados no fluxo comum por design;
 - benchmarks release de streaming, sessões longas e comandos paralelos
   executados separadamente dentro do mesmo gate.
 
@@ -718,3 +722,77 @@ Os executáveis de teste da biblioteca e do aplicativo foram inspecionados com
 e `requestedExecutionLevel="asInvoker"`. O mesmo harness executou com sucesso
 sob o token elevado; portanto o erro anterior de `TaskDialogIndirect` não
 dependia de privilégio e foi removido na composição do build.
+
+### Virtualização aninhada, navegador e orçamento de tokens — 23 de agosto de 2026
+
+Foi adicionada uma fixture determinística com 180 atividades alternando 60
+comandos, 60 leituras de 72 linhas e 60 diffs grandes. Antes da janela virtual
+por atividade, abrir esse estado produzia 70.199 nós DOM; comandos/leituras
+levavam 4.593 ms e os diffs mais 4.395,8 ms. A rolagem media 10,4 FPS, com frame
+mediano de 95,8 ms, 29 de 32 frames acima de 50 ms e 3.003 ms em long tasks.
+Reabrir a conversa levava 2.429 ms e recolher conteúdo acima da leitura movia a
+âncora visual em −259 px.
+
+Com a janela aninhada, cache LRU de medidas, correção por âncora e materialização
+adaptativa, o mesmo estado integral reabriu em 313 ms com 4.184 nós, dez
+atividades, 216 linhas de leitura e 132 linhas de diff montadas. Trocar para o
+chat leve levou 22 ms e a deriva ficou em 0 px. Scroll deliberado mediu cerca de
+118 FPS; o padrão extremo de arraste mediu cerca de 209 FPS, zero frames acima
+de 20 ms, zero long tasks e aproximadamente 346 nós durante o movimento.
+
+O gate automatizado final percorre as 180 posições, expande uma amostra real de
+comando/leitura/diff e mede o caminho quente em 920×640, 1280×820 e 1920×1080:
+
+| Métrica | 920×640 | 1280×820 | 1920×1080 |
+| --- | ---: | ---: | ---: |
+| FPS médio | `237,06` | `234,19` | `219,10` |
+| frame mediano | `4,2 ms` | `4,2 ms` | `4,2 ms` |
+| P95 | `4,3 ms` | `4,3 ms` | `4,4 ms` |
+| P99 | `8,2 ms` | `8,4 ms` | `16,6 ms` |
+| maior frame | `12,4 ms` | `12,4 ms` | `20,8 ms` |
+| long tasks | `0` | `0` | `0` |
+| reabertura | `42,3 ms` | `51,6 ms` | `56,1 ms` |
+| atividades montadas | `25` | `38` | `57` |
+| nós DOM | `1.799` | `1.966` | `2.221` |
+| deriva de âncora | `0 px` | `0 px` | `0 px` |
+
+O alvo de 240 Hz é tratado por orçamento de frame, não como promessa impossível
+sobre compositor, driver e scheduler do sistema. O gate exige mediana/P95 abaixo
+de um frame de 240 Hz, P99 limitado, nenhum long task, no máximo um outlier frio
+abaixo de 50 ms e nenhum placeholder depois de 90 ms de repouso.
+
+O orçamento de tokens foi reexecutado com `pnpm measure:tokens`:
+
+| Caminho | Resultado |
+| --- | ---: |
+| catálogo completo | `1.939` tokens estimados |
+| catálogo somente leitura | `844` tokens (`−56,47%`) |
+| construção + encode do catálogo | `0,0117 ms` mediano |
+| saída de ferramenta `2.439.995 B → 6.494 B` | `−99,734%` em `13,559 ms` |
+| comando moderado após compactação semântica | `104` tokens (`−87,13%` adicional) |
+| comando grande após compactação semântica | `159` tokens (`−89,66%` adicional) |
+| página inicial de histórico | `−99,588%` de transporte e itens |
+| parse + decode inicial versus histórico integral | `327,68×` mais rápido |
+| heap inicial versus histórico integral | `−99,529%` |
+| busca direcionada em 64 MiB | `28` tokens (`−99,832%`) em `58,906 ms` |
+| oito leituras idênticas | uma execução (`−87,5%`), `1,595×` menor latência |
+
+Nos demais caminhos, batching de texto ficou `203,44×` mais rápido, framing de
+comando `88,77×`, quatro comandos independentes `3,87×`, polling incremental
+`235,92×` e ripgrep `2,116×`. O soak de 100 mil turnos manteve no máximo oito
+turnos montados; o diff de 150 mil linhas manteve no máximo 73 linhas.
+
+O navegador interno passou o gate responsivo nas três larguras, com uma aba
+selecionada, quatro controles de navegação, endereço único, zero overflow e
+surface nativa alinhada ao conteúdo interno do painel. Testes Rust validam URL,
+credenciais, bounds, histórico e título; testes frontend validam schema local,
+restauração lazy, ownership por conversa, deduplicação de bounds e ações de aba.
+Um smoke no WebView2 real criou uma tarefa dev descartável, abriu o child webview,
+navegou pela barra para `example.org`, percorreu histórico e fechou aba/tarefa.
+O site remoto carregou sem acesso a comandos: uma tentativa de
+`engine_thread_list` foi rejeitada pelo guard de origem remota do Tauri. O teste
+também detectou e eliminou um deadlock de comandos síncronos no dispatcher e um
+accessor Solid obsoleto durante a desmontagem; a repetição terminou sem erros no
+runtime dev.
+O gate também confirma duas imagens agrupadas sem data URL textual e a matiz
+final com HEX, badge, ícone, quadrado HSV e cursor coerentes.
