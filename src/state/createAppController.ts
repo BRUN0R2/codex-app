@@ -73,7 +73,10 @@ import {
   updateAutoTopUp as updateAutoTopUpCommand,
   updateConfig,
 } from "../infrastructure/codexClient";
-import { createAccountProfileRefreshCoordinator } from "./accountProfileRefresh";
+import {
+  createAccountProfileRefreshCoordinator,
+  mergeAccountProfile,
+} from "./accountProfileRefresh";
 import type { AppController, DiagnosticEntry, SendMessageInput } from "./appController";
 import {
   unreadAutomationRuns as readUnreadAutomationRuns,
@@ -399,19 +402,7 @@ export function createAppController(): AppController {
     apply: (profile: AccountProfileResponse) => {
       setAccountProfile(profile);
       setAccountProfileError(null);
-      setAccount((current) => {
-        if (current?.account === null || current?.account === undefined) {
-          return current;
-        }
-        return {
-          ...current,
-          account: {
-            ...current.account,
-            name: profile.displayName ?? current.account.name,
-            picture: profile.picture ?? current.account.picture,
-          },
-        };
-      });
+      setAccount((current) => mergeAccountProfile(current, profile));
     },
     reportError: (reason) => {
       const message = describeError(reason);

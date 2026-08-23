@@ -791,6 +791,34 @@ function activeActivityReflectionVisualAuditExpression() {
     }
     const sweepStyle = getComputedStyle(sweep);
     const highlightStyle = getComputedStyle(highlight);
+    const sweepAnimation = sweep.getAnimations().find(
+      (animation) => animation.animationName === "activity-reflection-sweep",
+    );
+    const highlightAnimation = highlight.getAnimations().find(
+      (animation) => animation.animationName === "activity-reflection-text",
+    );
+    const timing = sweepAnimation?.effect?.getTiming();
+    const duration = Number(timing?.duration);
+    const delay = Number(timing?.delay);
+    const waveOpacities = [];
+    if (
+      sweepAnimation !== undefined &&
+      highlightAnimation !== undefined &&
+      Number.isFinite(duration) &&
+      Number.isFinite(delay)
+    ) {
+      sweepAnimation.pause();
+      highlightAnimation.pause();
+      for (const fraction of [0.14, 0.29, 0.46, 0.62, 0.79, 0.96]) {
+        const sampleTime = delay + duration * fraction;
+        sweepAnimation.currentTime = sampleTime;
+        highlightAnimation.currentTime = sampleTime;
+        waveOpacities.push(Number.parseFloat(getComputedStyle(sweep).opacity));
+      }
+      const screenshotTime = delay + duration * 0.46;
+      sweepAnimation.currentTime = screenshotTime;
+      highlightAnimation.currentTime = screenshotTime;
+    }
     return {
       viewport: { width: innerWidth, height: innerHeight },
       titleText: title.textContent?.trim() ?? null,
@@ -803,6 +831,7 @@ function activeActivityReflectionVisualAuditExpression() {
       highlightAnimationName: highlightStyle.animationName,
       maskImage: sweepStyle.maskImage || sweepStyle.webkitMaskImage,
       maskWaveCount: ((sweepStyle.maskImage || sweepStyle.webkitMaskImage).match(/rgb\\(0, 0, 0\\)/g) ?? []).length,
+      waveOpacities,
       pointerEvents: sweepStyle.pointerEvents,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
@@ -1557,6 +1586,10 @@ function profileVisualAuditExpression() {
       ).length,
       insightRows: document.querySelectorAll(".profile-insight-list > div").length,
       invocationRows: document.querySelectorAll(".profile-invocation-list li").length,
+      profileAvatarImages: document.querySelectorAll(
+        ".profile-identity .account-avatar-profile img",
+      ).length,
+      sidebarAvatarImages: document.querySelectorAll(".sidebar .account-avatar img").length,
       activeProfileTriggers: document.querySelectorAll(".sidebar-account-trigger.active").length,
       planBadge: document.querySelector(".profile-plan-badge")?.textContent?.trim() ?? null,
       loadingStates: document.querySelectorAll(".profile-skeleton, .profile-load-error").length,
@@ -1820,11 +1853,19 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
     metrics.highlightAnimationName === "activity-reflection-text",
     "o texto luminoso não acompanha a varredura",
   );
-  assert(metrics.animationDuration === "2s", "o ciclo da reflexão não mede 2 segundos");
+  assert(metrics.animationDuration === "4.2s", "o ciclo sequencial não mede 4,2 segundos");
   assert(metrics.animationDelay === "0.08s", "a reflexão não inicia quase imediatamente");
   assert(
-    metrics.maskWaveCount >= 3,
-    `a reflexão não contém três ondas sequenciais (${JSON.stringify(metrics.maskImage)})`,
+    metrics.maskWaveCount === 1,
+    `mais de uma onda ficou visível ao mesmo tempo (${JSON.stringify(metrics.maskImage)})`,
+  );
+  const expectedVisibility = [true, false, true, false, true, false];
+  assert(
+    metrics.waveOpacities.length === expectedVisibility.length &&
+      metrics.waveOpacities.every(
+        (opacity, index) => (opacity >= 0.95) === expectedVisibility[index],
+      ),
+    `as três passagens não estão separadas por pausas: ${JSON.stringify(metrics.waveOpacities)}`,
   );
   assert(
     metrics.animationTimingFunction.includes("cubic-bezier"),
@@ -2251,6 +2292,8 @@ function validateProfileMetrics(metrics, viewport) {
   assert(metrics.centeredInsetDifference <= 3, "o conteúdo do perfil não está centralizado");
   assert(Math.abs(metrics.avatar.width - 80) <= tolerance, "o avatar do perfil não mede 80 px");
   assert(Math.abs(metrics.avatar.height - 80) <= tolerance, "o avatar do perfil não mede 80 px");
+  assert(metrics.profileAvatarImages === 1, "a foto do avatar não aparece na página de perfil");
+  assert(metrics.sidebarAvatarImages >= 1, "a foto do avatar não aparece na barra lateral");
   assert(metrics.summary.height >= 60, "o resumo do perfil ficou baixo demais");
   assert(metrics.summaryStats === 5, "o resumo não contém as cinco métricas oficiais");
   assert(metrics.activityCells === 364, "o calendário não contém 52 semanas completas");

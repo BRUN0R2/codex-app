@@ -3722,26 +3722,16 @@ pre {
   inset: 0;
   width: 100%;
   overflow: hidden;
-  animation: activity-reflection-sweep 2s cubic-bezier(0.35, 0, 0.25, 1) 80ms infinite;
+  animation: activity-reflection-sweep 4.2s cubic-bezier(0.35, 0, 0.25, 1) 80ms infinite;
   color: var(--color-token-text-primary);
   mask-image: linear-gradient(
     90deg,
     transparent 0%,
-    transparent 6%,
-    rgb(0 0 0 / 45%) 9%,
-    #000 12%,
-    rgb(0 0 0 / 45%) 15%,
-    transparent 18%,
-    transparent 27%,
-    rgb(0 0 0 / 45%) 30%,
-    #000 33%,
-    rgb(0 0 0 / 45%) 36%,
-    transparent 39%,
-    transparent 48%,
-    rgb(0 0 0 / 45%) 51%,
-    #000 54%,
-    rgb(0 0 0 / 45%) 57%,
-    transparent 60%,
+    transparent 38%,
+    rgb(0 0 0 / 45%) 44%,
+    #000 50%,
+    rgb(0 0 0 / 45%) 56%,
+    transparent 62%,
     transparent 100%
   );
   pointer-events: none;
@@ -3750,27 +3740,17 @@ pre {
   -webkit-mask-image: linear-gradient(
     90deg,
     transparent 0%,
-    transparent 6%,
-    rgb(0 0 0 / 45%) 9%,
-    #000 12%,
-    rgb(0 0 0 / 45%) 15%,
-    transparent 18%,
-    transparent 27%,
-    rgb(0 0 0 / 45%) 30%,
-    #000 33%,
-    rgb(0 0 0 / 45%) 36%,
-    transparent 39%,
-    transparent 48%,
-    rgb(0 0 0 / 45%) 51%,
-    #000 54%,
-    rgb(0 0 0 / 45%) 57%,
-    transparent 60%,
+    transparent 38%,
+    rgb(0 0 0 / 45%) 44%,
+    #000 50%,
+    rgb(0 0 0 / 45%) 56%,
+    transparent 62%,
     transparent 100%
   );
 }
 
 .activity-title-highlight {
-  animation: activity-reflection-text 2s cubic-bezier(0.35, 0, 0.25, 1) 80ms infinite;
+  animation: activity-reflection-text 4.2s cubic-bezier(0.35, 0, 0.25, 1) 80ms infinite;
   transform: translate3d(115%, 0, 0);
   will-change: transform;
 }
@@ -4251,14 +4231,38 @@ pre {
 }
 
 @keyframes activity-reflection-sweep {
-  0% { transform: translate3d(-115%, 0, 0); }
-  88%,
-  100% { transform: translate3d(115%, 0, 0); }
+  0%,
+  2% { opacity: 0; transform: translate3d(-115%, 0, 0); }
+  2.01% { opacity: 1; transform: translate3d(-115%, 0, 0); }
+  25% { opacity: 1; transform: translate3d(115%, 0, 0); }
+  25.01%,
+  33% { opacity: 0; transform: translate3d(115%, 0, 0); }
+  33.01%,
+  35% { opacity: 0; transform: translate3d(-115%, 0, 0); }
+  35.01% { opacity: 1; transform: translate3d(-115%, 0, 0); }
+  58% { opacity: 1; transform: translate3d(115%, 0, 0); }
+  58.01%,
+  66% { opacity: 0; transform: translate3d(115%, 0, 0); }
+  66.01%,
+  68% { opacity: 0; transform: translate3d(-115%, 0, 0); }
+  68.01% { opacity: 1; transform: translate3d(-115%, 0, 0); }
+  91% { opacity: 1; transform: translate3d(115%, 0, 0); }
+  91.01%,
+  100% { opacity: 0; transform: translate3d(115%, 0, 0); }
 }
 
 @keyframes activity-reflection-text {
-  0% { transform: translate3d(115%, 0, 0); }
-  88%,
+  0%,
+  2.01% { transform: translate3d(115%, 0, 0); }
+  25%,
+  33% { transform: translate3d(-115%, 0, 0); }
+  33.01%,
+  35.01% { transform: translate3d(115%, 0, 0); }
+  58%,
+  66% { transform: translate3d(-115%, 0, 0); }
+  66.01%,
+  68.01% { transform: translate3d(115%, 0, 0); }
+  91%,
   100% { transform: translate3d(-115%, 0, 0); }
 }
 

@@ -1,4 +1,4 @@
-import { createSignal, Show } from "solid-js";
+import { createEffect, createSignal, Show } from "solid-js";
 
 import type { ChatGptAccount } from "../contracts/types";
 
@@ -8,7 +8,16 @@ interface AccountAvatarProps {
 }
 
 export function AccountAvatar(props: AccountAvatarProps) {
+  let observedAccount = props.account;
   const [failedPicture, setFailedPicture] = createSignal<string | null>(null);
+  createEffect(() => {
+    const currentAccount = props.account;
+    if (currentAccount === observedAccount) {
+      return;
+    }
+    observedAccount = currentAccount;
+    setFailedPicture(null);
+  });
   const picture = () => {
     const source = props.account?.picture ?? null;
     return source !== failedPicture() ? source : null;

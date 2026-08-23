@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ACCOUNT_PROFILE_STALE_TIME_MS,
   createAccountProfileRefreshCoordinator,
+  mergeAccountProfile,
 } from "./accountProfileRefresh";
 
 function deferred<T>() {
@@ -16,6 +17,56 @@ function deferred<T>() {
 }
 
 describe("atualização do perfil ChatGPT", () => {
+  it("aplica nome e foto oficiais sem descartar os demais dados da conta", () => {
+    const account = {
+      account: {
+        type: "chatgpt",
+        email: "ada@example.com",
+        name: "Ada",
+        picture: null,
+        planType: "pro",
+      },
+      requiresOpenaiAuth: true,
+      refresh: { status: "notRequired", error: null },
+    } as const;
+    const profile = {
+      displayName: "Ada Lovelace",
+      username: "ada.dev",
+      picture: "https://images.example.com/ada.png",
+      statisticsStatus: "available",
+      summary: {
+        lifetimeTokens: null,
+        peakDailyTokens: null,
+        longestRunningTurnSeconds: null,
+        currentStreakDays: null,
+        longestStreakDays: null,
+      },
+      dailyUsage: null,
+      activityInsights: {
+        fastModePercent: null,
+        mostUsedReasoningEffort: null,
+        mostUsedReasoningEffortPercent: null,
+        uniqueSkillsUsed: null,
+        totalSkillsUsed: null,
+        totalThreads: null,
+        topInvocations: null,
+      },
+    } as const;
+
+    expect(mergeAccountProfile(account, profile)?.account).toEqual({
+      ...account.account,
+      name: "Ada Lovelace",
+      picture: "https://images.example.com/ada.png",
+    });
+    const existingPicture = "https://images.example.com/existing.png";
+    expect(
+      mergeAccountProfile(
+        { ...account, account: { ...account.account, picture: existingPicture } },
+        { ...profile, picture: null },
+      )?.account?.picture,
+    ).toBe(existingPicture);
+  });
+
   it("compartilha a chamada em andamento dentro da mesma sessão", async () => {
     const pending = deferred<{ picture: string }>();
     const read = vi.fn(() => pending.promise);

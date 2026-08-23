@@ -1,4 +1,23 @@
+import type { AccountProfileResponse, AccountReadResponse } from "../contracts/types";
+
 export const ACCOUNT_PROFILE_STALE_TIME_MS = 6 * 60 * 60 * 1_000;
+
+export function mergeAccountProfile(
+  current: AccountReadResponse | undefined,
+  profile: AccountProfileResponse,
+): AccountReadResponse | undefined {
+  if (current?.account === null || current === undefined) {
+    return current;
+  }
+  return {
+    ...current,
+    account: {
+      ...current.account,
+      name: profile.displayName ?? current.account.name,
+      picture: profile.picture ?? current.account.picture,
+    },
+  };
+}
 
 export interface AccountProfileRefreshOptions<T> {
   readonly getSessionKey: () => string | null;

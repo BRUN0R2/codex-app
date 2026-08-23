@@ -65,7 +65,11 @@ pub struct AccountProfileActivityInsights {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
 pub enum AccountProfileInvocation {
     Plugin {
         id: Option<String>,
@@ -303,9 +307,10 @@ fn profile_contract_error(message: impl Into<String>) -> AuthError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountProfileDailyUsageWire, AccountProfileInvocation, AccountProfileInvocationKindWire,
-        AccountProfileInvocationWire, AccountProfileStatisticsStatus, ChatGptProfileMetadataWire,
-        ChatGptProfileResponse, ChatGptProfileStatsWire, ChatGptProfileWire,
+        AccountProfileActivityInsights, AccountProfileDailyUsageWire, AccountProfileInvocation,
+        AccountProfileInvocationKindWire, AccountProfileInvocationWire,
+        AccountProfileStatisticsStatus, ChatGptProfileMetadataWire, ChatGptProfileResponse,
+        ChatGptProfileStatsWire, ChatGptProfileWire,
     };
     use crate::engine::ReasoningEffort;
 
@@ -384,6 +389,46 @@ mod tests {
                 ..
             }) if name == "@test-android-apps"
         ));
+    }
+
+    #[test]
+    fn serializes_invocation_fields_in_camel_case() {
+        let serialized = serde_json::to_value(AccountProfileActivityInsights {
+            top_invocations: Some(vec![
+                AccountProfileInvocation::Plugin {
+                    id: Some("plugin-1".into()),
+                    name: "@plugin".into(),
+                    usage_count: 3,
+                },
+                AccountProfileInvocation::Skill {
+                    id: Some("skill-1".into()),
+                    name: "@plugin:inspect".into(),
+                    plugin_name: Some("@plugin".into()),
+                    usage_count: 5,
+                },
+            ]),
+            ..AccountProfileActivityInsights::default()
+        })
+        .expect("profile activity should serialize");
+
+        assert_eq!(
+            serialized["topInvocations"],
+            serde_json::json!([
+                {
+                    "type": "plugin",
+                    "id": "plugin-1",
+                    "name": "@plugin",
+                    "usageCount": 3
+                },
+                {
+                    "type": "skill",
+                    "id": "skill-1",
+                    "name": "@plugin:inspect",
+                    "pluginName": "@plugin",
+                    "usageCount": 5
+                }
+            ])
+        );
     }
 
     #[test]

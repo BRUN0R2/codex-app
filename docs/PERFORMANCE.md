@@ -342,14 +342,16 @@ handoff de wheel entre comando, diff e leitura. As três transferências levam
 `0,6–0,7 ms` juntas, não executam `getComputedStyle` e entregam exatamente
 `−60`, `−120` e `−80 px` à timeline. O gate também cobre arquivo criado de 338
 linhas colorido, `read_file`/`search_text` tipados, gutters compactos, três ondas
-de atividade em 2 s e o perfil com largura de `732 px`, avatar de `80 px`, 364
-células, cinco métricas, cinco insights e zero overflow.
+de atividade não sobrepostas em 4,2 s e o perfil com largura de `732 px`, avatar
+de `80 px`, imagem efetivamente montada na página e na sidebar, 364 células,
+cinco métricas, cinco insights e zero overflow. O gate pausa a animação em seis
+pontos do ciclo e exige a sequência visível/oculta/visível/oculta/visível/oculta.
 
-O build corrente produz app principal de `466,21 KiB` (`138,67 KiB` gzip),
-chunk auxiliar de `20,47 KiB` (`8,14 KiB` gzip), CSS de `128,89 KiB`
-(`23,74 KiB` gzip) e worker Markdown lazy de `63,48 KiB`. Contra o gate integral
+O build corrente produz app principal de `466,29 KiB` (`138,68 KiB` gzip),
+chunk auxiliar de `20,47 KiB` (`8,14 KiB` gzip), CSS de `129,32 KiB`
+(`23,81 KiB` gzip) e worker Markdown lazy de `63,48 KiB`. Contra o gate integral
 de 21 de agosto, o payload inicial agregado passou de `151,10 KiB` para
-`170,55 KiB` gzip, acréscimo de `19,45 KiB` (`12,87%`) para syntax, streaming,
+`170,63 KiB` gzip, acréscimo de `19,53 KiB` (`12,93%`) para syntax, streaming,
 navegação, perfil e demais superfícies novas. Nenhuma dependência, WASM ou worker
 de runtime adicional foi introduzido; o worker Markdown continua lazy.
 
@@ -697,12 +699,12 @@ canônica aberta permaneceu responsiva e não foi encerrada ou substituída.
 de integridade alto:
 
 - 291 arquivos de texto validados como UTF-8 sem BOM;
-- 56 arquivos e 281 testes frontend aprovados;
+- 56 arquivos e 282 testes frontend aprovados;
 - 21 cenários visuais em três viewports, totalizando 63 capturas;
 - TypeScript estrito, Biome e build Vite de produção;
 - bootstrap/hash do ripgrep e auditoria de dependências transitivas;
 - `cargo check`, `rustfmt` e Clippy com warnings como erro;
-- 272 testes Rust aprovados e 8 benchmarks ignorados no fluxo comum por design;
+- 273 testes Rust aprovados e 8 benchmarks ignorados no fluxo comum por design;
 - benchmarks release de streaming, sessões longas e comandos paralelos
   executados separadamente dentro do mesmo gate.
 

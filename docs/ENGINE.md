@@ -176,16 +176,22 @@ O perfil segue o fluxo do Desktop oficial. `GET /wham/profiles/me` fornece
 diários, insights e invocações de plugins/skills. O wire remoto é privado ao
 módulo `auth/profile.rs`; antes do IPC, o Rust valida limites, percentuais,
 datas ISO, cardinalidade e overflow, agrega buckets duplicados pela data e
-produz uniões discriminadas próprias. `metadata.stats_error` vira o estado
-explícito `unavailable`, preservando a identidade sem inventar estatísticas.
+produz uniões discriminadas próprias. Variantes de plugin/skill usam
+`rename_all_fields = "camelCase"` na fronteira IPC, garantindo `usageCount` e
+`pluginName` em vez dos nomes internos Rust. `metadata.stats_error` vira o
+estado explícito `unavailable`, preservando a identidade sem inventar
+estatísticas.
 
 A chamada tem deadline próprio de cinco segundos, não participa do caminho de
 boot e fica válida por seis horas por identidade de sessão. Respostas de uma
 sessão substituída são descartadas; URL ausente ou imagem que falha mantém as
-iniciais. A ausência de foto no token OIDC não aciona `userinfo` nem atrasa a
-inicialização. A UI deriva localmente somente as projeções diária, semanal e
-acumulada da janela fixa de 52 semanas; totais e insights continuam
-autoritativos da conta e nunca são estimados pelo histórico SQLite local.
+iniciais. Uma nova revisão da conta limpa a falha visual anterior e permite
+tentar novamente a mesma URL; a foto oficial aplicada pelo perfil atualiza
+página, menu e sidebar pelo mesmo estado. A ausência de foto no token OIDC não
+aciona `userinfo` nem atrasa a inicialização. A UI deriva localmente somente as
+projeções diária, semanal e acumulada da janela fixa de 52 semanas; totais e
+insights continuam autoritativos da conta e nunca são estimados pelo histórico
+SQLite local.
 
 O uso segue uma política separada e não possui polling permanente: o valor fica
 válido por cinco minutos e é revalidado, quando obsoleto, ao recuperar foco ou

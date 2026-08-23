@@ -217,9 +217,11 @@ metadados visuais; turnos e conteúdo persistido nunca são limitados por ela.
 `response.output_item.added` preserva a fase de mensagem antes do primeiro
 delta. Por isso “Pensando” aparece imediatamente, acompanha o título da atividade
 mais recente e desaparece quando a resposta final começa, sem montar cards
-vazios. A atividade ativa usa uma única cópia visual mascarada por três ondas
-sequenciais em um ciclo de 2 s com atraso de 80 ms; a animação é GPU-only,
-respeita a política global de movimento reduzido e não duplica nós de texto.
+vazios. A atividade ativa usa uma única cópia visual e uma única faixa de
+reflexo. A mesma faixa atravessa o texto três vezes sem sobreposição, com pausas
+explícitas dentro de um ciclo de 4,2 s e atraso inicial de 80 ms. A animação é
+GPU-only, respeita a política global de movimento reduzido e não duplica nós de
+texto.
 Disclosures de atividade, comando e diff nascem fechados e só montam o corpo
 pesado quando abertos. Chaves de expansão são hierárquicas e isoladas pelo
 identificador da conversa: sobrevivem à desmontagem temporária e à troca de
