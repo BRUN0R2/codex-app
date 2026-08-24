@@ -118,7 +118,9 @@ import {
   resolveTimelineFollowing,
   resolveTimelineMessageOffset,
   resolveTimelineRestorationTop,
+  resolveTimelineWheelHandoffTarget,
   type ScrollbarMetrics,
+  shouldMeasureTimelineScrollAsUserInitiated,
   shouldPreserveTimelineAnchor,
   shouldSynchronizeTimelineToEnd,
   TimelineProgrammaticScrollTracker,
@@ -186,6 +188,10 @@ const USER_MESSAGE_NAVIGATOR_DETAIL_PREVIEW_CHARACTERS: number = 320;
 const ACTIVE_MESSAGE_VIEWPORT_INSET_PX: number = 112;
 const LIVE_OUTPUT_FOLLOW_EPSILON_PX: number = 24;
 const TIMELINE_SCROLL_REGION_SELECTOR = "[data-timeline-scroll-region]";
+const TIMELINE_WHEEL_LISTENER_OPTIONS = {
+  capture: true,
+  passive: false,
+} as const satisfies AddEventListenerOptions;
 const IMAGE_OUTPUT_PRESENTATION = { type: "image" } as const;
 
 interface TimelineUserMessageEntry extends UserMessageEntry {
@@ -219,11 +225,13 @@ export function Timeline(props: {
   let scrollbarThumbElement: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let animationFrame: number | undefined;
+  let pendingExplicitUserScrollMeasurement = false;
   let pendingLayoutSynchronization = false;
-  let pendingUserScrollMeasurement = false;
+  let pendingUnownedScrollMeasurement = false;
   let timelineRestorationFrame: number | undefined;
   let activityContentResumeTimer: number | undefined;
   let previousActivityScrollTop = 0;
+  let nestedWheelTimelineTarget: number | undefined;
   let userMessageNavigationFrame: number | undefined;
   let pendingUserMessageNavigation: PendingUserMessageNavigation | undefined;
   let pendingHistoryLayout: PendingHistoryLayout | undefined;
@@ -517,6 +525,7 @@ export function Timeline(props: {
   }
 
   function scrollTimelineTo(top: number, behavior: ScrollBehavior = "auto"): void {
+    cancelTimelineWheelHandoff();
     if (scrollElement === undefined) {
       return;
     }
@@ -611,6 +620,7 @@ export function Timeline(props: {
   function cancelPendingTimelineWork(): number {
     timelineTransitionRevision += 1;
     cancelPendingUserMessageNavigation();
+    cancelTimelineWheelHandoff();
     if (animationFrame !== undefined) {
       cancelAnimationFrame(animationFrame);
       animationFrame = undefined;
@@ -621,8 +631,9 @@ export function Timeline(props: {
     }
     virtualMeasurementGeneration += 1;
     virtualMeasurementScheduledGeneration = undefined;
+    pendingExplicitUserScrollMeasurement = false;
     pendingLayoutSynchronization = false;
-    pendingUserScrollMeasurement = false;
+    pendingUnownedScrollMeasurement = false;
     pendingVirtualMeasurements.clear();
     pendingHistoryLayout = undefined;
     pendingVirtualAnchorCorrection = undefined;
@@ -706,8 +717,9 @@ export function Timeline(props: {
           savedScrollTop: anchoredScrollTop ?? savedScrollTop,
         }),
       );
+      pendingExplicitUserScrollMeasurement = false;
       pendingLayoutSynchronization = false;
-      pendingUserScrollMeasurement = false;
+      pendingUnownedScrollMeasurement = false;
       measureScroll(false);
     });
   }
@@ -725,6 +737,7 @@ export function Timeline(props: {
     return (
       timelineRestorationFrame !== undefined ||
       programmaticScroll.smoothActive() ||
+      nestedWheelTimelineTarget !== undefined ||
       pendingUserMessageNavigation !== undefined
     );
   }
@@ -900,9 +913,22 @@ export function Timeline(props: {
     }
   }
 
-  function claimTimelineScrollOwnership(): void {
+  function cancelTimelineWheelHandoff(): void {
+    if (nestedWheelTimelineTarget === undefined) {
+      return;
+    }
+    nestedWheelTimelineTarget = undefined;
+    if (scrollElement !== undefined) {
+      scrollElement.scrollTo({ behavior: "auto", top: scrollElement.scrollTop });
+    }
+  }
+
+  function claimTimelineScrollOwnership(preserveWheelHandoff = false): void {
     cancelPendingUserMessageNavigation();
     programmaticScroll.cancel();
+    if (!preserveWheelHandoff) {
+      cancelTimelineWheelHandoff();
+    }
   }
 
   function readNestedTimelineScrollRegion(target: EventTarget | null): HTMLElement | null {
@@ -928,6 +954,7 @@ export function Timeline(props: {
       case "PageDown":
       case "PageUp":
         claimTimelineScrollOwnership();
+        scheduleTimelineFrame(true, false);
         return;
     }
   }
@@ -938,6 +965,7 @@ export function Timeline(props: {
     }
     if (event.pointerType === "touch" || (event.pointerType === "mouse" && event.button === 1)) {
       claimTimelineScrollOwnership();
+      scheduleTimelineFrame(true, false);
     }
   }
 
@@ -945,12 +973,16 @@ export function Timeline(props: {
     if (event.ctrlKey || event.shiftKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
       return;
     }
-    claimTimelineScrollOwnership();
+    claimTimelineScrollOwnership(true);
     const nestedRegion = readNestedTimelineScrollRegion(event.target);
     if (nestedRegion === null) {
+      cancelTimelineWheelHandoff();
+      scheduleTimelineFrame(true, false);
       return;
     }
     if (scrollElement === undefined || !event.cancelable) {
+      cancelTimelineWheelHandoff();
+      scheduleTimelineFrame(true, false);
       return;
     }
     const transfer = resolveNestedTimelineWheelTransfer({
@@ -964,11 +996,23 @@ export function Timeline(props: {
       scrollTop: nestedRegion.scrollTop,
     });
     if (transfer === null) {
+      cancelTimelineWheelHandoff();
       return;
     }
     event.preventDefault();
     nestedRegion.scrollTop = transfer.nestedScrollTop;
-    scrollTimelineTo(scrollElement.scrollTop + transfer.timelineDelta);
+    const target = resolveTimelineWheelHandoffTarget({
+      currentScrollTop: scrollElement.scrollTop,
+      delta: transfer.timelineDelta,
+      maximumScroll: Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight),
+      pendingTarget: nestedWheelTimelineTarget ?? null,
+    });
+    if (Math.abs(scrollElement.scrollTop - target) <= 1) {
+      nestedWheelTimelineTarget = undefined;
+      return;
+    }
+    nestedWheelTimelineTarget = target;
+    scrollElement.scrollTo({ behavior: "smooth", top: target });
     scheduleTimelineFrame(true, false);
   }
 
@@ -981,7 +1025,7 @@ export function Timeline(props: {
   }
 
   function scheduleTimelineFrame(userInitiated: boolean, synchronizeLayout: boolean): void {
-    pendingUserScrollMeasurement ||= userInitiated;
+    pendingExplicitUserScrollMeasurement ||= userInitiated;
     pendingLayoutSynchronization ||= synchronizeLayout;
     if (timelineRestorationFrame !== undefined || animationFrame !== undefined) {
       return;
@@ -989,9 +1033,14 @@ export function Timeline(props: {
     animationFrame = requestAnimationFrame(() => {
       animationFrame = undefined;
       const shouldSynchronizeLayout = pendingLayoutSynchronization;
-      const shouldMeasureAsUserScroll = pendingUserScrollMeasurement;
+      const shouldMeasureAsUserScroll = shouldMeasureTimelineScrollAsUserInitiated({
+        explicitUserInput: pendingExplicitUserScrollMeasurement,
+        layoutRequested: shouldSynchronizeLayout,
+        unownedScroll: pendingUnownedScrollMeasurement,
+      });
+      pendingExplicitUserScrollMeasurement = false;
       pendingLayoutSynchronization = false;
-      pendingUserScrollMeasurement = false;
+      pendingUnownedScrollMeasurement = false;
       if (scrollElement === undefined) {
         return;
       }
@@ -1325,12 +1374,28 @@ export function Timeline(props: {
     if (scrollElement === undefined || contentElement === undefined) {
       return;
     }
-    const handleScroll = () => scheduleTimelineFrame(!consumeProgrammaticScroll(), false);
-    const handleScrollEnd = () => programmaticScroll.finish();
+    const handleScroll = () => {
+      if (
+        scrollElement !== undefined &&
+        nestedWheelTimelineTarget !== undefined &&
+        Math.abs(scrollElement.scrollTop - nestedWheelTimelineTarget) <= 1
+      ) {
+        nestedWheelTimelineTarget = undefined;
+      }
+      if (!consumeProgrammaticScroll()) {
+        pendingUnownedScrollMeasurement = true;
+      }
+      scheduleTimelineFrame(false, false);
+    };
+    const handleScrollEnd = () => {
+      nestedWheelTimelineTarget = undefined;
+      programmaticScroll.finish();
+    };
     const handleResize = () => {
       synchronizeTimelineLayoutWidth();
       synchronizeScroll();
     };
+    scrollElement.addEventListener("wheel", handleTimelineWheel, TIMELINE_WHEEL_LISTENER_OPTIONS);
     scrollElement.addEventListener("scroll", handleScroll, { passive: true });
     scrollElement.addEventListener("scrollend", handleScrollEnd);
     resizeObserver = new ResizeObserver(handleResize);
@@ -1343,6 +1408,13 @@ export function Timeline(props: {
     synchronizeScroll();
     const clockInterval = window.setInterval(() => setClock(Date.now()), 1_000);
     onCleanup(() => window.clearInterval(clockInterval));
+    onCleanup(() =>
+      scrollElement?.removeEventListener(
+        "wheel",
+        handleTimelineWheel,
+        TIMELINE_WHEEL_LISTENER_OPTIONS,
+      ),
+    );
     onCleanup(() => scrollElement?.removeEventListener("scroll", handleScroll));
     onCleanup(() => scrollElement?.removeEventListener("scrollend", handleScrollEnd));
   });
@@ -1362,6 +1434,7 @@ export function Timeline(props: {
     pendingVirtualMeasurements.clear();
     pendingHistoryLayout = undefined;
     pendingVirtualAnchorCorrection = undefined;
+    nestedWheelTimelineTarget = undefined;
     cancelActivityContentDeferral();
     programmaticScroll.cancel();
   });
@@ -1399,7 +1472,6 @@ export function Timeline(props: {
               onClick={handleTimelineClick}
               onKeyDown={handleTimelineKeyDown}
               onPointerDown={handleTimelinePointerDown}
-              onWheel={handleTimelineWheel}
               ref={scrollElement}
               // biome-ignore lint/a11y/noNoninteractiveTabindex: the official desktop keeps the scroll viewport keyboard-focusable for Home, End, PageUp, and PageDown.
               tabIndex={0}

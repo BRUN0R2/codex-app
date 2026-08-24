@@ -65,6 +65,14 @@ export function resolveTimelineFollowing(input: {
   return input.userInitiated ? input.nearEnd : input.followingLatest;
 }
 
+export function shouldMeasureTimelineScrollAsUserInitiated(input: {
+  readonly explicitUserInput: boolean;
+  readonly layoutRequested: boolean;
+  readonly unownedScroll: boolean;
+}): boolean {
+  return input.explicitUserInput || (input.unownedScroll && !input.layoutRequested);
+}
+
 export function shouldSynchronizeTimelineToEnd(input: {
   readonly followingLatest: boolean;
   readonly layoutRequested: boolean;
@@ -186,6 +194,40 @@ export function resolveNestedTimelineWheelTransfer(input: {
   return Math.abs(timelineDelta) <= TIMELINE_WHEEL_TRANSFER_EPSILON_PX
     ? null
     : { nestedScrollTop, timelineDelta };
+}
+
+export function resolveTimelineWheelHandoffTarget(input: {
+  readonly currentScrollTop: number;
+  readonly delta: number;
+  readonly maximumScroll: number;
+  readonly pendingTarget: number | null;
+}): number {
+  if (
+    !Number.isFinite(input.currentScrollTop) ||
+    input.currentScrollTop < 0 ||
+    !Number.isFinite(input.delta) ||
+    !Number.isFinite(input.maximumScroll) ||
+    input.maximumScroll < 0 ||
+    (input.pendingTarget !== null &&
+      (!Number.isFinite(input.pendingTarget) || input.pendingTarget < 0))
+  ) {
+    throw new Error(
+      "Timeline wheel handoff requires finite metrics and non-negative scroll positions.",
+    );
+  }
+  const currentScrollTop = Math.min(input.maximumScroll, input.currentScrollTop);
+  if (Math.abs(input.delta) <= TIMELINE_WHEEL_TRANSFER_EPSILON_PX) {
+    return currentScrollTop;
+  }
+  const pendingTarget =
+    input.pendingTarget === null ? null : Math.min(input.maximumScroll, input.pendingTarget);
+  const pendingDelta = pendingTarget === null ? 0 : pendingTarget - currentScrollTop;
+  const continuesPendingDirection =
+    pendingTarget !== null &&
+    (Math.abs(pendingDelta) <= TIMELINE_WHEEL_TRANSFER_EPSILON_PX ||
+      Math.sign(pendingDelta) === Math.sign(input.delta));
+  const origin = continuesPendingDirection ? pendingTarget : currentScrollTop;
+  return Math.min(input.maximumScroll, Math.max(0, origin + input.delta));
 }
 
 export function resolveTimelineRestorationTop(input: {

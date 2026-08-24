@@ -10,6 +10,8 @@ import {
   resolveTimelineFollowing,
   resolveTimelineMessageOffset,
   resolveTimelineRestorationTop,
+  resolveTimelineWheelHandoffTarget,
+  shouldMeasureTimelineScrollAsUserInitiated,
   shouldPreserveTimelineAnchor,
   shouldSynchronizeTimelineToEnd,
   TimelineProgrammaticScrollTracker,
@@ -59,6 +61,30 @@ describe("timeline scroll metrics", () => {
         userInitiated: true,
       }),
     ).toBe(false);
+  });
+
+  it("does not classify layout anchoring as user scroll without explicit input", () => {
+    expect(
+      shouldMeasureTimelineScrollAsUserInitiated({
+        explicitUserInput: false,
+        layoutRequested: true,
+        unownedScroll: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldMeasureTimelineScrollAsUserInitiated({
+        explicitUserInput: true,
+        layoutRequested: true,
+        unownedScroll: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldMeasureTimelineScrollAsUserInitiated({
+        explicitUserInput: false,
+        layoutRequested: false,
+        unownedScroll: true,
+      }),
+    ).toBe(true);
   });
 
   it("synchronizes layout changes only while following the latest content", () => {
@@ -138,7 +164,7 @@ describe("timeline scroll metrics", () => {
     );
   });
 
-  it("lets a nested viewport consume wheel movement that fits", () => {
+  it("leaves wheel movement that fits inside a nested viewport to the native scroller", () => {
     expect(
       resolveNestedTimelineWheelTransfer({
         clientHeight: 200,
@@ -177,6 +203,74 @@ describe("timeline scroll metrics", () => {
         scrollTop: 0,
       }),
     ).toEqual({ nestedScrollTop: 0, timelineDelta: -120 });
+  });
+
+  it("ignores only a wheel event with no vertical movement", () => {
+    expect(
+      resolveNestedTimelineWheelTransfer({
+        clientHeight: 200,
+        delta: 0,
+        scrollHeight: 1_000,
+        scrollTop: 400,
+      }),
+    ).toBeNull();
+  });
+
+  it("accumulates smooth handoff deltas against the pending destination", () => {
+    expect(
+      resolveTimelineWheelHandoffTarget({
+        currentScrollTop: 100,
+        delta: 40,
+        maximumScroll: 500,
+        pendingTarget: null,
+      }),
+    ).toBe(140);
+    expect(
+      resolveTimelineWheelHandoffTarget({
+        currentScrollTop: 112,
+        delta: 40,
+        maximumScroll: 500,
+        pendingTarget: 140,
+      }),
+    ).toBe(180);
+  });
+
+  it("clamps a pending smooth handoff after the timeline range changes", () => {
+    expect(
+      resolveTimelineWheelHandoffTarget({
+        currentScrollTop: 480,
+        delta: 80,
+        maximumScroll: 500,
+        pendingTarget: 560,
+      }),
+    ).toBe(500);
+    expect(
+      resolveTimelineWheelHandoffTarget({
+        currentScrollTop: 20,
+        delta: -80,
+        maximumScroll: 500,
+        pendingTarget: null,
+      }),
+    ).toBe(0);
+  });
+
+  it("reverses from the current position instead of a stale smooth destination", () => {
+    expect(
+      resolveTimelineWheelHandoffTarget({
+        currentScrollTop: 112,
+        delta: -40,
+        maximumScroll: 500,
+        pendingTarget: 180,
+      }),
+    ).toBe(72);
+    expect(
+      resolveTimelineWheelHandoffTarget({
+        currentScrollTop: 112,
+        delta: 0,
+        maximumScroll: 500,
+        pendingTarget: 180,
+      }),
+    ).toBe(112);
   });
 
   it("restores either the saved viewport or the exact end deterministically", () => {
