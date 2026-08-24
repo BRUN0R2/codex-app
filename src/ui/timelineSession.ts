@@ -1,3 +1,4 @@
+import { touchMostRecentEntry } from "./recentlyUsedMap";
 import type { VariableSizeVirtualizer, VirtualAnchor } from "./variableSizeVirtualizer";
 
 export interface TimelineViewportAnchor {
@@ -106,14 +107,9 @@ export class TimelineThreadSessionStore {
   }
 
   #touch(threadId: string, session: TimelineThreadSessionRecord): void {
-    this.#sessions.delete(threadId);
-    this.#sessions.set(threadId, session);
-    while (this.#sessions.size > this.#capacity) {
-      const oldestThreadId = this.#sessions.keys().next().value;
-      if (oldestThreadId === undefined) {
-        throw new Error("Timeline session cache lost its eviction candidate.");
-      }
-      this.#sessions.delete(oldestThreadId);
+    if (!this.#sessions.has(threadId)) {
+      this.#sessions.set(threadId, session);
     }
+    touchMostRecentEntry(this.#sessions, threadId, this.#capacity);
   }
 }

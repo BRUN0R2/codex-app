@@ -13,11 +13,12 @@ const HOME_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1`;
 const CHAT_REFERENCE_PREVIEW_URL = `${HOME_PREVIEW_URL}&chatReference=1`;
 const TIMELINE_STRESS_PREVIEW_URL = `${HOME_PREVIEW_URL}&timelineStress=1`;
 const BROWSER_PANEL_PREVIEW_URL = `${TIMELINE_STRESS_PREVIEW_URL}&browser=1`;
+const BROWSER_DEBUG_PREVIEW_URL = `${BROWSER_PANEL_PREVIEW_URL}&browserMetrics=1`;
 const SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=general`;
 const USAGE_SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=usage`;
 const SETTINGS_INTERACTION_PREVIEW_URL = `${SETTINGS_PREVIEW_URL}&preferenceDelay=400`;
 const AUTOMATIONS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&surface=automations`;
-const PROFILE_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&surface=profile`;
+const PROFILE_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=profile`;
 const ARTIFACT_DIRECTORY = path.join(PROJECT_ROOT, ".freebuff", "visual-audit");
 const VIEWPORTS = [
   { width: 920, height: 640 },
@@ -541,6 +542,32 @@ const SCENARIOS = [
     validate: validateBrowserPanelMetrics,
   },
   {
+    id: "browser-debug-panel",
+    url: BROWSER_DEBUG_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de timeline expandida"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Estresse de timeline expandida"),
+      );
+      threadButton?.click();
+      const openDebug = () => {
+        const button = document.querySelector('[aria-label="Alternar diagnóstico do navegador"]');
+        if (button instanceof HTMLButtonElement) {
+          button.click();
+          return;
+        }
+        requestAnimationFrame(openDebug);
+      };
+      openDebug();
+    })()`,
+    readyExpression: `document.querySelector(".browser-debug-panel") !== null &&
+      document.querySelectorAll(".browser-debug-row").length >= 3`,
+    auditExpression: browserDebugVisualAuditExpression,
+    validate: validateBrowserDebugMetrics,
+  },
+  {
     id: "browser-panel-lifecycle",
     url: BROWSER_PANEL_PREVIEW_URL,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
@@ -826,6 +853,45 @@ function browserPanelVisualAuditExpression() {
       addressInputs: panel.querySelectorAll('.browser-address input[aria-label="Pesquisar ou digitar endereço"]').length,
       previewPages: panel.querySelectorAll(".browser-preview-page").length,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function browserDebugVisualAuditExpression() {
+  return `(() => {
+    const panel = document.querySelector(".browser-panel");
+    const debug = document.querySelector(".browser-debug-panel");
+    const surface = document.querySelector(".browser-native-surface");
+    if (
+      !(panel instanceof HTMLElement) ||
+      !(debug instanceof HTMLElement) ||
+      !(surface instanceof HTMLElement)
+    ) {
+      throw new Error("O diagnóstico do navegador está incompleto.");
+    }
+    const rectangle = (element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      panel: rectangle(panel),
+      debug: rectangle(debug),
+      surface: rectangle(surface),
+      summaryCards: debug.querySelectorAll(".browser-debug-summary > div").length,
+      historyRows: debug.querySelectorAll(".browser-debug-row").length,
+      failedRows: debug.querySelectorAll('.browser-debug-row[data-status="failed"]').length,
+      stageBadges: debug.querySelectorAll(".browser-debug-stages span").length,
+      findingBadges: debug.querySelectorAll(".browser-debug-findings span").length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      debugHorizontalOverflow: debug.scrollWidth - debug.clientWidth,
     };
   })()`;
 }
@@ -2587,10 +2653,19 @@ function profileVisualAuditExpression() {
         visibility: style.visibility,
       };
     };
+    const overlaps = (left, right) =>
+      left.left < right.right &&
+      left.right > right.left &&
+      left.top < right.bottom &&
+      left.bottom > right.top;
     const chrome = rectangle(".window-chrome");
     const content = rectangle(".application-frame-content");
     const controls = rectangle(".window-chrome-controls");
-    const sidebar = rectangle(".sidebar");
+    const overlay = rectangle(".settings-overlay");
+    const navigation = rectangle(".settings-nav");
+    const main = rectangle(".settings-main");
+    const page = rectangle(".profile-settings-page");
+    const heading = rectangle(".profile-settings-page > .settings-heading");
     const surface = rectangle(".profile-page");
     const profileContent = rectangle(".profile-page-content");
     const avatar = rectangle(".profile-identity .account-avatar-profile");
@@ -2599,8 +2674,9 @@ function profileVisualAuditExpression() {
     const activityGrid = rectangle(".profile-activity-grid");
     const insights = rectangle(".profile-insights-grid");
     const surfaceElement = document.querySelector(".profile-page-scroll");
-    if (!(surfaceElement instanceof HTMLElement)) {
-      throw new Error("Scroller do perfil ausente.");
+    const settingsMainElement = document.querySelector(".settings-main");
+    if (!(surfaceElement instanceof HTMLElement) || !(settingsMainElement instanceof HTMLElement)) {
+      throw new Error("Contêiner de rolagem do perfil ausente.");
     }
     const cells = [...document.querySelectorAll(".profile-activity-cell")];
     return {
@@ -2608,7 +2684,11 @@ function profileVisualAuditExpression() {
       chrome,
       content,
       controls,
-      sidebar,
+      overlay,
+      navigation,
+      main,
+      page,
+      heading,
       surface,
       profileContent,
       avatar,
@@ -2616,15 +2696,19 @@ function profileVisualAuditExpression() {
       activity,
       activityGrid,
       insights,
+      chromeOverlapsSettings: overlaps(chrome, overlay),
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      settingsHorizontalOverflow:
+        settingsMainElement.scrollWidth - settingsMainElement.clientWidth,
       surfaceHorizontalOverflow: surfaceElement.scrollWidth - surfaceElement.clientWidth,
       centeredInsetDifference: Math.abs(
-        profileContent.left - surface.left - (surface.right - profileContent.right),
+        profileContent.left - page.left - (page.right - profileContent.right),
       ),
       summaryStats: document.querySelectorAll(".profile-summary-stat").length,
       activityCells: cells.length,
       activeCells: cells.filter((cell) => cell.getAttribute("data-level") !== "0").length,
       futureCells: cells.filter((cell) => cell.classList.contains("future")).length,
+      expectedFutureCells: 6 - new Date().getUTCDay(),
       monthLabels: document.querySelectorAll(".profile-activity-months span").length,
       activityTabs: document.querySelectorAll(".profile-activity-tabs button").length,
       selectedActivityTabs: document.querySelectorAll(
@@ -2635,8 +2719,9 @@ function profileVisualAuditExpression() {
       profileAvatarImages: document.querySelectorAll(
         ".profile-identity .account-avatar-profile img",
       ).length,
-      sidebarAvatarImages: document.querySelectorAll(".sidebar .account-avatar img").length,
-      activeProfileTriggers: document.querySelectorAll(".sidebar-account-trigger.active").length,
+      selectedProfileNavigation: [...document.querySelectorAll(
+        '.settings-nav nav button[aria-current="page"]',
+      )].filter((button) => button.textContent?.trim() === "Perfil").length,
       planBadge: document.querySelector(".profile-plan-badge")?.textContent?.trim() ?? null,
       loadingStates: document.querySelectorAll(".profile-skeleton, .profile-load-error").length,
     };
@@ -3093,7 +3178,7 @@ function validateSingleFileChangeMetrics(metrics, viewport) {
     "o arquivo novo perdeu a semântica Arquivo criado",
   );
   assert(metrics.newFileBadge === "NOVO", "o arquivo novo perdeu o selo NOVO");
-  assert(metrics.newFileAdditions === "+338", "o arquivo novo perdeu a contagem de linhas");
+  assert(metrics.newFileAdditions === "+256", "o arquivo novo perdeu a contagem de linhas");
   assert(metrics.newFileHasDeletions === false, "o arquivo novo ainda exibe uma remoção zerada");
   assert(
     metrics.deletedFileAction === "Arquivo excluído",
@@ -3362,36 +3447,58 @@ function validateSettingsInteractionMetrics(metrics) {
 function validateProfileMetrics(metrics, viewport) {
   const tolerance = 1;
   validateChromeMetrics(metrics, viewport);
+  assert(metrics.chromeOverlapsSettings === true, "o chrome não sobrepõe as configurações");
   assert(metrics.horizontalOverflow <= tolerance, "o perfil criou overflow horizontal global");
+  assert(
+    metrics.settingsHorizontalOverflow <= tolerance,
+    "o painel de configurações possui overflow horizontal",
+  );
   assert(
     metrics.surfaceHorizontalOverflow <= tolerance,
     "a superfície do perfil possui overflow horizontal",
   );
   assert(
-    Math.abs(metrics.surface.top - metrics.chrome.bottom) <= tolerance,
-    "o perfil não começa imediatamente abaixo do chrome",
+    Math.abs(metrics.navigation.top - metrics.content.top) <= tolerance,
+    "a navegação de configurações não chega ao topo",
   );
-  assert(metrics.profileContent.width <= 733, "o conteúdo do perfil ultrapassou 732 px");
   assert(
-    metrics.profileContent.width <= metrics.surface.width,
-    "o conteúdo do perfil ultrapassa sua superfície",
+    Math.abs(metrics.main.top - metrics.content.top) <= tolerance,
+    "o painel de configurações não chega ao topo",
+  );
+  assert(
+    metrics.heading.top >= metrics.chrome.bottom,
+    "o título do perfil invade a área do chrome",
+  );
+  assert(
+    metrics.surface.top > metrics.heading.bottom,
+    "o conteúdo do perfil sobrepõe o cabeçalho de configurações",
+  );
+  assert(metrics.page.width <= 821, "a página do perfil ultrapassou 820 px");
+  assert(
+    metrics.profileContent.width <= metrics.page.width,
+    "o conteúdo do perfil ultrapassa a página de configurações",
   );
   assert(metrics.centeredInsetDifference <= 3, "o conteúdo do perfil não está centralizado");
   assert(Math.abs(metrics.avatar.width - 80) <= tolerance, "o avatar do perfil não mede 80 px");
   assert(Math.abs(metrics.avatar.height - 80) <= tolerance, "o avatar do perfil não mede 80 px");
   assert(metrics.profileAvatarImages === 1, "a foto do avatar não aparece na página de perfil");
-  assert(metrics.sidebarAvatarImages >= 1, "a foto do avatar não aparece na barra lateral");
   assert(metrics.summary.height >= 60, "o resumo do perfil ficou baixo demais");
   assert(metrics.summaryStats === 5, "o resumo não contém as cinco métricas oficiais");
   assert(metrics.activityCells === 364, "o calendário não contém 52 semanas completas");
   assert(metrics.activeCells >= 60, "a atividade de preview ficou visualmente vazia");
-  assert(metrics.futureCells === 6, "os seis dias futuros da última semana não foram isolados");
+  assert(
+    metrics.futureCells === metrics.expectedFutureCells,
+    "os dias futuros da última semana não foram isolados",
+  );
   assert(metrics.monthLabels >= 10, "os rótulos mensais do calendário estão incompletos");
   assert(metrics.activityTabs === 3, "as três agregações de atividade estão ausentes");
   assert(metrics.selectedActivityTabs === 1, "a agregação ativa não é única");
   assert(metrics.insightRows === 5, "os cinco insights oficiais não foram renderizados");
   assert(metrics.invocationRows === 1, "o plugin mais usado do preview está ausente");
-  assert(metrics.activeProfileTriggers === 1, "a navegação não marca o perfil como ativo");
+  assert(
+    metrics.selectedProfileNavigation === 1,
+    "Configurações não marca Perfil como a página ativa",
+  );
   assert(metrics.planBadge === "Pro", "o badge de plano do perfil está incorreto");
   assert(metrics.loadingStates === 0, "o perfil permaneceu em loading ou erro");
   assert(metrics.activity.top > metrics.summary.bottom, "o gráfico sobrepõe o resumo");
@@ -3488,9 +3595,31 @@ function validateBrowserPanelMetrics(metrics, viewport) {
   assert(metrics.address.width >= 180, "a barra de endereço ficou estreita demais");
   assert(metrics.tabCount >= 1, "o navegador não criou a aba inicial");
   assert(metrics.selectedTabs === 1, "o navegador não possui uma única aba ativa");
-  assert(metrics.navigationButtons === 4, "faltam controles de navegação na barra");
+  assert(metrics.navigationButtons === 5, "faltam controles de navegação/diagnóstico na barra");
   assert(metrics.addressInputs === 1, "a barra de endereço não possui um único campo");
   assert(metrics.previewPages === 1, "a prévia não expõe a superfície substituta do webview nativo");
+}
+
+function validateBrowserDebugMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "o diagnóstico criou overflow horizontal global");
+  assert(
+    metrics.debugHorizontalOverflow <= tolerance,
+    "o conteúdo do diagnóstico criou overflow horizontal",
+  );
+  assert(metrics.panel.right <= viewport.width + tolerance, "o painel de diagnóstico saiu do viewport");
+  assert(
+    metrics.debug.left >= metrics.panel.left - tolerance &&
+      metrics.debug.right <= metrics.panel.right + tolerance,
+    "o diagnóstico não acompanha a largura do navegador",
+  );
+  assert(metrics.debug.bottom <= metrics.surface.top + tolerance, "o diagnóstico sobrepõe a webview");
+  assert(metrics.surface.height >= 180, "abrir o diagnóstico reduziu demais a superfície nativa");
+  assert(metrics.summaryCards === 4, "o resumo de diagnóstico não possui quatro métricas");
+  assert(metrics.historyRows >= 3, "o histórico de diagnóstico não renderizou as amostras");
+  assert(metrics.failedRows >= 1, "o diagnóstico não diferencia falhas");
+  assert(metrics.stageBadges === 5, "os estágios de latência não foram renderizados");
+  assert(metrics.findingBadges >= 6, "os achados de qualidade não foram renderizados");
 }
 
 function validateBrowserPanelLifecycleMetrics(metrics, viewport) {
@@ -3585,7 +3714,7 @@ function assert(condition, message) {
 
 function resolveBrowserPath() {
   const candidates = [
-    path.join(process.env.ProgramFiles ?? "", "Google", "Chrome", "Application", "chrome.exe"),
+    path.join(process.env["ProgramFiles"] ?? "", "Google", "Chrome", "Application", "chrome.exe"),
     path.join(
       process.env["ProgramFiles(x86)"] ?? "",
       "Google",
@@ -3594,13 +3723,19 @@ function resolveBrowserPath() {
       "chrome.exe",
     ),
     path.join(
-      process.env.LOCALAPPDATA ?? "",
+      process.env["LOCALAPPDATA"] ?? "",
       "Google",
       "Chrome",
       "Application",
       "chrome.exe",
     ),
-    path.join(process.env.ProgramFiles ?? "", "Microsoft", "Edge", "Application", "msedge.exe"),
+    path.join(
+      process.env["ProgramFiles"] ?? "",
+      "Microsoft",
+      "Edge",
+      "Application",
+      "msedge.exe",
+    ),
     path.join(
       process.env["ProgramFiles(x86)"] ?? "",
       "Microsoft",
@@ -3609,7 +3744,7 @@ function resolveBrowserPath() {
       "msedge.exe",
     ),
     path.join(
-      process.env.LOCALAPPDATA ?? "",
+      process.env["LOCALAPPDATA"] ?? "",
       "Microsoft",
       "Edge",
       "Application",
@@ -3704,6 +3839,8 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+const EVENT_DEADLINE_MILLISECONDS = 30_000;
+
 class CdpClient {
   static async connect(url) {
     const socket = new WebSocket(url);
@@ -3733,10 +3870,29 @@ class CdpClient {
   }
 
   waitForEvent(method) {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const listeners = this.events.get(method) ?? [];
-      listeners.push(resolve);
+      const settle = (value) => {
+        clearTimeout(deadline);
+        resolve(value);
+      };
+      listeners.push(settle);
       this.events.set(method, listeners);
+      const deadline = setTimeout(() => {
+        const pending = this.events.get(method) ?? [];
+        const listenerIndex = pending.indexOf(settle);
+        if (listenerIndex >= 0) {
+          pending.splice(listenerIndex, 1);
+        }
+        if ((this.events.get(method) ?? []).length === 0) {
+          this.events.delete(method);
+        }
+        reject(
+          new Error(
+            `O evento CDP "${method}" não aconteceu em ${EVENT_DEADLINE_MILLISECONDS} ms.`,
+          ),
+        );
+      }, EVENT_DEADLINE_MILLISECONDS);
     });
   }
 

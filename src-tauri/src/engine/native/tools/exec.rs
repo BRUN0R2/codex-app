@@ -22,6 +22,9 @@ use crate::engine::CommandOutputStream;
 use crate::error::AppError;
 use crate::process::{headless_command, headless_shell_command};
 
+const TASKKILL_TIME_LIMIT: Duration = Duration::from_secs(5);
+const TERMINATED_CHILD_REAP_TIME_LIMIT: Duration = Duration::from_secs(5);
+
 pub(super) struct CommandOutput {
     pub(super) termination: CommandTermination,
     pub(super) stdout: File,
@@ -238,11 +241,10 @@ async fn finish_capture_ref(
 }
 
 async fn finish_capture(
-    task: tokio::task::JoinHandle<Result<File, AppError>>,
+    mut task: tokio::task::JoinHandle<Result<File, AppError>>,
     label: &str,
 ) -> Result<File, AppError> {
-    task.await
-        .map_err(|error| AppError::Tool(format!("{label} reader failed: {error}")))?
+    finish_capture_ref(&mut task, label).await
 }
 
 async fn read_stream_spooled<R: AsyncRead + Unpin>(
@@ -297,7 +299,7 @@ async fn terminate_child(child: &mut tokio::process::Child) -> Result<(), AppErr
     taskkill
         .args(["/PID", &process_id.to_string(), "/T", "/F"])
         .kill_on_drop(true);
-    let output = match tokio::time::timeout(Duration::from_secs(5), taskkill.output()).await {
+    let output = match tokio::time::timeout(TASKKILL_TIME_LIMIT, taskkill.output()).await {
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
             return terminate_direct_child_after_tree_failure(
@@ -309,7 +311,10 @@ async fn terminate_child(child: &mut tokio::process::Child) -> Result<(), AppErr
         Err(_) => {
             return terminate_direct_child_after_tree_failure(
                 child,
-                "taskkill exceeded its 5 second time limit".into(),
+                format!(
+                    "taskkill exceeded its {} second time limit",
+                    TASKKILL_TIME_LIMIT.as_secs()
+                ),
             )
             .await;
         }
@@ -332,9 +337,14 @@ async fn terminate_child(child: &mut tokio::process::Child) -> Result<(), AppErr
         )
         .await;
     }
-    tokio::time::timeout(Duration::from_secs(5), child.wait())
+    tokio::time::timeout(TERMINATED_CHILD_REAP_TIME_LIMIT, child.wait())
         .await
-        .map_err(|_| AppError::Tool("terminated command did not exit within 5 seconds".into()))?
+        .map_err(|_| {
+            AppError::Tool(format!(
+                "terminated command did not exit within {} seconds",
+                TERMINATED_CHILD_REAP_TIME_LIMIT.as_secs()
+            ))
+        })?
         .map_err(|error| AppError::Tool(format!("could not reap command process: {error}")))?;
     Ok(())
 }

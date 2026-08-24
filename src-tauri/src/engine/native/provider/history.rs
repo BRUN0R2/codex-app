@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::ResponseItem;
+use super::{FunctionCallOutputPayload, ResponseItem};
 use crate::error::AppError;
 
 const ABORTED_TOOL_OUTPUT: &str = "aborted";
@@ -74,7 +74,7 @@ pub(crate) fn normalize_provider_history(
                 if output_is_missing {
                     normalized.push(ResponseItem::FunctionCallOutput {
                         call_id,
-                        output: ABORTED_TOOL_OUTPUT.into(),
+                        output: FunctionCallOutputPayload::text(ABORTED_TOOL_OUTPUT),
                     });
                     inserted_aborted_outputs += 1;
                 }
@@ -140,7 +140,7 @@ fn register_unique(
 #[cfg(test)]
 mod tests {
     use super::normalize_provider_history;
-    use crate::engine::native::provider::ResponseItem;
+    use crate::engine::native::provider::{FunctionCallOutputPayload, ResponseItem};
 
     #[test]
     fn inserts_aborted_outputs_after_incomplete_calls_and_removes_orphans() {
@@ -169,7 +169,8 @@ mod tests {
         assert!(matches!(
             &normalized.items[1],
             ResponseItem::FunctionCallOutput { call_id, output }
-                if call_id == "function-call" && output == "aborted"
+                if call_id == "function-call"
+                    && matches!(output, FunctionCallOutputPayload::Text(text) if text == "aborted")
         ));
         assert!(matches!(
             &normalized.items[3],
@@ -189,7 +190,7 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "complete".into(),
-                output: "ok".into(),
+                output: FunctionCallOutputPayload::text("ok"),
             },
         ])
         .expect("history should normalize");
@@ -219,11 +220,11 @@ mod tests {
         let duplicate_outputs = normalize_provider_history(vec![
             ResponseItem::FunctionCallOutput {
                 call_id: "duplicate".into(),
-                output: "first".into(),
+                output: FunctionCallOutputPayload::text("first"),
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "duplicate".into(),
-                output: "second".into(),
+                output: FunctionCallOutputPayload::text("second"),
             },
         ]);
         assert!(duplicate_outputs.is_err());

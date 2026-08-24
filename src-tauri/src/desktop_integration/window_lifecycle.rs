@@ -1,8 +1,8 @@
 use tauri::{Manager, WebviewWindow, Window, WindowEvent};
 
 use crate::{
-    desktop_integration::{ApplicationPreferencesState, startup},
-    engine::EngineManager,
+    desktop_integration::{ApplicationPreferencesState, restore_main_window, startup},
+    engine::{EngineManager, RuntimeDiagnosticSubsystem},
     error::AppError,
 };
 
@@ -20,9 +20,7 @@ pub fn apply_initial_window_state(window: &WebviewWindow) -> Result<(), AppError
         return Ok(());
     }
 
-    window.show().map_err(runtime_error)?;
-    window.unminimize().map_err(runtime_error)?;
-    window.set_focus().map_err(runtime_error)?;
+    restore_main_window(window)?;
     Ok(())
 }
 
@@ -48,16 +46,30 @@ pub fn handle_main_window_event(window: &Window, event: &WindowEvent) {
         Ok(preferences) if preferences.close_to_tray || has_active_turns => {
             api.prevent_close();
             if let Err(error) = window.hide() {
-                eprintln!("Main window could not move to tray: {error}");
+                report_runtime_error(
+                    window.app_handle(),
+                    format!("Main window could not move to tray: {error}"),
+                );
                 window.app_handle().exit(1);
             }
         }
         Ok(_) => window.app_handle().exit(0),
         Err(error) => {
-            eprintln!("Main window close policy is unavailable: {error}");
+            report_runtime_error(
+                window.app_handle(),
+                format!("Main window close policy is unavailable: {error}"),
+            );
             window.app_handle().exit(1);
         }
     }
+}
+
+fn report_runtime_error(app: &tauri::AppHandle, message: String) {
+    app.state::<EngineManager>().report_runtime_error(
+        app,
+        RuntimeDiagnosticSubsystem::Window,
+        message,
+    );
 }
 
 fn runtime_error(error: tauri::Error) -> AppError {

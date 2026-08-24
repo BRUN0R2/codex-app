@@ -1,6 +1,9 @@
 import { readAttachmentImage } from "../infrastructure/codexClient";
 
-const DIRECT_IMAGE_DATA = /^data:image\/(?:avif|gif|jpeg|png|svg\+xml|webp)(?:[;,])/iu;
+export const SAFE_IMAGE_DATA_MIME_PATTERN: string =
+  "^data:image\\/(?:avif|gif|jpeg|png|svg\\+xml|webp)";
+
+const DIRECT_IMAGE_DATA = new RegExp(`${SAFE_IMAGE_DATA_MIME_PATTERN}(?:[;,])`, "iu");
 
 export function isDirectImageSource(source: string): boolean {
   const value = source.trim();

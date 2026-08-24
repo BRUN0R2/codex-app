@@ -16,6 +16,7 @@ import {
   decodeAutoTopUpSettingsSnapshot,
   decodeCancelLoginResponse,
   decodeChatModelListResponse,
+  decodeConfigUpdate,
   decodeConfigUpdateResponse,
   decodeEngineNotification,
   decodeEngineServerRequest,
@@ -396,8 +397,9 @@ export function updateConfig(
   expectedVersion: number,
   update: ConfigUpdate,
 ): Promise<ConfigUpdateResponse> {
+  const validatedUpdate = decodeConfigUpdate(update);
   return invokeDecoded("engine_config_update", decodeConfigUpdateResponse, {
-    request: { expectedVersion, update },
+    request: { expectedVersion, update: validatedUpdate },
   });
 }
 
@@ -410,7 +412,7 @@ export function listChatModels(): Promise<ChatModelListResponse> {
 }
 
 export function inspectAttachments(paths: readonly string[]): Promise<readonly Attachment[]> {
-  return invokeDecoded("attachment_inspect", decodeAttachments, { paths });
+  return invokeDecoded("attachment_inspect", decodeAttachments, { request: { paths } });
 }
 
 export function savePastedImage(dataBase64: string): Promise<Attachment> {

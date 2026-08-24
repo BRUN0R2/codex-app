@@ -264,28 +264,35 @@ fn normalize_invocations(
     Ok(Some(
         invocations
             .into_iter()
-            .filter_map(AccountProfileInvocation::from_wire)
-            .collect(),
+            .map(AccountProfileInvocation::from_wire)
+            .collect::<Result<Vec<_>, _>>()?,
     ))
 }
 
 impl AccountProfileInvocation {
-    fn from_wire(wire: AccountProfileInvocationWire) -> Option<Self> {
-        let usage_count = wire.usage_count?;
+    fn from_wire(wire: AccountProfileInvocationWire) -> Result<Self, AuthError> {
+        let usage_count = wire.usage_count.ok_or_else(|| {
+            profile_contract_error("activity insight invocations require a usage count")
+        })?;
         match wire.kind {
-            AccountProfileInvocationKindWire::Plugin => Some(Self::Plugin {
+            AccountProfileInvocationKindWire::Plugin => Ok(Self::Plugin {
                 id: clean_profile_text(wire.plugin_id, MAX_INVOCATION_ID_BYTES),
-                name: clean_profile_text(wire.plugin_name, MAX_INVOCATION_NAME_BYTES)?,
+                name: required_invocation_name(wire.plugin_name)?,
                 usage_count,
             }),
-            AccountProfileInvocationKindWire::Skill => Some(Self::Skill {
+            AccountProfileInvocationKindWire::Skill => Ok(Self::Skill {
                 id: clean_profile_text(wire.skill_id, MAX_INVOCATION_ID_BYTES),
-                name: clean_profile_text(wire.skill_name, MAX_INVOCATION_NAME_BYTES)?,
+                name: required_invocation_name(wire.skill_name)?,
                 plugin_name: clean_profile_text(wire.plugin_name, MAX_INVOCATION_NAME_BYTES),
                 usage_count,
             }),
         }
     }
+}
+
+fn required_invocation_name(value: Option<String>) -> Result<String, AuthError> {
+    clean_profile_text(value, MAX_INVOCATION_NAME_BYTES)
+        .ok_or_else(|| profile_contract_error("activity insight invocations require a usable name"))
 }
 
 fn validate_percentage(label: &str, value: Option<f64>) -> Result<Option<f64>, AuthError> {
@@ -472,6 +479,41 @@ mod tests {
                 ..ChatGptProfileResponse::default()
             })
             .expect_err("invalid statistics should fail visibly");
+            assert!(error.to_string().contains("profile response is invalid"));
+        }
+    }
+
+    #[test]
+    fn rejects_invocation_entries_missing_required_fields() {
+        for stats in [
+            ChatGptProfileStatsWire {
+                top_invocations: Some(vec![AccountProfileInvocationWire {
+                    kind: AccountProfileInvocationKindWire::Plugin,
+                    plugin_id: None,
+                    plugin_name: Some("@plugin".into()),
+                    skill_id: None,
+                    skill_name: None,
+                    usage_count: None,
+                }]),
+                ..ChatGptProfileStatsWire::default()
+            },
+            ChatGptProfileStatsWire {
+                top_invocations: Some(vec![AccountProfileInvocationWire {
+                    kind: AccountProfileInvocationKindWire::Skill,
+                    plugin_id: None,
+                    plugin_name: Some("@plugin".into()),
+                    skill_id: Some("skill-1".into()),
+                    skill_name: None,
+                    usage_count: Some(1),
+                }]),
+                ..ChatGptProfileStatsWire::default()
+            },
+        ] {
+            let error = super::AccountProfileResponse::try_from(ChatGptProfileResponse {
+                stats,
+                ..ChatGptProfileResponse::default()
+            })
+            .expect_err("incomplete invocations should fail visibly");
             assert!(error.to_string().contains("profile response is invalid"));
         }
     }

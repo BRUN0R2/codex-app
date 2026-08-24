@@ -9,6 +9,9 @@ const EDGE_REQUEST_ID_PATTERN =
   /(?:Cloudflare Ray ID|Ray ID|edge request ID)\s*:?\s*([a-z0-9][a-z0-9._:-]{2,255})/iu;
 const HTML_DOCUMENT_PATTERN = /<(?:!doctype\s+html|html|head|body)\b/iu;
 const MAX_VISIBLE_FAILURE_CHARACTERS = 2_000;
+const SECONDS_PER_MINUTE = 60;
+const SECONDS_PER_HOUR = 60 * SECONDS_PER_MINUTE;
+const SECONDS_PER_DAY = 24 * SECONDS_PER_HOUR;
 
 export interface TurnFailurePresentation {
   readonly detail: string;
@@ -233,9 +236,9 @@ function parseErrorEnvelope(body: string): ProviderErrorDetails | null {
 }
 
 function formatDuration(seconds: number): string {
-  const days = Math.floor(seconds / 86_400);
-  const hours = Math.floor((seconds % 86_400) / 3_600);
-  const minutes = Math.floor((seconds % 3_600) / 60);
+  const days = Math.floor(seconds / SECONDS_PER_DAY);
+  const hours = Math.floor((seconds % SECONDS_PER_DAY) / SECONDS_PER_HOUR);
+  const minutes = Math.floor((seconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
   return formatDurationParts(days, hours, minutes);
 }
 

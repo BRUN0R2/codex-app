@@ -11,6 +11,7 @@ const MAX_SSE_LINE_BYTES: usize = 1_048_576;
 const MAX_SSE_EVENT_BYTES: usize = 4 * 1_048_576;
 pub(super) const MAX_MESSAGE_TEXT_BYTES: usize = 8 * 1_048_576;
 const MAX_IDENTIFIER_BYTES: usize = 256;
+const MAX_PROVIDER_ERROR_MESSAGE_CHARS: usize = 2_000;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -740,7 +741,7 @@ fn provider_error_message(value: &Value) -> String {
         .or_else(|| value.as_str())
         .unwrap_or("the provider returned an unspecified stream error")
         .chars()
-        .take(2_000)
+        .take(MAX_PROVIDER_ERROR_MESSAGE_CHARS)
         .collect()
 }
 

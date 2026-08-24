@@ -1,26 +1,45 @@
-import { listen } from "@tauri-apps/api/event";
-import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
-
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  lazy,
+  onCleanup,
+  onMount,
+  Show,
+  Suspense,
+} from "solid-js";
+import type { BrowserAgentActivityNotification } from "../contracts/types";
 import { openExternalUrl, openWorkspaceDirectory } from "../infrastructure/codexClient";
-import { isBrowserPreview } from "../platform/DesktopRuntime";
+import { subscribeToMenuEvents } from "../infrastructure/desktopClient";
+import { isBrowserPreview } from "../platform/desktopRuntime";
 import type { AppController } from "../state/appController";
 import { createBrowserController } from "../state/browserController";
 
 import { ApprovalCard } from "./ApprovalCard";
-import { AutomationsView } from "./AutomationsView";
 import { applyDesktopAppearance } from "./appearance";
-import { BrowserPanel } from "./BrowserPanel";
 import { Composer, type ComposerDraftRequest } from "./Composer";
 import { formatShortDate } from "./dateFormat";
 import { HomeComposerModeToggle } from "./HomeComposerModeToggle";
 import { Icon } from "./Icon";
-import { PlanProgress } from "./PlanProgress";
-import { ProfileView } from "./ProfileView";
-import { ReviewPanel } from "./ReviewPanel";
 import { LatestTurnFileChangeStore } from "./reviewChanges";
-import { SettingsDialog, type SettingsPage } from "./SettingsDialog";
+import type { SettingsPage } from "./SettingsDialog";
 import { Sidebar } from "./Sidebar";
 import { Timeline } from "./Timeline";
+import { TurnProgress } from "./TurnProgress";
+import { shouldShowTurnProgress } from "./turnProgressVisibility";
+
+const AutomationsView = lazy(async () => ({
+  default: (await import("./AutomationsView")).AutomationsView,
+}));
+const BrowserPanel = lazy(async () => ({
+  default: (await import("./BrowserPanel")).BrowserPanel,
+}));
+const ReviewPanel = lazy(async () => ({
+  default: (await import("./ReviewPanel")).ReviewPanel,
+}));
+const SettingsDialog = lazy(async () => ({
+  default: (await import("./SettingsDialog")).SettingsDialog,
+}));
 
 export function AppShell(props: { readonly controller: AppController }) {
   const previewSettingsPage = readPreviewSettingsPage();
@@ -30,11 +49,10 @@ export function AppShell(props: { readonly controller: AppController }) {
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
   const [reviewOpen, setReviewOpen] = createSignal(false);
   const [browserOpen, setBrowserOpen] = createSignal(readPreviewBrowserOpen());
-  const [activeSurface, setActiveSurface] = createSignal<"automations" | "chat" | "profile">(
-    previewSurface,
-  );
+  const [activeSurface, setActiveSurface] = createSignal<"automations" | "chat">(previewSurface);
   const reviewChangeStore = new LatestTurnFileChangeStore();
   const browserController = createBrowserController(props.controller.reportError);
+  let observedBrowserAgentActivity: BrowserAgentActivityNotification | null = null;
   const reviewChanges = createMemo(() =>
     reviewChangeStore.project(props.controller.turns(), props.controller.activeTurnId()),
   );
@@ -92,6 +110,26 @@ export function AppShell(props: { readonly controller: AppController }) {
     }
   });
 
+  createEffect(() => {
+    const activity = browserController.agentActivity();
+    if (activity === null || activity === observedBrowserAgentActivity) {
+      return;
+    }
+    observedBrowserAgentActivity = activity;
+    if (props.controller.currentThread()?.id !== activity.conversationId) {
+      return;
+    }
+    if (activity.panel === "close") {
+      setBrowserOpen(false);
+      return;
+    }
+    setSettingsPage(null);
+    setSettingsOpen(false);
+    setReviewOpen(false);
+    setActiveSurface("chat");
+    setBrowserOpen(true);
+  });
+
   function requestDraft(text: string): void {
     nextDraftRequestId += 1;
     setDraftRequest({ id: nextDraftRequestId, text });
@@ -131,23 +169,20 @@ export function AppShell(props: { readonly controller: AppController }) {
       chatDockResizeObserver.observe(chatDockElement);
       scheduleChatDockInset();
     }
-    const unlisteners = [
-      listen("menu:new-thread", () => {
+    void subscribeToMenuEvents({
+      onNewThread: () => {
         setActiveSurface("chat");
         props.controller.newThread();
-      }),
-      listen("menu:settings", () => openSettings()),
-      listen("menu:toggle-sidebar", () => setSidebarCollapsed((value) => !value)),
-    ];
-    for (const pending of unlisteners) {
-      void pending.then((unlisten) => {
-        if (disposed) {
-          unlisten();
-          return;
-        }
-        eventUnlisteners.push(unlisten);
-      });
-    }
+      },
+      onToggleSettings: () => openSettings(),
+      onToggleSidebar: () => setSidebarCollapsed((value) => !value),
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      eventUnlisteners.push(unlisten);
+    });
   });
   onCleanup(() => {
     browserController.dispose();
@@ -178,15 +213,9 @@ export function AppShell(props: { readonly controller: AppController }) {
           setReviewOpen(false);
           setActiveSurface("automations");
         }}
-        onOpenProfile={() => {
-          setBrowserOpen(false);
-          setReviewOpen(false);
-          setActiveSurface("profile");
-        }}
         onOpenWorkspace={(path) => void openWorkspace(path)}
         onOpenSettings={openSettings}
         onShowChat={() => setActiveSurface("chat")}
-        profileActive={activeSurface() === "profile"}
       />
       <main class="main-panel" inert={settingsOpen()}>
         <Show when={activeSurface() === "chat" && props.controller.product() === "chatgpt"}>
@@ -230,18 +259,16 @@ export function AppShell(props: { readonly controller: AppController }) {
           >
             <Timeline controller={props.controller} onSelectSuggestion={requestDraft} />
             <div class="chat-dock" ref={chatDockElement}>
-              <Show when={props.controller.activePlan()}>
-                {(plan) => (
-                  <PlanProgress
-                    changes={reviewChanges()}
-                    onToggleReview={() => {
-                      setBrowserOpen(false);
-                      setReviewOpen((current) => !current);
-                    }}
-                    plan={plan()}
-                    reviewOpen={reviewOpen()}
-                  />
-                )}
+              <Show when={shouldShowTurnProgress(props.controller.activePlan(), reviewChanges())}>
+                <TurnProgress
+                  changes={reviewChanges()}
+                  onToggleReview={() => {
+                    setBrowserOpen(false);
+                    setReviewOpen((current) => !current);
+                  }}
+                  plan={props.controller.activePlan()}
+                  reviewOpen={reviewOpen()}
+                />
               </Show>
               <ApprovalCard controller={props.controller} />
               <ModelSafetyNotice controller={props.controller} />
@@ -267,41 +294,46 @@ export function AppShell(props: { readonly controller: AppController }) {
             }
           >
             {(conversationId) => (
-              <BrowserPanel
-                controller={browserController}
-                conversationId={conversationId}
-                onClose={() => setBrowserOpen(false)}
-              />
+              <Suspense fallback={null}>
+                <BrowserPanel
+                  controller={browserController}
+                  conversationId={conversationId}
+                  onClose={() => setBrowserOpen(false)}
+                />
+              </Suspense>
             )}
           </Show>
           <Show when={activeSurface() === "automations"}>
-            <AutomationsView
-              controller={props.controller}
-              onOpenSettings={() => openSettings("general")}
-              onShowChat={() => setActiveSurface("chat")}
-            />
-          </Show>
-          <Show when={activeSurface() === "profile"}>
-            <ProfileView controller={props.controller} />
+            <Suspense fallback={null}>
+              <AutomationsView
+                controller={props.controller}
+                onOpenSettings={() => openSettings("general")}
+                onShowChat={() => setActiveSurface("chat")}
+              />
+            </Suspense>
           </Show>
           <Show when={activeSurface() === "chat" && reviewOpen() && reviewChanges().length > 0}>
-            <ReviewPanel
-              changes={reviewChanges()}
-              mode={props.controller.config()?.config.desktop.diffDisplay ?? "unified"}
-              onClose={() => setReviewOpen(false)}
-            />
+            <Suspense fallback={null}>
+              <ReviewPanel
+                changes={reviewChanges()}
+                mode={props.controller.config()?.config.desktop.diffDisplay ?? "unified"}
+                onClose={() => setReviewOpen(false)}
+              />
+            </Suspense>
           </Show>
         </div>
       </main>
       <Show when={settingsOpen()}>
-        <SettingsDialog
-          controller={props.controller}
-          initialPage={settingsPage() ?? undefined}
-          onClose={() => {
-            setSettingsPage(null);
-            setSettingsOpen(false);
-          }}
-        />
+        <Suspense fallback={null}>
+          <SettingsDialog
+            controller={props.controller}
+            initialPage={settingsPage() ?? undefined}
+            onClose={() => {
+              setSettingsPage(null);
+              setSettingsOpen(false);
+            }}
+          />
+        </Suspense>
       </Show>
       <Show when={props.controller.error()}>
         {(message) => (
@@ -337,12 +369,12 @@ function readPreviewSettingsPage(): SettingsPage | null {
     : null;
 }
 
-function readPreviewSurface(): "automations" | "chat" | "profile" {
+function readPreviewSurface(): "automations" | "chat" {
   if (!import.meta.env.DEV || !isBrowserPreview()) {
     return "chat";
   }
   const surface = new URLSearchParams(window.location.search).get("surface");
-  return surface === "automations" || surface === "profile" ? surface : "chat";
+  return surface === "automations" ? surface : "chat";
 }
 
 function readPreviewBrowserOpen(): boolean {

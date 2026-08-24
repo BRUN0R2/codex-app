@@ -1,5 +1,8 @@
 import type { ContextUsageItem, ModelContextWindow } from "../contracts/types";
 
+const COMPACT_TOKEN_THRESHOLD = 100_000;
+const THOUSAND_DIVISOR = 1_000;
+
 export interface ContextWindowMetrics {
   readonly contextWindow: number;
   readonly percent: number;
@@ -34,7 +37,8 @@ export function calculateContextWindowMetrics(
 
 export function formatContextTokens(tokens: number): string {
   const formatted = new Intl.NumberFormat("pt-BR", {
-    maximumFractionDigits: tokens < 100_000 && tokens % 1000 !== 0 ? 1 : 0,
-  }).format(tokens / 1_000);
+    maximumFractionDigits:
+      tokens < COMPACT_TOKEN_THRESHOLD && tokens % THOUSAND_DIVISOR !== 0 ? 1 : 0,
+  }).format(tokens / THOUSAND_DIVISOR);
   return `${formatted}k`;
 }

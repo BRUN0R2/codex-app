@@ -33,10 +33,19 @@ function describeErrorAt(reason: unknown, ancestors: Set<Error>, depth: number):
 }
 
 export function describeDiagnosticError(reason: unknown): string {
-  return formatDiagnosticReason(reason, new Set<Error>(), 0).slice(
-    0,
-    MAX_DIAGNOSTIC_DETAIL_CHARACTERS,
-  );
+  const detail = formatDiagnosticReason(reason, new Set<Error>(), 0);
+  let codePoints = 0;
+  let end = detail.length;
+  let index = 0;
+  for (const character of detail) {
+    codePoints += 1;
+    if (codePoints > MAX_DIAGNOSTIC_DETAIL_CHARACTERS) {
+      end = index;
+      break;
+    }
+    index += character.length;
+  }
+  return detail.slice(0, end);
 }
 
 function formatDiagnosticReason(reason: unknown, ancestors: Set<Error>, depth: number): string {

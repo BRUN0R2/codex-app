@@ -16,7 +16,10 @@ import type {
   AutomationListResponse,
   AutomationRun,
   AutoTopUpSettingsSnapshot,
+  BrowserActionMetric,
+  BrowserAgentActivityNotification,
   BrowserNewWindowNotification,
+  BrowserPageMetricSummary,
   BrowserTabSnapshot,
   CancelLoginResponse,
   ChatGptAccount,
@@ -27,6 +30,7 @@ import type {
   CommandError,
   CommandLiveOutput,
   ConfigReadResponse,
+  ConfigUpdate,
   ConfigUpdateResponse,
   CreditsSnapshot,
   DesktopPreferences,
@@ -91,12 +95,22 @@ type UnknownRecord = Record<string, unknown>;
 const MAX_STRING_BYTES = 4 * 1_048_576;
 const MAX_COLLECTION_LENGTH = 10_000;
 const MAX_OUTPUT_CHUNK_BYTES = 64 * 1_024;
+const DECIMAL_CURSOR_MAXIMUM_CHARACTERS = 20;
+const THREAD_HISTORY_CURSOR_MAXIMUM_CHARACTERS = 1_024;
+const ACCOUNT_PROFILE_DAILY_USAGE_MAXIMUM_ENTRIES = 800;
+const AUTOMATION_INTERVAL_MINIMUM_MINUTES = 5;
+const AUTOMATION_INTERVAL_MAXIMUM_MINUTES = 10_080;
+const TIMEZONE_OFFSET_MINIMUM_MINUTES = -840;
+const TIMEZONE_OFFSET_MAXIMUM_MINUTES = 840;
+const UI_FONT_SIZE_MINIMUM = 12;
+const UI_FONT_SIZE_MAXIMUM = 24;
 
 const RUNTIME_STATES = ["failed", "ready", "starting", "stopped"] as const;
 const CONVERSATION_MODES = ["chat", "work", "codex"] as const;
 const ENGINE_TRANSPORTS = ["httpsSse"] as const;
 const ENGINE_STORAGES = ["sqlite"] as const;
 const ENGINE_CAPABILITIES = [
+  "browserUse",
   "chatGptOauth",
   "explicitApprovals",
   "localThreads",
@@ -162,6 +176,7 @@ const RATE_LIMIT_REACHED_TYPES = [
 ] as const;
 const MODEL_REROUTE_REASONS = ["highRiskCyberActivity"] as const;
 const MODEL_VERIFICATIONS = ["trustedAccessForCyber"] as const;
+const MODEL_CONTEXT_WINDOW_PREFERENCES = ["default", "maximum"] as const;
 
 export class ContractError extends Error {
   public readonly path: string;
@@ -190,7 +205,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [18] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [19] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -268,7 +283,12 @@ export function decodeAccountProfileResponse(value: unknown): AccountProfileResp
   const dailyUsage =
     object.dailyUsage === null
       ? null
-      : array(object.dailyUsage, "$.dailyUsage", decodeAccountProfileDailyUsage, 800);
+      : array(
+          object.dailyUsage,
+          "$.dailyUsage",
+          decodeAccountProfileDailyUsage,
+          ACCOUNT_PROFILE_DAILY_USAGE_MAXIMUM_ENTRIES,
+        );
   if (dailyUsage !== null) {
     let previousDate: string | null = null;
     for (const [index, bucket] of dailyUsage.entries()) {
@@ -493,7 +513,7 @@ export function decodeThreadListResponse(value: unknown): ThreadListResponse {
   const object = exactRecord(value, "$", ["data", "nextCursor"]);
   return {
     data: array(object.data, "$.data", decodeThreadSummary),
-    nextCursor: nullableText(object.nextCursor, "$.nextCursor"),
+    nextCursor: nullableDecimalCursor(object.nextCursor, "$.nextCursor", "thread list"),
   };
 }
 
@@ -507,7 +527,7 @@ export function decodeThreadResumeResponse(value: unknown): ThreadResumeResponse
   return {
     thread: decodeThread(object.thread, "$.thread"),
     cwd: text(object.cwd, "$.cwd"),
-    nextCursor: nullableText(object.nextCursor, "$.nextCursor"),
+    nextCursor: nullableThreadHistoryCursor(object.nextCursor, "$.nextCursor"),
   };
 }
 
@@ -517,7 +537,7 @@ function decodeThreadPage(value: {
 }): ThreadReadResponse {
   return {
     thread: decodeThread(value.thread, "$.thread"),
-    nextCursor: nullableText(value.nextCursor, "$.nextCursor"),
+    nextCursor: nullableThreadHistoryCursor(value.nextCursor, "$.nextCursor"),
   };
 }
 
@@ -558,6 +578,177 @@ export function decodeBrowserNewWindowNotification(value: unknown): BrowserNewWi
     browserTabId: identifier(object.browserTabId, "$.browserTabId"),
     conversationId: identifier(object.conversationId, "$.conversationId"),
     url: browserUrl(object.url, "$.url"),
+  };
+}
+
+export function decodeBrowserAgentActivityNotification(
+  value: unknown,
+): BrowserAgentActivityNotification {
+  const object = exactRecord(value, "$", [
+    "action",
+    "activeBrowserTabId",
+    "conversationId",
+    "panel",
+    "tabs",
+  ]);
+  const tabs = array(object.tabs, "$.tabs", decodeBrowserTabSnapshot, 16);
+  const tabIds = new Set<string>();
+  for (const tab of tabs) {
+    if (tabIds.has(tab.browserTabId)) {
+      throw new ContractError(
+        "$.tabs",
+        `duplicate browser tab id ${JSON.stringify(tab.browserTabId)}`,
+      );
+    }
+    tabIds.add(tab.browserTabId);
+  }
+  const activeBrowserTabId =
+    object.activeBrowserTabId === null
+      ? null
+      : identifier(object.activeBrowserTabId, "$.activeBrowserTabId");
+  if (
+    (tabs.length === 0 && activeBrowserTabId !== null) ||
+    (activeBrowserTabId !== null && !tabIds.has(activeBrowserTabId))
+  ) {
+    throw new ContractError("$.activeBrowserTabId", "active browser tab is absent from topology");
+  }
+  return {
+    conversationId: identifier(object.conversationId, "$.conversationId"),
+    activeBrowserTabId,
+    tabs,
+    panel: literal(object.panel, "$.panel", ["close", "open"] as const),
+    action: text(object.action, "$.action", 128),
+  };
+}
+
+export function decodeBrowserActionMetric(value: unknown): BrowserActionMetric {
+  const object = exactRecord(value, "$", [
+    "action",
+    "actionMs",
+    "browserTabId",
+    "conversationId",
+    "error",
+    "id",
+    "itemId",
+    "loadMs",
+    "origin",
+    "page",
+    "queueMs",
+    "screenshotBytes",
+    "screenshotMs",
+    "sessionId",
+    "snapshotMs",
+    "status",
+    "timestampMs",
+    "totalMs",
+    "turnId",
+    "url",
+  ]);
+  return {
+    id: identifier(object.id, "$.id"),
+    sessionId: identifier(object.sessionId, "$.sessionId"),
+    timestampMs: integer(object.timestampMs, "$.timestampMs", 0, Number.MAX_SAFE_INTEGER),
+    conversationId: identifier(object.conversationId, "$.conversationId"),
+    turnId: identifier(object.turnId, "$.turnId"),
+    itemId: identifier(object.itemId, "$.itemId"),
+    browserTabId:
+      object.browserTabId === null ? null : identifier(object.browserTabId, "$.browserTabId"),
+    action: text(object.action, "$.action", 128),
+    status: literal(object.status, "$.status", ["completed", "declined", "failed"] as const),
+    origin: object.origin === null ? null : browserOrigin(object.origin, "$.origin"),
+    url: object.url === null ? null : browserUrl(object.url, "$.url"),
+    queueMs: integer(object.queueMs, "$.queueMs", 0, Number.MAX_SAFE_INTEGER),
+    actionMs: integer(object.actionMs, "$.actionMs", 0, Number.MAX_SAFE_INTEGER),
+    loadMs: integer(object.loadMs, "$.loadMs", 0, Number.MAX_SAFE_INTEGER),
+    snapshotMs: integer(object.snapshotMs, "$.snapshotMs", 0, Number.MAX_SAFE_INTEGER),
+    screenshotMs: integer(object.screenshotMs, "$.screenshotMs", 0, Number.MAX_SAFE_INTEGER),
+    totalMs: integer(object.totalMs, "$.totalMs", 0, Number.MAX_SAFE_INTEGER),
+    screenshotBytes:
+      object.screenshotBytes === null
+        ? null
+        : integer(object.screenshotBytes, "$.screenshotBytes", 0, Number.MAX_SAFE_INTEGER),
+    page: object.page === null ? null : decodeBrowserPageMetricSummary(object.page, "$.page"),
+    error: object.error === null ? null : text(object.error, "$.error", 2_048),
+  };
+}
+
+function decodeBrowserPageMetricSummary(value: unknown, path: string): BrowserPageMetricSummary {
+  const object = exactRecord(value, path, [
+    "consoleErrors",
+    "cumulativeLayoutShift",
+    "duplicateIds",
+    "horizontalOverflowPx",
+    "interactiveElements",
+    "largestContentfulPaintMs",
+    "longTaskCount",
+    "longTaskDurationMs",
+    "missingAltImages",
+    "navigationDurationMs",
+    "pageErrors",
+    "readyState",
+    "resourceCount",
+    "resourceFailures",
+    "transferBytes",
+    "unlabeledControls",
+    "viewportHeight",
+    "viewportWidth",
+  ]);
+  const optionalMetric = (entry: unknown, entryPath: string): number | null =>
+    entry === null ? null : finiteNumber(entry, entryPath, 0, Number.MAX_SAFE_INTEGER);
+  return {
+    readyState: literal(object.readyState, `${path}.readyState`, [
+      "complete",
+      "interactive",
+      "loading",
+    ] as const),
+    viewportWidth: integer(object.viewportWidth, `${path}.viewportWidth`, 1, 16_384),
+    viewportHeight: integer(object.viewportHeight, `${path}.viewportHeight`, 1, 16_384),
+    interactiveElements: integer(
+      object.interactiveElements,
+      `${path}.interactiveElements`,
+      0,
+      10_000,
+    ),
+    consoleErrors: integer(object.consoleErrors, `${path}.consoleErrors`, 0, 10_000),
+    pageErrors: integer(object.pageErrors, `${path}.pageErrors`, 0, 10_000),
+    resourceFailures: integer(object.resourceFailures, `${path}.resourceFailures`, 0, 10_000),
+    resourceCount: integer(object.resourceCount, `${path}.resourceCount`, 0, 1_000_000),
+    transferBytes: integer(
+      object.transferBytes,
+      `${path}.transferBytes`,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    navigationDurationMs: optionalMetric(
+      object.navigationDurationMs,
+      `${path}.navigationDurationMs`,
+    ),
+    largestContentfulPaintMs: optionalMetric(
+      object.largestContentfulPaintMs,
+      `${path}.largestContentfulPaintMs`,
+    ),
+    cumulativeLayoutShift: finiteNumber(
+      object.cumulativeLayoutShift,
+      `${path}.cumulativeLayoutShift`,
+      0,
+      1_000_000,
+    ),
+    longTaskCount: integer(object.longTaskCount, `${path}.longTaskCount`, 0, 1_000_000),
+    longTaskDurationMs: finiteNumber(
+      object.longTaskDurationMs,
+      `${path}.longTaskDurationMs`,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    horizontalOverflowPx: finiteNumber(
+      object.horizontalOverflowPx,
+      `${path}.horizontalOverflowPx`,
+      0,
+      1_000_000,
+    ),
+    unlabeledControls: integer(object.unlabeledControls, `${path}.unlabeledControls`, 0, 10_000),
+    missingAltImages: integer(object.missingAltImages, `${path}.missingAltImages`, 0, 10_000),
+    duplicateIds: integer(object.duplicateIds, `${path}.duplicateIds`, 0, 10_000),
   };
 }
 
@@ -607,10 +798,7 @@ export function decodeOutputReadResponse(value: unknown): OutputReadResponse {
   if (byteLength === 0 && chunk.length > 0) {
     throw new ContractError("$.chunk", "an empty output resource cannot contain text");
   }
-  const nextCursor = nullableText(object.nextCursor, "$.nextCursor", 20);
-  if (nextCursor !== null && !/^\d+$/u.test(nextCursor)) {
-    throw new ContractError("$.nextCursor", "expected a numeric output cursor");
-  }
+  const nextCursor = nullableDecimalCursor(object.nextCursor, "$.nextCursor", "output");
   return {
     outputId: identifier(object.outputId, "$.outputId"),
     chunk,
@@ -651,6 +839,69 @@ export function decodeConfigReadResponse(value: unknown): ConfigReadResponse {
 
 export function decodeConfigUpdateResponse(value: unknown): ConfigUpdateResponse {
   return decodeConfigReadResponse(value);
+}
+
+export function decodeConfigUpdate(value: unknown): ConfigUpdate {
+  const object = record(value, "$");
+  const type = text(field(object, "type"), "$.type", 64);
+  switch (type) {
+    case "desktop": {
+      const update = exactRecord(object, "$", ["type", "value"]);
+      return { type, value: decodeDesktopPreferences(update.value, "$.value") };
+    }
+    case "developerInstructions": {
+      const update = exactRecord(object, "$", ["type", "value"]);
+      return { type, value: nullableText(update.value, "$.value") };
+    }
+    case "modelContextWindow": {
+      const update = exactRecord(object, "$", ["model", "type", "value"]);
+      return {
+        type,
+        model: identifier(update.model, "$.model"),
+        value: literal(update.value, "$.value", MODEL_CONTEXT_WINDOW_PREFERENCES),
+      };
+    }
+    case "modelDefaults": {
+      const update = exactRecord(object, "$", ["type", "value"]);
+      const defaults = exactRecord(update.value, "$.value", [
+        "model",
+        "reasoningEffort",
+        "serviceTier",
+      ]);
+      return {
+        type,
+        value: {
+          model: nullableText(defaults.model, "$.value.model"),
+          reasoningEffort:
+            defaults.reasoningEffort === null
+              ? null
+              : literal(defaults.reasoningEffort, "$.value.reasoningEffort", REASONING_EFFORTS),
+          serviceTier: nullableText(defaults.serviceTier, "$.value.serviceTier"),
+        },
+      };
+    }
+    case "modelVerbosity": {
+      const update = exactRecord(object, "$", ["type", "value"]);
+      return {
+        type,
+        value: update.value === null ? null : literal(update.value, "$.value", MODEL_VERBOSITIES),
+      };
+    }
+    case "permissionProfile": {
+      const update = exactRecord(object, "$", ["type", "value"]);
+      return { type, value: decodePermissionProfile(update.value, "$.value") };
+    }
+    case "personality": {
+      const update = exactRecord(object, "$", ["type", "value"]);
+      return { type, value: literal(update.value, "$.value", PERSONALITIES) };
+    }
+    case "webSearch": {
+      const update = exactRecord(object, "$", ["type", "value"]);
+      return { type, value: literal(update.value, "$.value", WEB_SEARCH_MODES) };
+    }
+    default:
+      throw new ContractError("$.type", `unsupported config update ${JSON.stringify(type)}`);
+  }
 }
 
 export function decodeAccountRateLimitsResponse(value: unknown): AccountRateLimitsResponse {
@@ -928,27 +1179,55 @@ export function decodeEngineNotification(value: unknown): EngineNotification {
 
 export function decodeEngineServerRequest(value: unknown): EngineServerRequest {
   const root = exactRecord(value, "$", ["id", "method", "params"]);
-  const method = literal(root.method, "$.method", ["approval.command"] as const);
-  const params = exactRecord(root.params, "$.params", [
-    "command",
-    "cwd",
-    "itemId",
-    "reason",
-    "threadId",
-    "turnId",
-  ]);
-  return {
-    id: identifier(root.id, "$.id"),
-    method,
-    params: {
-      threadId: identifier(params.threadId, "$.params.threadId"),
-      turnId: identifier(params.turnId, "$.params.turnId"),
-      itemId: identifier(params.itemId, "$.params.itemId"),
-      command: text(params.command, "$.params.command", 16_384),
-      cwd: text(params.cwd, "$.params.cwd", 4_096),
-      reason: text(params.reason, "$.params.reason", 1_024),
-    },
-  };
+  const id = identifier(root.id, "$.id");
+  const method = literal(root.method, "$.method", [
+    "approval.browserOrigin",
+    "approval.command",
+  ] as const);
+  switch (method) {
+    case "approval.command": {
+      const params = exactRecord(root.params, "$.params", [
+        "command",
+        "cwd",
+        "itemId",
+        "reason",
+        "threadId",
+        "turnId",
+      ]);
+      return {
+        id,
+        method,
+        params: {
+          threadId: identifier(params.threadId, "$.params.threadId"),
+          turnId: identifier(params.turnId, "$.params.turnId"),
+          itemId: identifier(params.itemId, "$.params.itemId"),
+          command: text(params.command, "$.params.command", 16_384),
+          cwd: text(params.cwd, "$.params.cwd", 4_096),
+          reason: text(params.reason, "$.params.reason", 1_024),
+        },
+      };
+    }
+    case "approval.browserOrigin": {
+      const params = exactRecord(root.params, "$.params", [
+        "itemId",
+        "origin",
+        "reason",
+        "threadId",
+        "turnId",
+      ]);
+      return {
+        id,
+        method,
+        params: {
+          threadId: identifier(params.threadId, "$.params.threadId"),
+          turnId: identifier(params.turnId, "$.params.turnId"),
+          itemId: identifier(params.itemId, "$.params.itemId"),
+          origin: browserOrigin(params.origin, "$.params.origin"),
+          reason: text(params.reason, "$.params.reason", 1_024),
+        },
+      };
+    }
+  }
 }
 
 export function decodeCommandError(value: unknown): CommandError | null {
@@ -1200,9 +1479,19 @@ function decodeAutomationAt(value: unknown, path: string): Automation {
     projectPath:
       object.projectPath === null ? null : text(object.projectPath, `${path}.projectPath`, 4_096),
     enabled,
-    intervalMinutes: integer(object.intervalMinutes, `${path}.intervalMinutes`, 5, 10_080),
+    intervalMinutes: integer(
+      object.intervalMinutes,
+      `${path}.intervalMinutes`,
+      AUTOMATION_INTERVAL_MINIMUM_MINUTES,
+      AUTOMATION_INTERVAL_MAXIMUM_MINUTES,
+    ),
     timezone: text(object.timezone, `${path}.timezone`, 128),
-    timezoneOffsetMin: integer(object.timezoneOffsetMin, `${path}.timezoneOffsetMin`, -840, 840),
+    timezoneOffsetMin: integer(
+      object.timezoneOffsetMin,
+      `${path}.timezoneOffsetMin`,
+      TIMEZONE_OFFSET_MINIMUM_MINUTES,
+      TIMEZONE_OFFSET_MAXIMUM_MINUTES,
+    ),
     nextRunAt,
     lastRunAt,
     version: integer(object.version, `${path}.version`, 1, Number.MAX_SAFE_INTEGER),
@@ -1784,7 +2073,12 @@ function decodeModelContextWindowPreferences(
 function decodeDesktopPreferences(value: unknown, path: string): DesktopPreferences {
   const object = exactRecord(value, path, ["diffDisplay", "motion", "pointerCursor", "uiFontSize"]);
   return {
-    uiFontSize: integer(object.uiFontSize, `${path}.uiFontSize`, 12, 24),
+    uiFontSize: integer(
+      object.uiFontSize,
+      `${path}.uiFontSize`,
+      UI_FONT_SIZE_MINIMUM,
+      UI_FONT_SIZE_MAXIMUM,
+    ),
     motion: literal(object.motion, `${path}.motion`, MOTION_PREFERENCES),
     pointerCursor: booleanValue(object.pointerCursor, `${path}.pointerCursor`),
     diffDisplay: literal(object.diffDisplay, `${path}.diffDisplay`, DIFF_DISPLAYS),
@@ -2064,6 +2358,22 @@ function nullableText(
   return value === null ? null : text(value, path, maximumBytes);
 }
 
+function nullableDecimalCursor(value: unknown, path: string, label: string): string | null {
+  const nextCursor = nullableText(value, path, DECIMAL_CURSOR_MAXIMUM_CHARACTERS);
+  if (nextCursor !== null && !/^\d+$/u.test(nextCursor)) {
+    throw new ContractError(path, `expected a numeric ${label} cursor`);
+  }
+  return nextCursor;
+}
+
+function nullableThreadHistoryCursor(value: unknown, path: string): string | null {
+  const nextCursor = nullableText(value, path, THREAD_HISTORY_CURSOR_MAXIMUM_CHARACTERS);
+  if (nextCursor !== null && !/^[A-Za-z0-9_-]+$/u.test(nextCursor)) {
+    throw new ContractError(path, "expected a Base64URL thread history cursor");
+  }
+  return nextCursor;
+}
+
 function decodeCommandLiveOutput(value: unknown, path: string): CommandLiveOutput {
   const object = exactRecord(value, path, ["stderr", "stdout", "truncated"]);
   const stderr = text(object.stderr, `${path}.stderr`, 256 * 1_024, true);
@@ -2094,10 +2404,7 @@ function nullableThreadOutput(value: unknown, path: string): ThreadOutput | null
   if (byteLength <= MAX_OUTPUT_CHUNK_BYTES && previewBytes !== byteLength) {
     throw new ContractError(path, "small output resources must include their complete preview");
   }
-  const nextCursor = nullableText(object.nextCursor, `${path}.nextCursor`, 20);
-  if (nextCursor !== null && !/^\d+$/u.test(nextCursor)) {
-    throw new ContractError(`${path}.nextCursor`, "expected a numeric output cursor");
-  }
+  const nextCursor = nullableDecimalCursor(object.nextCursor, `${path}.nextCursor`, "output");
   if ((previewBytes === byteLength) !== (nextCursor === null)) {
     throw new ContractError(path, "output preview and continuation cursor are inconsistent");
   }
@@ -2137,6 +2444,25 @@ function browserUrl(value: unknown, path: string): string {
     url.password.length > 0
   ) {
     throw new ContractError(path, "browser URL is not allowed");
+  }
+  return decoded;
+}
+
+function browserOrigin(value: unknown, path: string): string {
+  const decoded = text(value, path, 2_048);
+  let url: URL;
+  try {
+    url = new URL(decoded);
+  } catch {
+    throw new ContractError(path, "expected an absolute browser origin");
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.origin !== decoded
+  ) {
+    throw new ContractError(path, "browser origin is not allowed");
   }
   return decoded;
 }

@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-
+import type { BrowserActionMetric } from "../contracts/types";
 import { openExternalUrl } from "../infrastructure/codexClient";
-import { isBrowserPreview } from "../platform/DesktopRuntime";
+import { isBrowserPreview } from "../platform/desktopRuntime";
 import type { BrowserController } from "../state/browserController";
 import { Icon } from "./Icon";
 
@@ -15,9 +15,12 @@ export function BrowserPanel(props: {
   let synchronizationFrame: number | undefined;
   let lastSurfaceSignature: string | null = null;
   let addressFocused = false;
+  let disposed = false;
   const [address, setAddress] = createSignal("");
+  const [debugOpen, setDebugOpen] = createSignal(false);
   const activeTab = createMemo(() => props.controller.activeTab(props.conversationId));
   const tabs = createMemo(() => props.controller.tabs(props.conversationId));
+  const metrics = createMemo(() => props.controller.metrics(props.conversationId));
 
   createEffect(() => {
     const current = activeTab();
@@ -30,10 +33,15 @@ export function BrowserPanel(props: {
   createEffect(() => {
     const conversationId = props.conversationId;
     void props.controller.ensureConversation(conversationId).then(() => {
-      if (props.conversationId === conversationId) {
+      if (!disposed && props.conversationId === conversationId) {
         scheduleSurfaceSynchronization();
       }
     });
+  });
+
+  createEffect(() => {
+    debugOpen();
+    scheduleSurfaceSynchronization();
   });
 
   function scheduleSurfaceSynchronization(): void {
@@ -92,6 +100,7 @@ export function BrowserPanel(props: {
   });
 
   onCleanup(() => {
+    disposed = true;
     resizeObserver?.disconnect();
     if (synchronizationFrame !== undefined) {
       cancelAnimationFrame(synchronizationFrame);
@@ -205,6 +214,17 @@ export function BrowserPanel(props: {
           </Show>
         </form>
         <button
+          aria-pressed={debugOpen()}
+          aria-label="Alternar diagnóstico do navegador"
+          class="browser-toolbar-button"
+          classList={{ active: debugOpen() }}
+          onClick={() => setDebugOpen((value) => !value)}
+          title="Diagnóstico e métricas"
+          type="button"
+        >
+          <Icon name="bug" size={14} />
+        </button>
+        <button
           aria-label="Abrir no navegador padrão"
           class="browser-toolbar-button"
           disabled={activeTab() === null || activeTab()?.url === "about:blank"}
@@ -219,6 +239,9 @@ export function BrowserPanel(props: {
           <Icon name="externalLink" size={14} />
         </button>
       </div>
+      <Show when={debugOpen()}>
+        <BrowserDebugPanel metrics={metrics()} />
+      </Show>
       <section
         aria-label="Conteúdo do navegador"
         class="browser-native-surface"
@@ -234,6 +257,131 @@ export function BrowserPanel(props: {
       </section>
     </aside>
   );
+}
+
+function BrowserDebugPanel(props: { readonly metrics: readonly BrowserActionMetric[] }) {
+  const recent = createMemo(() => props.metrics.slice(-20));
+  const latest = createMemo(() => recent().at(-1) ?? null);
+  const latestPage = createMemo(
+    () => [...recent()].reverse().find((metric) => metric.page !== null)?.page ?? null,
+  );
+  const averageTotal = createMemo(() => average(recent().map((metric) => metric.totalMs)));
+  const p95Total = createMemo(() =>
+    percentile(
+      recent().map((metric) => metric.totalMs),
+      0.95,
+    ),
+  );
+  const failures = createMemo(() => recent().filter((metric) => metric.status === "failed").length);
+
+  return (
+    <section aria-label="Diagnóstico do navegador" class="browser-debug-panel">
+      <header>
+        <div>
+          <strong>Diagnóstico</strong>
+          <span>{recent().length} ações recentes</span>
+        </div>
+        <small>Persistido em browser-actions.jsonl</small>
+      </header>
+      <div class="browser-debug-summary">
+        <BrowserDebugValue label="Média" value={formatMilliseconds(averageTotal())} />
+        <BrowserDebugValue label="p95" value={formatMilliseconds(p95Total())} />
+        <BrowserDebugValue label="Falhas" value={String(failures())} />
+        <BrowserDebugValue
+          label="Última captura"
+          value={formatBytes(latest()?.screenshotBytes ?? null)}
+        />
+      </div>
+      <Show
+        fallback={
+          <p class="browser-debug-empty">As métricas aparecem quando o agente usa o navegador.</p>
+        }
+        when={latest()}
+      >
+        {(metric) => (
+          <>
+            <div class="browser-debug-stages">
+              <span>fila {formatMilliseconds(metric().queueMs)}</span>
+              <span>ação {formatMilliseconds(metric().actionMs)}</span>
+              <span>carga {formatMilliseconds(metric().loadMs)}</span>
+              <span>snapshot {formatMilliseconds(metric().snapshotMs)}</span>
+              <span>captura {formatMilliseconds(metric().screenshotMs)}</span>
+            </div>
+            <Show when={latestPage()}>
+              {(page) => (
+                <div class="browser-debug-findings">
+                  <span>console {page().consoleErrors}</span>
+                  <span>página {page().pageErrors}</span>
+                  <span>recursos {page().resourceFailures}</span>
+                  <span>overflow {Math.round(page().horizontalOverflowPx)} px</span>
+                  <span>sem rótulo {page().unlabeledControls}</span>
+                  <span>CLS {page().cumulativeLayoutShift.toFixed(3)}</span>
+                  <span>
+                    LCP{" "}
+                    {page().largestContentfulPaintMs === null
+                      ? "—"
+                      : formatMilliseconds(page().largestContentfulPaintMs)}
+                  </span>
+                </div>
+              )}
+            </Show>
+            <Show when={metric().error}>
+              {(error) => <p class="browser-debug-error">{error()}</p>}
+            </Show>
+          </>
+        )}
+      </Show>
+      <div class="browser-debug-history">
+        <For each={[...recent()].reverse().slice(0, 6)}>
+          {(metric) => (
+            <div class="browser-debug-row" data-status={metric.status}>
+              <span>{metric.action.replaceAll("_", " ")}</span>
+              <code>{formatMilliseconds(metric.totalMs)}</code>
+            </div>
+          )}
+        </For>
+      </div>
+    </section>
+  );
+}
+
+function BrowserDebugValue(props: { readonly label: string; readonly value: string }) {
+  return (
+    <div>
+      <span>{props.label}</span>
+      <strong>{props.value}</strong>
+    </div>
+  );
+}
+
+function average(values: readonly number[]): number | null {
+  if (values.length === 0) {
+    return null;
+  }
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+function percentile(values: readonly number[], percentileValue: number): number | null {
+  if (values.length === 0) {
+    return null;
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * percentileValue) - 1);
+  return sorted[index] ?? null;
+}
+
+function formatMilliseconds(value: number | null): string {
+  return value === null ? "—" : `${Math.round(value)} ms`;
+}
+
+function formatBytes(value: number | null): string {
+  if (value === null) {
+    return "—";
+  }
+  if (value < 1_024) {
+    return `${value} B`;
+  }
+  return `${(value / 1_024).toFixed(value < 10_240 ? 1 : 0)} KiB`;
 }
 
 function browserTabLabel(title: string | null, url: string): string {

@@ -31,6 +31,10 @@ alterar estado.
 - ferramentas nativas fechadas para leitura, listagem, busca, edição, escrita e
   comandos, incluindo saída ao vivo, yield de processos longos e polling por
   cursor enquanto o agente executa trabalho independente;
+- Browser Use nativo no child WebView2 visível, com abertura/seleção/fechamento
+  de abas, navegação, histórico, cursor próprio do agente, mouse, teclado,
+  digitação, rolagem, drag, snapshot DOM/acessível, screenshot multimodal,
+  aprovação por origem e métricas de QA;
 - três perfis de permissão sem combinações implícitas: somente leitura, projeto
   com aprovação de comando e acesso total;
 - limites explícitos para entrada, anexos, arquivos, resultados, processos,
@@ -110,6 +114,17 @@ Para gerar o instalador NSIS:
 ```powershell
 pnpm tauri build
 ```
+
+O smoke explícito de desenvolvimento valida o fluxo real do child WebView2 sem
+conta nem provider:
+
+```powershell
+pnpm smoke:browser
+```
+
+Ele sobe uma página HTTP local descartável, captura, clica, digita, navega,
+fecha os WebViews e grava o relatório em
+`%APPDATA%\dev.codexapp.desktop\logs\browser-smoke.json`.
 
 Publicações oficiais usam somente o pipeline assinado descrito em
 [docs/RELEASE.md](docs/RELEASE.md). O baseline local do executável otimizado é

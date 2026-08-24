@@ -2,6 +2,15 @@ import type { ActivityStatus, CommandLiveOutput, FileChange, TurnStatus } from "
 
 export type ThinkingPresentation = "activity" | "none" | "standalone";
 export const LONG_COMMAND_DURATION_THRESHOLD_MS = 10_000;
+const SECONDS_PER_MINUTE = 60;
+const SECONDS_PER_HOUR = 60 * SECONDS_PER_MINUTE;
+const USER_MESSAGE_PROXIMITY_WEIGHTS = {
+  current: 25,
+  adjacent: 20,
+  nearby: 14,
+  remote: 10,
+  minimum: 7,
+} as const;
 
 export function thinkingPresentation(
   status: TurnStatus,
@@ -29,12 +38,12 @@ export function turnDurationLabel(status: TurnStatus, duration: string): string 
 
 export function formatElapsedSeconds(seconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(seconds));
-  if (totalSeconds < 60) {
+  if (totalSeconds < SECONDS_PER_MINUTE) {
     return `${totalSeconds} s`;
   }
-  const hours = Math.floor(totalSeconds / 3_600);
-  const minutes = Math.floor((totalSeconds % 3_600) / 60);
-  const remainder = totalSeconds % 60;
+  const hours = Math.floor(totalSeconds / SECONDS_PER_HOUR);
+  const minutes = Math.floor((totalSeconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
+  const remainder = totalSeconds % SECONDS_PER_MINUTE;
   if (hours === 0) {
     return `${minutes} min ${remainder} s`;
   }
@@ -201,19 +210,19 @@ export function toolOutputText(output: string | null | undefined): string | null
 
 export function userMessageMarkerWidth(index: number, interactionIndex: number | null): number {
   if (interactionIndex === null) {
-    return 7;
+    return USER_MESSAGE_PROXIMITY_WEIGHTS.minimum;
   }
   switch (Math.abs(index - interactionIndex)) {
     case 0:
-      return 25;
+      return USER_MESSAGE_PROXIMITY_WEIGHTS.current;
     case 1:
-      return 20;
+      return USER_MESSAGE_PROXIMITY_WEIGHTS.adjacent;
     case 2:
-      return 14;
+      return USER_MESSAGE_PROXIMITY_WEIGHTS.nearby;
     case 3:
-      return 10;
+      return USER_MESSAGE_PROXIMITY_WEIGHTS.remote;
     default:
-      return 7;
+      return USER_MESSAGE_PROXIMITY_WEIGHTS.minimum;
   }
 }
 

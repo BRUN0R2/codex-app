@@ -334,8 +334,8 @@ conclui depois de duas geometrias quietas. A auditoria reproduz uma mensagem
 topo nos viewports menores e ao scroll máximo matematicamente possível no
 viewport de 1920 × 1080.
 
-O gate visual corrente cobre 26 cenários em três viewports, totalizando
-78 capturas. Além das regressões anteriores, valida saída ao vivo com auto-follow
+O gate visual corrente cobre 27 cenários em três viewports, totalizando
+81 capturas. Além das regressões anteriores, valida saída ao vivo com auto-follow
 de `0 px`, exclusão com `−288`, ausência do cabeçalho agrupado redundante e
 navegação por âncora após expansão. Uma expansão real de conteúdo de `320 px`
 acima da leitura produz compensação de `320 px` e drift visual `0` durante wheel
@@ -344,20 +344,22 @@ cancelado, move somente a região interna em `40 px` e mantém a timeline seguin
 o fim após crescimento adicional de `160 px`, com distância final `0`. O handoff
 entre comando, diff e leitura continua levando `0,6–0,7 ms` para as três
 transferências, sem `getComputedStyle`, e entrega exatamente `−60`, `−120` e
-`−80 px` à timeline. O gate também cobre arquivo criado de 338 linhas colorido,
+`−80 px` à timeline. O gate também cobre arquivo criado de 256 linhas colorido,
 `read_file`/`search_text` tipados, gutters compactos, três ondas de atividade não
 sobrepostas em 2 s e o perfil com largura de `732 px`, avatar de `80 px`, imagem
 efetivamente montada na página e na sidebar, 364 células, cinco métricas, cinco
 insights e zero overflow. O gate pausa a animação em seis pontos do ciclo e exige
 a sequência visível/oculta/visível/oculta/visível/oculta.
 
-O build corrente produz app principal de `493,33 KiB` (`146,87 KiB` gzip),
-chunk auxiliar de `20,47 KiB` (`8,14 KiB` gzip), CSS de `133,92 KiB`
-(`24,52 KiB` gzip) e worker Markdown lazy de `63,48 KiB`. Contra o gate integral
-de 21 de agosto, o payload inicial agregado passou de `151,10 KiB` para
-`179,53 KiB` gzip, acréscimo de `28,43 KiB` (`18,82%`) para syntax, streaming,
-navegação, perfil e demais superfícies novas. Nenhuma dependência, WASM ou worker
-de runtime adicional foi introduzido; o worker Markdown continua lazy.
+O build corrente produz app principal de `430,03 KiB` (`128,32 KiB` gzip),
+entrada de `22,11 KiB` (`8,85 KiB` gzip), CSS de `132,92 KiB` (`24,35 KiB`
+gzip) e worker Markdown lazy de `63,48 KiB`. Os módulos iniciais compartilhados
+somam `5,42 KiB` (`2,56 KiB` gzip), levando o payload inicial agregado a
+`164,08 KiB` gzip: redução de `15,45 KiB` (`8,61%`) frente aos `179,53 KiB`
+anteriores. Configurações (`47,28 KiB`), Automações (`15,16 KiB`), Browser
+(`8,90 KiB`) e Revisão (`3,74 KiB`) agora são chunks acionados pela superfície,
+em vez de integrarem o caminho inicial. Nenhuma dependência, WASM ou worker de
+runtime adicional foi introduzido; o worker Markdown continua lazy.
 
 #### Comandos independentes em paralelo — 23 de agosto de 2026
 
@@ -505,12 +507,12 @@ e sete válidas:
 | 1.000 serializações HTML seguras | 13,736 ms |
 | cold path de 73 linhas de diff | 0,757 ms |
 | warm path das mesmas 73 linhas | 0,044 ms |
-| arquivo Rust criado com 338 linhas | 1,431 ms |
+| arquivo Rust criado com 256 linhas | 1,184 ms |
 | fallback de hunk acima do limite | 0,002 ms |
 
-A revalidação de 23 de agosto de 2026 alinhou o limite do diff ao preview nativo
-de 128 KiB e 4.096 linhas. O caso que antes perdia todas as cores ficou abaixo
-de 1,5 ms sem alterar o fallback patológico.
+A revalidação de 24 de agosto de 2026 alinhou o limite do diff ao orçamento
+interativo de 32 KiB e 256 linhas. O caso de fronteira permanece colorido abaixo
+de 1,5 ms, enquanto 257 linhas acionam o fallback explícito em `0,002 ms`.
 
 No corpus de diff completo, a série final permaneceu próxima do baseline no
 parse (`92,754 ms`), reduziu o highlight integral para `506,087 ms`, manteve o
@@ -697,18 +699,18 @@ primeira partida fria levou `1.400,1 ms`. A média entre séries foi `31,2 MiB` 
 working set e `7,7 MiB` privados, com executável de `12,5 MiB`. A instância
 canônica aberta permaneceu responsiva e não foi encerrada ou substituída.
 
-### Validação integral final — 23 de agosto de 2026
+### Validação integral final — 24 de agosto de 2026
 
 `pnpm verify` concluiu sem falhas no Windows com token de administrador e nível
 de integridade alto:
 
-- 305 arquivos de texto validados como UTF-8 sem BOM;
-- 60 arquivos e 302 testes frontend aprovados;
-- 26 cenários visuais em três viewports, totalizando 78 capturas;
+- 318 arquivos de texto validados como UTF-8 sem BOM;
+- 61 arquivos e 310 testes frontend aprovados;
+- 27 cenários visuais em três viewports, totalizando 81 capturas;
 - TypeScript estrito, Biome e build Vite de produção;
 - bootstrap/hash do ripgrep e auditoria de dependências transitivas;
 - `cargo check`, `rustfmt` e Clippy com warnings como erro;
-- 281 testes Rust aprovados e 9 benchmarks ignorados no fluxo comum por design;
+- 296 testes Rust aprovados e 9 benchmarks ignorados no fluxo comum por design;
 - benchmarks release de streaming, sessões longas e comandos paralelos
   executados separadamente dentro do mesmo gate.
 
@@ -783,7 +785,7 @@ comando `88,77×`, quatro comandos independentes `3,87×`, polling incremental
 turnos montados; o diff de 150 mil linhas manteve no máximo 73 linhas.
 
 O navegador interno passou o gate responsivo nas três larguras, com uma aba
-selecionada, quatro controles de navegação, endereço único, zero overflow e
+selecionada, cinco controles de navegação/diagnóstico, endereço único, zero overflow e
 surface nativa alinhada ao conteúdo interno do painel. Testes Rust validam URL,
 credenciais, bounds, histórico e título; testes frontend validam schema local,
 restauração lazy, ownership por conversa, deduplicação de bounds e ações de aba.
@@ -794,5 +796,71 @@ O site remoto carregou sem acesso a comandos: uma tentativa de
 também detectou e eliminou um deadlock de comandos síncronos no dispatcher e um
 accessor Solid obsoleto durante a desmontagem; a repetição terminou sem erros no
 runtime dev.
+
+### Browser Use nativo, diagnóstico e smoke real — 24 de agosto de 2026
+
+O Browser Use passou a medir cada ação em estágios separados: fila, operação,
+espera de carga, snapshot e screenshot. A amostra inclui status, ação,
+conversa/turno/item, aba, origem, URL sem query/fragment, tamanho da captura e um
+resumo da página com erros, recursos, Web Vitals, long tasks, overflow e achados
+de acessibilidade. O arquivo rotativo fica em
+`%APPDATA%\dev.codexapp.desktop\logs\browser-actions.jsonl`.
+
+O comparador aceita dois logs e um filtro opcional por ação:
+
+```powershell
+pnpm measure:browser -- --baseline .\before.jsonl --candidate .\after.jsonl
+pnpm measure:browser -- --baseline .\before.jsonl --candidate .\after.jsonl --action click
+```
+
+Ele produz amostras, falhas, média, mediana, P95 e deltas absolutos/percentuais
+para todos os estágios. Uma fixture determinística confirmou, por exemplo, a
+comparação de média total `150 → 95 ms` (`−36,67%`), P95 `180 → 100 ms`
+(`−44,44%`) e falhas `50% → 0%`.
+
+O painel de diagnóstico foi auditado em três viewports:
+
+| Viewport | Altura do diagnóstico | Altura restante da WebView | Overflow |
+| --- | ---: | ---: | ---: |
+| 920×640 | `230,27 px` | `301,73 px` | `0 px` |
+| 1280×820 | `252 px` | `460 px` | `0 px` |
+| 1920×1080 | `252 px` | `720 px` | `0 px` |
+
+O cenário exige quatro cartões, cinco estágios, pelo menos seis achados, histórico
+com falha diferenciada e manutenção da última amostra de página válida quando a
+ação mais recente falha antes da captura.
+
+`pnpm smoke:browser` executou no child WebView2 real com uma página HTTP local,
+sem conta ou provider. O smoke abriu a superfície `760×640`, capturou JPEG,
+clicou, confirmou `Contagem: 1`, digitou `Codex`, navegou para `/next`, fechou
+todos os WebViews e destruiu a janela principal antes do exit. Uma resposta
+`302` para outra porta/origem também foi bloqueada enquanto não aprovada e só
+prosseguiu depois da liberação explícita. O relatório final em
+`browser-smoke.json` registrou:
+
+| Etapa | load | snapshot | screenshot | JPEG |
+| --- | ---: | ---: | ---: | ---: |
+| inicial | `0 ms` | `6 ms` | `23 ms` | `18.591 B` |
+| após click | `0 ms` | `3 ms` | `24 ms` | `19.799 B` |
+| após digitação | `0 ms` | `3 ms` | `25 ms` | `20.131 B` |
+| após navegação | `0 ms` | `3 ms` | `19 ms` | `14.007 B` |
+| após origem aprovada | `0 ms` | `3 ms` | `25 ms` | `13.707 B` |
+
+O fluxo debug integral levou `4.649 ms`, incluindo animações deliberadas do
+cursor, guard de redirects, cinco capturas e teardown. Isso é um smoke
+funcional, não um benchmark de latência de produção.
+
+O orçamento release do catálogo foi reexecutado depois das sete ferramentas:
+
+| Caminho | Antes | Browser Use | Delta |
+| --- | ---: | ---: | ---: |
+| catálogo completo | `1.939` tokens | `3.049` tokens | `+1.110` (`+57,25%`) |
+| catálogo somente leitura | `844` tokens | `1.954` tokens | `+1.110` (`+131,52%`) |
+| construção + encode | `0,0117 ms` | `0,0197 ms` | `+0,0080 ms` |
+
+O custo é explícito: as sete definições somam aproximadamente `1.109` tokens e
+mantêm operações pequenas/estritas em vez de conceder CDP arbitrário. O catálogo
+completo ocupa `12.194 B`, aproximadamente `3.049` tokens ou `1,18%` da janela
+utilizável padrão de `258.400` tokens.
 O gate também confirma duas imagens agrupadas sem data URL textual e a matiz
 final com HEX, badge, ícone, quadrado HSV e cursor coerentes.

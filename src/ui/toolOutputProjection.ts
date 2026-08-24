@@ -1,10 +1,16 @@
 import { utf8ByteLength } from "../utf8";
+import { SAFE_IMAGE_DATA_MIME_PATTERN } from "./imageSource";
 import type { SyntaxLine } from "./syntax/contracts";
 import { syntaxLanguageFromPath } from "./syntax/languages";
 import { SyntaxLineTokenizer } from "./syntax/tokenizer";
 
 const MAX_SOURCE_HIGHLIGHT_BYTES: number = 256 * 1_024;
 const MAX_SOURCE_LINE_CHARACTERS: number = 4 * 1_024;
+const MAX_IMAGE_TOOL_SOURCE_BYTES: number = 16 * 1_048_576;
+const IMAGE_TOOL_DATA_URL = new RegExp(
+  `${SAFE_IMAGE_DATA_MIME_PATTERN}(?:;base64)?,[^\\s]+$`,
+  "iu",
+);
 
 export interface SourceOutputLine {
   readonly content: string;
@@ -101,10 +107,13 @@ export function projectImageToolOutput(text: string): string | null {
     return null;
   }
   const source = object.image_url;
-  if (source.length === 0 || new TextEncoder().encode(source).length > 16 * 1_048_576) {
+  if (
+    source.length === 0 ||
+    new TextEncoder().encode(source).length > MAX_IMAGE_TOOL_SOURCE_BYTES
+  ) {
     return null;
   }
-  if (/^data:image\/(?:avif|gif|jpeg|png|svg\+xml|webp)(?:;base64)?,[^\s]+$/iu.test(source)) {
+  if (IMAGE_TOOL_DATA_URL.test(source)) {
     return source;
   }
   try {

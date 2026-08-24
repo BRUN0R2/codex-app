@@ -69,6 +69,8 @@ import type { SettingsPage } from "./SettingsDialog";
 const MAX_VISIBLE_PROJECT_GROUPS = 5;
 const MAX_UNGROUPED_RECENT_THREADS = 8;
 const MAX_INLINE_PROJECT_THREADS = 5;
+const THREAD_BADGE_COUNT_SATURATION: number = 99;
+const DEFAULT_PROJECT_COLOR: string = "#4ade80";
 
 interface SidebarProjectGroup {
   readonly project: ProjectRecord;
@@ -81,11 +83,9 @@ export interface SidebarProps {
   readonly controller: SidebarController;
   readonly inert: boolean;
   readonly onOpenAutomations: () => void;
-  readonly onOpenProfile: () => void;
   readonly onOpenWorkspace: (path: string) => void;
   readonly onOpenSettings: (page?: SettingsPage) => void;
   readonly onShowChat: () => void;
-  readonly profileActive: boolean;
 }
 
 export function Sidebar(props: SidebarProps) {
@@ -346,7 +346,10 @@ export function Sidebar(props: SidebarProps) {
           </Show>
           <Show when={props.controller.unreadAutomationRuns().length > 0}>
             <span class="sidebar-automation-badge">
-              {Math.min(99, props.controller.unreadAutomationRuns().length)}
+              {Math.min(
+                THREAD_BADGE_COUNT_SATURATION,
+                props.controller.unreadAutomationRuns().length,
+              )}
             </span>
           </Show>
         </button>
@@ -599,18 +602,6 @@ export function Sidebar(props: SidebarProps) {
             <button
               onClick={() => {
                 setAccountMenuOpen(false);
-                props.onOpenProfile();
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <Icon name="user" size={15} />
-              <span>Perfil</span>
-              <Icon name="chevronRight" size={13} />
-            </button>
-            <button
-              onClick={() => {
-                setAccountMenuOpen(false);
                 props.onOpenSettings("usage");
               }}
               role="menuitem"
@@ -652,11 +643,10 @@ export function Sidebar(props: SidebarProps) {
             aria-expanded={accountMenuOpen()}
             aria-haspopup="menu"
             class="sidebar-account-trigger"
-            classList={{ active: props.profileActive }}
             onClick={() => {
               setBrandMenuOpen(false);
               if (props.collapsed) {
-                props.onOpenProfile();
+                props.onOpenSettings("profile");
                 return;
               }
               const opening = !accountMenuOpen();
@@ -889,7 +879,7 @@ function ProjectGroup(props: ProjectGroupProps) {
           <Show when={props.threads.length === 0}>
             <p class="no-threads">Nenhuma tarefa</p>
           </Show>
-          <Show when={props.threads.length > 5}>
+          <Show when={props.threads.length > MAX_INLINE_PROJECT_THREADS}>
             <button
               aria-expanded={props.threadListExpanded}
               class="project-thread-pagination"
@@ -898,7 +888,7 @@ function ProjectGroup(props: ProjectGroupProps) {
             >
               {props.threadListExpanded
                 ? "Mostrar menos"
-                : `Mostrar mais (${props.threads.length - 5})`}
+                : `Mostrar mais (${props.threads.length - MAX_INLINE_PROJECT_THREADS})`}
             </button>
           </Show>
         </div>
@@ -1091,9 +1081,22 @@ function ProjectEditModal(props: {
   const [icon, setIcon] = createSignal<IconName | undefined>(
     (props.project.icon as IconName | undefined) ?? "folder",
   );
-  const [color, setColor] = createSignal<string>(props.project.color ?? "#4ade80");
+  const [color, setColor] = createSignal<string>(props.project.color ?? DEFAULT_PROJECT_COLOR);
 
   const selectedIcon = () => icon() ?? "folder";
+
+  function closeOnEscape(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      props.onClose();
+    }
+  }
+
+  onMount(() => {
+    document.addEventListener("keydown", closeOnEscape);
+  });
+  onCleanup(() => {
+    document.removeEventListener("keydown", closeOnEscape);
+  });
 
   return (
     <Portal>
@@ -1183,6 +1186,10 @@ function ProjectEditModal(props: {
   );
 }
 
+const COLOR_PICKER_CURSOR_RADIUS_PX: number = 7;
+const COLOR_PICKER_CURSOR_DIAMETER_PX: number = 14;
+const PROJECT_HUE_SCALE_MAXIMUM: number = 359;
+
 function InlineColorPicker(props: {
   readonly color: string;
   readonly onChange: (color: string) => void;
@@ -1195,9 +1202,12 @@ function InlineColorPicker(props: {
   const sat = () => hsv().s;
   const val = () => hsv().v;
 
-  const cursorX = () => `calc(7px + (${sat()} / 100) * (100% - 14px))`;
-  const cursorY = () => `calc(7px + (${100 - val()} / 100) * (100% - 14px))`;
-  const hueX = () => `calc(7px + (${hue()} / 359) * (100% - 14px))`;
+  const cursorX = () =>
+    `calc(${COLOR_PICKER_CURSOR_RADIUS_PX}px + (${sat()} / 100) * (100% - ${COLOR_PICKER_CURSOR_DIAMETER_PX}px))`;
+  const cursorY = () =>
+    `calc(${COLOR_PICKER_CURSOR_RADIUS_PX}px + (${100 - val()} / 100) * (100% - ${COLOR_PICKER_CURSOR_DIAMETER_PX}px))`;
+  const hueX = () =>
+    `calc(${COLOR_PICKER_CURSOR_RADIUS_PX}px + (${hue()} / ${PROJECT_HUE_SCALE_MAXIMUM}) * (100% - ${COLOR_PICKER_CURSOR_DIAMETER_PX}px))`;
 
   function updateFromBox(event: PointerEvent) {
     if (boxRef === undefined) {

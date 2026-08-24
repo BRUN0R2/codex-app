@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,17 +35,17 @@ struct BatcherInner {
 struct BatchState {
     pending: Vec<StreamDelta>,
     pending_bytes: usize,
-    leading_keys: HashSet<StreamDeltaKey>,
+    leading_keys: HashMap<String, HashSet<DeltaChannel>>,
     scheduled_generation: Option<u64>,
     generation: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum StreamDeltaKey {
-    AgentText(String),
-    CommandOutput(String, CommandOutputStream),
-    ReasoningSummary(String, usize),
-    ReasoningText(String, usize),
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum DeltaChannel {
+    AgentText,
+    CommandOutput(CommandOutputStream),
+    ReasoningSummary(usize),
+    ReasoningText(usize),
 }
 
 impl StreamNotificationBatcher {
@@ -77,12 +77,11 @@ impl StreamNotificationBatcher {
         if delta_text(&delta).is_some_and(str::is_empty) {
             return Ok(());
         }
-        let key = delta_key(&delta);
         let encoded_bytes = delta_bytes(&delta);
         let mut schedule = None;
         {
             let mut state = self.inner.state.lock().await;
-            if state.leading_keys.insert(key) {
+            if state.is_leading_delta(&delta) {
                 state.cancel_schedule();
                 let pending = state.take_pending();
                 self.inner.emit(pending)?;
@@ -155,6 +154,19 @@ impl BatcherInner {
 }
 
 impl BatchState {
+    fn is_leading_delta(&mut self, delta: &StreamDelta) -> bool {
+        let channel = delta_channel(delta);
+        let item_id = delta_item_id(delta);
+        match self.leading_keys.get_mut(item_id) {
+            Some(channels) => channels.insert(channel),
+            None => {
+                self.leading_keys
+                    .insert(item_id.to_string(), HashSet::from([channel]));
+                true
+            }
+        }
+    }
+
     fn cancel_schedule(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.scheduled_generation = None;
@@ -166,18 +178,21 @@ impl BatchState {
     }
 }
 
-fn delta_key(delta: &StreamDelta) -> StreamDeltaKey {
+fn delta_item_id(delta: &StreamDelta) -> &str {
     match delta {
-        StreamDelta::AgentText { item_id, .. } => StreamDeltaKey::AgentText(item_id.clone()),
-        StreamDelta::CommandOutput {
-            item_id, stream, ..
-        } => StreamDeltaKey::CommandOutput(item_id.clone(), *stream),
-        StreamDelta::ReasoningSummary { item_id, index, .. } => {
-            StreamDeltaKey::ReasoningSummary(item_id.clone(), *index)
-        }
-        StreamDelta::ReasoningText { item_id, index, .. } => {
-            StreamDeltaKey::ReasoningText(item_id.clone(), *index)
-        }
+        StreamDelta::AgentText { item_id, .. }
+        | StreamDelta::CommandOutput { item_id, .. }
+        | StreamDelta::ReasoningSummary { item_id, .. }
+        | StreamDelta::ReasoningText { item_id, .. } => item_id,
+    }
+}
+
+fn delta_channel(delta: &StreamDelta) -> DeltaChannel {
+    match delta {
+        StreamDelta::AgentText { .. } => DeltaChannel::AgentText,
+        StreamDelta::CommandOutput { stream, .. } => DeltaChannel::CommandOutput(*stream),
+        StreamDelta::ReasoningSummary { index, .. } => DeltaChannel::ReasoningSummary(*index),
+        StreamDelta::ReasoningText { index, .. } => DeltaChannel::ReasoningText(*index),
     }
 }
 

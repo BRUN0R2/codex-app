@@ -110,7 +110,6 @@ import {
   takeQueuedMessage as reduceTakeQueuedMessage,
   saveMessageQueue,
 } from "./messageQueue";
-import { resolveNewThreadWorkspace } from "./newThreadTarget";
 import {
   loadPinnedThreadIds,
   removePinnedThreadId,
@@ -167,6 +166,7 @@ import { cachedThreadMatchesSummary, ThreadPageCache } from "./threadPageCache";
 import {
   applyThreadRuntimeStreamDeltas,
   mergeRuntimeThreadItems,
+  type PersistedVisibleTurnsBySource,
   readActiveTurnPlan,
   readPersistedVisibleTurns,
   isThreadActive as readThreadActive,
@@ -191,13 +191,12 @@ const ACCOUNT_READ_TIMEOUT_MS = 45_000;
 const THREAD_PAGE_CACHE_CAPACITY = 8;
 
 export function createAppController(): AppController {
-  let initialProductFlow = defaultProductFlowState();
-  let productFlowLoadError: Error | null = null;
-  try {
-    initialProductFlow = loadProductFlowState();
-  } catch (reason) {
-    productFlowLoadError = asError(reason);
-  }
+  const capturedProductFlow = captureInitialization(() => loadProductFlowState());
+  const initialProductFlow =
+    capturedProductFlow.failure === undefined
+      ? capturedProductFlow.value
+      : defaultProductFlowState();
+  const productFlowLoadError = capturedProductFlow.failure ?? null;
   const [productFlow, setProductFlow] = createSignal<ProductFlowState>(initialProductFlow);
   const [runtimeStatus, setRuntimeStatus] = createSignal<RuntimeStatus>({
     state: "starting",
@@ -238,21 +237,16 @@ export function createAppController(): AppController {
   const [historyCursor, setHistoryCursor] = createSignal<string | null>(null);
   const [historyLoading, setHistoryLoading] = createSignal(false);
   const threadPages = new ThreadPageCache(THREAD_PAGE_CACHE_CAPACITY);
-  let initialPinnedThreadIds: readonly string[] = [];
-  let pinLoadError: Error | null = null;
-  try {
-    initialPinnedThreadIds = loadPinnedThreadIds();
-  } catch (reason) {
-    pinLoadError = asError(reason);
-  }
+  const persistedVisibleTurnsBySource: PersistedVisibleTurnsBySource = new WeakMap();
+  const capturedPinnedThreadIds = captureInitialization(loadPinnedThreadIds);
+  const initialPinnedThreadIds =
+    capturedPinnedThreadIds.failure === undefined ? capturedPinnedThreadIds.value : [];
+  const pinLoadError = capturedPinnedThreadIds.failure ?? null;
   const [pinnedThreadIds, setPinnedThreadIds] = createSignal(initialPinnedThreadIds);
-  let initialPinnedProjectPaths: readonly string[] = [];
-  let projectPinLoadError: Error | null = null;
-  try {
-    initialPinnedProjectPaths = loadPinnedProjectPaths();
-  } catch (reason) {
-    projectPinLoadError = asError(reason);
-  }
+  const capturedProjectPins = captureInitialization(loadPinnedProjectPaths);
+  const initialPinnedProjectPaths =
+    capturedProjectPins.failure === undefined ? capturedProjectPins.value : [];
+  const projectPinLoadError = capturedProjectPins.failure ?? null;
   const [pinnedProjectPaths, setPinnedProjectPaths] = createSignal(initialPinnedProjectPaths);
   const [threadRuntime, setThreadRuntime] = createSignal<ReadonlyMap<string, ThreadRuntimeState>>(
     new Map(),
@@ -263,14 +257,14 @@ export function createAppController(): AppController {
     reportError,
     scheduler: createBrowserStreamDeltaScheduler(),
   });
+  const capturedMessageQueues = captureInitialization(loadMessageQueues);
   let initialMessageQueues: MessageQueueMap = new Map();
   let messageQueueLoadWarnings: readonly string[] = [];
-  try {
-    const loaded = loadMessageQueues();
-    initialMessageQueues = loaded.queues;
-    messageQueueLoadWarnings = loaded.warnings;
-  } catch (reason) {
-    messageQueueLoadWarnings = [asError(reason).message];
+  if (capturedMessageQueues.failure === undefined) {
+    initialMessageQueues = capturedMessageQueues.value.queues;
+    messageQueueLoadWarnings = capturedMessageQueues.value.warnings;
+  } else {
+    messageQueueLoadWarnings = [capturedMessageQueues.failure.message];
   }
   const [messageQueues, setMessageQueues] = createSignal<MessageQueueMap>(initialMessageQueues);
   const [pendingApprovals, setPendingApprovals] = createSignal<readonly EngineServerRequest[]>([]);
@@ -303,21 +297,16 @@ export function createAppController(): AppController {
   let modelCatalogRequest: Promise<boolean> | null = null;
   let chatModelCatalogRequest: Promise<boolean> | null = null;
   let modelCatalogSessionRevision = 0;
-  let initialProjects: readonly ProjectRecord[] = [];
-  let projectLoadError: Error | null = null;
-  try {
-    initialProjects = loadProjects();
-  } catch (reason) {
-    projectLoadError = asError(reason);
-  }
+  const capturedProjects = captureInitialization(loadProjects);
+  const initialProjects = capturedProjects.failure === undefined ? capturedProjects.value : [];
+  const projectLoadError = capturedProjects.failure ?? null;
   const [projects, setProjects] = createSignal(initialProjects);
-  let initialProjectSidebarState = defaultProjectSidebarState();
-  let projectSidebarStateLoadError: Error | null = null;
-  try {
-    initialProjectSidebarState = loadProjectSidebarState();
-  } catch (reason) {
-    projectSidebarStateLoadError = asError(reason);
-  }
+  const capturedProjectSidebarState = captureInitialization(loadProjectSidebarState);
+  const initialProjectSidebarState =
+    capturedProjectSidebarState.failure === undefined
+      ? capturedProjectSidebarState.value
+      : defaultProjectSidebarState();
+  const projectSidebarStateLoadError = capturedProjectSidebarState.failure ?? null;
   const [projectSidebarState, setProjectSidebarState] = createSignal<ProjectSidebarState>(
     initialProjectSidebarState,
   );
@@ -436,7 +425,7 @@ export function createAppController(): AppController {
   );
   const persistedTurns = createMemo<readonly VisibleThreadTurn[]>(() => {
     const thread = currentThread();
-    return thread === null ? [] : readPersistedVisibleTurns(thread);
+    return thread === null ? [] : readPersistedVisibleTurns(persistedVisibleTurnsBySource, thread);
   });
   const turns = createMemo<VisibleTurnSequence>(() => {
     const thread = currentThread();
@@ -1619,7 +1608,7 @@ export function createAppController(): AppController {
 
   function newThread(targetWorkspace?: string): boolean {
     const mode = conversationMode();
-    const requestedWorkspace = mode === "chat" ? null : resolveNewThreadWorkspace(targetWorkspace);
+    const requestedWorkspace = mode === "chat" ? null : (targetWorkspace ?? null);
     if (requestedWorkspace === null) {
       batch(() => {
         setWorkspace(null);
@@ -2394,6 +2383,7 @@ export function createAppController(): AppController {
         thread: update(page.thread),
       }));
     } catch (reason) {
+      reportError(reason);
       threadPages.delete(threadId);
       if (currentThread()?.id === threadId) {
         throw reason;
@@ -2710,6 +2700,18 @@ function assertNever(value: never): never {
 
 function asError(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(describeError(reason));
+}
+
+type CapturedInitialization<T> =
+  | { readonly value: T; readonly failure: undefined }
+  | { readonly value: undefined; readonly failure: Error };
+
+function captureInitialization<T>(load: () => T): CapturedInitialization<T> {
+  try {
+    return { value: load(), failure: undefined };
+  } catch (reason) {
+    return { value: undefined, failure: asError(reason) };
+  }
 }
 
 function settledQueueTail(operation: Promise<unknown>): Promise<void> {

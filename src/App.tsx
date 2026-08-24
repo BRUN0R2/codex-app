@@ -1,6 +1,6 @@
 import { ErrorBoundary, Match, Show, Switch } from "solid-js";
 
-import { shouldRenderWindowChrome } from "./platform/DesktopRuntime";
+import { shouldRenderWindowChrome } from "./platform/desktopRuntime";
 import { createAppController } from "./state/createAppController";
 import { AppShell } from "./ui/AppShell";
 import { CodexGlyph } from "./ui/CodexGlyph";

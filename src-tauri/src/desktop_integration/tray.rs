@@ -4,6 +4,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
+use crate::engine::{EngineManager, RuntimeDiagnosticSubsystem};
 use crate::error::AppError;
 
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -61,17 +62,24 @@ fn is_restore_click(event: &TrayIconEvent) -> bool {
 
 fn restore_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
-        eprintln!("Tray restore failed: main window is unavailable.");
+        report_runtime_error(
+            app,
+            "Tray restore failed: main window is unavailable.".into(),
+        );
         return;
     };
 
-    if let Err(error) = window
-        .show()
-        .and_then(|()| window.unminimize())
-        .and_then(|()| window.set_focus())
-    {
-        eprintln!("Tray restore failed: {error}");
+    if let Err(error) = super::restore_main_window(&window) {
+        report_runtime_error(app, format!("Tray restore failed: {error}"));
     }
+}
+
+fn report_runtime_error(app: &AppHandle, message: String) {
+    app.state::<EngineManager>().report_runtime_error(
+        app,
+        RuntimeDiagnosticSubsystem::Window,
+        message,
+    );
 }
 
 fn runtime_error(error: tauri::Error) -> AppError {

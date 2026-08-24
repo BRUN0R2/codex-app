@@ -1,3 +1,4 @@
+import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 
 import type {
@@ -9,6 +10,7 @@ import type {
   AutomationListResponse,
   AutomationRun,
   AutoTopUpSettingsSnapshot,
+  BrowserActionMetric,
   BrowserTabSnapshot,
   ChatModelListResponse,
   CodexModel,
@@ -44,7 +46,7 @@ function previewOutput(id: string, preview: string): ThreadOutput {
   };
 }
 
-const PREVIEW_CREATED_RUST_LINE_COUNT: number = 338;
+const PREVIEW_CREATED_RUST_LINE_COUNT: number = 256;
 
 function previewCreatedRustDiff(): string {
   const source = [
@@ -211,7 +213,7 @@ const PREVIEW_ENGINE = {
       "scheduledAutomations",
     ],
   },
-  schemaVersion: 18,
+  schemaVersion: 19,
   config: PREVIEW_CONFIG,
   diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
   permissionProfiles: [
@@ -1457,7 +1459,7 @@ export function setupBrowserPreview(): void {
             : [PREVIEW_IMAGE_ONE, PREVIEW_IMAGE_TWO];
         }
         case "attachment_inspect": {
-          const paths = (args as { paths?: readonly string[] }).paths ?? [];
+          const paths = (args as { request?: { paths?: readonly string[] } }).request?.paths ?? [];
           return paths.map((path, index) => ({
             id: `preview-attachment-${index}`,
             name: index === 0 ? "paisagem.png" : "interface.png",
@@ -1488,6 +1490,112 @@ export function setupBrowserPreview(): void {
     },
     { shouldMockEvents: true },
   );
+
+  if (previewParameters.get("browserMetrics") === "1") {
+    const metrics = previewBrowserMetrics(previewThread.id);
+    window.setTimeout(() => {
+      void Promise.all(metrics.map((metric) => emit("browser://metric", metric)));
+    }, 150);
+  }
+}
+
+function previewBrowserMetrics(conversationId: string): readonly BrowserActionMetric[] {
+  const now = Date.now();
+  return [
+    {
+      id: "preview-browser-metric-1",
+      sessionId: "preview-browser-session",
+      timestampMs: now - 1_200,
+      conversationId,
+      turnId: "preview-browser-turn",
+      itemId: "preview-browser-item-1",
+      browserTabId: null,
+      action: "navigate",
+      status: "completed",
+      origin: "http://127.0.0.1:1420",
+      url: "http://127.0.0.1:1420/",
+      queueMs: 2,
+      actionMs: 18,
+      loadMs: 146,
+      snapshotMs: 12,
+      screenshotMs: 31,
+      totalMs: 209,
+      screenshotBytes: 84_120,
+      page: previewBrowserPageMetric(146, 212, 0),
+      error: null,
+    },
+    {
+      id: "preview-browser-metric-2",
+      sessionId: "preview-browser-session",
+      timestampMs: now - 800,
+      conversationId,
+      turnId: "preview-browser-turn",
+      itemId: "preview-browser-item-2",
+      browserTabId: null,
+      action: "click",
+      status: "completed",
+      origin: "http://127.0.0.1:1420",
+      url: "http://127.0.0.1:1420/settings/profile",
+      queueMs: 1,
+      actionMs: 174,
+      loadMs: 64,
+      snapshotMs: 10,
+      screenshotMs: 28,
+      totalMs: 277,
+      screenshotBytes: 91_340,
+      page: previewBrowserPageMetric(64, 176, 0.014),
+      error: null,
+    },
+    {
+      id: "preview-browser-metric-3",
+      sessionId: "preview-browser-session",
+      timestampMs: now - 400,
+      conversationId,
+      turnId: "preview-browser-turn",
+      itemId: "preview-browser-item-3",
+      browserTabId: null,
+      action: "snapshot",
+      status: "failed",
+      origin: "http://127.0.0.1:1420",
+      url: "http://127.0.0.1:1420/settings/profile",
+      queueMs: 1,
+      actionMs: 4,
+      loadMs: 0,
+      snapshotMs: 11,
+      screenshotMs: 0,
+      totalMs: 16,
+      screenshotBytes: null,
+      page: null,
+      error: "Falha de recurso detectada durante a captura de diagnóstico.",
+    },
+  ];
+}
+
+function previewBrowserPageMetric(
+  navigationDurationMs: number,
+  largestContentfulPaintMs: number,
+  cumulativeLayoutShift: number,
+): NonNullable<BrowserActionMetric["page"]> {
+  return {
+    readyState: "complete",
+    viewportWidth: 760,
+    viewportHeight: 690,
+    interactiveElements: 18,
+    consoleErrors: 0,
+    pageErrors: 0,
+    resourceFailures: 1,
+    resourceCount: 42,
+    transferBytes: 486_000,
+    navigationDurationMs,
+    largestContentfulPaintMs,
+    cumulativeLayoutShift,
+    longTaskCount: 1,
+    longTaskDurationMs: 54,
+    horizontalOverflowPx: 0,
+    unlabeledControls: 1,
+    missingAltImages: 0,
+    duplicateIds: 0,
+  };
 }
 
 function previewSvg(svg: string): string {

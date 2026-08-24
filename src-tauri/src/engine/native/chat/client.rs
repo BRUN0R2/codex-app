@@ -30,6 +30,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEVICE_ID_FILE_NAME: &str = "chatgpt-consumer-device-id";
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+const MAX_MODELS_RESPONSE_BYTES: usize = 4 * 1_048_576;
+const MAX_INTEGRITY_PREPARE_RESPONSE_BYTES: usize = 1_048_576;
+const MAX_CONVERSATION_PREPARE_RESPONSE_BYTES: usize = 1_048_576;
 
 pub(super) struct ChatClient {
     state: OnceLock<ClientState>,
@@ -75,7 +78,7 @@ impl ChatClient {
             operation: "ChatGPT model catalog",
         })?
         .map_err(|error| AppError::Transport(error.to_string()))?;
-        decode_json(response, "ChatGPT model catalog", 4 * 1_048_576).await
+        decode_json(response, "ChatGPT model catalog", MAX_MODELS_RESPONSE_BYTES).await
     }
 
     pub async fn start_conversation(
@@ -165,8 +168,12 @@ impl ChatClient {
             operation: "ChatGPT integrity preparation",
         })?
         .map_err(|error| AppError::Transport(error.to_string()))?;
-        let requirements: IntegrityRequirements =
-            decode_json(response, "ChatGPT integrity preparation", 1_048_576).await?;
+        let requirements: IntegrityRequirements = decode_json(
+            response,
+            "ChatGPT integrity preparation",
+            MAX_INTEGRITY_PREPARE_RESPONSE_BYTES,
+        )
+        .await?;
         tokio::task::spawn_blocking(move || requirements.solve())
             .await
             .map_err(|error| {
@@ -191,7 +198,12 @@ impl ChatClient {
                 operation: "ChatGPT conversation preparation",
             })?
             .map_err(|error| AppError::Transport(error.to_string()))?;
-        decode_json(response, "ChatGPT conversation preparation", 1_048_576).await
+        decode_json(
+            response,
+            "ChatGPT conversation preparation",
+            MAX_CONVERSATION_PREPARE_RESPONSE_BYTES,
+        )
+        .await
     }
 
     fn authorized(

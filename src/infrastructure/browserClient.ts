@@ -2,11 +2,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
+  decodeBrowserActionMetric,
+  decodeBrowserAgentActivityNotification,
   decodeBrowserNewWindowNotification,
   decodeBrowserTabSnapshot,
   decodeOperationAck,
 } from "../contracts/decode";
 import type {
+  BrowserActionMetric,
+  BrowserAgentActivityNotification,
   BrowserNewWindowNotification,
   BrowserSurfaceBounds,
   BrowserTabSnapshot,
@@ -15,6 +19,8 @@ import type {
 
 const BROWSER_STATE_EVENT = "browser://state";
 const BROWSER_NEW_WINDOW_EVENT = "browser://new-window";
+const BROWSER_AGENT_ACTIVITY_EVENT = "browser://agent-activity";
+const BROWSER_METRIC_EVENT = "browser://metric";
 
 interface BrowserTabIdentity {
   readonly browserTabId: string;
@@ -84,6 +90,32 @@ export async function listenBrowserNewWindow(
   return listen<unknown>(BROWSER_NEW_WINDOW_EVENT, (event) => {
     try {
       onRequest(decodeBrowserNewWindowNotification(event.payload));
+    } catch (reason) {
+      onError(reason);
+    }
+  });
+}
+
+export async function listenBrowserAgentActivity(
+  onActivity: (activity: BrowserAgentActivityNotification) => void,
+  onError: (reason: unknown) => void,
+): Promise<UnlistenFn> {
+  return listen<unknown>(BROWSER_AGENT_ACTIVITY_EVENT, (event) => {
+    try {
+      onActivity(decodeBrowserAgentActivityNotification(event.payload));
+    } catch (reason) {
+      onError(reason);
+    }
+  });
+}
+
+export async function listenBrowserMetric(
+  onMetric: (metric: BrowserActionMetric) => void,
+  onError: (reason: unknown) => void,
+): Promise<UnlistenFn> {
+  return listen<unknown>(BROWSER_METRIC_EVENT, (event) => {
+    try {
+      onMetric(decodeBrowserActionMetric(event.payload));
     } catch (reason) {
       onError(reason);
     }

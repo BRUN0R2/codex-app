@@ -57,6 +57,11 @@ import { fileChangeLineStats } from "./fileChangeStats";
 import { FrontendFailureContext, useFrontendFailureReporter } from "./frontendFailure";
 import { Icon, type IconName } from "./Icon";
 import { TimelineTurnRenderFailure } from "./RenderFailure";
+import {
+  resolveScrollbarPageScrollAmount,
+  SCROLLBAR_ARROW_SCROLL_STEP_PX,
+  sameScrollbarMetrics,
+} from "./scrollCommands";
 import { ThreadOutputView } from "./ThreadOutputView";
 import {
   AgentMessage,
@@ -174,6 +179,10 @@ const ACTIVITY_OPEN_DISCLOSURE_VIRTUALIZATION_THRESHOLD = 4;
 const USER_MESSAGE_NAVIGATION_MAX_FRAMES: number = 8;
 const USER_MESSAGE_NAVIGATION_QUIET_FRAMES: number = 8;
 const USER_MESSAGE_SCROLL_INSET_PX: number = 32;
+const USER_MESSAGE_NAVIGATOR_TITLE_PREVIEW_CHARACTERS: number = 180;
+const USER_MESSAGE_NAVIGATOR_DETAIL_PREVIEW_CHARACTERS: number = 320;
+const ACTIVE_MESSAGE_VIEWPORT_INSET_PX: number = 112;
+const LIVE_OUTPUT_FOLLOW_EPSILON_PX: number = 24;
 const TIMELINE_SCROLL_REGION_SELECTOR = "[data-timeline-scroll-region]";
 const IMAGE_OUTPUT_PRESENTATION = { type: "image" } as const;
 
@@ -324,13 +333,19 @@ export function Timeline(props: {
       const response = [...turn.items].reverse().find((item) => item.type === "agentMessage");
       const detail =
         response?.type === "agentMessage"
-          ? blockPreview(presentAssistantText(response.text), 320)
+          ? blockPreview(
+              presentAssistantText(response.text),
+              USER_MESSAGE_NAVIGATOR_DETAIL_PREVIEW_CHARACTERS,
+            )
           : null;
       return turn.items.flatMap((item) => {
         if (item.type !== "userMessage") {
           return [];
         }
-        const title = inlinePreview(userMessageCopyText(item.content), 180);
+        const title = inlinePreview(
+          userMessageCopyText(item.content),
+          USER_MESSAGE_NAVIGATOR_TITLE_PREVIEW_CHARACTERS,
+        );
         return [
           {
             id: item.id,
@@ -438,7 +453,10 @@ export function Timeline(props: {
     ) {
       return messages.length - 1;
     }
-    const viewportTop = Math.max(0, input.scrollTop - list.offsetTop + 112);
+    const viewportTop = Math.max(
+      0,
+      input.scrollTop - list.offsetTop + ACTIVE_MESSAGE_VIEWPORT_INSET_PX,
+    );
     return findTimelineAnchorIndex(
       messages.length,
       (index) => {
@@ -1225,13 +1243,13 @@ export function Timeline(props: {
     if (scrollElement === undefined) {
       return;
     }
-    const page = Math.max(120, scrollElement.clientHeight * 0.8);
+    const page = resolveScrollbarPageScrollAmount(scrollElement.clientHeight);
     switch (event.key) {
       case "ArrowDown":
-        scrollElement.scrollBy({ top: 64 });
+        scrollElement.scrollBy({ top: SCROLLBAR_ARROW_SCROLL_STEP_PX });
         break;
       case "ArrowUp":
-        scrollElement.scrollBy({ top: -64 });
+        scrollElement.scrollBy({ top: -SCROLLBAR_ARROW_SCROLL_STEP_PX });
         break;
       case "End":
         scrollToEnd();
@@ -1454,7 +1472,7 @@ export function Timeline(props: {
                 aria-label="Rolar conversa para cima"
                 class="surface-scrollbar-arrow up"
                 disabled={!scrollbar().scrollable || scrollbar().thumbTop <= 0.5}
-                onClick={() => scrollTimelineBy(-64)}
+                onClick={() => scrollTimelineBy(-SCROLLBAR_ARROW_SCROLL_STEP_PX)}
                 title="Rolar para cima"
                 type="button"
               >
@@ -1497,7 +1515,7 @@ export function Timeline(props: {
                   scrollbar().thumbTop + scrollbar().thumbHeight >=
                     (scrollbarTrackElement?.clientHeight ?? 0) - 0.5
                 }
-                onClick={() => scrollTimelineBy(64)}
+                onClick={() => scrollTimelineBy(SCROLLBAR_ARROW_SCROLL_STEP_PX)}
                 title="Rolar para baixo"
                 type="button"
               >
@@ -2261,7 +2279,7 @@ function CommandItem(props: {
       outputScrollElement.scrollHeight -
         outputScrollElement.clientHeight -
         outputScrollElement.scrollTop <=
-      24;
+      LIVE_OUTPUT_FOLLOW_EPSILON_PX;
   }
 
   return (
@@ -2568,15 +2586,6 @@ function ExpandedChangeDiff(props: {
 }) {
   const document = createMemo(() => createDiffDocument(props.diff));
   return <DiffView document={document()} mode={props.mode} path={props.path} />;
-}
-
-function sameScrollbarMetrics(left: ScrollbarMetrics, right: ScrollbarMetrics): boolean {
-  return (
-    left.maximumScroll === right.maximumScroll &&
-    left.scrollable === right.scrollable &&
-    left.thumbHeight === right.thumbHeight &&
-    left.thumbTop === right.thumbTop
-  );
 }
 
 function createTimelineFileChangeEntries(

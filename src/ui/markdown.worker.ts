@@ -1,13 +1,5 @@
 import { renderMarkdownSource } from "./markdownParser";
-
-interface MarkdownWorkerRequest {
-  readonly id: number;
-  readonly source: string;
-}
-
-type MarkdownWorkerResponse =
-  | { readonly id: number; readonly html: string; readonly ok: true }
-  | { readonly id: number; readonly error: string; readonly ok: false };
+import type { MarkdownWorkerRequest, MarkdownWorkerResponse } from "./markdownWorkerProtocol";
 
 const workerScope = globalThis as unknown as {
   readonly addEventListener: (

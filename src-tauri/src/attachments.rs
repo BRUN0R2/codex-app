@@ -49,6 +49,12 @@ pub struct ReadImageRequest {
     pub path: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentInspectRequest {
+    pub paths: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadImageResponse {
@@ -64,8 +70,9 @@ struct ImageFormat {
 #[tauri::command]
 pub async fn attachment_inspect(
     app: AppHandle,
-    paths: Vec<String>,
+    request: AttachmentInspectRequest,
 ) -> CommandResult<Vec<Attachment>> {
+    let paths = request.paths;
     if paths.is_empty() {
         return Ok(Vec::new());
     }

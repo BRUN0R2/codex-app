@@ -1,10 +1,7 @@
 import { sanitizeMarkdownHtml } from "./markdownRenderer";
+import type { MarkdownWorkerResponse } from "./markdownWorkerProtocol";
 
 const MARKDOWN_WORKER_MINIMUM_CHARACTERS = 32 * 1_024;
-
-type MarkdownWorkerResponse =
-  | { readonly id: number; readonly html: string; readonly ok: true }
-  | { readonly id: number; readonly error: string; readonly ok: false };
 
 interface PendingRender {
   readonly reject: (reason: Error) => void;

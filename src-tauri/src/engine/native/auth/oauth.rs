@@ -21,6 +21,7 @@ use super::token::SecretString;
 use super::token::TokenSet;
 use super::token::clean_profile_picture;
 use super::token::clean_profile_text;
+use super::token::json_error_kind;
 use super::token::validate_account_token;
 
 #[cfg(test)]
@@ -405,8 +406,12 @@ async fn decode_response_limited<T: DeserializeOwned>(
     maximum_bytes: usize,
 ) -> Result<T, AuthError> {
     let bytes = read_response_limited(response, maximum_bytes, operation).await?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| AuthError::OAuth(format!("{operation} response is invalid: {error}")))
+    serde_json::from_slice(&bytes).map_err(|error| {
+        AuthError::OAuth(format!(
+            "{operation} response is invalid: {}",
+            json_error_kind(&error)
+        ))
+    })
 }
 
 async fn read_response_limited(

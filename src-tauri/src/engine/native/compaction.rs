@@ -3,13 +3,13 @@ use uuid::Uuid;
 
 use super::NativeEngineInner;
 use super::agent::{
-    DEFAULT_RETRY_AFTER_SECONDS, TurnProviderState, TurnRun, emit_item_notification,
-    handle_provider_control_event, validate_response_item, wait_for_rate_limit_reset,
-    wait_for_transient_provider_retry,
+    TurnProviderState, TurnRun, emit_item_notification, handle_provider_control_event,
+    validate_response_item,
 };
 use super::context_window::{build_compacted_history, prepare_compaction_history};
 use super::provider::{ResponseEvent, ResponseItem, ResponseRequest, ResponseRequestSettings};
 use super::storage::ProviderHistorySnapshot;
+use super::turn_recovery;
 use crate::engine::ThreadItem;
 use crate::error::AppError;
 
@@ -80,34 +80,10 @@ pub(super) async fn compact_context(
             Ok(stream) => stream,
             Err(AppError::Cancelled(_)) => return Ok(false),
             Err(error) => {
-                if let AppError::RateLimited {
-                    retry_after_seconds,
-                    ..
-                } = &error
+                if let Some(decision) =
+                    turn_recovery::classify(&error, &mut transient_failure_count)
                 {
-                    if wait_for_rate_limit_reset(
-                        inner,
-                        app,
-                        run,
-                        retry_after_seconds.unwrap_or(DEFAULT_RETRY_AFTER_SECONDS),
-                    )
-                    .await
-                    {
-                        continue 'request;
-                    }
-                    return Ok(false);
-                }
-                if error.is_transient() {
-                    transient_failure_count = transient_failure_count.saturating_add(1);
-                    if wait_for_transient_provider_retry(
-                        inner,
-                        app,
-                        run,
-                        &error,
-                        transient_failure_count,
-                    )
-                    .await
-                    {
+                    if turn_recovery::wait_for_retry(inner, app, run, &error, decision).await {
                         continue 'request;
                     }
                     return Ok(false);
@@ -124,34 +100,10 @@ pub(super) async fn compact_context(
                 Ok(None) => break,
                 Err(AppError::Cancelled(_)) => return Ok(false),
                 Err(error) => {
-                    if let AppError::RateLimited {
-                        retry_after_seconds,
-                        ..
-                    } = &error
+                    if let Some(decision) =
+                        turn_recovery::classify(&error, &mut transient_failure_count)
                     {
-                        if wait_for_rate_limit_reset(
-                            inner,
-                            app,
-                            run,
-                            retry_after_seconds.unwrap_or(DEFAULT_RETRY_AFTER_SECONDS),
-                        )
-                        .await
-                        {
-                            continue 'request;
-                        }
-                        return Ok(false);
-                    }
-                    if error.is_transient() {
-                        transient_failure_count = transient_failure_count.saturating_add(1);
-                        if wait_for_transient_provider_retry(
-                            inner,
-                            app,
-                            run,
-                            &error,
-                            transient_failure_count,
-                        )
-                        .await
-                        {
+                        if turn_recovery::wait_for_retry(inner, app, run, &error, decision).await {
                             continue 'request;
                         }
                         return Ok(false);

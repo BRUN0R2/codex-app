@@ -5,8 +5,8 @@ use tokio::sync::{Mutex, oneshot, watch};
 use uuid::Uuid;
 
 use crate::engine::{
-    ApprovalDecision, CommandApprovalRequest, EngineServerRequest, OperationAck,
-    SERVER_REQUEST_EVENT, ServerRequest, ServerResponse,
+    ApprovalDecision, BrowserOriginApprovalRequest, CommandApprovalRequest, EngineServerRequest,
+    OperationAck, SERVER_REQUEST_EVENT, ServerRequest, ServerResponse,
 };
 use crate::error::AppError;
 
@@ -22,6 +22,30 @@ impl ApprovalBroker {
         request: CommandApprovalRequest,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<ApprovalDecision, AppError> {
+        self.request(app, ServerRequest::ApproveCommand(request), cancellation)
+            .await
+    }
+
+    pub async fn request_browser_origin(
+        &self,
+        app: &AppHandle,
+        request: BrowserOriginApprovalRequest,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<ApprovalDecision, AppError> {
+        self.request(
+            app,
+            ServerRequest::ApproveBrowserOrigin(request),
+            cancellation,
+        )
+        .await
+    }
+
+    async fn request(
+        &self,
+        app: &AppHandle,
+        request: ServerRequest,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<ApprovalDecision, AppError> {
         let request_id = Uuid::now_v7().to_string();
         let (sender, receiver) = oneshot::channel();
         let previous = self.pending.lock().await.insert(request_id.clone(), sender);
@@ -35,12 +59,12 @@ impl ApprovalBroker {
             SERVER_REQUEST_EVENT,
             EngineServerRequest {
                 id: request_id.clone(),
-                request: ServerRequest::ApproveCommand(request),
+                request,
             },
         ) {
             self.pending.lock().await.remove(&request_id);
             return Err(AppError::State(format!(
-                "could not deliver command approval request: {error}"
+                "could not deliver approval request: {error}"
             )));
         }
 

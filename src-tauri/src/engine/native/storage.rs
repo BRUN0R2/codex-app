@@ -21,6 +21,7 @@ use super::output::{OUTPUT_CHUNK_BYTES, OutputSource};
 use super::provider::ResponseItem;
 use super::terminal_output::normalize_terminal_bytes;
 use super::text::truncate_utf8;
+use crate::command_validation::DECIMAL_CURSOR_MAXIMUM_BYTES;
 use crate::engine::{
     ActivityStatus, AppConfig, Automation, AutomationListResponse, AutomationRun,
     AutomationRunStatus, AutomationRunTrigger, CompletedTurn, ConfigReadResponse, ConfigUpdate,
@@ -42,8 +43,54 @@ pub(super) use self::output_search::{MAX_OUTPUT_SEARCH_QUERY_BYTES, OutputSearch
 
 const DATABASE_FILE_NAME: &str = "native-state-profile-v2.sqlite3";
 const DATABASE_SCHEMA_VERSION: i64 = 4;
+const FIRST_SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION_WITH_OUTPUT_RESOURCES: i64 = 2;
+const SCHEMA_VERSION_WITH_AUTOMATIONS: i64 = 3;
 const DATABASE_APPLICATION_ID: i64 = 1_128_552_527;
 const DATABASE_TABLES: &str = "app_config,automation_runs,automations,chat_conversations,output_chunks,output_resources,pending_turn_inputs,provider_items,thread_items,threads,turns";
+// Every lineage version below DATABASE_SCHEMA_VERSION must have a cumulative
+// entry; the pre-migration validator rejects unknown source versions.
+const SCHEMA_BASELINE_TABLES: &[(i64, &[&str])] = &[
+    (
+        FIRST_SCHEMA_VERSION,
+        &[
+            "app_config",
+            "chat_conversations",
+            "provider_items",
+            "thread_items",
+            "threads",
+            "turns",
+        ],
+    ),
+    (
+        SCHEMA_VERSION_WITH_OUTPUT_RESOURCES,
+        &[
+            "app_config",
+            "chat_conversations",
+            "output_chunks",
+            "output_resources",
+            "provider_items",
+            "thread_items",
+            "threads",
+            "turns",
+        ],
+    ),
+    (
+        SCHEMA_VERSION_WITH_AUTOMATIONS,
+        &[
+            "app_config",
+            "automation_runs",
+            "automations",
+            "chat_conversations",
+            "output_chunks",
+            "output_resources",
+            "provider_items",
+            "thread_items",
+            "threads",
+            "turns",
+        ],
+    ),
+];
 const THREAD_COLUMNS: &str = "id,cwd,name,preview,archived,created_at,updated_at,project_path,mode";
 const TURN_COLUMNS: &str =
     "id,thread_id,owner_id,status,model,reasoning_effort,error,created_at,updated_at";
@@ -51,8 +98,6 @@ const PENDING_TURN_INPUT_COLUMNS: &str = "sequence,turn_id,item_id,payload";
 const AUTOMATION_COLUMNS: &str = "id,name,prompt,project_path,enabled,interval_minutes,timezone,timezone_offset_min,next_run_at,last_run_at,version,created_at,updated_at";
 const AUTOMATION_RUN_COLUMNS: &str = "id,automation_id,trigger,status,thread_id,turn_id,error,reviewed,created_at,started_at,completed_at";
 const THREAD_PAGE_SIZE: usize = 50;
-const MAX_CURSOR_BYTES: usize = 20;
-const MAX_OUTPUT_CURSOR_BYTES: usize = 20;
 const MAX_ITEM_BYTES: usize = 2 * 1_048_576;
 // A valid turn accepts up to 16 MiB of raw input. An all-image turn expands to
 // less than 22 MiB as Base64; the remaining space covers the JSON envelope.
@@ -64,11 +109,17 @@ const MAX_PREVIEW_BYTES: usize = 512;
 const MAX_DEVELOPER_INSTRUCTIONS_BYTES: usize = 262_144;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const MAX_DATABASE_CONNECTIONS: u32 = 8;
+const MIN_DATABASE_CONNECTIONS: usize = 4;
+const DATABASE_CONNECTION_TIMEOUT_SECS: u64 = 5;
 const MAX_AUTOMATION_NAME_BYTES: usize = 160;
 const MAX_AUTOMATION_PROMPT_BYTES: usize = 262_144;
 const MAX_AUTOMATION_ERROR_BYTES: usize = 16_384;
+const PROJECT_PATH_MAX_BYTES: usize = 4_096;
+const TIMEZONE_LABEL_MAX_BYTES: usize = 128;
 const MAX_AUTOMATION_RUNS_LOADED: i64 = 200;
 const MAX_MODEL_CONTEXT_WINDOW_PREFERENCES: usize = 128;
+const UI_FONT_SIZE_MIN: u8 = 12;
+const UI_FONT_SIZE_MAX: u8 = 24;
 const AUTOMATION_SCHEMA_SQL: &str = "
     CREATE TABLE automations (
         id TEXT PRIMARY KEY,
@@ -242,19 +293,18 @@ impl NativeStorage {
             if version == 0 && application_id == 0 {
                 initialize_database(&mut connection)?;
             } else {
-                if application_id == DATABASE_APPLICATION_ID {
-                    let mut current_version = version;
-                    if current_version == 1 {
-                        migrate_database_v1_to_v2(&mut connection)?;
-                        current_version = 2;
-                    }
-                    if current_version == 2 {
-                        migrate_database_v2_to_v3(&mut connection)?;
-                        current_version = 3;
-                    }
-                    if current_version == 3 {
-                        migrate_database_v3_to_v4(&mut connection)?;
-                    }
+                validate_pre_migration_schema(&connection, version, application_id)?;
+                let mut current_version = version;
+                if current_version == FIRST_SCHEMA_VERSION {
+                    migrate_database_v1_to_v2(&mut connection)?;
+                    current_version = SCHEMA_VERSION_WITH_OUTPUT_RESOURCES;
+                }
+                if current_version == SCHEMA_VERSION_WITH_OUTPUT_RESOURCES {
+                    migrate_database_v2_to_v3(&mut connection)?;
+                    current_version = SCHEMA_VERSION_WITH_AUTOMATIONS;
+                }
+                if current_version == SCHEMA_VERSION_WITH_AUTOMATIONS {
+                    migrate_database_v3_to_v4(&mut connection)?;
                 }
                 let migrated_version: i64 = connection
                     .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -293,7 +343,7 @@ impl NativeStorage {
             let pool = Pool::builder()
                 .max_size(database_connection_limit())
                 .min_idle(Some(1))
-                .connection_timeout(Duration::from_secs(5))
+                .connection_timeout(Duration::from_secs(DATABASE_CONNECTION_TIMEOUT_SECS))
                 .build(manager)
                 .map_err(pool_error)?;
             Ok(Database {
@@ -336,7 +386,11 @@ impl NativeStorage {
         cursor: Option<String>,
         archived: bool,
     ) -> Result<ThreadListResponse, AppError> {
-        let offset = parse_cursor(cursor.as_deref())?;
+        let offset = parse_cursor(
+            cursor.as_deref(),
+            DECIMAL_CURSOR_MAXIMUM_BYTES,
+            "thread list",
+        )?;
         let pool = self.pool().await?;
         run_blocking(move || {
             let connection = pool.get().map_err(pool_error)?;
@@ -494,7 +548,7 @@ impl NativeStorage {
                 "output id contains control characters".into(),
             ));
         }
-        let sequence = parse_output_cursor(cursor.as_deref())?;
+        let sequence = parse_cursor(cursor.as_deref(), DECIMAL_CURSOR_MAXIMUM_BYTES, "output")?;
         let pool = self.pool().await?;
         run_blocking(move || {
             let connection = pool.get().map_err(pool_error)?;
@@ -845,7 +899,7 @@ impl NativeStorage {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage_error)?;
-            require_available_thread(&transaction, &thread_id)?;
+            require_readable_thread(&transaction, &thread_id)?;
             let mode: String = transaction
                 .query_row(
                     "SELECT mode FROM threads WHERE id = ?1",
@@ -1022,7 +1076,7 @@ impl NativeStorage {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage_error)?;
-            require_available_thread(&transaction, &thread_id)?;
+            require_readable_thread(&transaction, &thread_id)?;
             let active: bool = transaction
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM turns WHERE thread_id = ?1 AND status = 'inProgress')",
@@ -1288,24 +1342,34 @@ impl NativeStorage {
         &self,
         thread_id: String,
         turn_id: String,
-        provider_item: &ResponseItem,
+        provider_items: &[ResponseItem],
         mut thread_item: ThreadItem,
         output: Option<OutputSource>,
     ) -> Result<ThreadItem, AppError> {
+        if provider_items.is_empty() {
+            return Err(AppError::State(
+                "provider and thread item transaction requires provider context".into(),
+            ));
+        }
         let item_id = thread_item.id().to_string();
         prepare_thread_item_output(&mut thread_item, output.as_ref())?;
-        let provider_payload = encode_provider_item(provider_item, "provider item")?;
+        let provider_payloads = provider_items
+            .iter()
+            .map(|item| encode_provider_item(item, "provider item"))
+            .collect::<Result<Vec<_>, _>>()?;
         let thread_payload = encode_bounded(&thread_item, MAX_ITEM_BYTES, "thread item")?;
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
             let transaction = connection.transaction().map_err(storage_error)?;
-            transaction
-                .execute(
-                    "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
-                    params![&thread_id, provider_payload],
-                )
-                .map_err(storage_error)?;
+            for provider_payload in provider_payloads {
+                transaction
+                    .execute(
+                        "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
+                        params![&thread_id, provider_payload],
+                    )
+                    .map_err(storage_error)?;
+            }
             transaction
                 .execute(
                     "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
@@ -2373,15 +2437,15 @@ fn validate_automation_fields(
         )));
     }
     if let Some(project_path) = project_path
-        && (project_path.len() > 4_096 || !Path::new(project_path).is_absolute())
+        && (project_path.len() > PROJECT_PATH_MAX_BYTES || !Path::new(project_path).is_absolute())
     {
-        return Err(AppError::Protocol(
-            "automation project path must be an absolute path of at most 4096 bytes".into(),
-        ));
+        return Err(AppError::Protocol(format!(
+            "automation project path must be an absolute path of at most {PROJECT_PATH_MAX_BYTES} bytes"
+        )));
     }
     validate_interval(interval_minutes)?;
     if timezone.trim().is_empty()
-        || timezone.len() > 128
+        || timezone.len() > TIMEZONE_LABEL_MAX_BYTES
         || timezone.chars().any(|character| {
             character.is_control()
                 || !(character.is_ascii_alphanumeric()
@@ -2696,26 +2760,6 @@ fn read_thread_header(connection: &Connection, thread_id: &str) -> Result<Thread
         .ok_or_else(|| AppError::State("thread does not exist or is archived".into()))
 }
 
-fn require_available_thread(
-    transaction: &Transaction<'_>,
-    thread_id: &str,
-) -> Result<(), AppError> {
-    let exists: bool = transaction
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1 AND archived = 0)",
-            [thread_id],
-            |row| row.get(0),
-        )
-        .map_err(storage_error)?;
-    if exists {
-        Ok(())
-    } else {
-        Err(AppError::State(
-            "thread does not exist or is archived".into(),
-        ))
-    }
-}
-
 fn apply_config_update(config: &mut AppConfig, update: ConfigUpdate) -> Result<(), AppError> {
     match update {
         ConfigUpdate::ModelDefaults { value } => {
@@ -2800,10 +2844,10 @@ fn validate_config(config: &AppConfig) -> Result<(), AppError> {
 }
 
 fn validate_desktop(preferences: &DesktopPreferences) -> Result<(), AppError> {
-    if !(12..=24).contains(&preferences.ui_font_size) {
-        return Err(AppError::Protocol(
-            "UI font size must be between 12 and 24".into(),
-        ));
+    if !(UI_FONT_SIZE_MIN..=UI_FONT_SIZE_MAX).contains(&preferences.ui_font_size) {
+        return Err(AppError::Protocol(format!(
+            "UI font size must be between {UI_FONT_SIZE_MIN} and {UI_FONT_SIZE_MAX}"
+        )));
     }
     Ok(())
 }
@@ -3129,34 +3173,23 @@ fn utf8_chunk_boundary(bytes: &[u8], maximum_bytes: usize) -> Result<usize, AppE
     }
 }
 
-fn parse_cursor(cursor: Option<&str>) -> Result<usize, AppError> {
+fn parse_cursor(
+    cursor: Option<&str>,
+    maximum_bytes: usize,
+    label: &str,
+) -> Result<usize, AppError> {
     let Some(cursor) = cursor else {
         return Ok(0);
     };
     if cursor.is_empty()
-        || cursor.len() > MAX_CURSOR_BYTES
+        || cursor.len() > maximum_bytes
         || !cursor.bytes().all(|byte| byte.is_ascii_digit())
     {
-        return Err(AppError::Protocol("thread cursor is invalid".into()));
+        return Err(AppError::Protocol(format!("{label} cursor is invalid")));
     }
     cursor
         .parse()
-        .map_err(|_| AppError::Protocol("thread cursor is outside the supported range".into()))
-}
-
-fn parse_output_cursor(cursor: Option<&str>) -> Result<usize, AppError> {
-    let Some(cursor) = cursor else {
-        return Ok(0);
-    };
-    if cursor.is_empty()
-        || cursor.len() > MAX_OUTPUT_CURSOR_BYTES
-        || !cursor.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(AppError::Protocol("output cursor is invalid".into()));
-    }
-    cursor
-        .parse()
-        .map_err(|_| AppError::Protocol("output cursor is outside the supported range".into()))
+        .map_err(|_| AppError::Protocol(format!("{label} cursor is outside the supported range")))
 }
 
 fn status_name(status: TurnStatus) -> &'static str {
@@ -3427,7 +3460,7 @@ fn migrate_database_v1_to_v2(connection: &mut Connection) -> Result<(), AppError
     }
 
     transaction
-        .pragma_update(None, "user_version", 2_i64)
+        .pragma_update(None, "user_version", SCHEMA_VERSION_WITH_OUTPUT_RESOURCES)
         .map_err(storage_error)?;
     transaction.commit().map_err(storage_error)
 }
@@ -3438,7 +3471,7 @@ fn migrate_database_v2_to_v3(connection: &mut Connection) -> Result<(), AppError
         .execute_batch(AUTOMATION_SCHEMA_SQL)
         .map_err(storage_error)?;
     transaction
-        .pragma_update(None, "user_version", 3_i64)
+        .pragma_update(None, "user_version", SCHEMA_VERSION_WITH_AUTOMATIONS)
         .map_err(storage_error)?;
     transaction.commit().map_err(storage_error)
 }
@@ -3452,6 +3485,42 @@ fn migrate_database_v3_to_v4(connection: &mut Connection) -> Result<(), AppError
         .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
         .map_err(storage_error)?;
     transaction.commit().map_err(storage_error)
+}
+
+fn validate_pre_migration_schema(
+    connection: &Connection,
+    version: i64,
+    application_id: i64,
+) -> Result<(), AppError> {
+    if application_id != DATABASE_APPLICATION_ID {
+        return Err(AppError::Storage(format!(
+            "database identity is unsupported; expected application {DATABASE_APPLICATION_ID}, received application {application_id}"
+        )));
+    }
+    if version == DATABASE_SCHEMA_VERSION {
+        return Ok(());
+    }
+    let Some((_, required_tables)) = SCHEMA_BASELINE_TABLES
+        .iter()
+        .find(|(baseline, _)| *baseline == version)
+    else {
+        return Err(AppError::Storage(format!(
+            "database schema version {version} is outside the supported lineage {FIRST_SCHEMA_VERSION}..={DATABASE_SCHEMA_VERSION}"
+        )));
+    };
+    let tables = database_tables(connection)?;
+    let missing_tables = required_tables
+        .iter()
+        .filter(|table| !tables.split(',').any(|existing| existing == **table))
+        .copied()
+        .collect::<Vec<&str>>();
+    if !missing_tables.is_empty() {
+        return Err(AppError::Storage(format!(
+            "database schema {version} is missing required tables: {}",
+            missing_tables.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 fn validate_database(
@@ -3581,8 +3650,8 @@ fn configure_database_connection(connection: &Connection) -> rusqlite::Result<()
 
 fn database_connection_limit() -> u32 {
     std::thread::available_parallelism()
-        .map_or(4, std::num::NonZeroUsize::get)
-        .clamp(4, MAX_DATABASE_CONNECTIONS as usize) as u32
+        .map_or(MIN_DATABASE_CONNECTIONS, std::num::NonZeroUsize::get)
+        .clamp(MIN_DATABASE_CONNECTIONS, MAX_DATABASE_CONNECTIONS as usize) as u32
 }
 
 fn unix_timestamp() -> Result<i64, AppError> {
@@ -5763,10 +5832,29 @@ mod tests {
 
     #[test]
     fn rejects_ambiguous_cursors() {
-        assert!(super::parse_cursor(Some(" 1")).is_err());
-        assert!(super::parse_cursor(Some("-1")).is_err());
+        assert!(
+            super::parse_cursor(
+                Some(" 1"),
+                crate::command_validation::DECIMAL_CURSOR_MAXIMUM_BYTES,
+                "thread list",
+            )
+            .is_err()
+        );
+        assert!(
+            super::parse_cursor(
+                Some("-1"),
+                crate::command_validation::DECIMAL_CURSOR_MAXIMUM_BYTES,
+                "thread list",
+            )
+            .is_err()
+        );
         assert_eq!(
-            super::parse_cursor(Some("12")).expect("cursor should parse"),
+            super::parse_cursor(
+                Some("12"),
+                crate::command_validation::DECIMAL_CURSOR_MAXIMUM_BYTES,
+                "thread list",
+            )
+            .expect("cursor should parse"),
             12
         );
     }

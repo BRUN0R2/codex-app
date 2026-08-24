@@ -1,7 +1,13 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createSignal, onCleanup, onMount } from "solid-js";
 
-import { isBrowserPreview, isDesktopRuntime } from "../platform/DesktopRuntime";
+import {
+  closeMainWindow,
+  isMainWindowMaximized,
+  minimizeMainWindow,
+  onMainWindowFocusChanged,
+  toggleMainWindowMaximize,
+} from "../infrastructure/desktopClient";
+import { isBrowserPreview, isDesktopRuntime } from "../platform/desktopRuntime";
 
 interface WindowChromeProps {
   readonly onError?: ((reason: unknown) => void) | undefined;
@@ -27,7 +33,6 @@ export function WindowChrome(props: WindowChromeProps) {
 }
 
 function DesktopWindowChrome(props: WindowChromeProps) {
-  const appWindow = getCurrentWindow();
   const [maximized, setMaximized] = createSignal(false);
   let controlsReference: HTMLDivElement | undefined;
   let hoverResetFrame: number | undefined;
@@ -42,7 +47,7 @@ function DesktopWindowChrome(props: WindowChromeProps) {
 
   async function synchronizeMaximizedState(): Promise<void> {
     try {
-      const nextMaximized = await appWindow.isMaximized();
+      const nextMaximized = await isMainWindowMaximized();
       if (!disposed) {
         setMaximized(nextMaximized);
       }
@@ -115,12 +120,11 @@ function DesktopWindowChrome(props: WindowChromeProps) {
   onMount(() => {
     void synchronizeMaximizedState();
     window.addEventListener("resize", scheduleMaximizedStateSynchronization);
-    void appWindow
-      .onFocusChanged(({ payload: focused }) => {
-        if (focused) {
-          clearStuckControlHover();
-        }
-      })
+    void onMainWindowFocusChanged((focused) => {
+      if (focused) {
+        clearStuckControlHover();
+      }
+    })
       .then((unlisten) => {
         if (disposed) {
           unlisten();
@@ -147,12 +151,12 @@ function DesktopWindowChrome(props: WindowChromeProps) {
     <WindowChromeLayout
       interactive={true}
       maximized={maximized()}
-      onClose={() => runControlAction("fechar a janela", () => appWindow.close())}
-      onMinimize={() => runControlAction("minimizar a janela", () => appWindow.minimize())}
+      onClose={() => runControlAction("fechar a janela", closeMainWindow)}
+      onMinimize={() => runControlAction("minimizar a janela", minimizeMainWindow)}
       onToggleMaximize={() =>
         runControlAction(
           maximized() ? "restaurar a janela" : "maximizar a janela",
-          () => appWindow.toggleMaximize(),
+          toggleMainWindowMaximize,
           true,
         )
       }

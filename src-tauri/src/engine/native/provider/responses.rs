@@ -18,8 +18,10 @@ const MAX_SSE_LINE_BYTES: usize = 1_048_576;
 const MAX_SSE_EVENT_BYTES: usize = 2_097_152;
 const MAX_DELTA_BYTES: usize = 262_144;
 const MAX_HEADER_VALUE_BYTES: usize = 4_096;
+const MAX_ITEM_ID_BYTES: usize = 256;
 const MAX_METADATA_LIST_ITEMS: usize = 64;
 const MAX_METADATA_STRING_BYTES: usize = 1_024;
+const MAX_SERVER_MODEL_NAME_BYTES: usize = 256;
 const MAX_USAGE_TOKENS: u64 = 1_000_000_000;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
@@ -125,7 +127,7 @@ pub enum ResponseItem {
     },
     FunctionCallOutput {
         call_id: String,
-        output: String,
+        output: FunctionCallOutputPayload,
     },
     CustomToolCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +159,39 @@ pub enum ResponseItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FunctionCallOutputPayload {
+    Text(String),
+    Content(Vec<FunctionCallOutputContent>),
+}
+
+impl FunctionCallOutputPayload {
+    pub(crate) fn text(value: impl Into<String>) -> Self {
+        Self::Text(value.into())
+    }
+
+    pub(crate) fn content(&self) -> Option<&[FunctionCallOutputContent]> {
+        match self {
+            Self::Text(_) => None,
+            Self::Content(content) => Some(content),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FunctionCallOutputContent {
+    InputText {
+        text: String,
+    },
+    InputImage {
+        image_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct InternalChatMessageMetadataPassthrough {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     turn_id: Option<String>,
@@ -173,7 +208,25 @@ impl ResponseItem {
     }
 
     pub fn function_output(call_id: String, output: String) -> Self {
-        Self::FunctionCallOutput { call_id, output }
+        Self::FunctionCallOutput {
+            call_id,
+            output: FunctionCallOutputPayload::Text(output),
+        }
+    }
+
+    pub fn function_output_with_image(
+        call_id: String,
+        output: String,
+        image_url: String,
+        detail: Option<ImageDetail>,
+    ) -> Self {
+        Self::FunctionCallOutput {
+            call_id,
+            output: FunctionCallOutputPayload::Content(vec![
+                FunctionCallOutputContent::InputText { text: output },
+                FunctionCallOutputContent::InputImage { image_url, detail },
+            ]),
+        }
     }
 
     pub fn custom_output(call_id: String, output: String) -> Self {
@@ -382,7 +435,9 @@ pub struct ResponseStream {
 impl ResponseStream {
     pub(super) fn new(response: reqwest::Response) -> Result<Self, AppError> {
         let mut pending = VecDeque::new();
-        if let Some(model) = response_header(&response, "openai-model", 256)? {
+        if let Some(model) =
+            response_header(&response, "openai-model", MAX_SERVER_MODEL_NAME_BYTES)?
+        {
             pending.push_back(ResponseEvent::ServerModel(model));
         }
         if let Some(turn_state) =
@@ -390,8 +445,11 @@ impl ResponseStream {
         {
             pending.push_back(ResponseEvent::TurnState(turn_state));
         }
-        let safety_faster_model =
-            response_header(&response, "x-codex-safety-buffering-faster-model", 256)?;
+        let safety_faster_model = response_header(
+            &response,
+            "x-codex-safety-buffering-faster-model",
+            MAX_SERVER_MODEL_NAME_BYTES,
+        )?;
         Ok(Self {
             response,
             parser: SseParser::new(safety_faster_model),
@@ -736,7 +794,7 @@ fn emit_metadata_events(
         output.push_back(ResponseEvent::ServerModel(validated_metadata_text(
             model,
             "server model",
-            256,
+            MAX_SERVER_MODEL_NAME_BYTES,
         )?));
     }
 
@@ -828,7 +886,9 @@ fn decode_safety_buffering(
     } else {
         safety_faster_model.map(str::to_owned)
     }
-    .map(|model| validated_metadata_text(&model, "safety fallback model", 256))
+    .map(|model| {
+        validated_metadata_text(&model, "safety fallback model", MAX_SERVER_MODEL_NAME_BYTES)
+    })
     .transpose()?;
     Ok(Some(SafetyBuffering {
         use_cases: wire.use_cases,
@@ -937,7 +997,7 @@ fn decode_completed_usage(
 
 fn required_id(value: Option<String>, event: &str) -> Result<String, AppError> {
     let value = value.ok_or_else(|| AppError::Provider(format!("{event} is missing item_id")))?;
-    if value.is_empty() || value.len() > 256 {
+    if value.is_empty() || value.len() > MAX_ITEM_ID_BYTES {
         return Err(AppError::Provider(format!(
             "{event} contains an invalid item_id"
         )));
@@ -991,6 +1051,7 @@ fn stream_failure(event: StreamEventWire) -> AppError {
 mod tests {
     use std::collections::VecDeque;
 
+    use crate::engine::ImageDetail;
     use crate::engine::ModelVerbosity;
     use crate::engine::ModelVerification;
     use crate::engine::ReasoningEffort;
@@ -1013,6 +1074,28 @@ mod tests {
         assert_eq!(value["type"], "custom_tool_call_output");
         assert_eq!(value["call_id"], "call-1");
         assert_eq!(value["output"], "patch applied");
+    }
+
+    #[test]
+    fn function_tool_output_can_return_text_and_image_content() {
+        let value = serde_json::to_value(ResponseItem::function_output_with_image(
+            "call-1".into(),
+            "browser snapshot".into(),
+            "data:image/jpeg;base64,AA==".into(),
+            Some(ImageDetail::High),
+        ))
+        .expect("multimodal function output should serialize");
+
+        assert_eq!(value["type"], "function_call_output");
+        assert_eq!(value["call_id"], "call-1");
+        assert_eq!(value["output"][0]["type"], "input_text");
+        assert_eq!(value["output"][0]["text"], "browser snapshot");
+        assert_eq!(value["output"][1]["type"], "input_image");
+        assert_eq!(
+            value["output"][1]["image_url"],
+            "data:image/jpeg;base64,AA=="
+        );
+        assert_eq!(value["output"][1]["detail"], "high");
     }
 
     #[test]

@@ -3,7 +3,7 @@ import type { FileChange, VisibleThreadItem } from "../contracts/types";
 export function timelineItemIdentity<T extends Pick<VisibleThreadItem, "id" | "type">>(
   item: T,
 ): string {
-  return `${encodeIdentitySegment(item.type)}${encodeIdentitySegment(item.id)}`;
+  return `${encodeTimelineIdentitySegment(item.type)}${encodeTimelineIdentitySegment(item.id)}`;
 }
 
 export function timelineItemRenderIdentity(item: VisibleThreadItem): string {
@@ -12,13 +12,13 @@ export function timelineItemRenderIdentity(item: VisibleThreadItem): string {
     return identity;
   }
   const presentation = item.phase === "commentary" ? "commentary" : "answer";
-  return `${identity}${encodeIdentitySegment(presentation)}`;
+  return `${identity}${encodeTimelineIdentitySegment(presentation)}`;
 }
 
 export function timelineFileChangeIdentity(change: FileChange, occurrence: number): string {
-  return `${encodeIdentitySegment(change.path)}${occurrence}`;
+  return `${encodeTimelineIdentitySegment(change.path)}${occurrence}`;
 }
 
-function encodeIdentitySegment(value: string): string {
+export function encodeTimelineIdentitySegment(value: string): string {
   return `${value.length}:${value}|`;
 }

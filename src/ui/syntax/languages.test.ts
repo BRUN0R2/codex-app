@@ -16,6 +16,14 @@ describe("syntax language registry", () => {
     ).toEqual(["rust", "typescript", "powershell", "toml", "bash", "plainText"]);
   });
 
+  it("resolves Windows separators and case-insensitive file names", () => {
+    expect(["src\\main.rs", "DOCKERFILE", "README.MD"].map(syntaxLanguageFromPath)).toEqual([
+      "rust",
+      "bash",
+      "markdown",
+    ]);
+  });
+
   it("normalizes Markdown fence aliases without language detection", () => {
     expect(
       ["rs", "typescript no_run", "jsonc", "shell", "unknown"].map(syntaxLanguageFromAlias),

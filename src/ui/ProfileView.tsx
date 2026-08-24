@@ -42,8 +42,13 @@ const activityDateFormatter = new Intl.DateTimeFormat("pt-BR", {
   timeZone: "UTC",
   year: "numeric",
 });
+const TOP_INVOCATIONS_LIMIT: number = 5;
+const PROFILE_WEEK_COLUMN_SPAN: number = 4;
 
-export function ProfileView(props: { readonly controller: ProfileController }) {
+export function ProfileView(props: {
+  readonly controller: ProfileController;
+  readonly mode?: "settings" | "surface";
+}) {
   const [activityView, setActivityView] = createSignal<ProfileActivityView>("daily");
   const profile = () => props.controller.accountProfile();
   const account = () => props.controller.account()?.account;
@@ -56,7 +61,11 @@ export function ProfileView(props: { readonly controller: ProfileController }) {
   });
 
   return (
-    <section aria-label="Perfil" class="profile-page">
+    <section
+      aria-label="Perfil"
+      class="profile-page"
+      classList={{ "profile-page-settings": props.mode === "settings" }}
+    >
       <div class="profile-page-scroll">
         <div class="profile-page-content">
           <Show
@@ -226,7 +235,13 @@ function ProfileActivityChart(props: {
           <div aria-hidden="true" class="profile-activity-months">
             <For each={props.projection.monthLabels}>
               {(month) => (
-                <span style={{ "grid-column": `${month.column + 1} / span 4` }}>{month.label}</span>
+                <span
+                  style={{
+                    "grid-column": `${month.column + 1} / span ${PROFILE_WEEK_COLUMN_SPAN}`,
+                  }}
+                >
+                  {month.label}
+                </span>
               )}
             </For>
           </div>
@@ -295,7 +310,7 @@ function ProfileInsights(props: {
     ].filter(
       (entry): entry is { readonly label: string; readonly value: string } => entry !== null,
     );
-  const invocations = () => props.insights.topInvocations?.slice(0, 5) ?? [];
+  const invocations = () => props.insights.topInvocations?.slice(0, TOP_INVOCATIONS_LIMIT) ?? [];
 
   return (
     <section aria-label="Atividade do Codex" class="profile-insights-grid">

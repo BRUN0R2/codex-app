@@ -8,7 +8,8 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
-use serde::de::DeserializeOwned;
+use serde_json::Value;
+use serde_json::error::Category;
 use url::Url;
 use zeroize::Zeroize;
 
@@ -21,6 +22,8 @@ const LAST_REFRESH_FALLBACK_INTERVAL: Duration = Duration::days(8);
 const MAX_ACCOUNT_ID_BYTES: usize = 256;
 pub(super) const MAX_PROFILE_NAME_BYTES: usize = 256;
 const MAX_PROFILE_PICTURE_BYTES: usize = 8_192;
+const PROFILE_CLAIM_KEY: &str = "https://api.openai.com/profile";
+const AUTH_CLAIM_KEY: &str = "https://api.openai.com/auth";
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(super) struct SecretString(String);
@@ -208,58 +211,26 @@ pub(super) fn validate_account_token(token: &SecretString) -> Result<(), AuthErr
     parse_account_claims(token).map(|_| ())
 }
 
-#[derive(Deserialize)]
-struct JwtClaims {
-    #[serde(default)]
-    email: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    picture: Option<String>,
-    #[serde(rename = "https://api.openai.com/profile", default)]
-    profile: Option<ProfileClaims>,
-    #[serde(rename = "https://api.openai.com/auth", default)]
-    auth: Option<ChatGptClaims>,
-}
-
-#[derive(Default, Deserialize)]
-struct ProfileClaims {
-    #[serde(default)]
-    email: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    picture: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ChatGptClaims {
-    #[serde(default)]
-    chatgpt_plan_type: Option<String>,
-    #[serde(default)]
-    chatgpt_account_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ExpirationClaims {
-    #[serde(default)]
-    exp: Option<i64>,
-}
+type ClaimMap = serde_json::Map<String, Value>;
 
 fn parse_account_claims(token: &SecretString) -> Result<AccountClaims, AuthError> {
-    let claims: JwtClaims = decode_jwt_payload(token)?;
-    let profile = claims.profile.unwrap_or_default();
-    let email = claims.email.or(profile.email);
-    let name = clean_profile_text(claims.name.or(profile.name), MAX_PROFILE_NAME_BYTES);
-    let picture = clean_profile_picture(claims.picture.or(profile.picture));
-    let (plan_type, account_id) = claims
-        .auth
-        .map(|auth| (auth.chatgpt_plan_type, auth.chatgpt_account_id))
-        .unwrap_or_default();
+    let claims = decode_jwt_payload(token)?;
+    let profile = object_claim(&claims, PROFILE_CLAIM_KEY)?;
+    let auth = object_claim(&claims, AUTH_CLAIM_KEY)?;
+    let (plan_type, account_id) = match auth {
+        Some(auth) => (
+            string_claim(auth, "chatgpt_plan_type")?,
+            string_claim(auth, "chatgpt_account_id")?,
+        ),
+        None => (None, None),
+    };
     Ok(AccountClaims {
-        email,
-        name,
-        picture,
+        email: layered_string_claim(&claims, profile, "email")?,
+        name: clean_profile_text(
+            layered_string_claim(&claims, profile, "name")?,
+            MAX_PROFILE_NAME_BYTES,
+        ),
+        picture: clean_profile_picture(layered_string_claim(&claims, profile, "picture")?),
         plan_type,
         account_id,
     })
@@ -279,16 +250,12 @@ pub(super) fn clean_profile_picture(value: Option<String>) -> Option<String> {
 }
 
 fn parse_expiration(token: &SecretString) -> Result<Option<DateTime<Utc>>, AuthError> {
-    let claims: ExpirationClaims = decode_jwt_payload(token)?;
-    Ok(claims
-        .exp
-        .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)))
+    let claims = decode_jwt_payload(token)?;
+    let seconds = integer_claim(&claims, "exp")?;
+    Ok(seconds.and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0)))
 }
 
-fn decode_jwt_payload<T>(token: &SecretString) -> Result<T, AuthError>
-where
-    T: DeserializeOwned,
-{
+fn decode_jwt_payload(token: &SecretString) -> Result<ClaimMap, AuthError> {
     let mut parts = token.expose().split('.');
     let header = parts.next();
     let payload = parts.next();
@@ -304,12 +271,73 @@ where
         payload.ok_or_else(|| AuthError::InvalidToken("JWT payload is missing".into()))?;
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
-        .map_err(|error| {
-            AuthError::InvalidToken(format!("JWT payload is not base64url: {error}"))
-        })?;
+        .map_err(|_| AuthError::InvalidToken("JWT payload is not base64url".into()))?;
     let decoded = zeroize::Zeroizing::new(decoded);
-    serde_json::from_slice(&decoded)
-        .map_err(|error| AuthError::InvalidToken(format!("JWT claims are invalid: {error}")))
+    match serde_json::from_slice::<Value>(&decoded) {
+        Ok(Value::Object(claims)) => Ok(claims),
+        Ok(_) => Err(AuthError::InvalidToken(
+            "JWT claims are not a JSON object".into(),
+        )),
+        Err(error) => Err(AuthError::InvalidToken(format!(
+            "JWT claims are invalid: {}",
+            json_error_kind(&error)
+        ))),
+    }
+}
+
+// Claim decode failures must never echo claim values into diagnostics or IPC, so
+// errors carry only the claim name and a coarse error kind.
+pub(super) fn json_error_kind(error: &serde_json::Error) -> &'static str {
+    match error.classify() {
+        Category::Eof => "truncated JSON",
+        Category::Syntax => "not valid JSON",
+        Category::Data => "a field has an unsupported shape",
+        Category::Io => "an unreadable body",
+    }
+}
+
+fn string_claim(source: &ClaimMap, key: &str) -> Result<Option<String>, AuthError> {
+    match source.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(AuthError::InvalidToken(format!(
+            "JWT claim {key} is not a string"
+        ))),
+    }
+}
+
+fn integer_claim(source: &ClaimMap, key: &str) -> Result<Option<i64>, AuthError> {
+    match source.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| AuthError::InvalidToken(format!("JWT claim {key} is not an integer"))),
+        Some(_) => Err(AuthError::InvalidToken(format!(
+            "JWT claim {key} is not an integer"
+        ))),
+    }
+}
+
+fn object_claim<'a>(source: &'a ClaimMap, key: &str) -> Result<Option<&'a ClaimMap>, AuthError> {
+    match source.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(object)) => Ok(Some(object)),
+        Some(_) => Err(AuthError::InvalidToken(format!(
+            "JWT claim {key} is not an object"
+        ))),
+    }
+}
+
+fn layered_string_claim(
+    claims: &ClaimMap,
+    fallback: Option<&ClaimMap>,
+    key: &str,
+) -> Result<Option<String>, AuthError> {
+    match string_claim(claims, key)? {
+        Some(value) => Ok(Some(value)),
+        None => fallback.map_or(Ok(None), |source| string_claim(source, key)),
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +349,7 @@ mod tests {
 
     use super::AuthRecord;
     use super::SecretString;
+    use super::parse_expiration;
 
     fn jwt(payload: serde_json::Value) -> SecretString {
         let payload = serde_json::to_vec(&payload).unwrap_or_default();
@@ -380,5 +409,34 @@ mod tests {
         }));
 
         assert!(record.is_err());
+    }
+
+    #[test]
+    fn invalid_claim_decode_never_echoes_claim_values() {
+        let record = serde_json::from_value::<AuthRecord>(json!({
+            "tokens": {
+                "idToken": jwt(json!({
+                    "email": "person@example.com",
+                    "https://api.openai.com/auth": "account-1"
+                })).expose(),
+                "accessToken": jwt(json!({ "exp": "soon" })).expose(),
+                "refreshToken": "refresh",
+                "accountId": "account-1"
+            },
+            "lastRefresh": Utc::now()
+        }))
+        .unwrap_or_else(|error| panic!("fixture should deserialize: {error}"));
+
+        for failure in [
+            record.validate().expect_err("auth claim shape should fail"),
+            parse_expiration(&record.tokens().access_token)
+                .expect_err("expiration claim shape should fail"),
+        ] {
+            let message = failure.to_string();
+            assert!(!message.contains("person@example.com"));
+            assert!(!message.contains("account-1"));
+            assert!(!message.contains("soon"));
+            assert!(message.contains("JWT claim"));
+        }
     }
 }

@@ -1,11 +1,18 @@
 import { createSignal } from "solid-js";
 
-import type { BrowserSurfaceBounds, BrowserTabSnapshot } from "../contracts/types";
+import type {
+  BrowserActionMetric,
+  BrowserAgentActivityNotification,
+  BrowserSurfaceBounds,
+  BrowserTabSnapshot,
+} from "../contracts/types";
 import {
   closeBrowserTab,
   createBrowserTab,
   goBackInBrowserTab,
   goForwardInBrowserTab,
+  listenBrowserAgentActivity,
+  listenBrowserMetric,
   listenBrowserNewWindow,
   listenBrowserState,
   navigateBrowserTab,
@@ -14,6 +21,7 @@ import {
 } from "../infrastructure/browserClient";
 import {
   loadPersistedBrowserConversations,
+  MAX_BROWSER_URL_BYTES,
   type PersistedBrowserConversation,
   savePersistedBrowserConversations,
 } from "./browserPersistence";
@@ -27,12 +35,14 @@ interface BrowserConversationState {
 }
 
 export interface BrowserController {
+  readonly agentActivity: () => BrowserAgentActivityNotification | null;
   readonly activeTab: (conversationId: string) => BrowserTabSnapshot | null;
   readonly back: (conversationId: string) => Promise<boolean>;
   readonly closeTab: (conversationId: string, browserTabId: string) => Promise<boolean>;
   readonly dispose: () => void;
   readonly ensureConversation: (conversationId: string) => Promise<boolean>;
   readonly forward: (conversationId: string) => Promise<boolean>;
+  readonly metrics: (conversationId: string) => readonly BrowserActionMetric[];
   readonly navigate: (conversationId: string, input: string) => Promise<boolean>;
   readonly newTab: (conversationId: string, url?: string) => Promise<boolean>;
   readonly reload: (conversationId: string) => Promise<boolean>;
@@ -62,6 +72,12 @@ export function createBrowserController(reportError: (reason: unknown) => void):
   );
   const [states, setStates] =
     createSignal<ReadonlyMap<string, BrowserConversationState>>(initialStates);
+  const [agentActivity, setAgentActivity] = createSignal<BrowserAgentActivityNotification | null>(
+    null,
+  );
+  const [metricStates, setMetricStates] = createSignal<
+    ReadonlyMap<string, readonly BrowserActionMetric[]>
+  >(new Map());
   const nativeTabIds = new Set<string>();
   const initializingConversations = new Map<string, Promise<boolean>>();
   const unlisteners: Array<() => void> = [];
@@ -79,6 +95,10 @@ export function createBrowserController(reportError: (reason: unknown) => void):
       return null;
     }
     return state.tabs.find((tab) => tab.browserTabId === state.activeBrowserTabId) ?? null;
+  }
+
+  function metrics(conversationId: string): readonly BrowserActionMetric[] {
+    return metricStates().get(conversationId) ?? [];
   }
 
   function persist(): void {
@@ -126,6 +146,34 @@ export function createBrowserController(reportError: (reason: unknown) => void):
         nextTabs[index] = snapshot;
       }
       return { ...current, tabs: nextTabs };
+    });
+  }
+
+  function replaceFromAgent(activity: BrowserAgentActivityNotification): void {
+    if (activity.tabs.some((tab) => tab.conversationId !== activity.conversationId)) {
+      reportError(new Error("A topologia do agente contém uma aba de outra conversa."));
+      return;
+    }
+    for (const tab of activity.tabs) {
+      nativeTabIds.add(tab.browserTabId);
+    }
+    updateConversation(activity.conversationId, () =>
+      activity.tabs.length === 0 || activity.activeBrowserTabId === null
+        ? null
+        : {
+            activeBrowserTabId: activity.activeBrowserTabId,
+            tabs: activity.tabs,
+          },
+    );
+    setAgentActivity(activity);
+  }
+
+  function appendMetric(metric: BrowserActionMetric): void {
+    setMetricStates((current) => {
+      const previous = current.get(metric.conversationId) ?? [];
+      const next = new Map(current);
+      next.set(metric.conversationId, [...previous, metric].slice(-100));
+      return next;
     });
   }
 
@@ -200,16 +248,22 @@ export function createBrowserController(reportError: (reason: unknown) => void):
     if (await ensureNativeTab(placeholder)) {
       return true;
     }
-    updateConversation(conversationId, (current) => {
-      if (current === undefined) {
-        return null;
-      }
-      const remaining = current.tabs.filter((tab) => tab.browserTabId !== browserTabId);
-      return remaining.length === 0
-        ? null
-        : { activeBrowserTabId: remaining[0]?.browserTabId ?? "", tabs: remaining };
-    });
+    discardFailedBrowserTab(conversationId, browserTabId);
     return false;
+  }
+
+  function discardFailedBrowserTab(conversationId: string, browserTabId: string): void {
+    const current = states().get(conversationId);
+    if (current === undefined) {
+      return;
+    }
+    const remaining = current.tabs.filter((tab) => tab.browserTabId !== browserTabId);
+    const firstRemaining = remaining[0];
+    updateConversation(conversationId, () =>
+      firstRemaining === undefined
+        ? null
+        : { activeBrowserTabId: firstRemaining.browserTabId, tabs: remaining },
+    );
   }
 
   async function selectTab(conversationId: string, browserTabId: string): Promise<boolean> {
@@ -232,24 +286,30 @@ export function createBrowserController(reportError: (reason: unknown) => void):
       reportError(reason);
       return false;
     }
-    let needsReplacement = false;
-    updateConversation(conversationId, (current) => {
-      if (current === undefined) {
-        return null;
-      }
-      const index = current.tabs.findIndex((tab) => tab.browserTabId === browserTabId);
-      const remaining = current.tabs.filter((tab) => tab.browserTabId !== browserTabId);
-      if (remaining.length === 0) {
-        needsReplacement = true;
-        return null;
-      }
-      const nextActive =
+    const current = states().get(conversationId);
+    if (current === undefined) {
+      return newTab(conversationId);
+    }
+    const closedIndex = current.tabs.findIndex((tab) => tab.browserTabId === browserTabId);
+    const remaining = current.tabs.filter((tab) => tab.browserTabId !== browserTabId);
+    if (remaining.length === 0) {
+      updateConversation(conversationId, () => null);
+      return newTab(conversationId);
+    }
+    const successorIndex = Math.min(Math.max(0, closedIndex), remaining.length - 1);
+    const successor = remaining[successorIndex];
+    if (successor === undefined) {
+      reportError(new Error("A aba fechada não pôde ser substituída por outra aba remanescente."));
+      return false;
+    }
+    updateConversation(conversationId, () => ({
+      activeBrowserTabId:
         current.activeBrowserTabId === browserTabId
-          ? (remaining[Math.min(Math.max(0, index), remaining.length - 1)]?.browserTabId ?? "")
-          : current.activeBrowserTabId;
-      return { activeBrowserTabId: nextActive, tabs: remaining };
-    });
-    return needsReplacement ? newTab(conversationId) : true;
+          ? successor.browserTabId
+          : current.activeBrowserTabId,
+      tabs: remaining,
+    }));
+    return true;
   }
 
   async function withActiveTab(
@@ -338,6 +398,8 @@ export function createBrowserController(reportError: (reason: unknown) => void):
     started = true;
     for (const pending of [
       listenBrowserState(upsertSnapshot, reportError),
+      listenBrowserAgentActivity(replaceFromAgent, reportError),
+      listenBrowserMetric(appendMetric, reportError),
       listenBrowserNewWindow(
         (request) => void newTab(request.conversationId, request.url),
         reportError,
@@ -362,12 +424,14 @@ export function createBrowserController(reportError: (reason: unknown) => void):
   }
 
   return {
+    agentActivity,
     activeTab,
     back,
     closeTab,
     dispose,
     ensureConversation,
     forward,
+    metrics,
     navigate,
     newTab,
     reload,
@@ -383,7 +447,7 @@ export function normalizeBrowserAddress(input: string): string {
   if (
     value.length === 0 ||
     /\p{Cc}/u.test(value) ||
-    new TextEncoder().encode(value).length > 16_384
+    new TextEncoder().encode(value).length > MAX_BROWSER_URL_BYTES
   ) {
     throw new Error("O endereço do navegador é vazio ou inválido.");
   }

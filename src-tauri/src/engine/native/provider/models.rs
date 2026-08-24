@@ -15,6 +15,8 @@ const MAX_MODEL_TEXT_BYTES: usize = 16_384;
 const MAX_INSTRUCTIONS_BYTES: usize = 262_144;
 const MAX_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000_000;
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u8 = 95;
+const AUTO_COMPACT_CONTEXT_WINDOW_PERCENT: u64 = 90;
+const PERCENT_SCALE: u64 = 100;
 
 #[derive(Debug, Deserialize)]
 pub struct ModelsWire {
@@ -113,7 +115,7 @@ impl SelectedModel {
         let usable_tokens = maximum_tokens
             .checked_mul(u64::from(usable_percent))
             .ok_or_else(|| AppError::Provider("context-window calculation overflowed".into()))?
-            / 100;
+            / PERCENT_SCALE;
         let auto_compact_token_limit = self
             .auto_compact_token_limit
             .map(|limit| {
@@ -372,7 +374,7 @@ fn decode_context_window(model: &ModelWire) -> Result<Option<ModelContextWindow>
     let usable_tokens = tokens
         .checked_mul(u64::from(percent))
         .ok_or_else(|| AppError::Provider("context-window calculation overflowed".into()))?
-        / 100;
+        / PERCENT_SCALE;
     Ok(Some(ModelContextWindow {
         tokens,
         usable_tokens,
@@ -394,8 +396,8 @@ fn decode_auto_compact_token_limit(model: &ModelWire) -> Result<Option<u64>, App
     let context_limit = model
         .context_window
         .or(model.max_context_window)
-        .and_then(|tokens| tokens.checked_mul(9))
-        .map(|tokens| tokens / 10);
+        .and_then(|tokens| tokens.checked_mul(AUTO_COMPACT_CONTEXT_WINDOW_PERCENT))
+        .map(|scaled| scaled / PERCENT_SCALE);
     Ok(match (context_limit, model.auto_compact_token_limit) {
         (Some(context_limit), Some(advertised_limit)) => Some(context_limit.min(advertised_limit)),
         (Some(context_limit), None) => Some(context_limit),

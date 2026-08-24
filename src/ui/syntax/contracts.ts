@@ -49,9 +49,9 @@ export interface SyntaxLimits {
 }
 
 export const DIFF_SYNTAX_LIMITS: SyntaxLimits = {
-  maximumBytes: 128 * 1_024,
+  maximumBytes: 32 * 1_024,
   maximumLineCharacters: 4 * 1_024,
-  maximumLines: 4_096,
+  maximumLines: 256,
 };
 
 export type SyntaxFallbackReason =

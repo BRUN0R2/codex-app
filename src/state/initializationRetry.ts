@@ -1,6 +1,8 @@
 import { decodeCommandError } from "../contracts/decode";
 
 const MAX_INITIALIZATION_RETRY_DELAY_MS = 60_000;
+const MAX_INITIALIZATION_BACKOFF_EXPONENT: number = 6;
+const INITIALIZATION_RETRY_BASE_DELAY_MILLISECONDS: number = 1_000;
 
 export type InitializationStage = "account" | "authenticatedState" | "engine" | "events";
 
@@ -13,8 +15,11 @@ export class InitializationTimeoutError extends Error {
 
 export function initializationRetryDelay(attempt: number): number {
   const normalizedAttempt = Number.isSafeInteger(attempt) && attempt > 0 ? attempt : 0;
-  const exponent = Math.min(normalizedAttempt, 6);
-  return Math.min(1_000 * 2 ** exponent, MAX_INITIALIZATION_RETRY_DELAY_MS);
+  const exponent = Math.min(normalizedAttempt, MAX_INITIALIZATION_BACKOFF_EXPONENT);
+  return Math.min(
+    INITIALIZATION_RETRY_BASE_DELAY_MILLISECONDS * 2 ** exponent,
+    MAX_INITIALIZATION_RETRY_DELAY_MS,
+  );
 }
 
 export function isRetryableInitializationFailure(

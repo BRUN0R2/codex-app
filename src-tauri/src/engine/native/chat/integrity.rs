@@ -11,6 +11,11 @@ use crate::error::AppError;
 const REQUIREMENTS_PREFIX: &str = "gAAAAAC";
 const PROOF_PREFIX: &str = "gAAAAAB";
 const MAX_PROOF_ATTEMPTS: u64 = 500_000;
+const MAX_SENTINEL_TOKEN_BYTES: usize = 16_384;
+const SENTINEL_HASH_OFFSET_BASIS: u32 = 2_166_136_261;
+const SENTINEL_HASH_PRIME: u32 = 16_777_619;
+const SENTINEL_HASH_FINALIZATION_PRIME_FIRST: u32 = 2_246_822_507;
+const SENTINEL_HASH_FINALIZATION_PRIME_SECOND: u32 = 3_266_489_909;
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
 #[derive(Debug, Deserialize)]
@@ -158,15 +163,15 @@ fn encode_fingerprint(fingerprint: &[Value]) -> Result<String, AppError> {
 }
 
 fn sentinel_hash(value: &str) -> String {
-    let mut hash = 2_166_136_261_u32;
+    let mut hash = SENTINEL_HASH_OFFSET_BASIS;
     for code_unit in value.encode_utf16() {
         hash ^= u32::from(code_unit);
-        hash = hash.wrapping_mul(16_777_619);
+        hash = hash.wrapping_mul(SENTINEL_HASH_PRIME);
     }
     hash ^= hash >> 16;
-    hash = hash.wrapping_mul(2_246_822_507);
+    hash = hash.wrapping_mul(SENTINEL_HASH_FINALIZATION_PRIME_FIRST);
     hash ^= hash >> 13;
-    hash = hash.wrapping_mul(3_266_489_909);
+    hash = hash.wrapping_mul(SENTINEL_HASH_FINALIZATION_PRIME_SECOND);
     hash ^= hash >> 16;
     format!("{hash:08x}")
 }
@@ -180,7 +185,9 @@ fn valid_difficulty(value: &str) -> bool {
 
 fn validate_optional_token(value: Option<&str>) -> Result<(), AppError> {
     if value.is_some_and(|value| {
-        value.is_empty() || value.len() > 16_384 || value.chars().any(char::is_control)
+        value.is_empty()
+            || value.len() > MAX_SENTINEL_TOKEN_BYTES
+            || value.chars().any(char::is_control)
     }) {
         return Err(AppError::Provider(
             "ChatGPT returned an invalid integrity token".into(),

@@ -1,6 +1,5 @@
 use std::env;
 use std::ffi::OsString;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -14,6 +13,7 @@ use crate::process::headless_command;
 
 const RIPGREP_EXECUTABLE_NAME: &str = "rg.exe";
 const RIPGREP_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Clone, Debug, Default)]
 pub(in crate::engine::native) struct Ripgrep {
@@ -113,10 +113,7 @@ fn validate_executable(path: &Path) -> Result<(), AppError> {
         ))
     })?;
     let digest = Sha256::digest(bytes);
-    let mut actual = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(&mut actual, "{byte:02x}").expect("writing to a String cannot fail");
-    }
+    let actual = hex_encode(&digest);
     let expected = env!("CODEX_BUNDLED_RG_SHA256");
     if actual != expected {
         return Err(AppError::State(format!(
@@ -124,6 +121,15 @@ fn validate_executable(path: &Path) -> Result<(), AppError> {
         )));
     }
     Ok(())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX_LOWER[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX_LOWER[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 async fn validate_version(path: &Path) -> Result<(), AppError> {

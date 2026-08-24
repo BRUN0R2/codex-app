@@ -8,7 +8,7 @@ O único backend é `NativeEngine`:
 - provider: `ChatGPT Codex`;
 - autenticação: `ChatGPT OAuth`;
 - armazenamento: `sqlite`;
-- schema IPC: versão `18`.
+- schema IPC: versão `19`.
 
 Não existe variável de ambiente para trocar backend nem execução de binário
 genérico. O único sidecar é o `rg.exe` 15.2.0 fixado por manifesto e hash para a
@@ -42,18 +42,41 @@ existente e diretório, e somente então usa a API Rust do opener. O WebView nã
 possui `opener:allow-open-path`, portanto não pode abrir arquivos ou caminhos
 arbitrários diretamente.
 
+## Ferramentas do agente
+
+| Namespace | Ferramentas |
+| --- | --- |
+| Browser Use | `browser_manage`, `browser_snapshot`, `browser_pointer`, `browser_type`, `browser_key`, `browser_wait`, `browser_metrics` |
+
+`browser_manage` concentra painel, abas, URL, histórico e reload;
+`browser_pointer` concentra hover, click, drag e scroll. As demais operações
+mantêm schemas menores para texto, teclado, espera, inspeção e telemetria. Todas
+são exclusivas por conversa e continuam disponíveis em modo somente leitura,
+porque o sandbox descreve o workspace local; acesso a uma nova origem segue a
+política de aprovação separada.
+
+Schemas de funções estritas são verificados recursivamente contra o subconjunto
+de keywords aceito pelo provider. Restrições sem representação nesse subconjunto,
+como a unicidade dos modificadores de `browser_key`, pertencem ao decoder e à
+validação Rust da ferramenta e não são anunciadas como JSON Schema inválido.
+
 ## Eventos
 
-Seis canais Tauri possuem payloads fechados:
+Oito canais Tauri possuem payloads fechados:
 
 - `engine://runtime-status`: `starting`, `ready`, `failed` ou `stopped`;
 - `engine://runtime-diagnostic`: falhas operacionais não ocultáveis;
 - `engine://notification`: autenticação, tarefas, turnos, itens e deltas;
-- `engine://server-request`: somente `approval.command`.
+- `engine://server-request`: `approval.command` ou
+  `approval.browserOrigin`;
 - `browser://state`: snapshot estrito da aba após navegação, carregamento ou
   mudança de título;
 - `browser://new-window`: URL HTTP(S) validada que deve virar uma nova aba
-  controlada, nunca uma janela remota autônoma.
+  controlada, nunca uma janela remota autônoma;
+- `browser://agent-activity`: topologia autoritativa da conversa, ação e
+  diretiva `open | close` do painel;
+- `browser://metric`: uma amostra estruturada e limitada de latência, status e
+  achados da página.
 
 Notificações suportadas:
 
@@ -74,9 +97,17 @@ sem credenciais embutidas; bounds devem ser finitos e respeitar a superfície
 mínima/máxima. A capability Tauri autoriza somente o webview local `main`.
 Webviews remotos não recebem comandos IPC, permissões de arquivo ou opener. A
 sincronização de bounds oculta todas as abas inativas antes de mostrar a aba
-selecionada. Os sete comandos são assíncronos: `add_child`, navegação, bounds,
+selecionada. Os sete comandos Tauri são assíncronos: `add_child`, navegação, bounds,
 visibilidade e fechamento são despachados fora do handler principal, e eventos
 de página/título são emitidos somente depois que o callback WebView2 retorna.
+
+Browser Use injeta somente um script de documento fechado para cursor, refs,
+erros e métricas web. Entrada usa `Input.dispatchMouseEvent`,
+`Input.dispatchKeyEvent` e `Input.insertText`; captura usa
+`Page.captureScreenshot` com JPEG e redução de qualidade limitada. Nenhum nome
+ou parâmetro CDP arbitrário atravessa o provider. O screenshot segue dentro do
+array `function_call_output.output` junto ao texto do snapshot, conforme o
+contrato multimodal da Responses API.
 
 A versão IPC 15 adiciona saída transitória de comandos ao
 `item.streamDeltas`. Cada delta identifica `stdout` ou `stderr` e carrega uma
@@ -103,6 +134,12 @@ envelope `{ image_url }` e renderiza uma prévia segura em vez de expor a data U
 como texto. Registros anteriores de `view_image` com `plainText` recebem a mesma
 apresentação por uma migração determinística baseada no nome fechado da
 ferramenta, nunca por heurística sobre a descrição ou o conteúdo.
+
+A versão IPC 19 adiciona `approval.browserOrigin`. A solicitação carrega
+`threadId`, `turnId`, `itemId`, origem HTTP(S) canônica e motivo. Aceitar libera
+a origem para a conversa atual; recusar conclui a ferramenta como `declined`;
+cancelar interrompe o turno. Redirecionamentos e novas janelas iniciados pelo
+agente permanecem bloqueados até essa mesma decisão.
 
 A sincronização Rust↔TypeScript é travada por fixtures golden em
 `src/contracts/fixtures/`: `cargo test` falha se o contrato Rust mudar sem

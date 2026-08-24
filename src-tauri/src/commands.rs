@@ -4,8 +4,10 @@ use tauri_plugin_opener::OpenerExt as _;
 
 use crate::attachments::{AttachmentKind, persist_attachment};
 use crate::command_validation::{
-    MAX_TURN_ATTACHMENTS, MAX_TURN_TEXT_BYTES, validate_diagnostic_message, validate_model_name,
-    validate_protocol_id, validate_timezone, validate_workspace,
+    MAX_TURN_ATTACHMENTS, MAX_TURN_TEXT_BYTES, validate_decimal_cursor,
+    validate_diagnostic_message, validate_model_name, validate_protocol_id,
+    validate_thread_history_cursor, validate_timezone, validate_timezone_offset,
+    validate_workspace,
 };
 use crate::engine::{
     AccountProfileResponse, AccountRateLimitsResponse, AccountReadResponse,
@@ -24,6 +26,11 @@ const MIN_AUTOMATION_INTERVAL_MINUTES: u32 = 5;
 const MAX_AUTOMATION_INTERVAL_MINUTES: u32 = 10_080;
 const MAX_AUTOMATION_NAME_BYTES: usize = 160;
 const MAX_AUTOMATION_PROMPT_BYTES: usize = 262_144;
+const THREAD_NAME_MAXIMUM_CHARS: usize = MAX_AUTOMATION_NAME_BYTES;
+
+/// Mirrors `MAX_DEVELOPER_INSTRUCTIONS_BYTES` in native storage validation;
+/// both bounds must stay in sync.
+const MAX_DEVELOPER_INSTRUCTIONS_BYTES: usize = 262_144;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -110,10 +117,13 @@ enum TurnServiceTierSelection {
 }
 
 impl TurnServiceTierSelection {
-    fn into_option(self) -> Option<String> {
+    fn into_option(self) -> CommandResult<Option<String>> {
         match self {
-            Self::Default => None,
-            Self::Tier { id } => Some(id),
+            Self::Default => Ok(None),
+            Self::Tier { id } => {
+                validate_protocol_id("service tier id", &id)?;
+                Ok(Some(id))
+            }
         }
     }
 }
@@ -392,6 +402,7 @@ pub async fn engine_thread_list(
     engine: State<'_, EngineManager>,
     request: ThreadListRequest,
 ) -> CommandResult<ThreadListResponse> {
+    validate_decimal_cursor("thread list", request.cursor.as_deref())?;
     engine
         .thread_list(request.cursor, request.archived)
         .await
@@ -416,6 +427,7 @@ pub async fn engine_thread_read(
     request: ThreadReadRequest,
 ) -> CommandResult<ThreadReadResponse> {
     validate_protocol_id("thread id", &request.thread_id)?;
+    validate_thread_history_cursor(request.cursor.as_deref())?;
     engine
         .thread_read(request.thread_id, request.cursor)
         .await
@@ -428,6 +440,7 @@ pub async fn engine_output_read(
     request: OutputReadRequest,
 ) -> CommandResult<OutputReadResponse> {
     validate_protocol_id("output id", &request.output_id)?;
+    validate_decimal_cursor("output", request.cursor.as_deref())?;
     engine
         .output_read(request.output_id, request.cursor)
         .await
@@ -442,8 +455,14 @@ pub async fn engine_thread_set_name(
 ) -> CommandResult<OperationAck> {
     validate_protocol_id("thread id", &request.thread_id)?;
     let name = request.name.trim();
-    if name.is_empty() {
-        return Err(AppError::Protocol("thread name cannot be empty".into()).into());
+    if name.is_empty()
+        || name.len() > THREAD_NAME_MAXIMUM_CHARS
+        || name.chars().any(char::is_control)
+    {
+        return Err(AppError::Protocol(format!(
+            "thread name must contain between 1 and {THREAD_NAME_MAXIMUM_CHARS} bytes without control characters"
+        ))
+        .into());
     }
     engine
         .thread_set_name(&app, request.thread_id, name.into())
@@ -513,12 +532,7 @@ pub async fn engine_turn_start(
     validate_protocol_id("client user message id", &request.client_user_message_id)?;
     let model = request.model.map(validate_model_name).transpose()?;
     let timezone = validate_timezone(request.timezone)?;
-    if !(-840..=840).contains(&request.timezone_offset_min) {
-        return Err(AppError::Protocol(
-            "timezone offset must be between -840 and 840 minutes".into(),
-        )
-        .into());
-    }
+    validate_timezone_offset(request.timezone_offset_min)?;
     let input = decode_turn_input(&app, request.text, request.attachments).await?;
     engine
         .turn_start(
@@ -529,7 +543,7 @@ pub async fn engine_turn_start(
                 input,
                 model,
                 effort: request.effort,
-                service_tier: request.service_tier.into_option(),
+                service_tier: request.service_tier.into_option()?,
                 timezone,
                 timezone_offset_min: request.timezone_offset_min,
             },
@@ -722,13 +736,7 @@ fn validate_automation_schedule(
         ))
         .into());
     }
-    if !(-840..=840).contains(&timezone_offset_min) {
-        return Err(AppError::Protocol(
-            "automation timezone offset must be between -840 and 840 minutes".into(),
-        )
-        .into());
-    }
-    Ok(())
+    validate_timezone_offset(timezone_offset_min)
 }
 
 fn validate_auto_top_up_settings(
@@ -839,10 +847,25 @@ pub async fn engine_config_update(
     engine: State<'_, EngineManager>,
     request: ConfigUpdateRequest,
 ) -> CommandResult<ConfigUpdateResponse> {
+    validate_config_update_payload(&request.update)?;
     engine
         .config_update(request.expected_version, request.update)
         .await
         .map_err(Into::into)
+}
+
+fn validate_config_update_payload(update: &ConfigUpdate) -> CommandResult<()> {
+    if let ConfigUpdate::DeveloperInstructions {
+        value: Some(instructions),
+    } = update
+        && instructions.len() > MAX_DEVELOPER_INSTRUCTIONS_BYTES
+    {
+        return Err(AppError::Protocol(format!(
+            "developer instructions must contain between 1 and {MAX_DEVELOPER_INSTRUCTIONS_BYTES} bytes"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 #[tauri::command]

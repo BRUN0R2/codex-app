@@ -29,10 +29,10 @@ export interface ThreadRuntimeState {
 
 export type ThreadRuntimeMap = ReadonlyMap<string, ThreadRuntimeState>;
 
-const persistedVisibleTurnsBySource = new WeakMap<
+export type PersistedVisibleTurnsBySource = WeakMap<
   readonly ThreadTurn[],
   readonly VisibleThreadTurn[]
->();
+>;
 
 export function updateThreadRuntime(
   current: ThreadRuntimeMap,
@@ -147,7 +147,10 @@ export function readActiveTurnPlan(
   return null;
 }
 
-export function readPersistedVisibleTurns(thread: CodexThread): readonly VisibleThreadTurn[] {
+export function readPersistedVisibleTurns(
+  persistedVisibleTurnsBySource: PersistedVisibleTurnsBySource,
+  thread: CodexThread,
+): readonly VisibleThreadTurn[] {
   const cached = persistedVisibleTurnsBySource.get(thread.turns);
   if (cached !== undefined) {
     return cached;

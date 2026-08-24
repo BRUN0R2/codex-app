@@ -275,7 +275,7 @@ fn options_from_version(
         .flatten()
         .filter_map(|slug| normalized_optional(Some(slug.clone())))
         .collect::<HashSet<_>>();
-    version
+    let options = version
         .intelligence_presets
         .iter()
         .flatten()
@@ -319,8 +319,8 @@ fn options_from_version(
                 is_default: false,
             })
         })
-        .collect::<Vec<_>>()
-        .pipe(Ok)
+        .collect::<Vec<_>>();
+    Ok(options)
 }
 
 fn option_from_category(
@@ -472,14 +472,6 @@ fn humanize_slug(slug: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-
-trait Pipe: Sized {
-    fn pipe<T>(self, function: impl FnOnce(Self) -> T) -> T {
-        function(self)
-    }
-}
-
-impl<T> Pipe for T {}
 
 #[cfg(test)]
 mod tests {

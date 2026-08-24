@@ -14,6 +14,7 @@ const MIN_INTERVAL_MINUTES = 5;
 const MAX_INTERVAL_MINUTES = 10_080;
 const MAX_AUTOMATION_NAME_BYTES = 160;
 const MAX_AUTOMATION_PROMPT_BYTES = 262_144;
+const MAXIMUM_CONCURRENT_AUTOMATION_RUNS = 2;
 const RECENT_RUN_LIMIT = 20;
 
 type IntervalUnit = "days" | "hours" | "minutes";
@@ -362,7 +363,7 @@ export function AutomationsView(props: {
                           disabled={
                             commandPending() ||
                             activeRun() !== undefined ||
-                            activeRuns().length >= 2
+                            activeRuns().length >= MAXIMUM_CONCURRENT_AUTOMATION_RUNS
                           }
                           onClick={() => void props.controller.runAutomationNow(automation.id)}
                           type="button"

@@ -8,14 +8,34 @@ use tauri::{
     AppHandle, Emitter as _, LogicalPosition, LogicalSize, Manager as _, Position, Rect, Size,
     State, WebviewUrl,
 };
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard};
 use url::Url;
 
 use crate::command_validation::validate_protocol_id;
 use crate::engine::{EngineManager, OperationAck, RuntimeDiagnosticSubsystem};
 use crate::error::{AppError, CommandResult};
 
+mod agent;
+mod automation;
+mod metrics;
+#[cfg(debug_assertions)]
+mod smoke;
+
+pub(crate) use self::agent::BrowserAgentCapture;
+pub(crate) use self::automation::{
+    BrowserAutomationCapture, BrowserMouseButton, BrowserPageSnapshot, BrowserResolvedTarget,
+    BrowserTargetSelector,
+};
+pub(crate) use self::metrics::{
+    BrowserActionMetric, BrowserActionStatus, BrowserPageMetricSummary,
+};
+#[cfg(debug_assertions)]
+pub(crate) use self::smoke::{runtime_smoke_requested, start_runtime_smoke_if_requested};
+
 pub const BROWSER_STATE_EVENT: &str = "browser://state";
 pub const BROWSER_NEW_WINDOW_EVENT: &str = "browser://new-window";
+pub const BROWSER_AGENT_ACTIVITY_EVENT: &str = "browser://agent-activity";
+pub const BROWSER_METRIC_EVENT: &str = "browser://metric";
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const MAX_BROWSER_TABS: usize = 16;
@@ -24,17 +44,21 @@ const MAX_BROWSER_TITLE_CHARS: usize = 512;
 const MIN_BROWSER_WIDTH: f64 = 280.0;
 const MIN_BROWSER_HEIGHT: f64 = 180.0;
 const MAX_BROWSER_SURFACE_DIMENSION: f64 = 16_384.0;
+const PARKED_WEBVIEW_POSITION_X: f64 = -10_000.0;
+const PARKED_WEBVIEW_POSITION_Y: f64 = -10_000.0;
+const PARKED_WEBVIEW_WIDTH: f64 = 1.0;
+const PARKED_WEBVIEW_HEIGHT: f64 = 1.0;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserTabSnapshot {
-    browser_tab_id: String,
-    conversation_id: String,
-    url: String,
-    title: Option<String>,
-    can_go_back: bool,
-    can_go_forward: bool,
-    is_loading: bool,
+    pub(crate) browser_tab_id: String,
+    pub(crate) conversation_id: String,
+    pub(crate) url: String,
+    pub(crate) title: Option<String>,
+    pub(crate) can_go_back: bool,
+    pub(crate) can_go_forward: bool,
+    pub(crate) is_loading: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +67,23 @@ struct BrowserNewWindowNotification {
     browser_tab_id: String,
     conversation_id: String,
     url: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum BrowserPanelDirective {
+    Open,
+    Close,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserAgentActivityNotification {
+    pub(crate) conversation_id: String,
+    pub(crate) active_browser_tab_id: Option<String>,
+    pub(crate) tabs: Vec<BrowserTabSnapshot>,
+    pub(crate) panel: BrowserPanelDirective,
+    pub(crate) action: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,7 +210,7 @@ impl BrowserHistory {
     }
 }
 
-struct BrowserTabRecord {
+pub(super) struct BrowserTabRecord {
     conversation_id: String,
     history: BrowserHistory,
     is_loading: bool,
@@ -179,7 +220,7 @@ struct BrowserTabRecord {
 }
 
 impl BrowserTabRecord {
-    fn snapshot(&self, browser_tab_id: &str) -> BrowserTabSnapshot {
+    pub(super) fn snapshot(&self, browser_tab_id: &str) -> BrowserTabSnapshot {
         BrowserTabSnapshot {
             browser_tab_id: browser_tab_id.to_string(),
             conversation_id: self.conversation_id.clone(),
@@ -192,18 +233,82 @@ impl BrowserTabRecord {
     }
 }
 
-#[derive(Default)]
-struct BrowserRuntimeState {
-    creating: HashSet<String>,
-    tabs: HashMap<String, BrowserTabRecord>,
+#[derive(Debug, Clone, Default)]
+struct BrowserSurfaceState {
+    conversation_id: Option<String>,
+    bounds: Option<BrowserSurfaceBounds>,
+    visible: bool,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone)]
+pub(super) enum BrowserPendingTransition {
+    Navigate(Url),
+    NewTab(Url),
+}
+
+#[derive(Default)]
+pub(super) struct BrowserRuntimeState {
+    creating: HashSet<String>,
+    pub(super) tabs: HashMap<String, BrowserTabRecord>,
+    tab_order: HashMap<String, Vec<String>>,
+    active_tabs: HashMap<String, String>,
+    surface: BrowserSurfaceState,
+    approved_origins: HashMap<String, HashSet<String>>,
+    agent_interactions: HashSet<String>,
+    pending_transitions: HashMap<String, BrowserPendingTransition>,
+}
+
+#[derive(Clone)]
 pub struct BrowserManager {
-    runtime: Arc<Mutex<BrowserRuntimeState>>,
+    pub(super) runtime: Arc<Mutex<BrowserRuntimeState>>,
+    pub(super) state_notify: Arc<Notify>,
+    automation_locks: Arc<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    metrics: Arc<metrics::BrowserMetrics>,
+}
+
+impl Default for BrowserManager {
+    fn default() -> Self {
+        Self {
+            runtime: Arc::new(Mutex::new(BrowserRuntimeState::default())),
+            state_notify: Arc::new(Notify::new()),
+            automation_locks: Arc::new(AsyncMutex::new(HashMap::new())),
+            metrics: Arc::new(metrics::BrowserMetrics::default()),
+        }
+    }
 }
 
 impl BrowserManager {
+    pub(crate) fn initialize(&self, app: &AppHandle) -> Result<String, AppError> {
+        self.metrics.initialize(app)
+    }
+
+    pub(crate) async fn lock_conversation(&self, conversation_id: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.automation_locks.lock().await;
+            Arc::clone(
+                locks
+                    .entry(conversation_id.to_string())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+            )
+        };
+        lock.lock_owned().await
+    }
+
+    pub(crate) fn record_metric(&self, app: &AppHandle, metric: BrowserActionMetric) {
+        match self.metrics.record(metric) {
+            Ok(metric) => emit_or_report(app, BROWSER_METRIC_EVENT, metric),
+            Err(error) => app.state::<EngineManager>().report_runtime_error(
+                app,
+                RuntimeDiagnosticSubsystem::Runtime,
+                format!("browser metric persistence failed: {error}"),
+            ),
+        }
+    }
+
+    pub(crate) fn recent_metrics(&self, conversation_id: &str) -> Vec<BrowserActionMetric> {
+        self.metrics.recent(conversation_id)
+    }
+
     fn create_tab(
         &self,
         app: &AppHandle,
@@ -237,14 +342,22 @@ impl BrowserManager {
                 AppError::State("main window is unavailable for the in-app browser".into())
             })?;
             let webview_label = browser_webview_label(&browser_tab_id);
+            let navigation_policy_runtime = Arc::clone(&self.runtime);
+            let navigation_policy_notify = Arc::clone(&self.state_notify);
+            let navigation_policy_conversation_id = conversation_id.clone();
+            let navigation_policy_tab_id = browser_tab_id.clone();
             let navigation_runtime = Arc::clone(&self.runtime);
+            let navigation_notify = Arc::clone(&self.state_notify);
             let navigation_app = app.clone();
             let navigation_conversation_id = conversation_id.clone();
             let navigation_tab_id = browser_tab_id.clone();
+            let new_window_runtime = Arc::clone(&self.runtime);
+            let new_window_notify = Arc::clone(&self.state_notify);
             let new_window_app = app.clone();
             let new_window_conversation_id = conversation_id.clone();
             let new_window_tab_id = browser_tab_id.clone();
             let title_runtime = Arc::clone(&self.runtime);
+            let title_notify = Arc::clone(&self.state_notify);
             let title_app = app.clone();
             let title_tab_id = browser_tab_id.clone();
             let builder = WebviewBuilder::new(webview_label, WebviewUrl::External(url.clone()))
@@ -252,24 +365,31 @@ impl BrowserManager {
                 .zoom_hotkeys_enabled(true)
                 .enable_clipboard_access()
                 .disable_drag_drop_handler()
-                .on_navigation(|target| validate_browser_url(target).is_ok())
+                .initialization_script(automation::BROWSER_AGENT_INITIALIZATION_SCRIPT)
+                .on_navigation(move |target| {
+                    handle_navigation_request(
+                        &navigation_policy_runtime,
+                        &navigation_policy_notify,
+                        &navigation_policy_conversation_id,
+                        &navigation_policy_tab_id,
+                        target,
+                    )
+                })
                 .on_new_window(move |target, _features| {
-                    if validate_browser_url(&target).is_ok() {
-                        emit_or_report(
-                            &new_window_app,
-                            BROWSER_NEW_WINDOW_EVENT,
-                            BrowserNewWindowNotification {
-                                browser_tab_id: new_window_tab_id.clone(),
-                                conversation_id: new_window_conversation_id.clone(),
-                                url: target.as_str().to_string(),
-                            },
-                        );
-                    }
+                    handle_new_window_request(
+                        &new_window_runtime,
+                        &new_window_notify,
+                        &new_window_app,
+                        &new_window_conversation_id,
+                        &new_window_tab_id,
+                        target,
+                    );
                     NewWindowResponse::Deny
                 })
                 .on_page_load(move |_webview, payload| {
                     handle_page_load(
                         &navigation_runtime,
+                        &navigation_notify,
                         &navigation_app,
                         &navigation_conversation_id,
                         &navigation_tab_id,
@@ -288,12 +408,13 @@ impl BrowserManager {
                         tab.snapshot(&title_tab_id)
                     };
                     emit_or_report(&title_app, BROWSER_STATE_EVENT, snapshot);
+                    title_notify.notify_waiters();
                 });
             let webview = window
                 .add_child(
                     builder,
-                    LogicalPosition::new(-10_000.0, -10_000.0),
-                    LogicalSize::new(1.0, 1.0),
+                    LogicalPosition::new(PARKED_WEBVIEW_POSITION_X, PARKED_WEBVIEW_POSITION_Y),
+                    LogicalSize::new(PARKED_WEBVIEW_WIDTH, PARKED_WEBVIEW_HEIGHT),
                 )
                 .map_err(|error| {
                     AppError::State(format!("could not create in-app browser tab: {error}"))
@@ -315,7 +436,7 @@ impl BrowserManager {
             let mut runtime = self.runtime.lock();
             runtime.creating.remove(&browser_tab_id);
             let record = BrowserTabRecord {
-                conversation_id,
+                conversation_id: conversation_id.clone(),
                 history: BrowserHistory::new(url.clone()),
                 is_loading: true,
                 title: None,
@@ -323,9 +444,19 @@ impl BrowserManager {
                 webview,
             };
             let snapshot = record.snapshot(&browser_tab_id);
+            runtime
+                .tab_order
+                .entry(conversation_id.clone())
+                .or_default()
+                .push(browser_tab_id.clone());
+            runtime
+                .active_tabs
+                .entry(conversation_id)
+                .or_insert_with(|| browser_tab_id.clone());
             runtime.tabs.insert(browser_tab_id, record);
             snapshot
         };
+        self.state_notify.notify_waiters();
         Ok(snapshot)
     }
 
@@ -431,7 +562,39 @@ impl BrowserManager {
         webview.close().map_err(|error| {
             AppError::State(format!("could not close in-app browser tab: {error}"))
         })?;
-        self.runtime.lock().tabs.remove(browser_tab_id);
+        {
+            let mut runtime = self.runtime.lock();
+            runtime.tabs.remove(browser_tab_id);
+            runtime.agent_interactions.remove(browser_tab_id);
+            runtime.pending_transitions.remove(browser_tab_id);
+            let successor = runtime
+                .tab_order
+                .get_mut(conversation_id)
+                .and_then(|order| {
+                    order.retain(|candidate| candidate != browser_tab_id);
+                    order.first().cloned()
+                });
+            match successor {
+                Some(successor)
+                    if runtime.active_tabs.get(conversation_id).map(String::as_str)
+                        == Some(browser_tab_id) =>
+                {
+                    runtime
+                        .active_tabs
+                        .insert(conversation_id.to_string(), successor);
+                }
+                None => {
+                    runtime.tab_order.remove(conversation_id);
+                    runtime.active_tabs.remove(conversation_id);
+                    runtime.approved_origins.remove(conversation_id);
+                    if runtime.surface.conversation_id.as_deref() == Some(conversation_id) {
+                        runtime.surface = BrowserSurfaceState::default();
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        self.state_notify.notify_waiters();
         Ok(OperationAck { applied: true })
     }
 
@@ -459,8 +622,30 @@ impl BrowserManager {
         };
         if let Some((conversation_id, browser_tab_id, bounds)) = active {
             validate_browser_bounds(bounds)?;
-            let runtime = self.runtime.lock();
+            let mut runtime = self.runtime.lock();
             owned_tab(&runtime, conversation_id, browser_tab_id)?;
+            runtime
+                .active_tabs
+                .insert(conversation_id.to_string(), browser_tab_id.to_string());
+            runtime.surface = BrowserSurfaceState {
+                conversation_id: Some(conversation_id.to_string()),
+                bounds: Some(bounds),
+                visible: true,
+            };
+        } else {
+            let mut runtime = self.runtime.lock();
+            if let (Some(conversation_id), Some(browser_tab_id)) =
+                (conversation_id, active_browser_tab_id)
+                && runtime
+                    .tabs
+                    .get(browser_tab_id)
+                    .is_some_and(|tab| tab.conversation_id == conversation_id)
+            {
+                runtime
+                    .active_tabs
+                    .insert(conversation_id.to_string(), browser_tab_id.to_string());
+            }
+            runtime.surface.visible = false;
         }
         let webviews = {
             let runtime = self.runtime.lock();
@@ -487,10 +672,11 @@ impl BrowserManager {
                 .map_err(browser_surface_error)?;
             webview.show().map_err(browser_surface_error)?;
         }
+        self.state_notify.notify_waiters();
         Ok(OperationAck { applied: true })
     }
 
-    fn snapshot(
+    pub(super) fn snapshot(
         &self,
         conversation_id: &str,
         browser_tab_id: &str,
@@ -534,8 +720,94 @@ fn owned_tab_mut<'a>(
     Ok(tab)
 }
 
+fn handle_navigation_request(
+    runtime: &Arc<Mutex<BrowserRuntimeState>>,
+    state_notify: &Arc<Notify>,
+    conversation_id: &str,
+    browser_tab_id: &str,
+    target: &Url,
+) -> bool {
+    if validate_browser_url(target).is_err() {
+        return false;
+    }
+    let mut runtime = runtime.lock();
+    if runtime.agent_interactions.contains(browser_tab_id)
+        && !origin_is_approved(&runtime, conversation_id, target)
+    {
+        runtime.pending_transitions.insert(
+            browser_tab_id.to_string(),
+            BrowserPendingTransition::Navigate(target.clone()),
+        );
+        drop(runtime);
+        state_notify.notify_waiters();
+        return false;
+    }
+    approve_origin(&mut runtime, conversation_id, target);
+    true
+}
+
+fn handle_new_window_request(
+    runtime: &Arc<Mutex<BrowserRuntimeState>>,
+    state_notify: &Arc<Notify>,
+    app: &AppHandle,
+    conversation_id: &str,
+    browser_tab_id: &str,
+    target: Url,
+) {
+    if validate_browser_url(&target).is_err() {
+        return;
+    }
+    {
+        let mut runtime = runtime.lock();
+        if runtime.agent_interactions.contains(browser_tab_id) {
+            runtime.pending_transitions.insert(
+                browser_tab_id.to_string(),
+                BrowserPendingTransition::NewTab(target),
+            );
+            drop(runtime);
+            state_notify.notify_waiters();
+            return;
+        }
+        approve_origin(&mut runtime, conversation_id, &target);
+    }
+    emit_or_report(
+        app,
+        BROWSER_NEW_WINDOW_EVENT,
+        BrowserNewWindowNotification {
+            browser_tab_id: browser_tab_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            url: target.as_str().to_string(),
+        },
+    );
+}
+
+fn approve_origin(runtime: &mut BrowserRuntimeState, conversation_id: &str, url: &Url) {
+    if let Some(origin) = browser_origin(url) {
+        runtime
+            .approved_origins
+            .entry(conversation_id.to_string())
+            .or_default()
+            .insert(origin);
+    }
+}
+
+fn origin_is_approved(runtime: &BrowserRuntimeState, conversation_id: &str, url: &Url) -> bool {
+    let Some(origin) = browser_origin(url) else {
+        return true;
+    };
+    runtime
+        .approved_origins
+        .get(conversation_id)
+        .is_some_and(|origins| origins.contains(&origin))
+}
+
+pub(crate) fn browser_origin(url: &Url) -> Option<String> {
+    matches!(url.scheme(), "http" | "https").then(|| url.origin().ascii_serialization())
+}
+
 fn handle_page_load(
     runtime: &Arc<Mutex<BrowserRuntimeState>>,
+    state_notify: &Arc<Notify>,
     app: &AppHandle,
     conversation_id: &str,
     browser_tab_id: &str,
@@ -561,6 +833,7 @@ fn handle_page_load(
         tab.snapshot(browser_tab_id)
     };
     emit_or_report(app, BROWSER_STATE_EVENT, snapshot);
+    state_notify.notify_waiters();
 }
 
 fn emit_or_report<T>(app: &AppHandle, event: &'static str, payload: T)

@@ -55,6 +55,32 @@ do webview local `main`. Comandos que manipulam webviews são assíncronos para
 não bloquear o dispatcher da janela; callbacks WebView2 apenas atualizam estado
 e enfileiram a emissão depois de retornar, evitando reentrância no IPC.
 
+O Browser Use mantém essa separação, mas o loop nativo do agente acessa a mesma
+instância registrada de `BrowserManager` pelo `AppHandle`. A composição é
+modular:
+
+- `browser/agent.rs`: locks assíncronos por conversa, aba ativa, topologia,
+  espera de carregamento, política de origem e ciclo do painel;
+- `browser/automation.rs`: única região que nomeia WebView2/COM; scripts com
+  retorno, métodos CDP fechados, snapshot renderizado, screenshot JPEG limitado
+  e entrada confiável de mouse/teclado;
+- `browser/metrics.rs`: eventos tipados, janela recente e JSONL rotativo;
+- `engine/native/tools/browser.rs`: sete ferramentas fechadas, validação dos
+  argumentos, aprovação cancelável e projeção para provider/timeline.
+
+O modelo nunca recebe um endpoint CDP genérico. Referências de elemento são
+produzidas pelo snapshot, pertencem ao documento atual e ficam obsoletas após
+mudanças de página. A inicialização injetada em cada documento mantém o cursor
+visual do agente e coletores limitados de erro, falha de recurso, CLS, LCP e
+long tasks. Cliques que tentam atravessar uma origem não aprovada são bloqueados
+no callback síncrono, convertidos em uma transição pendente e retomados somente
+depois da decisão explícita.
+
+Cada ação visual devolve texto e screenshot no mesmo
+`function_call_output.output` multimodal. Storage grava essa saída e o item da
+timeline na mesma transação; o modelo nunca inicia a rodada seguinte com uma
+captura ausente ou fora de ordem.
+
 Comandos longos permanecem no domínio do engine:
 
 ```mermaid
@@ -120,12 +146,25 @@ O composer mantém rascunhos efêmeros com ownership por `thread_id`; telas de
 nova conversa usam uma chave separada por modo e workspace. Trocar de tarefa
 salva e restaura somente o rascunho correspondente, incluindo anexos.
 
+`LatestTurnFileChangeStore` projeta os `FileChange` do turno ativo ou do último
+turno concluído. O gatilho de revisão existe sempre que essa projeção possui
+arquivos, independentemente de o agente ter publicado um plano ou de o turno já
+ter terminado. `AppShell` mantém timeline e composer no caminho inicial e
+carrega Configurações, Automações, Browser e Revisão por `import()` somente
+quando a superfície correspondente é aberta.
+
 O navegador interno também possui estado isolado por conversa. O controller
 frontend restaura abas lazy a partir de um schema local fechado, adota o webview
 nativo existente de forma idempotente e coalesce sincronizações de bounds pela
 assinatura conversa/aba/retângulo. O painel implementa abas, endereço,
 voltar/avançar, recarregar e abertura externa sem iframe; fechar ou ocultar a
 superfície esconde o child webview no mesmo ciclo de vida.
+
+Eventos `browser://agent-activity` substituem a topologia da conversa de forma
+autoritativa e abrem/fecham o painel somente quando a tarefa correspondente está
+visível. Eventos `browser://metric` alimentam o painel de diagnóstico sem
+polling. Se a ação mais recente falhar antes de capturar a página, a UI mantém
+os achados da última amostra válida e mostra a falha separadamente.
 
 A inicialização possui uma revisão monotônica que impede tentativas antigas de
 sobrescrever estado novo. Falhas transitórias de registro de eventos, timeout ou
@@ -141,13 +180,13 @@ Fragmentos do mesmo turno na fronteira são reunidos por identidade, sem perder
 ordem ou duplicar conteúdo. Conversas arquivadas só são consultadas quando a
 página correspondente das configurações é realmente aberta.
 
-`ProfileView.tsx` é uma superfície principal independente da conversa. O
-controller possui separadamente identidade carregada, estado de leitura e erro;
-o coordenador de perfil coalesce requisições e invalida por revisão/identidade
-da sessão. `profileActivity.ts` é uma projeção pura de 52 semanas que produz
-células, níveis, totais semanais, acumulados e rótulos mensais sem chamadas de
-rede ou acesso ao DOM. O componente apenas renderiza esse contrato e mantém a
-agregação selecionada localmente.
+`ProfileView.tsx` renderiza o conteúdo de Perfil dentro de
+`Configurações > Perfil`. O controller possui separadamente identidade
+carregada, estado de leitura e erro; o coordenador de perfil coalesce requisições
+e invalida por revisão/identidade da sessão. `profileActivity.ts` é uma projeção
+pura de 52 semanas que produz células, níveis, totais semanais, acumulados e
+rótulos mensais sem chamadas de rede ou acesso ao DOM. O componente apenas
+renderiza esse contrato e mantém a agregação selecionada localmente.
 
 Deltas de texto e de comando atravessam `streamDeltas.ts`: o primeiro fragmento
 de cada alvo é aplicado imediatamente e os seguintes são coalescidos por frame.
@@ -319,12 +358,21 @@ histórico e fila de revisão, mas não é proprietária da agenda.
   `chatgpt-oauth-v2`, no Windows Credential Manager;
 - projetos conhecidos: schema local `codex-desktop.profile-v2.projects` no WebView;
 - tarefas fixadas: schema local `codex-desktop.profile-v2.pinned-threads` no WebView.
+- projetos fixados: schema local `codex-desktop.profile-v2.pinned-projects` no
+  WebView.
+- estado do sidebar por projeto: schema local
+  `codex-desktop.profile-v2.project-sidebar` no WebView.
+- abas do navegador interno: schema local
+  `codex-desktop.profile-v2.browser-tabs` no WebView; a chave legada
+  `codex-browser-tabs-v1` é migrada uma única vez para o schema fechado e
+  removida após a escrita confirmada.
 - produto, modo e últimos destinos: schema local
   `codex-desktop.profile-v2.product-flow` no WebView.
 - filas de mensagens por conversa: chaves versionadas sob
   `codex-desktop.profile-v2.message-queue.*` no WebView; não há teto local de
   quantidade e cada conversa é persistida independentemente antes de a mensagem
-  ser aceita pela fila.
+  ser aceita pela fila. A preferência de enfileiramento (`queue` | `steer`) fica
+  em `codex-desktop.profile-v2.follow-up-behavior`.
 - preferência explícita de modelo/raciocínio do Chat:
   `codex-desktop.profile-v2.chat-intelligence` no WebView; a chave não existe enquanto o
   usuário usa o padrão dinâmico do catálogo.

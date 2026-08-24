@@ -32,6 +32,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REQUEST_ATTEMPTS: usize = 8;
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+const RETRY_BACKOFF_BASE_MILLIS: u64 = 500;
+const MODEL_CATALOG_BODY_MAX_BYTES: usize = 4 * 1_048_576;
 const ORIGINATOR: &str = "codex_desktop_next";
 
 #[derive(Default)]
@@ -65,7 +67,7 @@ impl ProviderClient {
     ) -> Result<ModelCatalog, AppError> {
         let url = model_catalog_url();
         let value: super::models::ModelsWire = self
-            .get_json(session, &url, "model catalog", 4 * 1_048_576)
+            .get_json(session, &url, "model catalog", MODEL_CATALOG_BODY_MAX_BYTES)
             .await?;
         ModelCatalog::from_wire(value, maximum_models)
     }
@@ -77,50 +79,11 @@ impl ProviderClient {
         operation: &'static str,
         maximum_bytes: usize,
     ) -> Result<T, AppError> {
-        let mut last_error = None;
-        for attempt in 0..MAX_REQUEST_ATTEMPTS {
-            let request = self
-                .authorized(Method::GET, url, session)?
-                .header(ACCEPT, "application/json");
-            let response = match tokio::time::timeout(REQUEST_TIMEOUT, request.send()).await {
-                Ok(Ok(response)) => response,
-                Ok(Err(error)) if error.is_connect() || error.is_timeout() => {
-                    last_error = Some(error.to_string());
-                    if attempt + 1 < MAX_REQUEST_ATTEMPTS {
-                        retry_delay(attempt).await;
-                    }
-                    continue;
-                }
-                Ok(Err(error)) => return Err(AppError::Transport(error.to_string())),
-                Err(_) => {
-                    last_error = Some(format!("{operation} timed out"));
-                    if attempt + 1 < MAX_REQUEST_ATTEMPTS {
-                        retry_delay(attempt).await;
-                    }
-                    continue;
-                }
-            };
-            if response.status().is_server_error() && attempt + 1 < MAX_REQUEST_ATTEMPTS {
-                last_error = Some(format!("HTTP {}", response.status().as_u16()));
-                retry_delay(attempt).await;
-                continue;
-            }
-            if !response.status().is_success() {
-                let failure = decode_provider_response_failure(response).await;
-                if failure.edge_blocked {
-                    self.clear_cloudflare_cookies()?;
-                    if attempt + 1 < MAX_REQUEST_ATTEMPTS {
-                        retry_delay(attempt).await;
-                        continue;
-                    }
-                }
-                return Err(failure.error);
-            }
-            return decode_json(response, operation, maximum_bytes).await;
-        }
-        Err(AppError::Transport(last_error.unwrap_or_else(|| {
-            format!("{operation} failed without a diagnostic")
-        })))
+        self.request_with_retries(operation, maximum_bytes, || {
+            self.authorized(Method::GET, url, session)
+                .map(|request| request.header(ACCEPT, "application/json"))
+        })
+        .await
     }
 
     pub async fn post_json<B, T>(
@@ -132,16 +95,28 @@ impl ProviderClient {
         maximum_bytes: usize,
     ) -> Result<T, AppError>
     where
-        B: Serialize + ?Sized,
+        B: Serialize,
+        T: DeserializeOwned,
+    {
+        self.request_with_retries(operation, maximum_bytes, || {
+            self.authorized(Method::POST, url, session)
+                .map(|request| request.header(CONTENT_TYPE, "application/json").json(body))
+        })
+        .await
+    }
+
+    async fn request_with_retries<T>(
+        &self,
+        operation: &'static str,
+        maximum_bytes: usize,
+        build_request: impl Fn() -> Result<reqwest::RequestBuilder, AppError>,
+    ) -> Result<T, AppError>
+    where
         T: DeserializeOwned,
     {
         let mut last_error = None;
         for attempt in 0..MAX_REQUEST_ATTEMPTS {
-            let request = self
-                .authorized(Method::POST, url, session)?
-                .header(ACCEPT, "application/json")
-                .header(CONTENT_TYPE, "application/json")
-                .json(body);
+            let request = build_request()?;
             let response = match tokio::time::timeout(REQUEST_TIMEOUT, request.send()).await {
                 Ok(Ok(response)) => response,
                 Ok(Err(error)) if error.is_connect() || error.is_timeout() => {
@@ -368,7 +343,8 @@ async fn read_limited(response: Response, maximum_bytes: usize) -> Result<Vec<u8
 async fn retry_delay(attempt: usize) {
     let exponent = u32::try_from(attempt).unwrap_or(u32::MAX).min(16);
     let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
-    let delay = Duration::from_millis(500u64.saturating_mul(multiplier)).min(MAX_RETRY_DELAY);
+    let delay = Duration::from_millis(RETRY_BACKOFF_BASE_MILLIS.saturating_mul(multiplier))
+        .min(MAX_RETRY_DELAY);
     tokio::time::sleep(delay).await;
 }
 

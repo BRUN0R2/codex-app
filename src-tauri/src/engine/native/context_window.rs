@@ -3,7 +3,9 @@ use std::io::{self, Write};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::provider::{ResponseContent, ResponseItem};
+use super::provider::{
+    FunctionCallOutputContent, FunctionCallOutputPayload, ResponseContent, ResponseItem,
+};
 use super::text::truncate_utf8;
 use crate::engine::{ModelContextWindow, TokenUsage};
 
@@ -97,7 +99,7 @@ pub(super) fn prepare_compaction_history(
         let replacement = match &prepared[index] {
             ResponseItem::FunctionCallOutput { call_id, .. } => ResponseItem::FunctionCallOutput {
                 call_id: call_id.clone(),
-                output: COMPACTION_OUTPUT_TRUNCATION.into(),
+                output: FunctionCallOutputPayload::text(COMPACTION_OUTPUT_TRUNCATION),
             },
             ResponseItem::CustomToolCallOutput { call_id, .. } => {
                 ResponseItem::CustomToolCallOutput {
@@ -333,24 +335,35 @@ fn estimate_encrypted_payload_bytes(encoded_len: usize) -> u64 {
 }
 
 fn image_estimate_adjustment(item: &ResponseItem) -> (u64, u64) {
-    let ResponseItem::Message { content, .. } = item else {
-        return (0, 0);
+    let mut adjustment = (0_u64, 0_u64);
+    let mut add_image = |image_url: &str| {
+        if let Some(payload) = inline_image_payload_len(image_url) {
+            adjustment.0 = adjustment.0.saturating_add(payload);
+            adjustment.1 = adjustment
+                .1
+                .saturating_add(RESIZED_IMAGE_TOKEN_ESTIMATE.saturating_mul(BYTES_PER_TOKEN));
+        }
     };
-    content
-        .iter()
-        .filter_map(|part| match part {
-            ResponseContent::InputImage { image_url, .. } => inline_image_payload_len(image_url),
-            ResponseContent::InputText { .. }
-            | ResponseContent::OutputText { .. }
-            | ResponseContent::Refusal { .. } => None,
-        })
-        .fold((0_u64, 0_u64), |(payloads, estimates), payload| {
-            (
-                payloads.saturating_add(payload),
-                estimates
-                    .saturating_add(RESIZED_IMAGE_TOKEN_ESTIMATE.saturating_mul(BYTES_PER_TOKEN)),
-            )
-        })
+    match item {
+        ResponseItem::Message { content, .. } => {
+            for part in content {
+                if let ResponseContent::InputImage { image_url, .. } = part {
+                    add_image(image_url);
+                }
+            }
+        }
+        ResponseItem::FunctionCallOutput { output, .. } => {
+            if let Some(content) = output.content() {
+                for part in content {
+                    if let FunctionCallOutputContent::InputImage { image_url, .. } = part {
+                        add_image(image_url);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    adjustment
 }
 
 fn inline_image_payload_len(image_url: &str) -> Option<u64> {
@@ -495,7 +508,7 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "call-1".into(),
-                output: "x".repeat(400),
+                output: FunctionCallOutputPayload::text("x".repeat(400)),
             },
         ];
         let snapshot = ContextUsageSnapshot {
@@ -528,6 +541,20 @@ mod tests {
     }
 
     #[test]
+    fn function_output_image_uses_the_same_fixed_estimate() {
+        let item = ResponseItem::function_output_with_image(
+            "call-1".into(),
+            "browser snapshot".into(),
+            format!("data:image/jpeg;base64,{}", "a".repeat(400_000)),
+            None,
+        );
+        let estimate = estimate_item_tokens(&item);
+
+        assert!(estimate >= RESIZED_IMAGE_TOKEN_ESTIMATE);
+        assert!(estimate < 1_300);
+    }
+
+    #[test]
     fn encrypted_checkpoint_has_a_bounded_visible_estimate() {
         let item = ResponseItem::Compaction {
             id: Some("compact-1".into()),
@@ -544,7 +571,7 @@ mod tests {
             text("user", "keep"),
             ResponseItem::FunctionCallOutput {
                 call_id: "call-1".into(),
-                output: "x".repeat(4_000),
+                output: FunctionCallOutputPayload::text("x".repeat(4_000)),
             },
         ];
         let prepared = prepare_compaction_history("", &history, &[], Some(200));
@@ -552,7 +579,11 @@ mod tests {
         assert!(matches!(
             prepared.last(),
             Some(ResponseItem::FunctionCallOutput { output, .. })
-                if output == "Output exceeded the available model context and was truncated"
+                if matches!(
+                    output,
+                    FunctionCallOutputPayload::Text(text)
+                        if text == "Output exceeded the available model context and was truncated"
+                )
         ));
         assert_ne!(
             serde_json::to_string(&history).expect("original history should encode"),
@@ -565,7 +596,7 @@ mod tests {
         let history = vec![
             ResponseItem::FunctionCallOutput {
                 call_id: "call-1".into(),
-                output: "x".repeat(4_000),
+                output: FunctionCallOutputPayload::text("x".repeat(4_000)),
             },
             text("user", "newest"),
         ];
@@ -574,7 +605,11 @@ mod tests {
         assert!(matches!(
             prepared.first(),
             Some(ResponseItem::FunctionCallOutput { output, .. })
-                if output == "Output exceeded the available model context and was truncated"
+                if matches!(
+                    output,
+                    FunctionCallOutputPayload::Text(text)
+                        if text == "Output exceeded the available model context and was truncated"
+                )
         ));
         assert_eq!(
             serde_json::to_value(prepared.last()).expect("prepared item should encode"),

@@ -29,6 +29,11 @@ const DAY_MILLISECONDS = 86_400_000;
 const DAYS_PER_WEEK = 7;
 const WEEK_COUNT = 52;
 const CELL_COUNT = WEEK_COUNT * DAYS_PER_WEEK;
+const LEVEL_HIGH_RATIO = 3 / 4;
+const LEVEL_MEDIUM_RATIO = 1 / 2;
+const LEVEL_LOW_RATIO = 1 / 4;
+const MONTH_LABEL_MINIMUM_DAY = 7;
+const MONTH_GAP_COLUMNS = 4;
 
 export function projectProfileActivity(
   usage: readonly AccountProfileDailyUsage[],
@@ -101,13 +106,14 @@ function dailyLevels(values: readonly number[]): readonly ProfileActivityLevel[]
     if (value <= 0 || maximum <= 0) {
       return 0;
     }
-    if (value * 4 > maximum * 3) {
+    const ratio = value / maximum;
+    if (ratio > LEVEL_HIGH_RATIO) {
       return 4;
     }
-    if (value * 2 > maximum) {
+    if (ratio > LEVEL_MEDIUM_RATIO) {
       return 3;
     }
-    if (value * 4 > maximum) {
+    if (ratio > LEVEL_LOW_RATIO) {
       return 2;
     }
     return 1;
@@ -135,7 +141,7 @@ function profileActivityMonthLabels(start: number): readonly ProfileActivityMont
   for (let column = 0; column < WEEK_COUNT; column += 1) {
     const timestamp = start + column * DAYS_PER_WEEK * DAY_MILLISECONDS;
     const date = new Date(timestamp);
-    if (date.getUTCDate() > 7 || column < nextColumn) {
+    if (date.getUTCDate() > MONTH_LABEL_MINIMUM_DAY || column < nextColumn) {
       continue;
     }
     labels.push({
@@ -143,7 +149,7 @@ function profileActivityMonthLabels(start: number): readonly ProfileActivityMont
       date: toIsoDate(timestamp),
       label: formatter.format(date).replace(/\.$/u, ""),
     });
-    nextColumn = column + 4;
+    nextColumn = column + MONTH_GAP_COLUMNS;
   }
   return labels;
 }

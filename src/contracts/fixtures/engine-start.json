@@ -15,7 +15,7 @@
       "scheduledAutomations"
     ]
   },
-  "schemaVersion": 18,
+  "schemaVersion": 19,
   "diagnosticLogPath": "C:\\appdata\\logs\\runtime.jsonl",
   "config": {
     "config": {

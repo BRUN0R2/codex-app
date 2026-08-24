@@ -18,6 +18,7 @@ pub enum EngineStorage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EngineCapability {
+    BrowserUse,
     ChatGptOauth,
     LocalThreads,
     ModelStreaming,
@@ -285,6 +286,8 @@ pub struct EngineServerRequest {
 pub enum ServerRequest {
     #[serde(rename = "approval.command")]
     ApproveCommand(CommandApprovalRequest),
+    #[serde(rename = "approval.browserOrigin")]
+    ApproveBrowserOrigin(BrowserOriginApprovalRequest),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -295,6 +298,16 @@ pub struct CommandApprovalRequest {
     pub item_id: String,
     pub command: String,
     pub cwd: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserOriginApprovalRequest {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub origin: String,
     pub reason: String,
 }
 

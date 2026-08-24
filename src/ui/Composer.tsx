@@ -69,6 +69,10 @@ import { Icon } from "./Icon";
 import { ImagePreview } from "./ImagePreview";
 import { modelContextWindowPreference, resolveModelContextWindow } from "./modelContextWindow";
 
+const COMPOSER_MESSAGE_MAXIMUM_CHARACTERS: number = 1_048_576;
+const COMPOSER_ATTACHMENT_MAXIMUM_COUNT: number = 12;
+const COMPOSER_TEXTAREA_MAXIMUM_HEIGHT_PX: number = 220;
+
 export interface ComposerProps {
   readonly controller: ComposerController;
   readonly draftRequest: ComposerDraftRequest | null;
@@ -515,7 +519,7 @@ export function Composer(props: ComposerProps) {
         </Show>
         <textarea
           aria-label={composerPlaceholder(mode())}
-          maxlength={1_048_576}
+          maxlength={COMPOSER_MESSAGE_MAXIMUM_CHARACTERS}
           onInput={(event) => {
             setText(event.currentTarget.value);
             resizeTextArea(event.currentTarget);
@@ -563,7 +567,7 @@ export function Composer(props: ComposerProps) {
                 >
                   <header>Adicionar</header>
                   <button
-                    disabled={attachments().length >= 12}
+                    disabled={attachments().length >= COMPOSER_ATTACHMENT_MAXIMUM_COUNT}
                     onClick={() => {
                       setAddMenuOpen(false);
                       void attachFiles();
@@ -1140,7 +1144,7 @@ function mergeAttachments(
       paths.add(key);
     }
   }
-  if (result.length > 12) {
+  if (result.length > COMPOSER_ATTACHMENT_MAXIMUM_COUNT) {
     throw new Error("Uma mensagem aceita no máximo 12 anexos.");
   }
   return result;
@@ -1155,13 +1159,13 @@ function resizeTextArea(element: HTMLTextAreaElement | undefined): void {
     return;
   }
   element.style.height = "auto";
-  element.style.height = `${Math.min(element.scrollHeight, 220)}px`;
+  element.style.height = `${Math.min(element.scrollHeight, COMPOSER_TEXTAREA_MAXIMUM_HEIGHT_PX)}px`;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   const chunks: string[] = [];
-  const chunkSize = 32_768;
+  const chunkSize: number = 32_768;
   for (let offset = 0; offset < bytes.length; offset += chunkSize) {
     const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
     chunks.push(String.fromCharCode(...chunk));

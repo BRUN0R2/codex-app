@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,9 +14,24 @@ use crate::error::AppError;
 
 type CacheEntry = OnceCell<Result<CachedReadOutput, AppError>>;
 
-#[derive(Debug, Default)]
+const READ_CACHE_MAXIMUM_ENTRIES: usize = 64;
+const READ_CACHE_MAXIMUM_BYTES: usize = 64 * 1_048_576;
+
+#[derive(Default)]
 pub(in crate::engine::native) struct ReadToolCache {
-    entries: Mutex<HashMap<ReadToolCacheKey, Arc<CacheEntry>>>,
+    state: Mutex<ReadCacheState>,
+}
+
+#[derive(Default)]
+struct ReadCacheState {
+    slots: HashMap<ReadToolCacheKey, ReadCacheSlot>,
+    insertion_order: VecDeque<ReadToolCacheKey>,
+    cached_bytes: usize,
+}
+
+struct ReadCacheSlot {
+    entry: Arc<CacheEntry>,
+    accounted: bool,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -72,14 +87,60 @@ impl ReadToolCache {
         Fut: Future<Output = Result<CachedReadOutput, AppError>>,
     {
         let entry = {
-            let mut entries = self.entries.lock().await;
-            Arc::clone(
-                entries
-                    .entry(key)
-                    .or_insert_with(|| Arc::new(OnceCell::new())),
-            )
+            let mut state = self.state.lock().await;
+            match state.slots.get(&key) {
+                Some(slot) => Arc::clone(&slot.entry),
+                None => {
+                    let slot = ReadCacheSlot {
+                        entry: Arc::new(OnceCell::new()),
+                        accounted: false,
+                    };
+                    let entry = Arc::clone(&slot.entry);
+                    state.slots.insert(key.clone(), slot);
+                    state.insertion_order.push_back(key.clone());
+                    entry
+                }
+            }
         };
-        entry.get_or_init(execute).await.clone()
+        let result = entry.get_or_init(execute).await.clone();
+        self.account_completed_entry(&key, &result).await;
+        result
+    }
+
+    async fn account_completed_entry(
+        &self,
+        key: &ReadToolCacheKey,
+        result: &Result<CachedReadOutput, AppError>,
+    ) {
+        let Ok(output) = result else {
+            return;
+        };
+        let mut state = self.state.lock().await;
+        let Some(slot) = state.slots.get_mut(key) else {
+            return;
+        };
+        if slot.accounted {
+            return;
+        }
+        slot.accounted = true;
+        state.cached_bytes = state.cached_bytes.saturating_add(output.byte_len());
+        while state.slots.len() > READ_CACHE_MAXIMUM_ENTRIES
+            || state.cached_bytes > READ_CACHE_MAXIMUM_BYTES
+        {
+            let Some(oldest) = state.insertion_order.pop_front() else {
+                break;
+            };
+            if oldest == *key {
+                state.insertion_order.push_front(oldest);
+                break;
+            }
+            let Some(evicted) = state.slots.remove(&oldest) else {
+                continue;
+            };
+            if let Some(Ok(cached)) = evicted.entry.get() {
+                state.cached_bytes = state.cached_bytes.saturating_sub(cached.byte_len());
+            }
+        }
     }
 }
 
@@ -128,6 +189,7 @@ impl ReadToolCacheKey {
                 },
             },
             ToolOperation::ApplyPatch(_)
+            | ToolOperation::Browser(_)
             | ToolOperation::EditFile(_)
             | ToolOperation::WriteFile(_)
             | ToolOperation::ExecCommand(_)
@@ -143,6 +205,12 @@ impl ReadToolCacheKey {
 }
 
 impl CachedReadOutput {
+    fn byte_len(&self) -> usize {
+        match self {
+            Self::Text { output, .. } | Self::OutputPage(output) => output.len(),
+        }
+    }
+
     pub(super) fn text(output: String, kind: TextOutputKind) -> Self {
         Self::Text {
             output: Arc::from(output),
@@ -175,7 +243,7 @@ mod tests {
 
     use futures_util::future::join_all;
 
-    use super::{CachedReadOutput, ReadToolCache, ReadToolCacheKey};
+    use super::{CachedReadOutput, READ_CACHE_MAXIMUM_ENTRIES, ReadToolCache, ReadToolCacheKey};
     use crate::engine::native::output_compaction::TextOutputKind;
     use crate::engine::native::tools::ToolRegistry;
     use crate::error::AppError;
@@ -383,5 +451,72 @@ mod tests {
                 operation: "text search"
             })
         )));
+    }
+
+    #[tokio::test]
+    async fn eviction_enforces_the_maximum_entry_count() {
+        let registry = ToolRegistry;
+        let cache = ReadToolCache::default();
+        let executions = AtomicUsize::new(0);
+        let mut keys = Vec::new();
+        for index in 0..=READ_CACHE_MAXIMUM_ENTRIES {
+            let prepared = registry
+                .prepare(
+                    format!("read-eviction-{index}"),
+                    "read_file",
+                    &format!(r#"{{"path":"eviction-{index}.rs","start_line":1,"end_line":20}}"#),
+                )
+                .expect("cached read should prepare");
+            keys.push(
+                ReadToolCacheKey::from_operation(
+                    Path::new("C:\\workspace"),
+                    "thread-eviction",
+                    &prepared.operation,
+                )
+                .expect("read should be cacheable"),
+            );
+        }
+
+        for key in &keys {
+            cache
+                .get_or_execute(key.clone(), || async {
+                    executions.fetch_add(1, Ordering::Relaxed);
+                    Ok(CachedReadOutput::text(
+                        "evictable result".into(),
+                        TextOutputKind::ReadFile,
+                    ))
+                })
+                .await
+                .expect("each seeded read should complete");
+        }
+        assert_eq!(executions.load(Ordering::Relaxed), keys.len());
+
+        cache
+            .get_or_execute(keys[0].clone(), || async {
+                executions.fetch_add(1, Ordering::Relaxed);
+                Ok(CachedReadOutput::text(
+                    "re-executed result".into(),
+                    TextOutputKind::ReadFile,
+                ))
+            })
+            .await
+            .expect("the oldest read should have been evicted");
+        assert_eq!(executions.load(Ordering::Relaxed), keys.len() + 1);
+
+        let newest = keys
+            .last()
+            .cloned()
+            .expect("the seeded cache should contain entries");
+        cache
+            .get_or_execute(newest, || async {
+                executions.fetch_add(1, Ordering::Relaxed);
+                Ok(CachedReadOutput::text(
+                    "should not execute".into(),
+                    TextOutputKind::ReadFile,
+                ))
+            })
+            .await
+            .expect("the newest read should remain cached");
+        assert_eq!(executions.load(Ordering::Relaxed), keys.len() + 1);
     }
 }

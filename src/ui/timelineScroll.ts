@@ -4,6 +4,8 @@ const SCROLLBAR_OVERFLOW_EPSILON_PX = 2;
 const TIMELINE_PROGRAMMATIC_SCROLL_EPSILON_PX = 1;
 const TIMELINE_WHEEL_LINE_PX = 16;
 const TIMELINE_WHEEL_TRANSFER_EPSILON_PX = 0.5;
+const TIMELINE_WHEEL_DELTA_MODE_LINE = 1;
+const TIMELINE_WHEEL_DELTA_MODE_PAGE = 2;
 
 export type TimelineProgrammaticScrollKind = "instant" | "smooth";
 
@@ -146,9 +148,9 @@ export function normalizeTimelineWheelDelta(input: {
     throw new Error("Timeline wheel viewport height must be a non-negative finite number.");
   }
   switch (input.deltaMode) {
-    case 1:
+    case TIMELINE_WHEEL_DELTA_MODE_LINE:
       return input.deltaY * TIMELINE_WHEEL_LINE_PX;
-    case 2:
+    case TIMELINE_WHEEL_DELTA_MODE_PAGE:
       return input.deltaY * input.viewportHeight;
     default:
       return input.deltaY;

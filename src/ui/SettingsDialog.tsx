@@ -27,12 +27,15 @@ import {
   readApplicationPreferences,
   updateApplicationPreferences,
 } from "../infrastructure/codexClient";
-import { isBrowserPreview, isDesktopRuntime } from "../platform/DesktopRuntime";
+import { isBrowserPreview, isDesktopRuntime } from "../platform/desktopRuntime";
 import type { AppController } from "../state/appController";
 
 type SettingsDialogController = Pick<
   AppController,
   | "account"
+  | "accountProfile"
+  | "accountProfileError"
+  | "accountProfileLoading"
   | "archivedThreads"
   | "archivedThreadsLoaded"
   | "archivedThreadsLoading"
@@ -59,6 +62,7 @@ type SettingsDialogController = Pick<
   | "autoTopUpError"
   | "autoTopUpLoading"
   | "refreshAutoTopUpSettings"
+  | "refreshAccountProfile"
   | "enableAutoTopUp"
   | "updateAutoTopUp"
   | "disableAutoTopUp"
@@ -68,7 +72,6 @@ type SettingsDialogController = Pick<
   | "updateSetting"
 >;
 
-import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { accountPlanLabel } from "./accountPresentation";
 import {
   DEFAULT_APPLICATION_PREFERENCES,
@@ -82,6 +85,7 @@ import {
   modelSupportsMaximumContext,
 } from "./modelContextWindow";
 import { OUTPUT_DETAIL_OPTIONS, outputDetailLabel } from "./outputDetail";
+import { ProfileView } from "./ProfileView";
 import { threadTitle } from "./Sidebar";
 import { SurfaceScrollbar } from "./SurfaceScrollbar";
 import { presentUsageLimits, type UsageLimitEntry, usagePercentLabel } from "./usagePresentation";
@@ -126,6 +130,11 @@ const SETTINGS_NAVIGATION: readonly SettingsNavigationSection[] = [
     items: [{ icon: "archive", label: "Chats arquivados", page: "archived" }],
   },
 ];
+
+const AUTO_TOP_UP_DEFAULT_RECHARGE_TARGET: string = "250";
+const AUTO_TOP_UP_DEFAULT_RECHARGE_THRESHOLD: string = "125";
+const DEVELOPER_INSTRUCTIONS_MAXIMUM_BYTES: number = 262_144;
+const OUTPUT_DETAIL_MENU_ESTIMATED_HEIGHT_PX: number = 224;
 
 export function SettingsDialog(props: {
   readonly controller: SettingsDialogController;
@@ -661,7 +670,7 @@ function PersonalizationSettings(props: {
           <small>Até 256 KiB, armazenadas localmente no SQLite do app.</small>
         </span>
         <textarea
-          maxlength={262_144}
+          maxlength={DEVELOPER_INSTRUCTIONS_MAXIMUM_BYTES}
           onInput={(event) => props.setDeveloperInstructions(event.currentTarget.value)}
           placeholder="Ex.: prefira APIs pequenas e explique decisões arquiteturais importantes."
           rows={9}
@@ -727,8 +736,10 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
   const snapshot = () => rateLimits()?.rateLimits;
   const autoTopUp = () => props.controller.autoTopUpSettings();
   const [autoTopUpEditing, setAutoTopUpEditing] = createSignal(false);
-  const [rechargeThreshold, setRechargeThreshold] = createSignal("125");
-  const [rechargeTarget, setRechargeTarget] = createSignal("250");
+  const [rechargeThreshold, setRechargeThreshold] = createSignal(
+    AUTO_TOP_UP_DEFAULT_RECHARGE_THRESHOLD,
+  );
+  const [rechargeTarget, setRechargeTarget] = createSignal(AUTO_TOP_UP_DEFAULT_RECHARGE_TARGET);
   const [rechargeMonthlyLimit, setRechargeMonthlyLimit] = createSignal("");
   const [confirmReset, setConfirmReset] = createSignal<{
     readonly key: string;
@@ -748,8 +759,8 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
     if (settings === null || autoTopUpEditing()) {
       return;
     }
-    setRechargeThreshold(settings.rechargeThreshold ?? "125");
-    setRechargeTarget(settings.rechargeTarget ?? "250");
+    setRechargeThreshold(settings.rechargeThreshold ?? AUTO_TOP_UP_DEFAULT_RECHARGE_THRESHOLD);
+    setRechargeTarget(settings.rechargeTarget ?? AUTO_TOP_UP_DEFAULT_RECHARGE_TARGET);
     setRechargeMonthlyLimit(settings.rechargeMonthlyLimit ?? "");
   });
 
@@ -1218,21 +1229,10 @@ function creditsLabel(credits: CreditsSnapshot): string {
 }
 
 function ProfileSettings(props: { readonly controller: SettingsDialogController }) {
-  const account = () => props.controller.account()?.account;
   return (
-    <div class="settings-page">
+    <div class="settings-page profile-settings-page">
       <SettingsHeading title="Perfil" description="Conta ChatGPT usada pelo Codex App." />
-      <section class="account-settings-card">
-        <AccountAvatar account={account()} size="settings" />
-        <div>
-          <strong>{accountDisplayName(account())}</strong>
-          <Show when={account()?.email}>{(email) => <small>{email()}</small>}</Show>
-          <small>Plano {account()?.planType ?? "não informado"}</small>
-        </div>
-        <button class="danger-button" onClick={() => void props.controller.logout()} type="button">
-          <Icon name="logout" size={15} /> Sair
-        </button>
-      </section>
+      <ProfileView controller={props.controller} mode="settings" />
     </div>
   );
 }
@@ -1389,9 +1389,8 @@ function OutputDetailSelect(props: {
     if (bounds === undefined) {
       return false;
     }
-    const estimatedMenuHeight = 224;
     const availableBelow = window.innerHeight - bounds.bottom;
-    return availableBelow < estimatedMenuHeight && bounds.top > availableBelow;
+    return availableBelow < OUTPUT_DETAIL_MENU_ESTIMATED_HEIGHT_PX && bounds.top > availableBelow;
   }
 
   function openMenu(focusSelectedOption: boolean): void {

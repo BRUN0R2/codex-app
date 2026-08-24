@@ -1,3 +1,4 @@
+import { touchMostRecentEntry } from "./recentlyUsedMap";
 import { VariableSizeVirtualizer } from "./variableSizeVirtualizer";
 
 export interface ActivityVirtualizerActivation {
@@ -60,15 +61,10 @@ export class ActivityVirtualizerStore {
   }
 
   #touch(groupKey: string, record: ActivityVirtualizerRecord): void {
-    this.#records.delete(groupKey);
-    this.#records.set(groupKey, record);
-    while (this.#records.size > this.#capacity) {
-      const oldestGroupKey = this.#records.keys().next().value;
-      if (oldestGroupKey === undefined) {
-        throw new Error("Activity virtualizer cache lost its eviction candidate.");
-      }
-      this.#records.delete(oldestGroupKey);
+    if (!this.#records.has(groupKey)) {
+      this.#records.set(groupKey, record);
     }
+    touchMostRecentEntry(this.#records, groupKey, this.#capacity);
   }
 }
 

@@ -9,6 +9,8 @@ import { MARKDOWN_SYNTAX_LIMITS, tokenizeSyntaxBlock } from "../src/ui/syntax/to
 
 const SAMPLE_COUNT = 7;
 const CORPUS_ITERATIONS = 500;
+const CREATED_FILE_LINE_COUNT = 256;
+const OVERSIZED_DIFF_LINE_COUNT = CREATED_FILE_LINE_COUNT + 1;
 const REPRESENTATIVE_CASES: readonly {
   readonly code: string;
   readonly language: SyntaxLanguage;
@@ -38,6 +40,13 @@ const REPRESENTATIVE_CASES: readonly {
   },
   { language: "yaml", code: "service:\n  enabled: true\n  image: codex:latest" },
 ];
+
+const RUST_REPRESENTATIVE_CASE = REPRESENTATIVE_CASES.find(
+  (sample) => sample.language === "rust",
+);
+if (!RUST_REPRESENTATIVE_CASE) {
+  throw new Error("The representative case set must include a Rust sample.");
+}
 
 const corpusMeasurement = measure(() => {
   let checksum = 0;
@@ -69,7 +78,7 @@ const longRustMeasurement = measure(() => {
 const htmlMeasurement = measure(() => {
   let checksum = 0;
   for (let iteration = 0; iteration < 1_000; iteration += 1) {
-    checksum += highlightCodeToHtml(REPRESENTATIVE_CASES[13]?.code ?? "", "rust").length;
+    checksum += highlightCodeToHtml(RUST_REPRESENTATIVE_CASE.code, "rust").length;
   }
   return checksum;
 });
@@ -101,8 +110,8 @@ const warmDiffMeasurement = measure(() => {
 });
 
 const oversizedDiff = createDiffDocument(
-  `@@ -1,4097 +1,4097 @@\n${Array.from(
-    { length: 4_097 },
+  `@@ -1,${OVERSIZED_DIFF_LINE_COUNT} +1,${OVERSIZED_DIFF_LINE_COUNT} @@\n${Array.from(
+    { length: OVERSIZED_DIFF_LINE_COUNT },
     (_, index) => ` const value_${index} = ${index};`,
   ).join("\n")}`,
 );
@@ -111,32 +120,36 @@ const fallbackMeasurement = measure(() => {
   return highlighter.render(oversizedDiff, "oversized.ts", 1) === null ? 1 : 0;
 });
 const createdFileDiff = createDiffDocument(
-  `@@ -0,0 +1,338 @@\n${Array.from(
-    { length: 338 },
+  `@@ -0,0 +1,${CREATED_FILE_LINE_COUNT} @@\n${Array.from(
+    { length: CREATED_FILE_LINE_COUNT },
     (_, index) => `+const VALUE_${index}: usize = ${index} * 1_024;`,
   ).join("\n")}`,
 );
 const createdFileMeasurement = measure(() => {
   const highlighter = new DiffSyntaxHighlighter();
   let checksum = 0;
-  for (let sourceIndex = 1; sourceIndex <= 338; sourceIndex += 1) {
+  for (let sourceIndex = 1; sourceIndex <= CREATED_FILE_LINE_COUNT; sourceIndex += 1) {
     checksum += highlighter.render(createdFileDiff, "semantic.rs", sourceIndex)?.length ?? 0;
   }
   return checksum;
 });
 
 const malicious = highlightCodeToHtml("<script>alert('xss')</script>", "future-language");
-if (
-  corpusMeasurement.value <= 0 ||
-  longRustMeasurement.value <= 0 ||
-  htmlMeasurement.value <= 0 ||
-  coldDiffMeasurement.value <= 0 ||
-  warmDiffMeasurement.value <= 0 ||
-  createdFileMeasurement.value <= 0 ||
-  fallbackMeasurement.value !== 1 ||
-  malicious.includes("<script>")
-) {
-  throw new Error("Syntax benchmark violated a correctness or security invariant.");
+const invariantChecks = {
+  corpusHighlighted: corpusMeasurement.value > 0,
+  createdFileHighlighted: createdFileMeasurement.value > 0,
+  diffColdPathHighlighted: coldDiffMeasurement.value > 0,
+  diffWarmPathHighlighted: warmDiffMeasurement.value > 0,
+  htmlRendered: htmlMeasurement.value > 0,
+  longRustHighlighted: longRustMeasurement.value > 0,
+  maliciousHtmlEscaped: !malicious.includes("<script>"),
+  oversizedDiffFellBack: fallbackMeasurement.value === 1,
+};
+const violatedInvariants = Object.entries(invariantChecks)
+  .filter(([, passed]) => !passed)
+  .map(([name]) => name);
+if (violatedInvariants.length > 0) {
+  throw new Error(`Syntax benchmark violated invariants: ${violatedInvariants.join(", ")}.`);
 }
 if (
   corpusMeasurement.medianMilliseconds > 250 ||
@@ -164,7 +177,7 @@ process.stdout.write(
       visibleRows: range.end - range.start,
       coldDiffMedianMs: coldDiffMeasurement.medianMilliseconds,
       warmDiffMedianMs: warmDiffMeasurement.medianMilliseconds,
-      createdFileLines: 338,
+      createdFileLines: CREATED_FILE_LINE_COUNT,
       createdFileMedianMs: createdFileMeasurement.medianMilliseconds,
       oversizedHunkFallbackMedianMs: fallbackMeasurement.medianMilliseconds,
     },

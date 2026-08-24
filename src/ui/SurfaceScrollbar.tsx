@@ -1,5 +1,10 @@
 import { createSignal, onCleanup, onMount } from "solid-js";
 
+import {
+  resolveScrollbarPageScrollAmount,
+  SCROLLBAR_ARROW_SCROLL_STEP_PX,
+  sameScrollbarMetrics,
+} from "./scrollCommands";
 import { calculateTimelineScrollbar, type ScrollbarMetrics } from "./timelineScroll";
 
 const EMPTY_SCROLLBAR: ScrollbarMetrics = {
@@ -125,13 +130,13 @@ export function SurfaceScrollbar(props: {
     if (scrollElement === undefined) {
       return;
     }
-    const page = Math.max(120, scrollElement.clientHeight * 0.8);
+    const page = resolveScrollbarPageScrollAmount(scrollElement.clientHeight);
     switch (event.key) {
       case "ArrowDown":
-        scrollBy(64);
+        scrollBy(SCROLLBAR_ARROW_SCROLL_STEP_PX);
         break;
       case "ArrowUp":
-        scrollBy(-64);
+        scrollBy(-SCROLLBAR_ARROW_SCROLL_STEP_PX);
         break;
       case "End":
         scrollElement.scrollTop = scrollbar().maximumScroll;
@@ -190,7 +195,7 @@ export function SurfaceScrollbar(props: {
         aria-label={`Rolar ${props.label} para cima`}
         class="surface-scrollbar-arrow up"
         disabled={!scrollbar().scrollable || scrollbar().thumbTop <= 0.5}
-        onClick={() => scrollBy(-64)}
+        onClick={() => scrollBy(-SCROLLBAR_ARROW_SCROLL_STEP_PX)}
         title="Rolar para cima"
         type="button"
       >
@@ -231,21 +236,12 @@ export function SurfaceScrollbar(props: {
           !scrollbar().scrollable ||
           scrollbar().thumbTop + scrollbar().thumbHeight >= (trackElement?.clientHeight ?? 0) - 0.5
         }
-        onClick={() => scrollBy(64)}
+        onClick={() => scrollBy(SCROLLBAR_ARROW_SCROLL_STEP_PX)}
         title="Rolar para baixo"
         type="button"
       >
         <span aria-hidden="true" class="surface-scrollbar-arrow-glyph" />
       </button>
     </div>
-  );
-}
-
-function sameScrollbarMetrics(left: ScrollbarMetrics, right: ScrollbarMetrics): boolean {
-  return (
-    left.maximumScroll === right.maximumScroll &&
-    left.scrollable === right.scrollable &&
-    left.thumbHeight === right.thumbHeight &&
-    left.thumbTop === right.thumbTop
   );
 }

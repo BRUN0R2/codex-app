@@ -8,6 +8,10 @@ pub const MAX_TIMEZONE_BYTES: usize = 128;
 pub const MAX_TURN_TEXT_BYTES: usize = 1_048_576;
 pub const MAX_TURN_ATTACHMENTS: usize = 12;
 pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 4_096;
+pub const DECIMAL_CURSOR_MAXIMUM_BYTES: usize = 20;
+pub const THREAD_HISTORY_CURSOR_MAXIMUM_BYTES: usize = 1_024;
+pub const TIMEZONE_OFFSET_MINIMUM: i32 = -840;
+pub const TIMEZONE_OFFSET_MAXIMUM: i32 = 840;
 
 /// Single semantic rule for every engine identifier: non-blank, bounded and
 /// free of control characters.
@@ -15,6 +19,50 @@ pub fn identifier_is_valid(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= MAX_IDENTIFIER_BYTES
         && !value.chars().any(char::is_control)
+}
+
+pub fn validate_decimal_cursor(label: &str, cursor: Option<&str>) -> CommandResult<()> {
+    let Some(cursor) = cursor else {
+        return Ok(());
+    };
+    if cursor.is_empty()
+        || cursor.len() > DECIMAL_CURSOR_MAXIMUM_BYTES
+        || !cursor.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(AppError::Protocol(format!(
+            "{label} cursor must contain between 1 and {DECIMAL_CURSOR_MAXIMUM_BYTES} ASCII digits"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+pub fn validate_thread_history_cursor(cursor: Option<&str>) -> CommandResult<()> {
+    let Some(cursor) = cursor else {
+        return Ok(());
+    };
+    if cursor.is_empty()
+        || cursor.len() > THREAD_HISTORY_CURSOR_MAXIMUM_BYTES
+        || !cursor
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(AppError::Protocol(format!(
+            "thread history cursor must contain between 1 and {THREAD_HISTORY_CURSOR_MAXIMUM_BYTES} Base64URL characters"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+pub fn validate_timezone_offset(offset_min: i32) -> CommandResult<()> {
+    if !(TIMEZONE_OFFSET_MINIMUM..=TIMEZONE_OFFSET_MAXIMUM).contains(&offset_min) {
+        return Err(AppError::Protocol(format!(
+            "timezone offset must be between {TIMEZONE_OFFSET_MINIMUM} and {TIMEZONE_OFFSET_MAXIMUM} minutes"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 pub async fn validate_workspace(value: &str) -> CommandResult<String> {
@@ -105,7 +153,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        normalize_windows_canonical_path, validate_diagnostic_message, validate_protocol_id,
+        normalize_windows_canonical_path, validate_decimal_cursor, validate_diagnostic_message,
+        validate_protocol_id, validate_thread_history_cursor, validate_timezone_offset,
         validate_workspace,
     };
 
@@ -158,6 +207,51 @@ mod tests {
         let payload = json!({ "type": "tier", "id": "priority" });
         assert_eq!(payload["type"], "tier");
         assert_eq!(payload["id"], "priority");
+    }
+
+    #[test]
+    fn decimal_cursors_accept_only_ascii_offsets_within_the_bound() {
+        assert!(validate_decimal_cursor("thread list", None).is_ok());
+        assert!(validate_decimal_cursor("thread list", Some("42")).is_ok());
+        assert!(validate_decimal_cursor("output", Some("0")).is_ok());
+        assert!(validate_decimal_cursor("thread list", Some("")).is_err());
+        assert!(validate_decimal_cursor("thread list", Some("-1")).is_err());
+        assert!(validate_decimal_cursor("thread list", Some(" 1")).is_err());
+        assert!(validate_decimal_cursor("thread list", Some("+1")).is_err());
+        assert!(
+            validate_decimal_cursor(
+                "thread list",
+                Some(&"9".repeat(super::DECIMAL_CURSOR_MAXIMUM_BYTES + 1)),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn thread_history_cursors_accept_the_base64url_contract() {
+        let encoded_cursor = "eyJ2ZXJzaW9uIjoxLCJ0aHJlYWRJZCI6InRocmVhZC0xIn0";
+        assert!(validate_thread_history_cursor(None).is_ok());
+        assert!(validate_thread_history_cursor(Some(encoded_cursor)).is_ok());
+        assert!(validate_thread_history_cursor(Some("history_cursor-1")).is_ok());
+        assert!(validate_thread_history_cursor(Some("42")).is_ok());
+        assert!(validate_thread_history_cursor(Some("")).is_err());
+        assert!(validate_thread_history_cursor(Some("cursor=padding")).is_err());
+        assert!(validate_thread_history_cursor(Some("cursor/value")).is_err());
+        assert!(
+            validate_thread_history_cursor(Some(
+                &"a".repeat(super::THREAD_HISTORY_CURSOR_MAXIMUM_BYTES + 1),
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn timezone_offsets_stay_within_the_supported_range() {
+        assert!(validate_timezone_offset(super::TIMEZONE_OFFSET_MINIMUM).is_ok());
+        assert!(validate_timezone_offset(super::TIMEZONE_OFFSET_MAXIMUM).is_ok());
+        assert!(validate_timezone_offset(0).is_ok());
+        assert!(validate_timezone_offset(super::TIMEZONE_OFFSET_MINIMUM - 1).is_err());
+        assert!(validate_timezone_offset(super::TIMEZONE_OFFSET_MAXIMUM + 1).is_err());
     }
 
     #[test]

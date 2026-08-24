@@ -1,6 +1,7 @@
 import { createContext, useContext } from "solid-js";
 
 import type { TimelineDisclosureKey, TimelineDisclosureStore } from "./timelineDisclosure";
+import { encodeTimelineIdentitySegment } from "./timelineIdentity";
 
 export interface TimelineDisclosureBinding {
   readonly descendantContext: TimelineDisclosureContextValue;
@@ -19,19 +20,15 @@ export interface TimelineDisclosureContextValue {
 
 export const TimelineDisclosureContext = createContext<TimelineDisclosureContextValue>();
 
-function encodeTimelineDisclosureSegment(segment: string): string {
-  return `${segment.length}:${segment}|`;
-}
-
 export function timelineDisclosureNamespacePrefix(namespace: string): TimelineDisclosureKey {
-  return encodeTimelineDisclosureSegment(namespace) as TimelineDisclosureKey;
+  return encodeTimelineIdentitySegment(namespace) as TimelineDisclosureKey;
 }
 
 export function timelineDisclosureChildKey(
   parentKey: TimelineDisclosureKey,
   key: string,
 ): TimelineDisclosureKey {
-  return `${parentKey}${encodeTimelineDisclosureSegment(key)}` as TimelineDisclosureKey;
+  return `${parentKey}${encodeTimelineIdentitySegment(key)}` as TimelineDisclosureKey;
 }
 
 export function timelineDisclosureStorageKey(

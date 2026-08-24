@@ -18,6 +18,7 @@ mod stream_notifications;
 mod terminal_output;
 mod text;
 mod tools;
+mod turn_recovery;
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -59,7 +60,7 @@ use crate::engine::{
 };
 use crate::error::AppError;
 
-pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 18;
+pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 19;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTOMATION_SCHEDULER_MAX_SLEEP: Duration = Duration::from_secs(15 * 60);
@@ -239,17 +240,16 @@ impl NativeEngine {
     }
 
     /// Runs a turn body on the shared task set and finalizes its ownership record.
-    async fn spawn_turn_task<F>(&self, app: &AppHandle, turn_id: &str, task: F)
+    async fn spawn_turn_task<F>(&self, app: &AppHandle, thread_id: String, turn_id: String, task: F)
     where
         F: Future<Output = Result<RunCompletion, AppError>> + Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
         let app_handle = app.clone();
-        let background_turn_id = turn_id.to_string();
         self.inner.tasks.lock().await.spawn(async move {
             let result = task.await;
             inner
-                .finalize_turn(&app_handle, result, &background_turn_id)
+                .finalize_turn(&app_handle, result, thread_id, turn_id)
                 .await;
         });
     }
@@ -316,7 +316,19 @@ impl NativeEngine {
         match self.inner.storage.next_automation_run_at().await {
             Ok(None) => AUTOMATION_SCHEDULER_MAX_SLEEP,
             Ok(Some(next_run_at)) => {
-                let now = current_unix_timestamp().unwrap_or(next_run_at);
+                let now = match current_unix_timestamp() {
+                    Ok(now) => now,
+                    Err(error) => {
+                        self.inner.emit_diagnostic(
+                            app,
+                            DiagnosticStream::Runtime,
+                            format!(
+                                "automation scheduler could not read the system clock: {error}; treating due schedules as runnable now"
+                            ),
+                        );
+                        next_run_at
+                    }
+                };
                 if next_run_at <= now {
                     AUTOMATION_SCHEDULER_RETRY_DELAY
                 } else {
@@ -1000,6 +1012,7 @@ impl NativeEngine {
             .announce_turn_start(app, &request.thread_id, &turn, Some(user_item))
             .await?;
 
+        let task_thread_id = request.thread_id.clone();
         let run = TurnRun {
             thread_id: request.thread_id,
             turn_id: turn.id.clone(),
@@ -1013,7 +1026,7 @@ impl NativeEngine {
         };
         let task_inner = Arc::clone(&self.inner);
         let app_handle = app.clone();
-        self.spawn_turn_task(app, &turn.id, async move {
+        self.spawn_turn_task(app, task_thread_id, turn.id.clone(), async move {
             agent::run_turn(task_inner, app_handle, run).await
         })
         .await;
@@ -1067,6 +1080,7 @@ impl NativeEngine {
             .announce_turn_start(app, &request.thread_id, &turn, Some(user_item))
             .await?;
 
+        let task_thread_id = request.thread_id.clone();
         let run = chat::ChatTurnRun {
             thread_id: request.thread_id,
             turn_id: turn.id.clone(),
@@ -1080,7 +1094,7 @@ impl NativeEngine {
         debug_assert_eq!(thread.mode, ConversationMode::Chat);
         let task_inner = Arc::clone(&self.inner);
         let app_handle = app.clone();
-        self.spawn_turn_task(app, &turn.id, async move {
+        self.spawn_turn_task(app, task_thread_id, turn.id.clone(), async move {
             chat::run_turn(task_inner, app_handle, run).await
         })
         .await;
@@ -1489,22 +1503,24 @@ impl NativeEngineInner {
         &self,
         app: &AppHandle,
         result: Result<RunCompletion, AppError>,
-        turn_id: &str,
+        thread_id: String,
+        turn_id: String,
     ) {
-        let thread_id = {
+        let owned = {
             let active_turns = self.active_turns.lock().await;
-            active_turns.iter().find_map(|(thread_id, active)| {
-                (active.turn_id == turn_id).then(|| thread_id.clone())
-            })
+            active_turns
+                .get(&thread_id)
+                .is_some_and(|active| active.turn_id == turn_id)
         };
-        let Some(thread_id) = thread_id else {
+        if !owned {
             self.emit_diagnostic(
                 app,
                 DiagnosticStream::Runtime,
                 format!("completed turn `{turn_id}` lost its active ownership record"),
             );
+            self.settle_orphaned_turn(app, thread_id, &turn_id).await;
             return;
-        };
+        }
         let (status, failure) = match result {
             Ok(RunCompletion::Completed) => (TurnStatus::Completed, None),
             Ok(RunCompletion::Interrupted) => (TurnStatus::Interrupted, None),
@@ -1523,13 +1539,36 @@ impl NativeEngineInner {
             }
         };
         if let Err(error) = self
-            .settle_turn(app, thread_id, turn_id, status, failure)
+            .settle_turn(app, thread_id, &turn_id, status, failure)
             .await
         {
             self.emit_diagnostic(
                 app,
                 DiagnosticStream::Runtime,
                 format!("could not finalize turn `{turn_id}`: {error}"),
+            );
+        }
+    }
+
+    /// `settle_turn` requires the ownership record, which is gone here; the
+    /// same storage settlement runs directly so the persisted turn cannot stay
+    /// in progress without an owner.
+    async fn settle_orphaned_turn(&self, app: &AppHandle, thread_id: String, turn_id: &str) {
+        let _lifecycle_guard = self.thread_lifecycle_gate.lock().await;
+        if let Err(error) = self
+            .storage
+            .complete_turn_settlement(
+                thread_id,
+                turn_id.into(),
+                TurnStatus::Failed,
+                Some(format!("turn `{turn_id}` lost its active ownership record")),
+            )
+            .await
+        {
+            self.emit_diagnostic(
+                app,
+                DiagnosticStream::Runtime,
+                format!("could not settle the orphaned turn `{turn_id}`: {error}"),
             );
         }
     }
@@ -1804,6 +1843,7 @@ fn descriptor() -> EngineDescriptor {
         transport: EngineTransport::HttpsSse,
         storage: EngineStorage::Sqlite,
         capabilities: vec![
+            EngineCapability::BrowserUse,
             EngineCapability::ChatGptOauth,
             EngineCapability::LocalThreads,
             EngineCapability::ModelStreaming,

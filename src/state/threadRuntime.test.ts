@@ -1,16 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import type { CodexThread } from "../contracts/types";
+import type { CodexThread, ThreadTurn } from "../contracts/types";
 import {
   applyThreadRuntimeStreamDeltas,
   deleteThreadRuntime,
   isThreadActive,
   mergeRuntimeThreadItems,
+  type PersistedVisibleTurnsBySource,
   readActiveTurnPlan,
   readPersistedVisibleTurns,
   synchronizeThreadRuntime,
   updateThreadRuntime,
 } from "./threadRuntime";
+import type { VisibleThreadTurn } from "./visibleTurnSequence";
 
 describe("thread runtime reducer", () => {
   it("isolates concurrent streams by thread", () => {
@@ -81,7 +83,7 @@ describe("thread runtime reducer", () => {
 
     const turns = mergeRuntimeThreadItems(
       thread,
-      readPersistedVisibleTurns(thread),
+      readPersistedVisibleTurns(newTurnCache(), thread),
       runtimeItems,
       "turn-a",
     );
@@ -93,9 +95,13 @@ describe("thread runtime reducer", () => {
 
   it("reuses persisted turn projections until the immutable turn source changes", () => {
     const thread = threadFixture("completed");
-    const first = readPersistedVisibleTurns(thread);
-    const metadataOnly = readPersistedVisibleTurns({ ...thread, updatedAt: thread.updatedAt + 1 });
-    const changedTurns = readPersistedVisibleTurns({
+    const turnCache = newTurnCache();
+    const first = readPersistedVisibleTurns(turnCache, thread);
+    const metadataOnly = readPersistedVisibleTurns(turnCache, {
+      ...thread,
+      updatedAt: thread.updatedAt + 1,
+    });
+    const changedTurns = readPersistedVisibleTurns(turnCache, {
       ...thread,
       turns: [...thread.turns],
     });
@@ -109,7 +115,7 @@ describe("thread runtime reducer", () => {
     const thread = threadFixture("inProgress");
     const turns = mergeRuntimeThreadItems(
       thread,
-      readPersistedVisibleTurns(thread),
+      readPersistedVisibleTurns(newTurnCache(), thread),
       [
         {
           type: "plan",
@@ -201,6 +207,10 @@ describe("thread runtime reducer", () => {
     expect(result.get("thread-a")?.itemOverlays).toEqual([]);
   });
 });
+
+function newTurnCache(): PersistedVisibleTurnsBySource {
+  return new WeakMap<readonly ThreadTurn[], readonly VisibleThreadTurn[]>();
+}
 
 function threadFixture(status: "completed" | "inProgress"): CodexThread {
   return {

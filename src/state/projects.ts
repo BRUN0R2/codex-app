@@ -1,5 +1,5 @@
+import { ICON_NAMES, type IconName } from "../contracts/iconNames";
 import type { ProjectRecord } from "../contracts/types";
-import type { IconName } from "../ui/Icon";
 import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 import { normalizeProjectColor } from "./projectColor";
 
@@ -112,7 +112,8 @@ function decodeStoredProjects(value: unknown): StoredProjects {
     if (typeof name !== "string" || name.length === 0 || name.length > MAX_NAME_CHARACTERS) {
       throw new Error(`O nome do projeto ${index + 1} é inválido.`);
     }
-    const icon = typeof project.icon === "string" ? (project.icon as IconName) : undefined;
+    const icon =
+      typeof project.icon === "string" && isIconName(project.icon) ? project.icon : undefined;
     const color = project.color === undefined ? undefined : normalizeProjectColor(project.color);
     const comparison = normalizeForComparison(path);
     if (seen.has(comparison)) {
@@ -122,6 +123,10 @@ function decodeStoredProjects(value: unknown): StoredProjects {
     return { name, path, ...(icon ? { icon } : {}), ...(color ? { color } : {}) };
   });
   return { version: 1, projects };
+}
+
+function isIconName(value: string): value is IconName {
+  return ICON_NAMES.some((name) => name === value);
 }
 
 function validatePath(value: unknown): string {

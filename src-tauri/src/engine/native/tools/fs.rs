@@ -22,7 +22,10 @@ use crate::process::headless_command;
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const RIPGREP_THREADS_PER_SEARCH: &str = "2";
 const MAX_SEARCH_STDERR_BYTES: usize = 32 * 1_024;
-const MAX_SEARCH_OUTPUT_LINE_BYTES: usize = MAX_TOOL_PATH_BYTES + MAX_SEARCH_LINE_BYTES + 128;
+const SEARCH_LINE_OVERHEAD_BYTES: usize = 128;
+const MAX_SEARCH_OUTPUT_LINE_BYTES: usize =
+    MAX_TOOL_PATH_BYTES + MAX_SEARCH_LINE_BYTES + SEARCH_LINE_OVERHEAD_BYTES;
+const SEARCH_LINE_INITIAL_CAPACITY: usize = 1_024;
 
 fn search_query_variants(query: &str) -> Vec<String> {
     let normalized = query.replace("\r\n", "\n").replace('\r', "\n");
@@ -163,7 +166,7 @@ pub(super) async fn search_text(
     let deadline = tokio::time::Instant::now() + SEARCH_TIMEOUT;
     let mut stdout = BufReader::new(stdout);
     let mut matches = Vec::new();
-    let mut line = Vec::with_capacity(1_024);
+    let mut line = Vec::with_capacity(SEARCH_LINE_INITIAL_CAPACITY);
     let mut truncated = false;
 
     loop {

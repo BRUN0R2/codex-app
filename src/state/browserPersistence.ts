@@ -1,8 +1,11 @@
-const STORAGE_KEY = "codex-browser-tabs-v1";
+import { PROFILE_STORAGE_KEYS } from "./profileStorage";
+
+const STORAGE_KEY = PROFILE_STORAGE_KEYS.browserTabs;
+const LEGACY_STORAGE_KEY = "codex-browser-tabs-v1";
 const STORAGE_VERSION = 1;
 const MAX_PERSISTED_BROWSER_TABS = 16;
 const MAX_PERSISTED_CONVERSATIONS = 16;
-const MAX_BROWSER_URL_BYTES = 16_384;
+export const MAX_BROWSER_URL_BYTES = 16_384;
 
 export interface PersistedBrowserTab {
   readonly browserTabId: string;
@@ -20,10 +23,16 @@ interface PersistedBrowserState {
   readonly version: typeof STORAGE_VERSION;
 }
 
-export function loadPersistedBrowserConversations(): {
+export interface LoadedPersistedBrowserConversations {
   readonly conversations: readonly PersistedBrowserConversation[];
   readonly error: Error | null;
-} {
+}
+
+export function loadPersistedBrowserConversations(): LoadedPersistedBrowserConversations {
+  const migration = migrateLegacyBrowserState();
+  if (migration !== null) {
+    return migration;
+  }
   const raw = localStorage.getItem(STORAGE_KEY);
   if (raw === null) {
     return { conversations: [], error: null };
@@ -35,6 +44,33 @@ export function loadPersistedBrowserConversations(): {
     };
   } catch (reason) {
     localStorage.removeItem(STORAGE_KEY);
+    return {
+      conversations: [],
+      error: reason instanceof Error ? reason : new Error("Invalid persisted browser state."),
+    };
+  }
+}
+
+function migrateLegacyBrowserState(): LoadedPersistedBrowserConversations | null {
+  const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+  if (raw === null) {
+    return null;
+  }
+  let state: PersistedBrowserState;
+  try {
+    state = decodePersistedBrowserState(JSON.parse(raw));
+  } catch (reason) {
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+    return {
+      conversations: [],
+      error: reason instanceof Error ? reason : new Error("Invalid persisted browser state."),
+    };
+  }
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+    return null;
+  } catch (reason) {
     return {
       conversations: [],
       error: reason instanceof Error ? reason : new Error("Invalid persisted browser state."),

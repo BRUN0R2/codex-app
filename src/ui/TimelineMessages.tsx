@@ -12,6 +12,9 @@ import { createCommentaryPresentation } from "./messagePresentation";
 import { useTimelineDisclosure } from "./timelineDisclosureContext";
 
 const USER_MESSAGE_COLLAPSED_LINES = 20;
+const COPY_FEEDBACK_RESET_MILLISECONDS: number = 2_000;
+const MESSAGE_OVERFLOW_EPSILON_PX: number = 1;
+const FALLBACK_TITLE_LIMIT_CHARACTERS: number = 160;
 
 export function UserMessage(props: {
   readonly item: Extract<ThreadItem, { type: "userMessage" }>;
@@ -35,7 +38,7 @@ export function UserMessage(props: {
     if (bubble === undefined || disclosure.isOpen()) {
       return;
     }
-    setCollapsible(bubble.scrollHeight > bubble.clientHeight + 1);
+    setCollapsible(bubble.scrollHeight > bubble.clientHeight + MESSAGE_OVERFLOW_EPSILON_PX);
   }
 
   function scheduleMeasurement(): void {
@@ -216,7 +219,7 @@ function CopyMessageButton(props: { readonly text: string }) {
       reportFailure(frontendFailureMessage("Falha ao copiar uma mensagem", reason));
       setState("failed");
     }
-    resetTimer = window.setTimeout(() => setState("idle"), 2_000);
+    resetTimer = window.setTimeout(() => setState("idle"), COPY_FEEDBACK_RESET_MILLISECONDS);
   }
 
   const label = () => {
@@ -259,5 +262,5 @@ function userContentPartCopyText(part: UserContent): string {
 
 function imageContentName(path: string): string {
   const name = fileName(path);
-  return name.length <= 160 ? name : "Imagem anexada";
+  return name.length <= FALLBACK_TITLE_LIMIT_CHARACTERS ? name : "Imagem anexada";
 }

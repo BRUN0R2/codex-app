@@ -7,13 +7,13 @@ use super::{
     MAX_IDENTIFIER_BYTES, MAX_ITEM_BYTES, decode_bounded, parse_status, read_thread_header,
     storage_error, validate_text,
 };
+use crate::command_validation::THREAD_HISTORY_CURSOR_MAXIMUM_BYTES;
 use crate::engine::{CodexThread, ThreadTurn, TurnStatus};
 use crate::error::AppError;
 
 pub(super) const INITIAL_THREAD_HISTORY_PAGE_ROWS: usize = 64;
 pub(super) const OLDER_THREAD_HISTORY_PAGE_ROWS: usize = 256;
 const THREAD_HISTORY_PAGE_BYTES: usize = 4 * 1_048_576;
-const MAX_HISTORY_CURSOR_BYTES: usize = 1_024;
 const HISTORY_CURSOR_VERSION: u8 = 1;
 
 #[derive(Debug)]
@@ -70,7 +70,7 @@ pub(super) fn parse_history_cursor(
     let Some(cursor) = cursor else {
         return Ok(None);
     };
-    if cursor.is_empty() || cursor.len() > MAX_HISTORY_CURSOR_BYTES {
+    if cursor.is_empty() || cursor.len() > THREAD_HISTORY_CURSOR_MAXIMUM_BYTES {
         return Err(AppError::Protocol(
             "thread history cursor is invalid".into(),
         ));
@@ -78,7 +78,7 @@ pub(super) fn parse_history_cursor(
     let payload = URL_SAFE_NO_PAD
         .decode(cursor)
         .map_err(|_| AppError::Protocol("thread history cursor is invalid".into()))?;
-    if payload.len() > MAX_HISTORY_CURSOR_BYTES {
+    if payload.len() > THREAD_HISTORY_CURSOR_MAXIMUM_BYTES {
         return Err(AppError::Protocol(
             "thread history cursor is invalid".into(),
         ));
@@ -235,10 +235,39 @@ fn encode_history_cursor(cursor: &ThreadHistoryCursor) -> Result<String, AppErro
     let payload = serde_json::to_vec(cursor)
         .map_err(|error| AppError::Storage(format!("could not encode history cursor: {error}")))?;
     let encoded = URL_SAFE_NO_PAD.encode(payload);
-    if encoded.len() > MAX_HISTORY_CURSOR_BYTES {
+    if encoded.len() > THREAD_HISTORY_CURSOR_MAXIMUM_BYTES {
         return Err(AppError::Storage(
             "encoded thread history cursor exceeds its transport bound".into(),
         ));
     }
     Ok(encoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ThreadHistoryCursor, encode_history_cursor, parse_history_cursor};
+
+    #[test]
+    fn encoded_cursor_round_trips_through_the_command_contract() {
+        let cursor = ThreadHistoryCursor {
+            version: 1,
+            thread_id: "thread-1".into(),
+            created_at: 42,
+            turn_id: "turn-1".into(),
+            sequence: 7,
+        };
+        let encoded = encode_history_cursor(&cursor).expect("history cursor should encode");
+
+        crate::command_validation::validate_thread_history_cursor(Some(&encoded))
+            .expect("the command boundary must accept storage history cursors");
+        let decoded = parse_history_cursor(Some(&encoded), "thread-1")
+            .expect("history cursor should parse")
+            .expect("history cursor should be present");
+
+        assert_eq!(decoded.version, cursor.version);
+        assert_eq!(decoded.thread_id, cursor.thread_id);
+        assert_eq!(decoded.created_at, cursor.created_at);
+        assert_eq!(decoded.turn_id, cursor.turn_id);
+        assert_eq!(decoded.sequence, cursor.sequence);
+    }
 }

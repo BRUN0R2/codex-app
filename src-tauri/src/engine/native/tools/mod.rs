@@ -25,6 +25,7 @@ use crate::engine::{
 };
 use crate::error::AppError;
 
+mod browser;
 mod command_output_stream;
 mod command_sessions;
 mod exec;
@@ -86,6 +87,7 @@ pub struct PreparedTool {
 #[derive(Debug)]
 enum ToolOperation {
     ApplyPatch(ParsedPatch),
+    Browser(browser::BrowserToolOperation),
     ReadFile(ReadFileArgs),
     ListFiles(ListFilesArgs),
     SearchText(SearchTextArgs),
@@ -106,6 +108,13 @@ pub struct ToolExecutionResult {
     pub completed_item: ThreadItem,
     pub display_output: Option<OutputSource>,
     pub background_command: Option<BackgroundCommandLease>,
+    pub visual_context: Option<ToolVisualContext>,
+}
+
+#[derive(Debug)]
+pub struct ToolVisualContext {
+    pub image_url: String,
+    pub description: String,
 }
 
 pub struct ToolExecutionContext<'a> {
@@ -254,7 +263,7 @@ impl ToolRegistry {
     }
 
     fn build_definitions() -> Vec<Value> {
-        vec![
+        let mut definitions = vec![
             function_tool(
                 "read_file",
                 "Read a bounded UTF-8 range from a file inside the workspace.",
@@ -450,7 +459,9 @@ impl ToolRegistry {
                     "definition": include_str!("../apply_patch/apply_patch.lark")
                 }
             }),
-        ]
+        ];
+        definitions.extend(browser::definitions());
+        definitions
     }
 
     pub fn prepare(
@@ -542,7 +553,13 @@ impl ToolRegistry {
                     ToolOperation::UpdatePlan { explanation, steps },
                 )
             }
-            _ => return Err(AppError::Tool(format!("unknown tool `{name}`"))),
+            _ => match browser::prepare(name, arguments) {
+                Some(prepared) => {
+                    let (name, description, operation) = prepared?;
+                    (name, description, ToolOperation::Browser(operation))
+                }
+                None => return Err(AppError::Tool(format!("unknown tool `{name}`"))),
+            },
         };
         Ok(PreparedTool {
             item_id,
@@ -583,6 +600,14 @@ impl ToolRegistry {
     }
 }
 
+struct ThreadItemParams {
+    status: ActivityStatus,
+    live_output: Option<CommandLiveOutput>,
+    process_id: Option<String>,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+}
+
 impl PreparedTool {
     pub fn name(&self) -> &'static str {
         self.name
@@ -606,6 +631,9 @@ impl PreparedTool {
 
     fn output_presentation(&self) -> ToolOutputPresentation {
         match &self.operation {
+            ToolOperation::Browser(operation) if operation.presents_image() => {
+                ToolOutputPresentation::Image
+            }
             ToolOperation::ListFiles(_) => ToolOutputPresentation::FileList,
             ToolOperation::ReadFile(args) => ToolOutputPresentation::SourceFile {
                 path: args.path.clone(),
@@ -648,67 +676,21 @@ impl PreparedTool {
             completed_item: self.finish_item(workspace, ActivityStatus::Completed, None, Some(0)),
             display_output: None,
             background_command: None,
+            visual_context: None,
         }
     }
 
     pub fn started_item(&self, workspace: &Path) -> ThreadItem {
-        match &self.operation {
-            ToolOperation::ApplyPatch(patch) => ThreadItem::FileChange {
-                id: self.item_id.clone(),
-                changes: preview_changes(patch),
+        self.build_item(
+            workspace,
+            ThreadItemParams {
                 status: ActivityStatus::InProgress,
-            },
-            ToolOperation::ExecCommand(args) => ThreadItem::CommandExecution {
-                id: self.item_id.clone(),
-                command: args.command.clone(),
-                cwd: display_workspace_path(workspace, &args.cwd),
-                process_id: None,
-                started_at: Some(self.started_at_ms()),
-                source: CommandSource::Agent,
-                status: ActivityStatus::InProgress,
-                aggregated_output: None,
                 live_output: Some(CommandLiveOutput::default()),
+                process_id: None,
                 exit_code: None,
                 duration_ms: None,
             },
-            ToolOperation::EditFile(args) => ThreadItem::FileChange {
-                id: self.item_id.clone(),
-                changes: vec![FileChange {
-                    path: args.path.clone(),
-                    kind: FileChangeKind::Update { move_path: None },
-                    diff: diff_preview(&args.old_text, &args.new_text),
-                    line_stats: Some(line_stats(&args.old_text, &args.new_text)),
-                }],
-                status: ActivityStatus::InProgress,
-            },
-            ToolOperation::WriteFile(args) => ThreadItem::FileChange {
-                id: self.item_id.clone(),
-                changes: vec![FileChange {
-                    path: args.path.clone(),
-                    kind: if args.overwrite {
-                        FileChangeKind::Update { move_path: None }
-                    } else {
-                        FileChangeKind::Add
-                    },
-                    diff: diff_preview("", &args.content),
-                    line_stats: Some(line_stats("", &args.content)),
-                }],
-                status: ActivityStatus::InProgress,
-            },
-            ToolOperation::UpdatePlan { explanation, steps } => ThreadItem::Plan {
-                id: self.item_id.clone(),
-                explanation: explanation.clone(),
-                steps: steps.clone(),
-            },
-            _ => ThreadItem::ToolExecution {
-                id: self.item_id.clone(),
-                name: self.name.into(),
-                description: self.description.clone(),
-                status: ActivityStatus::InProgress,
-                output_presentation: self.output_presentation(),
-                output: None,
-            },
-        }
+        )
     }
 
     pub fn failed_result(&self, workspace: &Path, error: &AppError) -> ToolExecutionResult {
@@ -731,11 +713,17 @@ impl PreparedTool {
                 },
                 display_output: None,
                 background_command: None,
+                visual_context: None,
             });
         }
         let workspace = canonical_workspace(context.workspace).await?;
         let started_at = Instant::now();
         let execution = match &self.operation {
+            ToolOperation::Browser(operation) => {
+                browser::execute(operation, &self.item_id, &context, cancellation)
+                    .await
+                    .map(ToolResult::Browser)
+            }
             ToolOperation::ApplyPatch(patch) => execute_patch_operation(
                 &workspace,
                 patch.clone(),
@@ -921,6 +909,33 @@ impl PreparedTool {
         };
 
         match execution {
+            Ok(ToolResult::Browser(output)) => {
+                let duration = elapsed_millis(started_at)?;
+                let visual_context = match (output.visual_image_url, output.visual_description) {
+                    (Some(image_url), Some(description)) => Some(ToolVisualContext {
+                        image_url,
+                        description,
+                    }),
+                    (None, None) => None,
+                    _ => {
+                        return Err(AppError::State(
+                            "browser visual result is incomplete".into(),
+                        ));
+                    }
+                };
+                Ok(ToolExecutionResult {
+                    provider_output: output.provider_output,
+                    completed_item: self.finish_item(
+                        &workspace,
+                        output.status,
+                        None,
+                        Some(duration),
+                    ),
+                    display_output: output.display_output.map(OutputSource::text),
+                    background_command: None,
+                    visual_context,
+                })
+            }
             Ok(ToolResult::BackgroundCommand(session)) => {
                 let ToolOperation::ExecCommand(args) = &self.operation else {
                     return Err(AppError::State(
@@ -945,6 +960,7 @@ impl PreparedTool {
                     },
                     display_output: None,
                     background_command: Some(session.lease),
+                    visual_context: None,
                 })
             }
             Ok(ToolResult::Patch(outcome)) => Ok(ToolExecutionResult {
@@ -956,6 +972,7 @@ impl PreparedTool {
                 },
                 display_output: None,
                 background_command: None,
+                visual_context: None,
             }),
             Ok(ToolResult::MutationConfirmation(provider_output)) => {
                 self.complete_mutation_confirmation(&workspace, started_at, provider_output)
@@ -985,6 +1002,7 @@ impl PreparedTool {
             ),
             display_output: None,
             background_command: None,
+            visual_context: None,
         })
     }
 
@@ -1003,6 +1021,7 @@ impl PreparedTool {
             completed_item,
             display_output: Some(output.source),
             background_command: None,
+            visual_context: None,
         })
     }
 
@@ -1013,24 +1032,37 @@ impl PreparedTool {
         exit_code: Option<i32>,
         duration_ms: Option<u64>,
     ) -> ThreadItem {
+        self.build_item(
+            workspace,
+            ThreadItemParams {
+                status,
+                live_output: None,
+                process_id: None,
+                exit_code,
+                duration_ms,
+            },
+        )
+    }
+
+    fn build_item(&self, workspace: &Path, params: ThreadItemParams) -> ThreadItem {
         match &self.operation {
             ToolOperation::ApplyPatch(patch) => ThreadItem::FileChange {
                 id: self.item_id.clone(),
                 changes: preview_changes(patch),
-                status,
+                status: params.status,
             },
             ToolOperation::ExecCommand(args) => ThreadItem::CommandExecution {
                 id: self.item_id.clone(),
                 command: args.command.clone(),
                 cwd: display_workspace_path(workspace, &args.cwd),
-                process_id: None,
+                process_id: params.process_id,
                 started_at: Some(self.started_at_ms()),
                 source: CommandSource::Agent,
-                status,
+                status: params.status,
                 aggregated_output: None,
-                live_output: None,
-                exit_code,
-                duration_ms,
+                live_output: params.live_output,
+                exit_code: params.exit_code,
+                duration_ms: params.duration_ms,
             },
             ToolOperation::EditFile(args) => ThreadItem::FileChange {
                 id: self.item_id.clone(),
@@ -1040,7 +1072,7 @@ impl PreparedTool {
                     diff: diff_preview(&args.old_text, &args.new_text),
                     line_stats: Some(line_stats(&args.old_text, &args.new_text)),
                 }],
-                status,
+                status: params.status,
             },
             ToolOperation::WriteFile(args) => ThreadItem::FileChange {
                 id: self.item_id.clone(),
@@ -1054,7 +1086,7 @@ impl PreparedTool {
                     diff: diff_preview("", &args.content),
                     line_stats: Some(line_stats("", &args.content)),
                 }],
-                status,
+                status: params.status,
             },
             ToolOperation::UpdatePlan { explanation, steps } => ThreadItem::Plan {
                 id: self.item_id.clone(),
@@ -1065,7 +1097,7 @@ impl PreparedTool {
                 id: self.item_id.clone(),
                 name: self.name.into(),
                 description: self.description.clone(),
-                status,
+                status: params.status,
                 output_presentation: self.output_presentation(),
                 output: None,
             },
@@ -1090,6 +1122,7 @@ impl PreparedTool {
             completed_item: self.finish_item(workspace, status, exit_code, duration_ms),
             display_output,
             background_command: None,
+            visual_context: None,
         }
     }
 
@@ -1114,6 +1147,7 @@ impl PreparedTool {
 
 enum ToolResult {
     BackgroundCommand(BackgroundCommandStart),
+    Browser(browser::BrowserToolExecution),
     StoredOutput(StoredToolOutput),
     MutationConfirmation(String),
     Patch(PatchOutcome),
@@ -1431,6 +1465,13 @@ mod tests {
         assert_eq!(
             names,
             BTreeSet::from([
+                "browser_key",
+                "browser_manage",
+                "browser_metrics",
+                "browser_pointer",
+                "browser_snapshot",
+                "browser_type",
+                "browser_wait",
                 "list_files",
                 "poll_command",
                 "read_file",
@@ -1854,6 +1895,60 @@ mod tests {
                 .expect("function tools should have names");
             assert_eq!(definition["strict"], true, "{name} must use strict mode");
             assert_strict_object_schema(&definition["parameters"], name);
+            assert_provider_schema_keywords(&definition["parameters"], name);
+        }
+    }
+
+    fn assert_provider_schema_keywords(schema: &Value, context: &str) {
+        let Some(schema) = schema.as_object() else {
+            return;
+        };
+        for keyword in schema.keys() {
+            assert!(
+                matches!(
+                    keyword.as_str(),
+                    "$defs"
+                        | "$ref"
+                        | "additionalProperties"
+                        | "anyOf"
+                        | "description"
+                        | "enum"
+                        | "exclusiveMaximum"
+                        | "exclusiveMinimum"
+                        | "format"
+                        | "items"
+                        | "maxItems"
+                        | "maxLength"
+                        | "maximum"
+                        | "minItems"
+                        | "minLength"
+                        | "minimum"
+                        | "multipleOf"
+                        | "pattern"
+                        | "properties"
+                        | "required"
+                        | "type"
+                ),
+                "{context} uses unsupported strict-schema keyword {keyword}"
+            );
+        }
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            for (name, property) in properties {
+                assert_provider_schema_keywords(property, &format!("{context}.{name}"));
+            }
+        }
+        if let Some(items) = schema.get("items") {
+            assert_provider_schema_keywords(items, &format!("{context}[]"));
+        }
+        if let Some(definitions) = schema.get("$defs").and_then(Value::as_object) {
+            for (name, definition) in definitions {
+                assert_provider_schema_keywords(definition, &format!("{context}.$defs.{name}"));
+            }
+        }
+        if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
+            for (index, branch) in branches.iter().enumerate() {
+                assert_provider_schema_keywords(branch, &format!("{context}.anyOf[{index}]"));
+            }
         }
     }
 

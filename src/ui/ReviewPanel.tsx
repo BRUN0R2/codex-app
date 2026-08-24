@@ -10,6 +10,8 @@ import {
   summarizeReviewDocuments,
 } from "./reviewChanges";
 
+const FILE_BADGE_EXTENSION_LIMIT: number = 3;
+
 interface ReviewPanelProps {
   readonly changes: readonly FileChange[];
   readonly mode: DiffDisplayMode;
@@ -131,5 +133,5 @@ export function ReviewPanel(props: ReviewPanelProps) {
 function fileType(path: string): string {
   const file = path.split(/[\\/]/u).at(-1) ?? path;
   const extension = file.includes(".") ? file.split(".").at(-1) : null;
-  return extension?.slice(0, 3).toLocaleUpperCase("pt-BR") ?? "FILE";
+  return extension?.slice(0, FILE_BADGE_EXTENSION_LIMIT).toLocaleUpperCase("pt-BR") ?? "FILE";
 }

@@ -25,6 +25,7 @@ Ferramentas de desenvolvimento: `vite` + `vite-plugin-solid` (build),
 | Grupo | Crates | Papel |
 | --- | --- | --- |
 | Shell | `tauri`, `tauri-plugin-dialog`, `tauri-plugin-opener`, `tauri-plugin-autostart`, `tauri-plugin-single-instance`, `tauri-build` | Janela nativa, integrações do SO e build |
+| Browser Windows | `webview2-com`, `windows` | Callback assíncrono de `ExecuteScript`, métodos CDP fechados e tipos COM usados pelo Browser Use no child WebView2 |
 | Async | `tokio`, `futures-util` | Runtime de tarefas e streaming SSE incremental |
 | HTTP | `reqwest` (rustls, cookies, stream), `url` | HTTPS do provider sem OpenSSL e validação de URLs |
 | Persistência | `rusqlite` (bundled), `r2d2`, `r2d2_sqlite` | SQLite WAL transacional com pool dimensionado |
@@ -59,10 +60,14 @@ spool já existente. No Windows, `build.rs` usa a API oficial
 manifesto ao linker, evitando tanto import ausente de `TaskDialogIndirect` quanto
 recurso `MANIFEST` duplicado.
 
-O navegador interno também não adicionou crate. Ele habilita somente a feature
-`unstable` do `tauri` já fixado para acessar `Window::add_child`, a API necessária
-para child webviews nativos no Tauri 2. A superfície continua atrás de comandos
-e validações próprios; nenhuma API instável é exposta ao frontend.
+O navegador interno habilita a feature `unstable` do `tauri` para
+`Window::add_child`, a API necessária aos child webviews nativos. O controle do
+agente tornou diretas duas dependências que já estavam no grafo transitivo do
+Tauri: `webview2-com 0.38.2` e `windows 0.61.3`. Isso permite nomear e testar o
+contrato WebView2 usado por `ExecuteScript` e
+`CallDevToolsProtocolMethod`; nenhuma versão adicional entrou no lockfile. O
+modelo não recebe COM nem CDP genérico: somente operações fechadas do módulo
+`browser/automation.rs`.
 
 ## Dependências transitivas
 

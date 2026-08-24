@@ -12,7 +12,7 @@ mod engine;
 mod error;
 mod process;
 
-use desktop_integration::ApplicationPreferencesState;
+use desktop_integration::{ApplicationPreferencesState, restore_main_window};
 use engine::{EngineManager, RuntimeDiagnosticSubsystem};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter as _, Manager as _};
@@ -21,15 +21,8 @@ fn focus_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window is unavailable".to_string())?;
-    window
-        .unminimize()
-        .map_err(|error| format!("could not restore the main window: {error}"))?;
-    window
-        .show()
-        .map_err(|error| format!("could not show the main window: {error}"))?;
-    window
-        .set_focus()
-        .map_err(|error| format!("could not focus the main window: {error}"))
+    restore_main_window(&window)
+        .map_err(|error| format!("could not restore the main window: {error}"))
 }
 
 fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) -> Result<(), String> {
@@ -54,7 +47,10 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) -> Result<(), Strin
         "about" => {
             use tauri_plugin_dialog::DialogExt as _;
             app.dialog()
-                .message("Codex App 0.1.0 — cliente desktop nativo para o Codex.")
+                .message(format!(
+                    "Codex App {} — cliente desktop nativo para o Codex.",
+                    env!("CARGO_PKG_VERSION")
+                ))
                 .title("Sobre o Codex App")
                 .show(|_| {});
             Ok(())
@@ -139,12 +135,19 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = match tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    #[cfg(debug_assertions)]
+    let browser_smoke_requested = browser::runtime_smoke_requested();
+    #[cfg(not(debug_assertions))]
+    let browser_smoke_requested = false;
+    let mut builder = tauri::Builder::default();
+    if !browser_smoke_requested {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Err(error) = focus_main_window(app) {
                 report_runtime_error(app, RuntimeDiagnosticSubsystem::Window, error);
             }
-        }))
+        }));
+    }
+    let app = match builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -160,6 +163,8 @@ pub fn run() {
         .manage(EngineManager::default())
         .manage(browser::BrowserManager::default())
         .setup(|app| {
+            app.state::<browser::BrowserManager>()
+                .initialize(app.handle())?;
             let preferences = ApplicationPreferencesState::load(app.handle())?;
             if !app.manage(preferences) {
                 return Err(crate::error::AppError::State(
@@ -173,6 +178,8 @@ pub fn run() {
                 crate::error::AppError::State("main window is unavailable".to_string())
             })?;
             desktop_integration::apply_initial_window_state(&main_window)?;
+            #[cfg(debug_assertions)]
+            browser::start_runtime_smoke_if_requested(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -235,7 +242,7 @@ pub fn run() {
         Ok(app) => app,
         Err(error) => {
             eprintln!("failed to build Codex App: {error}");
-            return;
+            std::process::exit(1);
         }
     };
 

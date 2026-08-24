@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::engine::ThreadOutput;
 
 pub(super) const OUTPUT_CHUNK_BYTES: usize = 64 * 1_024;
+const FIRST_OUTPUT_PAGE_CURSOR: &str = "1";
 
 #[derive(Debug)]
 enum OutputContent {
@@ -28,7 +29,8 @@ impl OutputSource {
                 id: Uuid::now_v7().to_string(),
                 preview,
                 byte_length,
-                next_cursor: (byte_length > OUTPUT_CHUNK_BYTES as u64).then(|| "1".into()),
+                next_cursor: (byte_length > OUTPUT_CHUNK_BYTES as u64)
+                    .then(|| FIRST_OUTPUT_PAGE_CURSOR.into()),
             },
             content: OutputContent::Text(content),
         }
@@ -45,7 +47,7 @@ impl OutputSource {
                 id: Uuid::now_v7().to_string(),
                 preview,
                 byte_length,
-                next_cursor: (byte_length > preview_bytes).then(|| "1".into()),
+                next_cursor: (byte_length > preview_bytes).then(|| FIRST_OUTPUT_PAGE_CURSOR.into()),
             },
             content: OutputContent::File(content),
         })

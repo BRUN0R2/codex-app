@@ -1,5 +1,40 @@
 import type { IconName } from "./Icon";
 
+export type ToolCategory = "command" | "exploration" | "terminalRead" | "web";
+
+const TOOL_CATEGORY_NAMES: Readonly<Record<ToolCategory, readonly string[]>> = {
+  command: ["poll_command", "run_shell", "shell"],
+  exploration: ["code_search", "list_files", "read_file", "search_text"],
+  terminalRead: ["read_output", "read_thread_terminal"],
+  web: [
+    "browser_key",
+    "browser_manage",
+    "browser_metrics",
+    "browser_pointer",
+    "browser_snapshot",
+    "browser_type",
+    "browser_wait",
+    "web_fetch",
+    "web_search",
+  ],
+};
+
+export function isCommandTool(name: string): boolean {
+  return TOOL_CATEGORY_NAMES.command.includes(name.toLowerCase());
+}
+
+export function isExplorationTool(name: string): boolean {
+  return TOOL_CATEGORY_NAMES.exploration.includes(name.toLowerCase());
+}
+
+export function isTerminalReadTool(name: string): boolean {
+  return TOOL_CATEGORY_NAMES.terminalRead.includes(name.toLowerCase());
+}
+
+export function isWebSearchTool(name: string): boolean {
+  return TOOL_CATEGORY_NAMES.web.includes(name.toLowerCase());
+}
+
 export function toolIconName(name: string): IconName {
   switch (name) {
     case "read_file":
@@ -11,6 +46,13 @@ export function toolIconName(name: string): IconName {
       return "search";
     case "web_search":
     case "web_fetch":
+    case "browser_key":
+    case "browser_manage":
+    case "browser_metrics":
+    case "browser_pointer":
+    case "browser_snapshot":
+    case "browser_type":
+    case "browser_wait":
       return "globe";
     case "shell":
     case "run_shell":
@@ -38,6 +80,20 @@ export function toolLabel(name: string): string {
       return "Busca no projeto";
     case "web_search":
       return "Pesquisa na web";
+    case "browser_manage":
+      return "Controle do navegador";
+    case "browser_snapshot":
+      return "Inspeção do navegador";
+    case "browser_pointer":
+      return "Mouse do navegador";
+    case "browser_type":
+      return "Digitação no navegador";
+    case "browser_key":
+      return "Teclado do navegador";
+    case "browser_wait":
+      return "Espera no navegador";
+    case "browser_metrics":
+      return "Métricas do navegador";
     case "view_image":
       return "Visualização de imagem";
     case "poll_command":

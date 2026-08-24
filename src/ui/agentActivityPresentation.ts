@@ -1,4 +1,12 @@
 import type { VisibleThreadItem } from "../contracts/types";
+import {
+  isCommandTool,
+  isExplorationTool,
+  isTerminalReadTool,
+  isWebSearchTool,
+} from "./activityLabels";
+
+export { isTerminalReadTool };
 
 export type AgentActivityItem = Extract<
   VisibleThreadItem,
@@ -42,11 +50,6 @@ export interface ActiveAgentActivity {
   readonly kind: AgentActivityKind;
   readonly label: string;
 }
-
-const EXPLORATION_TOOLS = new Set(["code_search", "list_files", "read_file", "search_text"]);
-const COMMAND_TOOLS = new Set(["poll_command", "run_shell", "shell"]);
-const TERMINAL_READ_TOOLS = new Set(["read_output", "read_thread_terminal"]);
-const WEB_TOOLS = new Set(["web_fetch", "web_search"]);
 
 export class AgentActivityProjectionStore {
   #units: readonly AgentActivityRenderUnit[] = [];
@@ -178,16 +181,16 @@ export function summarizeAgentActivity(
     }
 
     const name = item.name.toLowerCase();
-    if (WEB_TOOLS.has(name)) {
+    if (isWebSearchTool(name)) {
       webSearch += 1;
       webSearchRunning ||= item.status === "inProgress";
-    } else if (TERMINAL_READ_TOOLS.has(name)) {
+    } else if (isTerminalReadTool(name)) {
       terminalReads += 1;
       terminalReadsRunning ||= item.status === "inProgress";
-    } else if (EXPLORATION_TOOLS.has(name)) {
+    } else if (isExplorationTool(name)) {
       exploration += 1;
       explorationRunning ||= item.status === "inProgress";
-    } else if (COMMAND_TOOLS.has(name)) {
+    } else if (isCommandTool(name)) {
       commands += 1;
       commandsRunning ||= item.status === "inProgress";
     } else {
@@ -257,16 +260,16 @@ export function activeAgentActivity(
     }
 
     const name = item.name.toLowerCase();
-    if (WEB_TOOLS.has(name)) {
+    if (isWebSearchTool(name)) {
       return { kind: "webSearch", label: webSearchActivityTitle(item.description, item.status) };
     }
-    if (TERMINAL_READ_TOOLS.has(name)) {
+    if (isTerminalReadTool(name)) {
       return { kind: "terminalRead", label: "Lendo terminal do chat" };
     }
-    if (EXPLORATION_TOOLS.has(name)) {
+    if (isExplorationTool(name)) {
       return { kind: "exploration", label: "Lendo arquivos" };
     }
-    if (COMMAND_TOOLS.has(name)) {
+    if (isCommandTool(name)) {
       return { kind: "commands", label: "Executando comando" };
     }
     return {
@@ -275,10 +278,6 @@ export function activeAgentActivity(
     };
   }
   return null;
-}
-
-export function isTerminalReadTool(name: string): boolean {
-  return TERMINAL_READ_TOOLS.has(name.toLowerCase());
 }
 
 export function webSearchActivityTitle(

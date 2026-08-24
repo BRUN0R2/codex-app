@@ -99,7 +99,10 @@ function Get-ProcessDetails {
         }
       }
     }
-  } catch {}
+  } catch {
+    # Diagnostics-only degradation: the fallback below still resolves the process,
+    # so no guard decision ever depends on this CIM query succeeding.
+  }
 
   $fallback = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
   return [pscustomobject]@{

@@ -9,13 +9,17 @@ import {
   decodeAutomationListResponse,
   decodeAutomationRun,
   decodeAutoTopUpSettingsSnapshot,
+  decodeBrowserActionMetric,
+  decodeBrowserAgentActivityNotification,
   decodeBrowserNewWindowNotification,
   decodeBrowserTabSnapshot,
   decodeChatModelListResponse,
   decodeEngineNotification,
+  decodeEngineServerRequest,
   decodeEngineStartResponse,
   decodeModelListResponse,
   decodeOutputReadResponse,
+  decodeThreadListResponse,
   decodeThreadReadResponse,
   decodeUsageResetCreditsResponse,
   decodeUsageResetRedemptionResponse,
@@ -98,6 +102,85 @@ describe("decodificação dos contratos nativos", () => {
       "browser URL is not allowed",
     );
     expect(() => decodeBrowserTabSnapshot({ ...snapshot, future: true })).toThrow("expected keys");
+
+    const activity = {
+      conversationId: snapshot.conversationId,
+      activeBrowserTabId: snapshot.browserTabId,
+      tabs: [snapshot],
+      panel: "open",
+      action: "snapshot",
+    };
+    expect(decodeBrowserAgentActivityNotification(activity)).toEqual(activity);
+    expect(() =>
+      decodeBrowserAgentActivityNotification({
+        ...activity,
+        activeBrowserTabId: "missing",
+      }),
+    ).toThrow("absent from topology");
+
+    const metric = {
+      id: "metric-1",
+      sessionId: "session-1",
+      timestampMs: 1_787_500_000_000,
+      conversationId: snapshot.conversationId,
+      turnId: "turn-1",
+      itemId: "item-1",
+      browserTabId: snapshot.browserTabId,
+      action: "snapshot",
+      status: "completed",
+      origin: "https://example.com",
+      url: "https://example.com/path",
+      queueMs: 1,
+      actionMs: 2,
+      loadMs: 3,
+      snapshotMs: 4,
+      screenshotMs: 5,
+      totalMs: 15,
+      screenshotBytes: 1_024,
+      page: {
+        readyState: "complete",
+        viewportWidth: 800,
+        viewportHeight: 600,
+        interactiveElements: 4,
+        consoleErrors: 0,
+        pageErrors: 0,
+        resourceFailures: 0,
+        resourceCount: 10,
+        transferBytes: 2_048,
+        navigationDurationMs: 120,
+        largestContentfulPaintMs: 180,
+        cumulativeLayoutShift: 0.01,
+        longTaskCount: 1,
+        longTaskDurationMs: 51,
+        horizontalOverflowPx: 0,
+        unlabeledControls: 0,
+        missingAltImages: 0,
+        duplicateIds: 0,
+      },
+      error: null,
+    };
+    expect(decodeBrowserActionMetric(metric)).toEqual(metric);
+  });
+
+  it("decodifica aprovações de origem separadamente de comandos", () => {
+    const request = {
+      id: "approval-1",
+      method: "approval.browserOrigin",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "item-1",
+        origin: "https://example.com",
+        reason: "open a new tab",
+      },
+    };
+    expect(decodeEngineServerRequest(request)).toEqual(request);
+    expect(() =>
+      decodeEngineServerRequest({
+        ...request,
+        params: { ...request.params, origin: "https://example.com/path" },
+      }),
+    ).toThrow("origin is not allowed");
   });
 
   it("valida preferências de inicialização e bandeja", () => {
@@ -273,7 +356,7 @@ describe("decodificação dos contratos nativos", () => {
           "scheduledAutomations",
         ],
       },
-      schemaVersion: 18,
+      schemaVersion: 19,
       config: configFixture(),
       diagnosticLogPath: "C:\\Users\\Developer\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
@@ -300,7 +383,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 18,
+        schemaVersion: 19,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",
@@ -859,6 +942,17 @@ describe("decodificação dos contratos nativos", () => {
 
     expect(decodeThreadReadResponse(response).thread.turns[0]?.error).toBe(
       "O provider rejeitou o evento.",
+    );
+    const historyCursor = "eyJ2ZXJzaW9uIjoxLCJ0aHJlYWRJZCI6InRocmVhZC0xIn0";
+    expect(decodeThreadReadResponse({ ...response, nextCursor: historyCursor }).nextCursor).toBe(
+      historyCursor,
+    );
+    expect(() =>
+      decodeThreadReadResponse({ ...response, nextCursor: "cursor=with-padding" }),
+    ).toThrow("Base64URL thread history cursor");
+    expect(decodeThreadListResponse({ data: [], nextCursor: "50" }).nextCursor).toBe("50");
+    expect(() => decodeThreadListResponse({ data: [], nextCursor: "opaque_cursor" })).toThrow(
+      "numeric thread list cursor",
     );
     expect(
       decodeThreadReadResponse({

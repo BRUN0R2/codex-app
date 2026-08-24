@@ -6,6 +6,7 @@ export type DiagnosticStream = "runtime";
 export type EngineTransport = "httpsSse";
 export type EngineStorage = "sqlite";
 export type EngineCapability =
+  | "browserUse"
   | "chatGptOauth"
   | "explicitApprovals"
   | "localThreads"
@@ -43,7 +44,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 18;
+  readonly schemaVersion: 19;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -447,6 +448,58 @@ export interface BrowserNewWindowNotification {
   readonly url: string;
 }
 
+export interface BrowserAgentActivityNotification {
+  readonly conversationId: string;
+  readonly activeBrowserTabId: string | null;
+  readonly tabs: readonly BrowserTabSnapshot[];
+  readonly panel: "close" | "open";
+  readonly action: string;
+}
+
+export interface BrowserPageMetricSummary {
+  readonly readyState: string;
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
+  readonly interactiveElements: number;
+  readonly consoleErrors: number;
+  readonly pageErrors: number;
+  readonly resourceFailures: number;
+  readonly resourceCount: number;
+  readonly transferBytes: number;
+  readonly navigationDurationMs: number | null;
+  readonly largestContentfulPaintMs: number | null;
+  readonly cumulativeLayoutShift: number;
+  readonly longTaskCount: number;
+  readonly longTaskDurationMs: number;
+  readonly horizontalOverflowPx: number;
+  readonly unlabeledControls: number;
+  readonly missingAltImages: number;
+  readonly duplicateIds: number;
+}
+
+export interface BrowserActionMetric {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly timestampMs: number;
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly itemId: string;
+  readonly browserTabId: string | null;
+  readonly action: string;
+  readonly status: "completed" | "declined" | "failed";
+  readonly origin: string | null;
+  readonly url: string | null;
+  readonly queueMs: number;
+  readonly actionMs: number;
+  readonly loadMs: number;
+  readonly snapshotMs: number;
+  readonly screenshotMs: number;
+  readonly totalMs: number;
+  readonly screenshotBytes: number | null;
+  readonly page: BrowserPageMetricSummary | null;
+  readonly error: string | null;
+}
+
 export interface BrowserSurfaceBounds {
   readonly x: number;
   readonly y: number;
@@ -538,6 +591,12 @@ export interface ConfigReadResponse {
   readonly version: number;
 }
 
+export interface ModelDefaults {
+  readonly model: string | null;
+  readonly reasoningEffort: ReasoningEffort | null;
+  readonly serviceTier: string | null;
+}
+
 export type ConfigUpdate =
   | { readonly type: "desktop"; readonly value: DesktopPreferences }
   | { readonly type: "developerInstructions"; readonly value: string | null }
@@ -546,6 +605,7 @@ export type ConfigUpdate =
       readonly model: string;
       readonly value: ModelContextWindowPreference;
     }
+  | { readonly type: "modelDefaults"; readonly value: ModelDefaults }
   | { readonly type: "modelVerbosity"; readonly value: ModelVerbosity | null }
   | { readonly type: "permissionProfile"; readonly value: PermissionProfile }
   | { readonly type: "personality"; readonly value: Personality }
@@ -834,7 +894,19 @@ export interface CommandApprovalServerRequest {
   };
 }
 
-export type EngineServerRequest = CommandApprovalServerRequest;
+export interface BrowserOriginApprovalServerRequest {
+  readonly id: string;
+  readonly method: "approval.browserOrigin";
+  readonly params: {
+    readonly threadId: string;
+    readonly turnId: string;
+    readonly itemId: string;
+    readonly origin: string;
+    readonly reason: string;
+  };
+}
+
+export type EngineServerRequest = BrowserOriginApprovalServerRequest | CommandApprovalServerRequest;
 export type ApprovalDecision = "accept" | "cancel" | "decline";
 
 export interface CommandError {

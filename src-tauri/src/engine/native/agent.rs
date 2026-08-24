@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use futures_util::future::join_all;
@@ -21,11 +20,12 @@ use super::provider::{
 };
 use super::storage::ProviderHistorySnapshot;
 use super::stream_notifications::StreamNotificationBatcher;
-use super::text::{format_duration, truncate_utf8};
+use super::text::truncate_utf8;
 use super::tools::{
     MAX_PROVIDER_ITEM_BYTES, PreparedTool, ReadToolCache, ReadToolCacheKey, ToolExecutionContext,
     ToolExecutionResult, ToolRegistry,
 };
+use super::turn_recovery;
 use super::{NativeEngineInner, TurnContinuation};
 use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
 use crate::engine::{
@@ -35,6 +35,14 @@ use crate::engine::{
     Personality, StreamDelta, ThreadItem, TurnInput, WebSearchMode,
 };
 use crate::error::AppError;
+
+pub(super) use super::turn_recovery::{
+    DEFAULT_RETRY_AFTER_SECONDS, automatic_provider_retry_wait, automatic_rate_limit_wait,
+};
+#[cfg(test)]
+use super::turn_recovery::{
+    MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS, MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS,
+};
 
 const MAX_USER_TEXT_BYTES: usize = 1_048_576;
 const MAX_ATTACHMENT_TEXT_BYTES: usize = 2 * 1_048_576;
@@ -46,10 +54,7 @@ const MAX_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_ERROR_BYTES: usize = 4_096;
 const MAX_PARALLEL_TOOLS: usize = 8;
-const MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS: u64 = 7 * 24 * 60 * 60;
-const MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS: u64 = 60;
 const MAX_CONTEXT_RECOVERY_ATTEMPTS_WITHOUT_PROGRESS: u8 = 1;
-pub(super) const DEFAULT_RETRY_AFTER_SECONDS: u64 = 60;
 
 pub(super) struct PreparedTurn {
     pub user_item: ThreadItem,
@@ -300,35 +305,12 @@ pub(super) async fn run_turn(
                 Ok(stream) => stream,
                 Err(AppError::Cancelled(_)) => return Ok(RunCompletion::Interrupted),
                 Err(error) => {
-                    if let AppError::RateLimited {
-                        retry_after_seconds,
-                        ..
-                    } = &error
+                    if let Some(decision) =
+                        turn_recovery::classify(&error, &mut transient_failure_count)
                     {
                         history_requires_refresh = false;
-                        if wait_for_rate_limit_reset(
-                            &inner,
-                            &app,
-                            &mut run,
-                            retry_after_seconds.unwrap_or(DEFAULT_RETRY_AFTER_SECONDS),
-                        )
-                        .await
-                        {
-                            continue 'sampling;
-                        }
-                        return Ok(RunCompletion::Interrupted);
-                    }
-                    if error.is_transient() {
-                        transient_failure_count = transient_failure_count.saturating_add(1);
-                        history_requires_refresh = false;
-                        if wait_for_transient_provider_retry(
-                            &inner,
-                            &app,
-                            &mut run,
-                            &error,
-                            transient_failure_count,
-                        )
-                        .await
+                        if turn_recovery::wait_for_retry(&inner, &app, &mut run, &error, decision)
+                            .await
                         {
                             continue 'sampling;
                         }
@@ -374,33 +356,12 @@ pub(super) async fn run_turn(
                     Ok(Some(event)) => event,
                     Ok(None) => break,
                     Err(error) => {
-                        if let AppError::RateLimited {
-                            retry_after_seconds,
-                            ..
-                        } = &error
+                        if let Some(decision) =
+                            turn_recovery::classify(&error, &mut transient_failure_count)
                         {
                             stream_deltas.flush().await?;
-                            if wait_for_rate_limit_reset(
-                                &inner,
-                                &app,
-                                &mut run,
-                                retry_after_seconds.unwrap_or(DEFAULT_RETRY_AFTER_SECONDS),
-                            )
-                            .await
-                            {
-                                continue 'sampling;
-                            }
-                            return Ok(RunCompletion::Interrupted);
-                        }
-                        if error.is_transient() {
-                            transient_failure_count = transient_failure_count.saturating_add(1);
-                            stream_deltas.flush().await?;
-                            if wait_for_transient_provider_retry(
-                                &inner,
-                                &app,
-                                &mut run,
-                                &error,
-                                transient_failure_count,
+                            if turn_recovery::wait_for_retry(
+                                &inner, &app, &mut run, &error, decision,
                             )
                             .await
                             {
@@ -515,7 +476,7 @@ pub(super) async fn run_turn(
                                 .append_provider_and_thread_item(
                                     run.thread_id.clone(),
                                     run.turn_id.clone(),
-                                    &item,
+                                    std::slice::from_ref(&item),
                                     thread_item,
                                     None,
                                 )
@@ -721,20 +682,35 @@ pub(super) async fn run_turn(
                         }
                     };
                     let background_command = result.background_command.take();
-                    let output = match pending.output_kind {
-                        ToolOutputKind::Function => {
+                    let visual_context = result.visual_context.take();
+                    let output = match (pending.output_kind, visual_context) {
+                        (ToolOutputKind::Function, Some(visual)) => {
+                            ResponseItem::function_output_with_image(
+                                pending.call_id,
+                                format!("{}\n\n{}", result.provider_output, visual.description),
+                                visual.image_url,
+                                Some(ImageDetail::High),
+                            )
+                        }
+                        (ToolOutputKind::Function, None) => {
                             ResponseItem::function_output(pending.call_id, result.provider_output)
                         }
-                        ToolOutputKind::Custom => {
+                        (ToolOutputKind::Custom, None) => {
                             ResponseItem::custom_output(pending.call_id, result.provider_output)
                         }
+                        (ToolOutputKind::Custom, Some(_)) => {
+                            return Err(AppError::State(
+                                "custom tool produced unsupported visual context".into(),
+                            ));
+                        }
                     };
+                    validate_response_item(&output)?;
                     let completed_item = match inner
                         .storage
                         .append_provider_and_thread_item(
                             run.thread_id.clone(),
                             run.turn_id.clone(),
-                            &output,
+                            std::slice::from_ref(&output),
                             result.completed_item,
                             result.display_output,
                         )
@@ -777,98 +753,6 @@ pub(super) async fn run_turn(
     .await;
     stream_deltas.flush().await?;
     result
-}
-
-pub(super) async fn wait_for_rate_limit_reset(
-    inner: &NativeEngineInner,
-    app: &AppHandle,
-    run: &mut TurnRun,
-    retry_after_seconds: u64,
-) -> bool {
-    let wait = automatic_rate_limit_wait(retry_after_seconds);
-    inner.emit_diagnostic(
-        app,
-        DiagnosticStream::Runtime,
-        format!(
-            "Provider usage limit reached; keeping the turn active and retrying in {}.",
-            format_duration(wait.as_secs())
-        ),
-    );
-    if *run.cancellation.borrow() {
-        return false;
-    }
-
-    let sleep = tokio::time::sleep(wait);
-    tokio::pin!(sleep);
-    loop {
-        tokio::select! {
-            _ = &mut sleep => {
-                inner.emit_diagnostic(
-                    app,
-                    DiagnosticStream::Runtime,
-                    "Provider usage limit wait finished; retrying the active turn.".into(),
-                );
-                return true;
-            }
-            changed = run.cancellation.changed() => {
-                if changed.is_err() || *run.cancellation.borrow() {
-                    return false;
-                }
-            }
-        }
-    }
-}
-
-pub(super) fn automatic_rate_limit_wait(retry_after_seconds: u64) -> Duration {
-    Duration::from_secs(retry_after_seconds.clamp(1, MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS))
-}
-
-pub(super) async fn wait_for_transient_provider_retry(
-    inner: &NativeEngineInner,
-    app: &AppHandle,
-    run: &mut TurnRun,
-    error: &AppError,
-    failure_count: u32,
-) -> bool {
-    let wait = error
-        .retry_after_seconds()
-        .map(|seconds| {
-            Duration::from_secs(seconds.clamp(1, MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS))
-        })
-        .unwrap_or_else(|| automatic_provider_retry_wait(failure_count));
-    inner.emit_diagnostic(
-        app,
-        DiagnosticStream::Runtime,
-        format!(
-            "Transient provider failure; keeping the turn active and retrying in {}: {error}",
-            format_duration(wait.as_secs())
-        ),
-    );
-    if *run.cancellation.borrow() {
-        return false;
-    }
-
-    let sleep = tokio::time::sleep(wait);
-    tokio::pin!(sleep);
-    loop {
-        tokio::select! {
-            _ = &mut sleep => return true,
-            changed = run.cancellation.changed() => {
-                if changed.is_err() || *run.cancellation.borrow() {
-                    return false;
-                }
-            }
-        }
-    }
-}
-
-pub(super) fn automatic_provider_retry_wait(failure_count: u32) -> Duration {
-    let exponent = failure_count.saturating_sub(1).min(6);
-    Duration::from_secs(
-        1u64.checked_shl(exponent)
-            .unwrap_or(u64::MAX)
-            .min(MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS),
-    )
 }
 
 async fn recover_from_context_window(
@@ -1387,6 +1271,7 @@ impl RejectedToolCall {
             completed_item: self.failed_item(),
             display_output: Some(display_output),
             background_command: None,
+            visual_context: None,
         }
     }
 
@@ -1546,6 +1431,10 @@ fn compose_instructions(
         .as_deref()
         .map(|instructions| format!("\n\n# User developer instructions\n{instructions}"))
         .unwrap_or_default();
+    let browser_guidance = "The built-in browser tools control the visible browser attached to this conversation. \
+        For interface QA, open or navigate with browser_manage, inspect with browser_snapshot before using element refs, \
+        treat refs as stale after page changes, and use browser_metrics to verify latency and runtime findings. \
+        Browser actions return a fresh viewport screenshot to your next reasoning round.";
     let runtime = match mode {
         ConversationMode::Chat => format!(
             "# ChatGPT Chat\n\
@@ -1560,6 +1449,7 @@ fn compose_instructions(
              The local workspace is {}. Use only tools advertised in this request, and treat tool paths \
              as workspace-relative. Drive the task to a reviewable result. For multi-step work, publish \
              a concise plan with update_plan and keep its statuses current. Skip a plan for trivial work. \
+             {browser_guidance} \
              Never claim an operation succeeded until its tool result confirms it. \
              Surface blockers and failures plainly. {personality}",
             model.instructions(),
@@ -1571,6 +1461,7 @@ fn compose_instructions(
              Use only the tools advertised in this request. Tool paths are workspace-relative. \
              For multi-step work, publish a concise plan with update_plan and keep its statuses current. \
              Skip a plan for trivial requests. \
+             {browser_guidance} \
              Never claim an operation succeeded until its tool result confirms it. \
              Surface blockers and failures plainly. {personality}",
             model.instructions(),

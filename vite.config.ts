@@ -25,7 +25,7 @@ export default defineConfig({
     port: devPort,
     strictPort: true,
     watch: {
-      ignored: ["**/.reference/**", "**/src-tauri/**"],
+      ignored: ["**/.reference/**", "**/.references/**", "**/src-tauri/**"],
     },
   },
   build: {

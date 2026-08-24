@@ -57,6 +57,37 @@ fluxo interativo da CLI. O build anterior `26.727.6591.0` reportava
 `codex-cli 0.146.0-alpha.9.2`; a versão interna atual não foi inferida porque o
 binário protegido não publica esse metadado.
 
+## Browser Use e Computer Use no fluxo oficial
+
+A documentação oficial foi revalidada em 24 de agosto de 2026:
+
+- [Browser use](https://learn.chatgpt.com/codex/browser) descreve o navegador
+  embutido, perfil separado, controle visível por mouse/teclado, estado
+  renderizado, screenshot, aprovação da primeira origem e modo de desenvolvedor
+  com CDP completo;
+- [Computer use](https://learn.chatgpt.com/codex/computer) diferencia o controle
+  amplo do desktop do Browser Use restrito à superfície web;
+- [Windows](https://developers.openai.com/codex/app/windows/) confirma que a
+  integração do navegador é uma capacidade nativa do aplicativo.
+
+O snapshot aberto de `openai/codex` confirma no schema
+`BrowserUseConfigToml`: política padrão e por origem, acesso a histórico,
+downloads, uploads e `full_cdp_access`. O fluxo MCP oficial usa o conector
+`browser-use` e a elicitação `access_browser_origin`; a política Guardian avalia
+o efeito real de clicks e ações autenticadas, não apenas a descrição do agente.
+
+O bundle Desktop `26.818.5229.0` contém módulos separados
+`browser-use-settings`, `computer-use-settings` e configuração de CDP. O
+conector proprietário completo não está no repositório aberto, portanto esta
+aplicação não copia bundle, plugin nem processo do produto oficial. Ela adota os
+mesmos princípios com contratos próprios:
+
+- o `BrowserManager` existente continua dono do child WebView;
+- o engine acessa esse manager por ferramentas tipadas, sem backend paralelo;
+- CDP fica encapsulado e limitado em Rust;
+- cada ação retorna DOM/acessibilidade e screenshot no próprio output da função;
+- origem, métricas e teardown são explícitos e testáveis.
+
 ## Comandos longos no core e no Desktop oficial
 
 O fluxo foi conferido diretamente em:

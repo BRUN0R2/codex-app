@@ -32,17 +32,27 @@ describe("diff syntax highlighter", () => {
     const highlighter = new DiffSyntaxHighlighter();
     expect(highlighter.render(ordinary, "file.unknown", 1)).toBeNull();
 
-    const large = createDiffDocument(
-      `@@ -1,4097 +1,4097 @@\n${Array.from(
-        { length: 4_097 },
+    const oversized = createDiffDocument(
+      `@@ -1,257 +1,257 @@\n${Array.from(
+        { length: 257 },
         (_, index) => ` const value_${index} = ${index};`,
       ).join("\n")}`,
     );
-    expect(highlighter.render(large, "src/large.ts", 1)).toBeNull();
+    expect(highlighter.render(oversized, "src/large.ts", 1)).toBeNull();
+
+    const boundary = createDiffDocument(
+      `@@ -1,256 +1,256 @@\n${Array.from(
+        { length: 256 },
+        (_, index) => ` const value_${index} = ${index};`,
+      ).join("\n")}`,
+    );
+    expect(
+      highlighter.render(boundary, "src/boundary.ts", 1)?.some((token) => token.kind === "keyword"),
+    ).toBe(true);
   });
 
   it("highlights a created Rust file with hundreds of added lines", () => {
-    const lineCount = 338;
+    const lineCount = 256;
     const document = createDiffDocument(
       `@@ -0,0 +1,${lineCount} @@\n${Array.from(
         { length: lineCount },

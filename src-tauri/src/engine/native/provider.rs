@@ -29,6 +29,8 @@ use crate::error::AppError;
 
 pub(crate) use self::history::normalize_provider_history;
 pub(crate) use self::models::SelectedModel;
+pub(crate) use self::responses::FunctionCallOutputContent;
+pub(crate) use self::responses::FunctionCallOutputPayload;
 pub(crate) use self::responses::ResponseContent;
 pub(crate) use self::responses::ResponseEvent;
 pub(crate) use self::responses::ResponseItem;
@@ -44,6 +46,20 @@ const MAX_RATE_LIMIT_BUCKETS: usize = 32;
 const MAX_USAGE_RESET_CREDITS: usize = 100;
 const MAX_USAGE_RESET_ID_BYTES: usize = 256;
 const MAX_USAGE_RESET_TITLE_BYTES: usize = 512;
+const MAX_USAGE_RESET_STATUS_BYTES: usize = 64;
+const MAX_USAGE_RESET_CODE_BYTES: usize = 128;
+const MAX_AUTO_RELOAD_POLICY_BYTES: usize = 128;
+const MAX_DECIMAL_DIGIT_BYTES: usize = 32;
+const RATE_LIMIT_BODY_MAX_BYTES: usize = 1_048_576;
+const USAGE_RESET_CREDITS_BODY_MAX_BYTES: usize = 1_048_576;
+const USAGE_RESET_REDEMPTION_BODY_MAX_BYTES: usize = 256 * 1_024;
+const AUTO_TOP_UP_SETTINGS_BODY_MAX_BYTES: usize = 256 * 1_024;
+const CREDIT_DISCOUNT_OFFER_BODY_MAX_BYTES: usize = 256 * 1_024;
+const ACCOUNT_CHECK_BODY_MAX_BYTES: usize = 2 * 1_048_576;
+const PLAN_PRICE_BODY_MAX_BYTES: usize = 2 * 1_048_576;
+const VOLUME_DISCOUNT_POLICY_PERCENT: u32 = 30;
+const VOLUME_DISCOUNT_WITH_AUTO_RELOAD_INCENTIVE_PERCENT: u32 = 40;
+const EPOCH_SECONDS_UPPER_BOUND: i64 = 9_999_999_999;
 const USAGE_RESET_CREDITS_URL: &str =
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const USAGE_RESET_CONSUME_URL: &str =
@@ -121,7 +137,12 @@ impl ChatGptCodexProvider {
         let session = auth.session(app).await?;
         let payload: UsagePayload = self
             .client
-            .get_json(&session, client::USAGE_URL, "rate limits", 1_048_576)
+            .get_json(
+                &session,
+                client::USAGE_URL,
+                "rate limits",
+                RATE_LIMIT_BODY_MAX_BYTES,
+            )
             .await?;
         let plan_type = payload.plan_type;
         let mut response = payload.into_domain()?;
@@ -145,7 +166,7 @@ impl ChatGptCodexProvider {
                 &session,
                 USAGE_RESET_CREDITS_URL,
                 "usage reset credits",
-                1_048_576,
+                USAGE_RESET_CREDITS_BODY_MAX_BYTES,
             )
             .await?;
         payload.into_domain()
@@ -170,7 +191,7 @@ impl ChatGptCodexProvider {
                 USAGE_RESET_CONSUME_URL,
                 &body,
                 "usage reset redemption",
-                256 * 1_024,
+                USAGE_RESET_REDEMPTION_BODY_MAX_BYTES,
             )
             .await?;
         payload.into_domain(credit_id)
@@ -188,7 +209,7 @@ impl ChatGptCodexProvider {
                 &session,
                 AUTO_TOP_UP_SETTINGS_URL,
                 "automatic credit reload settings",
-                256 * 1_024,
+                AUTO_TOP_UP_SETTINGS_BODY_MAX_BYTES,
             )
             .await?;
         let discount = self
@@ -197,7 +218,7 @@ impl ChatGptCodexProvider {
                 &session,
                 CREDIT_DISCOUNT_OFFER_URL,
                 "credit discount offer",
-                256 * 1_024,
+                CREDIT_DISCOUNT_OFFER_BODY_MAX_BYTES,
             )
             .await
             .ok()
@@ -220,7 +241,7 @@ impl ChatGptCodexProvider {
                 &session,
                 CREDIT_DISCOUNT_OFFER_URL,
                 "credit discount offer",
-                256 * 1_024,
+                CREDIT_DISCOUNT_OFFER_BODY_MAX_BYTES,
             )
             .await
             .ok();
@@ -239,7 +260,7 @@ impl ChatGptCodexProvider {
                 AUTO_TOP_UP_ENABLE_URL,
                 &body,
                 "enable automatic credit reload",
-                256 * 1_024,
+                AUTO_TOP_UP_SETTINGS_BODY_MAX_BYTES,
             )
             .await?;
         payload.into_domain(
@@ -280,7 +301,7 @@ impl ChatGptCodexProvider {
                 AUTO_TOP_UP_DISABLE_URL,
                 &serde_json::json!({}),
                 "disable automatic credit reload",
-                256 * 1_024,
+                AUTO_TOP_UP_SETTINGS_BODY_MAX_BYTES,
             )
             .await?;
         payload.into_domain(None)
@@ -312,7 +333,7 @@ impl ChatGptCodexProvider {
                 AUTO_TOP_UP_UPDATE_URL,
                 &body,
                 "update automatic credit reload",
-                256 * 1_024,
+                AUTO_TOP_UP_SETTINGS_BODY_MAX_BYTES,
             )
             .await?;
         payload.into_domain(None)
@@ -330,7 +351,7 @@ impl ChatGptCodexProvider {
                 session,
                 ACCOUNTS_CHECK_URL,
                 "account billing details",
-                2 * 1_048_576,
+                ACCOUNT_CHECK_BODY_MAX_BYTES,
             )
             .await?;
         let Some(billing_country) = account_check
@@ -351,7 +372,12 @@ impl ChatGptCodexProvider {
         let url = format!("{CHECKOUT_PRICING_CONFIG_BASE_URL}/{billing_country}");
         let pricing: CheckoutPricingConfigWire = self
             .client
-            .get_json(session, &url, "localized plan pricing", 2 * 1_048_576)
+            .get_json(
+                session,
+                &url,
+                "localized plan pricing",
+                PLAN_PRICE_BODY_MAX_BYTES,
+            )
             .await?;
         pricing.into_plan_price(plan_type)
     }
@@ -513,7 +539,7 @@ impl UsageResetCreditWire {
         let status = validate_usage_reset_text(
             "credit status",
             self.status.unwrap_or_else(|| "unknown".into()),
-            64,
+            MAX_USAGE_RESET_STATUS_BYTES,
         )?;
         let expires_at = self
             .expires_at
@@ -591,7 +617,8 @@ impl UsageResetConsumeWire {
         self,
         requested_credit_id: Option<&str>,
     ) -> Result<UsageResetRedemptionResponse, AppError> {
-        let code = validate_usage_reset_text("redemption code", self.code, 128)?;
+        let code =
+            validate_usage_reset_text("redemption code", self.code, MAX_USAGE_RESET_CODE_BYTES)?;
         let credit_id = self
             .credit
             .map(|credit| {
@@ -644,11 +671,19 @@ impl AutoTopUpSettingsWire {
         )?;
         let policy = self
             .auto_reload_credit_discount_policy
-            .map(|value| validate_usage_reset_text("automatic reload discount policy", value, 128))
+            .map(|value| {
+                validate_usage_reset_text(
+                    "automatic reload discount policy",
+                    value,
+                    MAX_AUTO_RELOAD_POLICY_BYTES,
+                )
+            })
             .transpose()?;
         let policy_discount = match policy.as_deref() {
-            Some("volume_discount_v1") => Some(30),
-            Some("volume_discount_with_auto_reload_incentive_v1") => Some(40),
+            Some("volume_discount_v1") => Some(VOLUME_DISCOUNT_POLICY_PERCENT),
+            Some("volume_discount_with_auto_reload_incentive_v1") => {
+                Some(VOLUME_DISCOUNT_WITH_AUTO_RELOAD_INCENTIVE_PERCENT)
+            }
             _ => None,
         };
         Ok(AutoTopUpSettingsSnapshot {
@@ -751,7 +786,7 @@ fn validate_optional_decimal(
         .map(|value| {
             let value = value.trim().to_string();
             if value.is_empty()
-                || value.len() > 32
+                || value.len() > MAX_DECIMAL_DIGIT_BYTES
                 || !value.bytes().all(|byte| byte.is_ascii_digit())
             {
                 return Err(AppError::Provider(format!(
@@ -853,7 +888,7 @@ impl SpendLimitWire {
 }
 
 fn to_js_timestamp_ms(value: i64) -> i64 {
-    if (0..=9_999_999_999).contains(&value) {
+    if (0..=EPOCH_SECONDS_UPPER_BOUND).contains(&value) {
         value * 1_000
     } else {
         value

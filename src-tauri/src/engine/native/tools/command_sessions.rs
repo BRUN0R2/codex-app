@@ -612,33 +612,24 @@ impl CommandSession {
     }
 
     async fn wait_finished(&self) {
-        loop {
-            let notified = self.finished_notify.notified();
-            if self.finished.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
+        wait_for_flag(&self.finished_notify, || {
+            self.finished.load(Ordering::Acquire)
+        })
+        .await;
     }
 
     async fn wait_persisted_or_discarded(&self) {
-        loop {
-            let notified = self.persisted_notify.notified();
-            if self.persisted.load(Ordering::Acquire) || self.discarded.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
+        wait_for_flag(&self.persisted_notify, || {
+            self.persisted.load(Ordering::Acquire) || self.discarded.load(Ordering::Acquire)
+        })
+        .await;
     }
 
     async fn wait_terminal(&self) {
-        loop {
-            let notified = self.terminal_notify.notified();
-            if self.terminal_ready.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
+        wait_for_flag(&self.terminal_notify, || {
+            self.terminal_ready.load(Ordering::Acquire)
+        })
+        .await;
     }
 
     fn cancel(&self) {
@@ -655,6 +646,16 @@ impl Drop for ForegroundSessionGuard {
         if self.armed {
             self.session.promote_to_background();
         }
+    }
+}
+
+async fn wait_for_flag(notify: &Notify, is_ready: impl Fn() -> bool) {
+    loop {
+        let notified = notify.notified();
+        if is_ready() {
+            return;
+        }
+        notified.await;
     }
 }
 

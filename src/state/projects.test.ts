@@ -91,4 +91,29 @@ describe("project storage", () => {
       },
     ]);
   });
+
+  it("drops stored icons outside the closed vocabulary", () => {
+    localStorage.setItem(
+      PROFILE_STORAGE_KEYS.projects,
+      JSON.stringify({
+        version: 1,
+        projects: [
+          {
+            color: "#4ade80",
+            icon: "rocket",
+            name: "project",
+            path: "D:\\code\\project",
+          },
+        ],
+      }),
+    );
+
+    expect(loadProjects()).toEqual([
+      {
+        color: "#4ade80",
+        name: "project",
+        path: "D:\\code\\project",
+      },
+    ]);
+  });
 });

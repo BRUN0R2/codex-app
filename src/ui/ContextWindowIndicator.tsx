@@ -12,8 +12,8 @@ export function ContextWindowIndicator(props: ContextWindowIndicatorProps): JSX.
   const metrics = createMemo(() => calculateContextWindowMetrics(props.usage, props.modelWindow));
   const percent = () => metrics()?.percent ?? 0;
   const remainingPercent = () => metrics()?.remainingPercent ?? 0;
-  const radius = 5;
-  const circumference = 2 * Math.PI * radius;
+  const radius: number = 5;
+  const circumference: number = 2 * Math.PI * radius;
   const strokeDashoffset = () => (circumference * remainingPercent()) / 100;
   const roundedPercent = () => Math.round(percent());
   const statusLabel = () =>
