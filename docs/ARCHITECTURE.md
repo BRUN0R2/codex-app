@@ -42,8 +42,8 @@ O engine nativo divide ownership assim:
   árvore de processos (`exec.rs`), transcript incremental
   (`command_output_stream.rs`), sessões longas e polling
   (`command_sessions.rs`) e confinamento de paths no workspace (`workspace.rs`);
-- `approval.rs`: solicitações de uso único que aguardam decisão, cancelamento
-  explícito ou encerramento, sem expiração arbitrária;
+- `approval.rs`: solicitações que aguardam decisão ou cancelamento explícito;
+  comandos podem receber autorização limitada à tarefa durante a sessão atual;
 - `storage.rs`: schema SQLite próprio, transações e configuração versionada;
 - `mod.rs`: ciclo de vida e ownership dos turnos em execução.
 
@@ -75,6 +75,14 @@ visual do agente e coletores limitados de erro, falha de recurso, CLS, LCP e
 long tasks. Cliques que tentam atravessar uma origem não aprovada são bloqueados
 no callback síncrono, convertidos em uma transição pendente e retomados somente
 depois da decisão explícita.
+
+O loop recompõe um protocolo de execução curto junto das instruções cacheadas do
+modelo. Ele define autonomia para mudanças locais autorizadas, commentary apenas
+com resultado concreto e próximo passo, atualização antes/depois de esperas
+longas, plano para trabalho realmente multifásico, paralelismo somente entre
+operações independentes e promoção rápida de comandos previsivelmente longos.
+O `prompt_cache_key` continua sendo o identificador da tarefa, portanto esse
+prefixo estável não vira contexto novo a cada poll.
 
 Cada ação visual devolve texto e screenshot no mesmo
 `function_call_output.output` multimodal. Storage grava essa saída e o item da
@@ -193,8 +201,11 @@ de cada alvo é aplicado imediatamente e os seguintes são coalescidos por frame
 Saída de comando usa operações tipadas por stream (`append`, `backspace`,
 `clearCurrentLine` e `truncated`), frames de no máximo 8 KiB e uma prévia
 transitória combinada de 256 KiB. O backend faz flush de todos os deltas antes de
-publicar qualquer item terminal; `item.completed` descarta o overlay e torna o
-snapshot persistido imediatamente autoritativo. A prévia ao vivo nunca entra no
+publicar qualquer item terminal. Um comando que apenas ultrapassou o yield
+continua usando semântica `item.started`, preserva o overlay e aceita novos
+deltas; somente o estado terminal usa `item.completed`, descarta o overlay e
+torna o snapshot persistido autoritativo. Polls internos são itens causais do
+provider, mas não unidades visuais da timeline. A prévia ao vivo nunca entra no
 histórico nem no contexto do provider.
 `Markdown.tsx` usa modo append-only somente para IDs ainda presentes no overlay,
 consolida blocos estáveis sem comparar novamente todo o prefixo acumulado e

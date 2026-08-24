@@ -742,7 +742,7 @@ const PREVIEW_CONTEXT_THREAD = {
           id: "preview-command-5",
           command: "Get-Content -LiteralPath src/ui/Timeline.tsx -Raw",
           cwd: PREVIEW_WORKSPACE,
-          processId: null,
+          processId: "preview-background-session",
           startedAt: Date.now() - 35_000,
           source: "agent",
           status: "inProgress",

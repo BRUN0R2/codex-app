@@ -1544,6 +1544,18 @@ function timelinePerformanceStressPrepareExpression() {
           visited: visited.size,
         };
 
+        const adaptiveMaximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+        const adaptiveJump = Math.max(200, timeline.clientHeight * 0.3);
+        const adaptiveTarget = timeline.scrollTop > adaptiveMaximum / 2
+          ? Math.max(0, timeline.scrollTop - adaptiveJump)
+          : Math.min(adaptiveMaximum, timeline.scrollTop + adaptiveJump);
+        timeline.scrollTop = adaptiveTarget;
+        timeline.dispatchEvent(new Event("scroll"));
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const adaptiveDeferralObserved =
+          document.querySelector(".agent-activity-scroll-placeholder") !== null;
+        await new Promise((resolve) => setTimeout(resolve, 110));
+
         const frameIntervals = [];
         const longTasks = [];
         const observer = PerformanceObserver.supportedEntryTypes?.includes("longtask")
@@ -1729,6 +1741,7 @@ function timelinePerformanceStressPrepareExpression() {
           rapidFramesOver34Ms: sortedFrames.filter((value) => value > 34).length,
           rapidLongTasks: longTasks.length,
           rapidLongTaskTotalMs: longTasks.reduce((total, value) => total + value, 0),
+          adaptiveDeferralObserved,
           placeholderFrames,
           reopenMs,
           visualDriftPx,
@@ -2977,6 +2990,10 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
   assert(metrics.titleText === metrics.baseText + metrics.highlightText, "as camadas perderam texto");
   assert(metrics.baseText === metrics.highlightText, "a reflexão não replica o título ativo");
   assert(
+    /^Comando em execução há (?:\d+s|\d+m \d+s|\d+h \d+m \d+s)$/u.test(metrics.baseText),
+    `o comando longo não exibe duração no título (${JSON.stringify(metrics.baseText)})`,
+  );
+  assert(
     metrics.animationName === "activity-reflection-sweep",
     "a varredura luminosa não está animada",
   );
@@ -3113,7 +3130,10 @@ function validateLiveCommandOutputMetrics(metrics, viewport) {
     "a saída ao vivo criou overflow horizontal no comando",
   );
   assert(metrics.open === true, "o comando em execução não ficou expandido");
-  assert(metrics.title === "Executando comando", "o comando aberto perdeu seu estado em execução");
+  assert(
+    /^Comando em execução há (?:\d+s|\d+m \d+s|\d+h \d+m \d+s)$/u.test(metrics.title),
+    `o comando aberto perdeu seu estado ou duração (${JSON.stringify(metrics.title)})`,
+  );
   assert(
     metrics.prompt?.includes("Get-Content -LiteralPath src/ui/Timeline.tsx -Raw"),
     "o comando original não aparece junto da saída ao vivo",
@@ -3659,7 +3679,10 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
   assert(metrics.expansionIterations < 1200, "a expansão virtualizada não convergiu");
   assert(metrics.expansionMs <= 20_000, "a expansão virtualizada ultrapassou 20 s");
   assert(metrics.rapidFrames >= 60, "o teste rápido coletou poucos frames");
-  assert(metrics.placeholderFrames > 0, "a rolagem rápida não ativou a materialização adaptativa");
+  assert(
+    metrics.adaptiveDeferralObserved === true,
+    "o salto determinístico não ativou a materialização adaptativa",
+  );
   assert(metrics.rapidP95FrameMs <= 20, "o P95 do scroll rápido ultrapassou 20 ms");
   assert(metrics.rapidP99FrameMs <= 34, "o P99 do scroll rápido ultrapassou 34 ms");
   assert(metrics.rapidMaximumFrameMs <= 50, "o scroll rápido produziu um frame acima de 50 ms");

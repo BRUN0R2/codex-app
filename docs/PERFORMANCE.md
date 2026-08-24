@@ -351,11 +351,11 @@ efetivamente montada na página e na sidebar, 364 células, cinco métricas, cin
 insights e zero overflow. O gate pausa a animação em seis pontos do ciclo e exige
 a sequência visível/oculta/visível/oculta/visível/oculta.
 
-O build corrente produz app principal de `430,03 KiB` (`128,32 KiB` gzip),
-entrada de `22,11 KiB` (`8,85 KiB` gzip), CSS de `132,92 KiB` (`24,35 KiB`
+O build corrente produz app principal de `431,20 KiB` (`128,62 KiB` gzip),
+entrada de `22,11 KiB` (`8,85 KiB` gzip), CSS de `132,94 KiB` (`24,36 KiB`
 gzip) e worker Markdown lazy de `63,48 KiB`. Os módulos iniciais compartilhados
 somam `5,42 KiB` (`2,56 KiB` gzip), levando o payload inicial agregado a
-`164,08 KiB` gzip: redução de `15,45 KiB` (`8,61%`) frente aos `179,53 KiB`
+`164,39 KiB` gzip: redução de `15,14 KiB` (`8,43%`) frente aos `179,53 KiB`
 anteriores. Configurações (`47,28 KiB`), Automações (`15,16 KiB`), Browser
 (`8,90 KiB`) e Revisão (`3,74 KiB`) agora são chunks acionados pela superfície,
 em vez de integrarem o caminho inicial. Nenhuma dependência, WASM ou worker de
@@ -395,16 +395,16 @@ resposta posterior ao cursor:
 
 | Medição | Resultado |
 | --- | ---: |
-| retorno mediano após `exec_command` | `261 ms` (`250–266 ms`) |
-| comando independente mediano durante a sessão | `481 ms` (`470–510 ms`) |
-| duração total mediana | `2.466 ms` (`2.461–2.474 ms`) |
-| ganho mediano entre yield e conclusão | `9,43×` (`9,27–9,82×`) |
+| retorno mediano após `exec_command` | `253 ms` (`251–259 ms`) |
+| comando independente mediano durante a sessão | `452 ms` (`439–472 ms`) |
+| duração total mediana | `2.426 ms` (`2.424–2.439 ms`) |
+| ganho mediano entre yield e conclusão | `9,59×` (`9,36–9,71×`) |
 | payload do snapshot inicial | `16.513 bytes` |
 | payload incremental posterior | `146 bytes` |
 | redução mediana do payload repetido | `113,10×` |
-| 2.000 snapshots completos de 256 KiB | `200.346 µs` |
-| 2.000 polls incrementais sem cópia integral | `176 µs` |
-| ganho por eliminação da cópia | `1.133,82×` |
+| 2.000 snapshots completos de 256 KiB | `33.951 µs` |
+| 2.000 polls incrementais sem cópia integral | `169 µs` |
+| ganho por eliminação da cópia | `200,18×` |
 
 Bytes são usados como proxy determinístico de tokens; a tokenização exata varia
 por modelo. O gate exige pelo menos `4×` de ganho de responsividade e `20×` de
@@ -423,6 +423,25 @@ O teste também valida que o segundo comando termina antes do primeiro e que a
 linha final não carrega novamente o marcador do histórico. O processo continua
 com spool integral, cancelamento da árvore, limite de sessão e finalização
 transacional; a redução afeta somente a resposta enviada ao agente.
+
+#### Trabalho contínuo e informativo — 24 de agosto de 2026
+
+O protocolo adicional é limitado por teste a `2.500 B` e integra o prefixo
+estável identificado por `prompt_cache_key = thread_id`; polls não acrescentam
+uma nova cópia das instruções. O wait máximo caiu de 300 para 30 segundos, o que
+garante uma nova oportunidade de commentary sem prender uma rodada por cinco
+minutos. A timeline filtra polls de coordenação, conserva o mesmo comando e seus
+deltas depois do yield e usa duração compacta no título ativo.
+
+Regressões combinam o caso causal inteiro: promoção para background continua
+com semântica não terminal, um snapshot de turno concluído retém apenas o
+comando ativo, novos deltas ainda chegam, mensagens enfileiradas aguardam todas
+as sessões e o terminal substitui o overlay. A auditoria visual exige o formato
+**Comando em execução há 35s** nos três viewports, com output ao vivo, reflexão,
+scroll e zero overflow preservados. O stress da timeline prova a transição
+adaptativa com um salto determinístico acima do limiar antes de medir FPS; a
+ativação deixou de depender da quantidade incidental de pixels por frame do
+compositor.
 
 O comando `pnpm measure:soak` cobre estruturas destinadas a sessões longas sem
 simular rede ou provider. Na revalidação de 18 de agosto de 2026, 100.000 turnos,
@@ -705,12 +724,12 @@ canônica aberta permaneceu responsiva e não foi encerrada ou substituída.
 de integridade alto:
 
 - 318 arquivos de texto validados como UTF-8 sem BOM;
-- 61 arquivos e 310 testes frontend aprovados;
+- 61 arquivos e 313 testes frontend aprovados;
 - 27 cenários visuais em três viewports, totalizando 81 capturas;
 - TypeScript estrito, Biome e build Vite de produção;
 - bootstrap/hash do ripgrep e auditoria de dependências transitivas;
 - `cargo check`, `rustfmt` e Clippy com warnings como erro;
-- 296 testes Rust aprovados e 9 benchmarks ignorados no fluxo comum por design;
+- 300 testes Rust aprovados e 9 benchmarks ignorados no fluxo comum por design;
 - benchmarks release de streaming, sessões longas e comandos paralelos
   executados separadamente dentro do mesmo gate.
 
@@ -854,13 +873,14 @@ O orçamento release do catálogo foi reexecutado depois das sete ferramentas:
 
 | Caminho | Antes | Browser Use | Delta |
 | --- | ---: | ---: | ---: |
-| catálogo completo | `1.939` tokens | `3.049` tokens | `+1.110` (`+57,25%`) |
-| catálogo somente leitura | `844` tokens | `1.954` tokens | `+1.110` (`+131,52%`) |
-| construção + encode | `0,0117 ms` | `0,0197 ms` | `+0,0080 ms` |
+| catálogo completo | `1.939` tokens | `3.105` tokens | `+1.166` (`+60,13%`) |
+| catálogo somente leitura | `844` tokens | `2.010` tokens | `+1.166` (`+138,15%`) |
+| construção + encode | `0,0117 ms` | `0,0179 ms` | `+0,0062 ms` |
 
-O custo é explícito: as sete definições somam aproximadamente `1.109` tokens e
+O custo é explícito: Browser Use e o contrato de progresso somam aproximadamente
+`1.165` tokens ao baseline e
 mantêm operações pequenas/estritas em vez de conceder CDP arbitrário. O catálogo
-completo ocupa `12.194 B`, aproximadamente `3.049` tokens ou `1,18%` da janela
+completo ocupa `12.417 B`, aproximadamente `3.105` tokens ou `1,20%` da janela
 utilizável padrão de `258.400` tokens.
 O gate também confirma duas imagens agrupadas sem data URL textual e a matiz
 final com HEX, badge, ícone, quadrado HSV e cursor coerentes.

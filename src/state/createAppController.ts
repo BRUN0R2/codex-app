@@ -165,6 +165,8 @@ import { applyThreadSummary, prependThreadHistory } from "./threadHistory";
 import { cachedThreadMatchesSummary, ThreadPageCache } from "./threadPageCache";
 import {
   applyThreadRuntimeStreamDeltas,
+  isContinuingBackgroundCommand,
+  isTimelineVisibleItem,
   mergeRuntimeThreadItems,
   type PersistedVisibleTurnsBySource,
   readActiveTurnPlan,
@@ -173,6 +175,7 @@ import {
   deleteThreadRuntime as reduceDeleteThreadRuntime,
   synchronizeThreadRuntime as reduceSynchronizeThreadRuntime,
   updateThreadRuntime as reduceUpdateThreadRuntime,
+  retainContinuingBackgroundCommands,
   type ThreadRuntimeState,
 } from "./threadRuntime";
 import {
@@ -1068,6 +1071,7 @@ export function createAppController(): AppController {
         {
           streamDeltas.releaseThread(notification.params.threadId);
           let completedActiveTurn = false;
+          let backgroundCommandContinues = false;
           batch(() => {
             updateCachedThread(notification.params.threadId, (thread) =>
               applyTurnCompletion(thread, notification.params.turn),
@@ -1086,10 +1090,14 @@ export function createAppController(): AppController {
             );
             updateThreadRuntime(notification.params.threadId, (runtime) => {
               completedActiveTurn = runtime.activeTurnId === notification.params.turn.id;
+              const continuingItems = completedActiveTurn
+                ? retainContinuingBackgroundCommands(runtime.itemOverlays)
+                : runtime.itemOverlays;
+              backgroundCommandContinues = continuingItems.length > 0;
               return {
                 ...runtime,
                 activeTurnId: completedActiveTurn ? null : runtime.activeTurnId,
-                itemOverlays: completedActiveTurn ? [] : runtime.itemOverlays,
+                itemOverlays: continuingItems,
                 safetyBuffering: completedActiveTurn ? null : runtime.safetyBuffering,
               };
             });
@@ -1103,7 +1111,11 @@ export function createAppController(): AppController {
               setError(notification.params.error.message);
             }
           });
-          if (completedActiveTurn && notification.params.turn.status === "completed") {
+          if (
+            completedActiveTurn &&
+            !backgroundCommandContinues &&
+            notification.params.turn.status === "completed"
+          ) {
             queueMicrotask(() => {
               void scheduleQueuedMessage(notification.params.threadId);
             });
@@ -1147,6 +1159,12 @@ export function createAppController(): AppController {
           if (item.type === "contextUsage") {
             return { ...runtime, contextUsage: item };
           }
+          if (!isTimelineVisibleItem(item)) {
+            return {
+              ...runtime,
+              itemOverlays: removeItem(runtime.itemOverlays, item.id),
+            };
+          }
           return {
             ...runtime,
             contextUsage: item.type === "contextCompaction" ? null : runtime.contextUsage,
@@ -1156,6 +1174,18 @@ export function createAppController(): AppController {
                 : upsertItem(runtime.itemOverlays, item),
           };
         });
+        if (
+          notification.method === "item.completed" &&
+          notification.params.item.type === "commandExecution" &&
+          notification.params.item.processId !== null &&
+          notification.params.item.status !== "inProgress"
+        ) {
+          queueMicrotask(() => {
+            if (currentThread()?.id === notification.params.threadId && activeTurnId() === null) {
+              void scheduleQueuedMessage(notification.params.threadId);
+            }
+          });
+        }
         return;
       default:
         assertNever(notification);
@@ -2025,7 +2055,11 @@ export function createAppController(): AppController {
       return false;
     }
     try {
-      const runningTurnId = threadRuntime().get(threadId)?.activeTurnId ?? null;
+      const runtime = threadRuntime().get(threadId);
+      if (runtime?.itemOverlays.some(isContinuingBackgroundCommand) === true) {
+        return false;
+      }
+      const runningTurnId = runtime?.activeTurnId ?? null;
       if (runningTurnId === null) {
         const response = await startTurn({
           threadId,

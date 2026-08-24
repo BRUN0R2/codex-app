@@ -321,6 +321,7 @@ pub struct ServerResponse {
 #[serde(rename_all = "camelCase")]
 pub enum ApprovalDecision {
     Accept,
+    AcceptForSession,
     Decline,
     Cancel,
 }
@@ -1268,8 +1269,10 @@ pub struct AutoTopUpSettingsSnapshot {
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
+    use super::ApprovalDecision;
     use super::FileChangeKind;
     use super::PermissionProfile;
+    use super::ServerResponse;
 
     #[test]
     fn default_configuration_is_explicit_and_safe() {
@@ -1281,6 +1284,15 @@ mod tests {
         assert!(config.model.is_none());
         assert!(config.model_context_window_preferences.is_empty());
         assert!(config.model_verbosity.is_none());
+    }
+
+    #[test]
+    fn command_approval_accepts_the_session_scope() {
+        let response: ServerResponse = serde_json::from_value(serde_json::json!({
+            "decision": "acceptForSession"
+        }))
+        .expect("session approval should decode");
+        assert_eq!(response.decision, ApprovalDecision::AcceptForSession);
     }
 
     #[test]

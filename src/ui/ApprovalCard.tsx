@@ -1,6 +1,7 @@
 import { createSignal, Show } from "solid-js";
 
 import type {
+  ApprovalDecision,
   BrowserOriginApprovalServerRequest,
   CommandApprovalServerRequest,
   EngineServerRequest,
@@ -37,7 +38,7 @@ function CommandApproval(props: {
 }) {
   const [responding, setResponding] = createSignal(false);
 
-  async function decide(decision: "accept" | "cancel" | "decline"): Promise<void> {
+  async function decide(decision: ApprovalDecision): Promise<void> {
     setResponding(true);
     await props.controller.respondToApproval(props.request.id, decision);
     setResponding(false);
@@ -66,6 +67,13 @@ function CommandApproval(props: {
         </button>
         <button disabled={responding()} onClick={() => void decide("decline")} type="button">
           Recusar
+        </button>
+        <button
+          disabled={responding()}
+          onClick={() => void decide("acceptForSession")}
+          type="button"
+        >
+          Permitir nesta tarefa
         </button>
         <button
           class="primary-button"

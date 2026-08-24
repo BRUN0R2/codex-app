@@ -4460,6 +4460,7 @@ pre {
 
 .approval-card footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 7px;
   margin-top: 12px;

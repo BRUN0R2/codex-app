@@ -50,6 +50,24 @@ export function formatElapsedSeconds(seconds: number): string {
   return `${hours} h ${minutes} min ${remainder} s`;
 }
 
+export function formatCompactElapsedSeconds(seconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  if (totalSeconds < SECONDS_PER_MINUTE) {
+    return `${totalSeconds}s`;
+  }
+  const hours = Math.floor(totalSeconds / SECONDS_PER_HOUR);
+  const minutes = Math.floor((totalSeconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
+  const remainder = totalSeconds % SECONDS_PER_MINUTE;
+  if (hours === 0) {
+    return `${minutes}m ${remainder}s`;
+  }
+  return `${hours}h ${minutes}m ${remainder}s`;
+}
+
+export function runningCommandHeadline(duration: string | null, fallback: string): string {
+  return duration === null ? fallback : `Comando em execução há ${duration}`;
+}
+
 export function reasoningTitle(summary: readonly string[], content: readonly string[]): string {
   const source = lastNonEmpty(summary) ?? lastNonEmpty(content);
   if (source === null) {

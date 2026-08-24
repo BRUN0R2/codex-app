@@ -990,7 +990,7 @@ async fn authorize_origin(
         )
         .await?;
     match decision {
-        ApprovalDecision::Accept => {
+        ApprovalDecision::Accept | ApprovalDecision::AcceptForSession => {
             manager.approve_agent_origin(context.thread_id, url);
             Ok(true)
         }

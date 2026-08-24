@@ -5,6 +5,7 @@ import type {
   ModelSafetyBufferingUpdatedNotification,
   ModelVerification,
   PlanItem,
+  ThreadItem,
   ThreadSummary,
   ThreadTurn,
   VisibleThreadItem,
@@ -86,14 +87,17 @@ export function synchronizeThreadRuntime(
 ): ThreadRuntimeMap {
   const incomingActiveTurnId = activeTurnFromThread(thread);
   const existing = current.get(thread.id);
+  const itemOverlays =
+    existing?.activeTurnId === incomingActiveTurnId && incomingActiveTurnId !== null
+      ? existing.itemOverlays
+      : incomingActiveTurnId === null
+        ? retainContinuingBackgroundCommands(existing?.itemOverlays ?? [])
+        : [];
   const next = new Map(current);
   next.set(thread.id, {
     activeTurnId: incomingActiveTurnId,
     contextUsage: readLatestContextUsage(thread),
-    itemOverlays:
-      existing?.activeTurnId === incomingActiveTurnId && incomingActiveTurnId !== null
-        ? existing.itemOverlays
-        : [],
+    itemOverlays,
     modelReroute: existing?.modelReroute ?? null,
     modelVerifications: existing?.modelVerifications ?? [],
     safetyBuffering: existing?.safetyBuffering ?? null,
@@ -124,7 +128,30 @@ export function isThreadActive(
   thread: ThreadSummary,
   runtime: ThreadRuntimeState | undefined,
 ): boolean {
-  return thread.status.type === "active" || (runtime?.activeTurnId ?? null) !== null;
+  return (
+    thread.status.type === "active" ||
+    (runtime?.activeTurnId ?? null) !== null ||
+    (runtime?.itemOverlays.some(isContinuingBackgroundCommand) ?? false)
+  );
+}
+
+export function isTimelineVisibleItem(item: ThreadItem): boolean {
+  return (
+    item.type !== "contextUsage" && !(item.type === "toolExecution" && item.name === "poll_command")
+  );
+}
+
+export function isContinuingBackgroundCommand(item: VisibleThreadItem): boolean {
+  return (
+    item.type === "commandExecution" && item.status === "inProgress" && item.processId !== null
+  );
+}
+
+export function retainContinuingBackgroundCommands(
+  items: readonly VisibleThreadItem[],
+): readonly VisibleThreadItem[] {
+  const continuing = items.filter(isContinuingBackgroundCommand);
+  return continuing.length === items.length ? items : continuing;
 }
 
 export function readActiveTurnPlan(
@@ -157,7 +184,9 @@ export function readPersistedVisibleTurns(
   }
   const projected = thread.turns.map((turn) => ({
     ...turn,
-    items: turn.items.filter((item) => item.type !== "contextUsage"),
+    items: turn.items
+      .filter((item): item is VisibleThreadItem => item.type !== "contextUsage")
+      .filter(isTimelineVisibleItem),
   }));
   persistedVisibleTurnsBySource.set(thread.turns, projected);
   return projected;

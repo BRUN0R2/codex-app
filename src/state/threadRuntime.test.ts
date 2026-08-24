@@ -4,11 +4,14 @@ import type { CodexThread, ThreadTurn } from "../contracts/types";
 import {
   applyThreadRuntimeStreamDeltas,
   deleteThreadRuntime,
+  isContinuingBackgroundCommand,
   isThreadActive,
+  isTimelineVisibleItem,
   mergeRuntimeThreadItems,
   type PersistedVisibleTurnsBySource,
   readActiveTurnPlan,
   readPersistedVisibleTurns,
+  retainContinuingBackgroundCommands,
   synchronizeThreadRuntime,
   updateThreadRuntime,
 } from "./threadRuntime";
@@ -60,6 +63,61 @@ describe("thread runtime reducer", () => {
     expect(completed.get("thread-a")?.itemOverlays).toEqual([]);
     expect(completed.get("thread-a")?.activeTurnId).toBeNull();
     expect(deleteThreadRuntime(completed, "thread-a").has("thread-a")).toBe(false);
+  });
+
+  it("keeps a yielded command live after the owning turn becomes terminal", () => {
+    const command = backgroundCommand();
+    const running = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
+      ...runtime,
+      activeTurnId: "turn-a",
+      itemOverlays: [
+        { type: "agentMessage", id: "commentary", text: "Aguardando", phase: "commentary" },
+        command,
+      ],
+    }));
+    const completed = synchronizeThreadRuntime(running, threadFixture("completed"));
+    const runtime = completed.get("thread-a");
+
+    expect(runtime?.activeTurnId).toBeNull();
+    expect(runtime?.itemOverlays).toEqual([command]);
+    expect(isThreadActive(threadFixture("completed"), runtime)).toBe(true);
+    expect(isContinuingBackgroundCommand(command)).toBe(true);
+    expect(retainContinuingBackgroundCommands([command])).toEqual([command]);
+
+    const streamed = applyThreadRuntimeStreamDeltas(completed, [
+      {
+        kind: "commandOutput",
+        threadId: "thread-a",
+        turnId: "turn-a",
+        itemId: command.id,
+        stream: "stdout",
+        operation: { type: "append", delta: "test result: ok\n" },
+      },
+    ]);
+    expect(streamed.get("thread-a")?.itemOverlays[0]).toMatchObject({
+      type: "commandExecution",
+      liveOutput: { stdout: "test result: ok\n" },
+    });
+  });
+
+  it("keeps internal command polls out of the visible timeline", () => {
+    const thread = threadFixture("completed");
+    const poll = {
+      type: "toolExecution" as const,
+      id: "poll-1",
+      name: "poll_command",
+      description: "Wait for command",
+      status: "completed" as const,
+      outputPresentation: { type: "plainText" as const },
+      output: null,
+    };
+    const withPoll = {
+      ...thread,
+      turns: thread.turns.map((turn) => ({ ...turn, items: [...turn.items, poll] })),
+    };
+
+    expect(isTimelineVisibleItem(poll)).toBe(false);
+    expect(readPersistedVisibleTurns(newTurnCache(), withPoll)[0]?.items).not.toContainEqual(poll);
   });
 
   it("treats runtime ownership as active even when the persisted snapshot is stale", () => {
@@ -210,6 +268,23 @@ describe("thread runtime reducer", () => {
 
 function newTurnCache(): PersistedVisibleTurnsBySource {
   return new WeakMap<readonly ThreadTurn[], readonly VisibleThreadTurn[]>();
+}
+
+function backgroundCommand() {
+  return {
+    type: "commandExecution" as const,
+    id: "background-command",
+    command: "pnpm verify",
+    cwd: ".",
+    processId: "session-1",
+    startedAt: 1_000,
+    source: "agent" as const,
+    status: "inProgress" as const,
+    aggregatedOutput: null,
+    liveOutput: { stdout: "", stderr: "", truncated: false },
+    exitCode: null,
+    durationMs: null,
+  };
 }
 
 function threadFixture(status: "completed" | "inProgress"): CodexThread {

@@ -907,7 +907,7 @@ export interface BrowserOriginApprovalServerRequest {
 }
 
 export type EngineServerRequest = BrowserOriginApprovalServerRequest | CommandApprovalServerRequest;
-export type ApprovalDecision = "accept" | "cancel" | "decline";
+export type ApprovalDecision = "accept" | "acceptForSession" | "cancel" | "decline";
 
 export interface CommandError {
   readonly code: string;

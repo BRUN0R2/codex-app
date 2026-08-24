@@ -97,8 +97,10 @@ import {
   commandPollActivityTitle,
   fileChangeActionLabel,
   fileChangeGroupTitle,
+  formatCompactElapsedSeconds,
   formatElapsedSeconds,
   reasoningTitle,
+  runningCommandHeadline,
   terminalReadActivityTitle,
   thinkingPresentation,
   toolActivityTitle,
@@ -1998,12 +2000,6 @@ function AgentActivityGroup(props: {
   );
   const summaries = createMemo(() => summarizeAgentActivity(props.items));
   const activeActivity = createMemo(() => activeAgentActivity(props.items));
-  const title = createMemo(() => {
-    if (!props.isCurrent) {
-      return agentActivitySummaryLabel(props.items);
-    }
-    return activeActivity()?.label ?? props.reasoningHeading ?? "Pensando";
-  });
   const iconKind = createMemo(() =>
     props.isCurrent ? activeActivity()?.kind : summaries()[0]?.kind,
   );
@@ -2019,6 +2015,15 @@ function AgentActivityGroup(props: {
       return commandDurationLabel(item, props.clock);
     }
     return null;
+  });
+  const title = createMemo(() => {
+    if (!props.isCurrent) {
+      return agentActivitySummaryLabel(props.items);
+    }
+    const fallback = activeActivity()?.label ?? props.reasoningHeading ?? "Pensando";
+    return activeActivity()?.kind === "commands"
+      ? runningCommandHeadline(activeCommandDuration(), fallback)
+      : fallback;
   });
 
   return (
@@ -2046,9 +2051,6 @@ function AgentActivityGroup(props: {
             )}
           </Show>
           <ActivityHeadline active={props.isCurrent} text={title()} />
-          <Show when={activeCommandDuration()}>
-            {(duration) => <span class="activity-elapsed">· {duration()}</span>}
-          </Show>
           <span class="activity-chevron">
             <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
           </span>
@@ -2246,18 +2248,22 @@ function CommandItem(props: {
   let outputScrollElement: HTMLDivElement | undefined;
   let followLiveOutput = true;
   const disclosure = useTimelineDisclosure(() => `command:${props.item.id}`);
-  const title = () =>
-    commandActivityTitle(
-      props.item.command,
-      props.item.status,
-      props.variant === "grouped" ? false : disclosure.isOpen(),
-    );
   const output = () => props.item.aggregatedOutput;
   const liveOutput = () => commandLiveOutputText(props.item.liveOutput);
   const duration = () =>
     props.variant === "grouped" && props.item.status === "inProgress"
       ? null
       : commandDurationLabel(props.item, props.clock);
+  const backgroundRunning = () =>
+    props.item.status === "inProgress" && props.item.processId !== null;
+  const title = () => {
+    const fallback = commandActivityTitle(
+      props.item.command,
+      props.item.status,
+      props.variant === "grouped" ? false : disclosure.isOpen(),
+    );
+    return backgroundRunning() ? runningCommandHeadline(duration(), fallback) : fallback;
+  };
 
   createEffect(() => {
     liveOutput();
@@ -2294,7 +2300,7 @@ function CommandItem(props: {
           <Icon name="terminal" size={13} />
         </span>
         <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
-        <Show when={duration()}>
+        <Show when={!backgroundRunning() && duration()}>
           {(visibleDuration) => <span class="activity-elapsed">· {visibleDuration()}</span>}
         </Show>
         <span class="activity-chevron">
@@ -2349,7 +2355,7 @@ function commandDurationLabel(
   clock: number,
 ): string | null {
   const duration = visibleCommandDurationMs(item.status, item.startedAt, item.durationMs, clock);
-  return duration === null ? null : formatElapsedSeconds(Math.floor(duration / 1_000));
+  return duration === null ? null : formatCompactElapsedSeconds(Math.floor(duration / 1_000));
 }
 
 function ToolItem(props: {

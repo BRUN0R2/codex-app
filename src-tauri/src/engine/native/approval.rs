@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tauri::{AppHandle, Emitter as _};
 use tokio::sync::{Mutex, oneshot, watch};
@@ -13,6 +13,7 @@ use crate::error::AppError;
 #[derive(Debug, Default)]
 pub struct ApprovalBroker {
     pending: Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>,
+    approved_command_threads: Mutex<HashSet<String>>,
 }
 
 impl ApprovalBroker {
@@ -22,8 +23,22 @@ impl ApprovalBroker {
         request: CommandApprovalRequest,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<ApprovalDecision, AppError> {
-        self.request(app, ServerRequest::ApproveCommand(request), cancellation)
+        if self
+            .approved_command_threads
+            .lock()
             .await
+            .contains(&request.thread_id)
+        {
+            return Ok(ApprovalDecision::AcceptForSession);
+        }
+        let thread_id = request.thread_id.clone();
+        let decision = self
+            .request(app, ServerRequest::ApproveCommand(request), cancellation)
+            .await?;
+        if decision == ApprovalDecision::AcceptForSession {
+            self.approved_command_threads.lock().await.insert(thread_id);
+        }
+        Ok(decision)
     }
 
     pub async fn request_browser_origin(
@@ -115,6 +130,7 @@ impl ApprovalBroker {
         for sender in senders {
             let _decision_was_unobserved = sender.send(ApprovalDecision::Cancel);
         }
+        self.approved_command_threads.lock().await.clear();
     }
 }
 
@@ -135,5 +151,33 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn command_session_approval_is_scoped_and_cleared() {
+        let broker = ApprovalBroker::default();
+        broker
+            .approved_command_threads
+            .lock()
+            .await
+            .insert("thread-a".into());
+
+        assert!(
+            broker
+                .approved_command_threads
+                .lock()
+                .await
+                .contains("thread-a")
+        );
+        assert!(
+            !broker
+                .approved_command_threads
+                .lock()
+                .await
+                .contains("thread-b")
+        );
+
+        broker.cancel_all().await;
+        assert!(broker.approved_command_threads.lock().await.is_empty());
     }
 }

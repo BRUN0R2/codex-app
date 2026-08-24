@@ -7,8 +7,10 @@ import {
   commandPollActivityTitle,
   fileChangeActionLabel,
   fileChangeGroupTitle,
+  formatCompactElapsedSeconds,
   formatElapsedSeconds,
   reasoningTitle,
+  runningCommandHeadline,
   terminalReadActivityTitle,
   thinkingPresentation,
   toolActivityTitle,
@@ -38,6 +40,16 @@ describe("timeline presentation", () => {
     expect(formatElapsedSeconds(3_599)).toBe("59 min 59 s");
     expect(formatElapsedSeconds(3_600)).toBe("1 h 0 min 0 s");
     expect(formatElapsedSeconds(5_365)).toBe("1 h 29 min 25 s");
+  });
+
+  it("uses compact precision in the running-command headline", () => {
+    expect(formatCompactElapsedSeconds(59.9)).toBe("59s");
+    expect(formatCompactElapsedSeconds(385)).toBe("6m 25s");
+    expect(formatCompactElapsedSeconds(5_365)).toBe("1h 29m 25s");
+    expect(runningCommandHeadline("6m 25s", "Executando comando")).toBe(
+      "Comando em execução há 6m 25s",
+    );
+    expect(runningCommandHeadline(null, "Executando comando")).toBe("Executando comando");
   });
 
   it("uses the latest streamed reasoning heading without exposing completed markdown", () => {

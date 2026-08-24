@@ -66,7 +66,7 @@ const MAX_COMMAND_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const DEFAULT_COMMAND_YIELD_MILLISECONDS: u64 = 10_000;
 const MIN_COMMAND_YIELD_MILLISECONDS: u64 = 250;
 const MAX_COMMAND_YIELD_MILLISECONDS: u64 = 30_000;
-const MAX_COMMAND_POLL_WAIT_SECONDS: u16 = 300;
+const MAX_COMMAND_POLL_WAIT_SECONDS: u16 = 30;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Default)]
@@ -373,7 +373,7 @@ impl ToolRegistry {
             ),
             function_tool(
                 "poll_command",
-                "Wait for new output or terminal status from an engine-owned command session. Polling is read-only, serialized per session, and may run alongside unrelated tools or polls for other sessions.",
+                "Wait briefly for new output or terminal status from an engine-owned command session. Polling is read-only, serialized per session, and may run alongside unrelated tools or polls for other sessions. Continue independent work before polling; use the latest cursor, normally wait 10 seconds, and never wait more than 30 seconds so user-visible progress can continue.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -391,7 +391,7 @@ impl ToolRegistry {
                             "type": "integer",
                             "minimum": 0,
                             "maximum": MAX_COMMAND_POLL_WAIT_SECONDS,
-                            "description": "Maximum wait for output or completion. Use 0 for an immediate status check."
+                            "description": "Maximum wait for output or completion. Use 0 for an immediate status check, 10 for a normal progress wait, and at most 30 for long-running work."
                         }
                     },
                     "required": ["session_id", "cursor", "wait_seconds"],
@@ -847,7 +847,7 @@ impl PreparedTool {
                         )
                         .await?;
                     match decision {
-                        ApprovalDecision::Accept => {}
+                        ApprovalDecision::Accept | ApprovalDecision::AcceptForSession => {}
                         ApprovalDecision::Decline => {
                             let output = "The user declined this command.".to_string();
                             return Ok(self.result_with_output(

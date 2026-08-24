@@ -378,6 +378,13 @@ persistido; política, recuperação e atomicidade pertencem integralmente ao Ru
 
 ## Ferramentas e permissão
 
+Codex e Work recebem um protocolo de trabalho contínuo junto das instruções do
+modelo: atualização commentary antes da primeira ferramenta, novos updates
+somente quando há descoberta, fase, plano ou blocker concreto, aviso antes e
+depois de espera longa, autonomia sobre mudanças locais já solicitadas e final
+somente após validações necessárias. Comandos reconhecidamente longos usam yield
+curto, liberam a próxima rodada e deixam trabalho independente preceder o poll.
+
 | Ferramenta | Somente leitura | Projeto | Acesso total |
 | --- | ---: | ---: | ---: |
 | `read_file`, `list_files`, `search_text` | sim | sim | sim |
@@ -413,7 +420,9 @@ comando exclusivo funciona como barreira. Itens começam juntos, mas resultados
 e saídas para o provider são persistidos deterministicamente na ordem original
 das chamadas. A timeline não mostra cronômetro para operações
 curtas; após dez segundos, comandos ativos exibem duração atualizada a cada
-segundo e preservam a duração terminal.
+segundo e preservam a duração terminal. Sessões em background usam o título
+compacto **Comando em execução há 6m 25s**, sem repetir a linha de comando; o
+comando completo permanece dentro do disclosure.
 
 `yield_time_ms` controla por quanto tempo `exec_command` aguarda a conclusão em
 primeiro plano. O padrão é dez segundos e o intervalo fechado permitido é de
@@ -421,10 +430,13 @@ primeiro plano. O padrão é dez segundos e o intervalo fechado permitido é de
 `session_id`, `cursor`, tempo decorrido e o snapshot disponível, enquanto o
 processo continua sob ownership do `NativeEngine`. O item permanece
 `inProgress`, continua recebendo `stdout`/`stderr` em tempo real e o agente pode
-executar trabalho independente antes de consultar a sessão novamente.
+executar trabalho independente antes de consultar a sessão novamente. A
+promoção não publica um falso terminal: ela atualiza o mesmo overlay por
+`item.started`; o `item.completed` autoritativo só chega depois da drenagem e da
+transação terminal.
 
 `poll_command` aceita somente uma sessão pertencente à própria tarefa, um cursor
-opcional e espera de zero a 300 segundos. Consultas da mesma sessão são
+opcional e espera de zero a 30 segundos. Consultas da mesma sessão são
 serializadas; sessões diferentes continuam independentes. O manager mantém no
 máximo 32 sessões, remove primeiro a terminal mais antiga e nunca abandona um
 processo ativo para abrir espaço. Um cursor append-only recebe apenas o delta
@@ -433,6 +445,13 @@ limpeza de linha, a resposta muda explicitamente para `output_mode: snapshot`.
 Cursores futuros são rejeitados. Checkpoints são limitados, o transcript ao vivo
 retém no máximo 256 KiB por stream e o spool integral em disco continua sendo a
 fonte autoritativa após a conclusão.
+
+Itens `poll_command` permanecem no histórico causal enviado ao provider, mas são
+filtrados da projeção visual para que esperas repetidas não criem cartões
+“Comando verificado”. Se um turno terminal chega antes de uma sessão em
+background, o frontend retém somente os comandos ainda ativos, continua
+aplicando seus deltas e posterga mensagens enfileiradas até a última sessão
+terminar.
 
 Uma licença RAII acompanha cada sessão entregue ao agente. Persistir o item
 consome a licença por `commit`; qualquer retorno antecipado, cancelamento ou
@@ -452,6 +471,12 @@ terminal, inclusive em falha, timeout ou cancelamento. O item concluído contém
 somente ID, prévia, tamanho total e cursor; UI e agente continuam por
 `engine_output_read` e `read_output`. Recusa de comando retorna um resultado
 tipado ao modelo; cancelamento interrompe o turno.
+
+No perfil Projeto, a aprovação oferece **Executar uma vez** e **Permitir nesta
+tarefa**. A segunda opção corresponde a `acceptForSession`, vale somente para o
+`threadId` atual e vive apenas enquanto o engine desta sessão estiver ativo; não
+altera o perfil padrão, outras tarefas ou Browser Use. Encerramento limpa todas
+as autorizações de sessão.
 
 `read_output` possui dois caminhos mutuamente exclusivos. `query: null` lê a
 página bruta indicada por `cursor`; uma `query` textual exige `cursor: null` e
@@ -511,7 +536,9 @@ alto; não altera parser, busca, streaming ou ciclo das ferramentas.
 
 A fila de mensagens posteriores não possui limite local de quantidade. Ela é
 persistida por conversa em schema versionado antes de aceitar o enqueue,
-restaurada após reinício e despachada automaticamente quando o turno fica ocioso.
+restaurada após reinício e despachada automaticamente quando o turno fica ocioso
+e não resta comando em background. A conclusão de cada sessão tenta novamente o
+dispatch; com várias sessões, somente a última libera a fila.
 Uma entrada corrompida não impede a recuperação das demais filas. O limite de
 quota do armazenamento do WebView permanece uma restrição externa e produz erro
 visível; não causa descarte silencioso.

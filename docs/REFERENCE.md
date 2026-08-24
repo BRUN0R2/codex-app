@@ -57,6 +57,45 @@ fluxo interativo da CLI. O build anterior `26.727.6591.0` reportava
 `codex-cli 0.146.0-alpha.9.2`; a versão interna atual não foi inferida porque o
 binário protegido não publica esse metadado.
 
+## Harness aberto, updates e Code Mode
+
+A documentação oficial [Codex as a platform: build on the open agent
+harness](https://learn.chatgpt.com/blog/codex-as-a-platform) confirma que App,
+CLI e extensão usam o mesmo harness aberto. A camada não é apenas um prompt:
+mantém o loop, contexto, ferramentas, streaming, sandbox, aprovações, falhas e
+continuidade entre rodadas. O [protocolo do
+app-server](https://learn.chatgpt.com/docs/app-server) expõe essa execução como
+`thread → turn → item`, com `item/started`, deltas incrementais,
+`item/completed` autoritativo e `turn/completed` terminal.
+
+A instalação local `26.818.5229.0` confirmou a topologia em runtime. O processo
+Electron inicia:
+
+```text
+codex.exe -c features.code_mode_host=true app-server --analytics-default-enabled
+└─ codex-code-mode-host.exe
+```
+
+O snapshot aberto mostra três mecanismos complementares:
+
+- o prompt de colaboração exige autonomia até o resultado, updates curtos com
+  descoberta concreta e próximo passo, aviso antes/depois de trabalho longo e
+  plano sem etapas artificiais;
+- `UnifiedExecProcessManager` registra o processo antes de esperar, devolve ID
+  após o yield e conserva watcher/output enquanto novas rodadas acontecem;
+- handlers paralelos entram por leitura em um `RwLock`; operações exclusivas
+  entram por escrita. Code Mode oferece uma célula JavaScript separada e um
+  `wait` cancelável para compor ferramentas sem bloquear o renderer.
+
+O comportamento solicitado foi portado para o domínio próprio, sem executar ou
+redistribuir os binários oficiais. `WORK_EXECUTION_PROTOCOL` complementa as
+instruções cacheadas; o scheduler nativo já sobrepõe ferramentas independentes;
+sessões longas usam yield/poll; comandos permanecem em `item.started` até o
+terminal; polls internos não poluem a timeline; e `acceptForSession` elimina
+aprovações repetidas apenas na tarefa escolhida. O host JavaScript genérico não
+foi incorporado: para o catálogo local fechado, o batch Rust tipado mantém as
+mesmas garantias de concorrência sem adicionar um runtime de código arbitrário.
+
 ## Browser Use e Computer Use no fluxo oficial
 
 A documentação oficial foi revalidada em 24 de agosto de 2026:
@@ -127,7 +166,9 @@ para permitir baixa latência explícita, sem alterar o padrão de dez segundos.
 Sessões usam UUID, pertencem à tarefa, são limitadas a 32 e concluem item mais
 saída em transação SQLite. O transcript vivo é limitado, o resultado integral
 fica no spool e polling append-only devolve somente o delta posterior ao cursor.
-Nenhum arquivo da referência participa dessa implementação.
+Cada poll é limitado a 30 segundos. O primeiro yield mantém o item com semântica
+`started`, permitindo que os deltas continuem; só a transação terminal emite
+`completed`. Nenhum arquivo da referência participa dessa implementação.
 
 ## Perfil e atividade no Desktop oficial
 
@@ -178,6 +219,8 @@ O contrato visual observado no viewport nativo maximizado inclui:
 - commentary dentro da área recolhível de trabalho, entre o divisor de duração
   e a resposta final;
 - comandos individuais no formato **Comando executado: ...**;
+- comandos longos ativos no formato **Comando em execução há 6m 25s**, enquanto
+  commentary e planejamento novo continuam aparecendo abaixo;
 - `read_thread_terminal` apresentado como **Lendo terminal do chat**,
   **Terminal do chat lido** e, em resumo composto, **leu o terminal do chat**;
 - alteração simples de um arquivo mantida no grupo enquanto é a atividade

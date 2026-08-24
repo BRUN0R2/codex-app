@@ -55,6 +55,13 @@ const MAX_REJECTED_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_ERROR_BYTES: usize = 4_096;
 const MAX_PARALLEL_TOOLS: usize = 8;
 const MAX_CONTEXT_RECOVERY_ATTEMPTS_WITHOUT_PROGRESS: u8 = 1;
+const WORK_EXECUTION_PROTOCOL: &str = "# Work execution protocol\n\
+- Own implementation tasks end to end: inspect, change, verify, and report the outcome without stopping at a proposal. Make reasonable in-scope assumptions instead of asking avoidable questions.\n\
+- Before the first tool call, send a brief user-visible commentary update with the goal and immediate next step. During work, send another short commentary update only for a concrete discovery, completed phase, plan change, blocker, or before and after a long heads-down wait. Each update must state an outcome and what comes next; do not narrate routine calls or repeat the plan. Do not leave ongoing work without an update for roughly 60 seconds. Reserve the final answer for completed work.\n\
+- Use update_plan for non-trivial multi-phase work, keep exactly one step in progress, and update it when the real phase changes. Skip plans for trivial work.\n\
+- For a command expected to run longer than a few seconds, choose a short yield_time_ms so it becomes a background session promptly. Continue independent safe work before waiting. Poll with the latest cursor for at most 30 seconds at a time, report meaningful progress between waits, and never claim required validation succeeded or finish the turn while its command is still running.\n\
+- Batch independent reads and explicitly parallel-safe commands. Preserve barriers around dependent work, mutations, approvals, and shared state.\n\
+- Treat safe local reads, in-scope edits, and relevant tests as authorized by an implementation request. Stop only for a genuine permission boundary, destructive or external action, material scope expansion, or an unresolved blocker.";
 
 pub(super) struct PreparedTurn {
     pub user_item: ThreadItem,
@@ -727,13 +734,14 @@ pub(super) async fn run_turn(
                     if let Some(message) = tool_failure_diagnostic(&pending_name, &completed_item) {
                         inner.emit_diagnostic(&app, DiagnosticStream::Runtime, message);
                     }
+                    let remains_in_progress = item_remains_in_progress(&completed_item);
                     let notification = emit_item_notification(
                         &inner,
                         &app,
                         &run.thread_id,
                         &run.turn_id,
                         completed_item,
-                        false,
+                        remains_in_progress,
                     );
                     if let Some(command) = background_command {
                         command.commit();
@@ -1435,6 +1443,7 @@ fn compose_instructions(
         For interface QA, open or navigate with browser_manage, inspect with browser_snapshot before using element refs, \
         treat refs as stale after page changes, and use browser_metrics to verify latency and runtime findings. \
         Browser actions return a fresh viewport screenshot to your next reasoning round.";
+    let work_execution_protocol = WORK_EXECUTION_PROTOCOL;
     let runtime = match mode {
         ConversationMode::Chat => format!(
             "# ChatGPT Chat\n\
@@ -1447,8 +1456,8 @@ fn compose_instructions(
             "{}\n\n# ChatGPT Work — local\n\
              You are completing a substantial task through ChatGPT Work in local mode. \
              The local workspace is {}. Use only tools advertised in this request, and treat tool paths \
-             as workspace-relative. Drive the task to a reviewable result. For multi-step work, publish \
-             a concise plan with update_plan and keep its statuses current. Skip a plan for trivial work. \
+             as workspace-relative. Drive the task to a reviewable result. \
+             {work_execution_protocol} \
              {browser_guidance} \
              Never claim an operation succeeded until its tool result confirms it. \
              Surface blockers and failures plainly. {personality}",
@@ -1459,8 +1468,7 @@ fn compose_instructions(
             "{}\n\n# Native Codex Desktop runtime\n\
              You are operating through an independent desktop runtime in workspace {}. \
              Use only the tools advertised in this request. Tool paths are workspace-relative. \
-             For multi-step work, publish a concise plan with update_plan and keep its statuses current. \
-             Skip a plan for trivial requests. \
+             {work_execution_protocol} \
              {browser_guidance} \
              Never claim an operation succeeded until its tool result confirms it. \
              Surface blockers and failures plainly. {personality}",
@@ -1475,6 +1483,22 @@ fn compose_instructions(
         )));
     }
     Ok(instructions)
+}
+
+fn item_remains_in_progress(item: &ThreadItem) -> bool {
+    matches!(
+        item,
+        ThreadItem::CommandExecution {
+            status: ActivityStatus::InProgress,
+            ..
+        } | ThreadItem::FileChange {
+            status: ActivityStatus::InProgress,
+            ..
+        } | ThreadItem::ToolExecution {
+            status: ActivityStatus::InProgress,
+            ..
+        }
+    )
 }
 
 pub(super) fn validate_response_item(item: &ResponseItem) -> Result<(), AppError> {
@@ -1600,13 +1624,74 @@ mod tests {
 
     use super::{
         MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS, MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS,
-        PendingTool, add_input_bytes, automatic_provider_retry_wait, automatic_rate_limit_wait,
-        collect_tool_batch, deduplicate_read_calls, local_tools_enabled, record_turn_state,
-        tool_failure_diagnostic, validate_response_item, web_search_activity_detail,
+        PendingTool, WORK_EXECUTION_PROTOCOL, add_input_bytes, automatic_provider_retry_wait,
+        automatic_rate_limit_wait, collect_tool_batch, deduplicate_read_calls,
+        item_remains_in_progress, local_tools_enabled, record_turn_state, tool_failure_diagnostic,
+        validate_response_item, web_search_activity_detail,
     };
     use crate::engine::native::provider::{ResponseItem, WebSearchAction};
     use crate::engine::native::tools::{ToolExecutionResult, ToolRegistry};
-    use crate::engine::{ActivityStatus, ConversationMode, PermissionProfile, ThreadItem};
+    use crate::engine::{
+        ActivityStatus, CommandLiveOutput, CommandSource, ConversationMode, PermissionProfile,
+        ThreadItem,
+    };
+
+    #[test]
+    fn work_protocol_requires_updates_background_progress_and_autonomous_completion() {
+        assert!(
+            WORK_EXECUTION_PROTOCOL.len() <= 2_500,
+            "work protocol must stay cache-friendly and concise"
+        );
+        for expected in [
+            "user-visible commentary update",
+            "roughly 60 seconds",
+            "background session promptly",
+            "at most 30 seconds",
+            "Continue independent safe work",
+            "never claim required validation succeeded",
+            "reasonable in-scope assumptions",
+        ] {
+            assert!(
+                WORK_EXECUTION_PROTOCOL.contains(expected),
+                "missing {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_yielded_command_keeps_started_notification_semantics() {
+        let running = ThreadItem::CommandExecution {
+            id: "command-1".into(),
+            command: "cargo test".into(),
+            cwd: ".".into(),
+            process_id: Some("session-1".into()),
+            started_at: Some(1),
+            source: CommandSource::Agent,
+            status: ActivityStatus::InProgress,
+            aggregated_output: None,
+            live_output: Some(CommandLiveOutput::default()),
+            exit_code: None,
+            duration_ms: None,
+        };
+        let mut completed = running.clone();
+        let ThreadItem::CommandExecution {
+            status,
+            live_output,
+            exit_code,
+            duration_ms,
+            ..
+        } = &mut completed
+        else {
+            panic!("command fixture changed type");
+        };
+        *status = ActivityStatus::Completed;
+        *live_output = None;
+        *exit_code = Some(0);
+        *duration_ms = Some(10);
+
+        assert!(item_remains_in_progress(&running));
+        assert!(!item_remains_in_progress(&completed));
+    }
 
     fn stored_tool_item(result: &ToolExecutionResult) -> ThreadItem {
         let mut item = result.completed_item.clone();
