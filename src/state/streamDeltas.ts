@@ -2,12 +2,14 @@ export type StreamDelta =
   | {
       readonly kind: "agentText";
       readonly threadId: string;
+      readonly turnId: string;
       readonly itemId: string;
       readonly delta: string;
     }
   | {
       readonly kind: "reasoningText";
       readonly threadId: string;
+      readonly turnId: string;
       readonly itemId: string;
       readonly index: number;
       readonly target: "content" | "summary";
@@ -33,7 +35,7 @@ export interface StreamDeltaBatcher {
   readonly dispose: () => void;
   readonly enqueue: (delta: StreamDelta) => void;
   readonly flush: () => void;
-  readonly releaseItem: (threadId: string, itemId: string) => void;
+  readonly releaseItem: (threadId: string, turnId: string, itemId: string) => void;
   readonly releaseThread: (threadId: string) => void;
 }
 
@@ -147,6 +149,7 @@ export function createStreamDeltaBatcher(options: StreamDeltaBatcherOptions): St
           previous?.kind === "commandOutput" &&
           previous.itemId === delta.itemId &&
           previous.threadId === delta.threadId &&
+          previous.turnId === delta.turnId &&
           previous.stream === delta.stream &&
           previous.operation.type === "append" &&
           delta.operation.type === "append"
@@ -178,8 +181,10 @@ export function createStreamDeltaBatcher(options: StreamDeltaBatcherOptions): St
       scheduleFlush();
     },
     flush,
-    releaseItem(threadId, itemId) {
-      releaseMatching(`${threadId}${KEY_SEPARATOR}${itemId}${KEY_SEPARATOR}`);
+    releaseItem(threadId, turnId, itemId) {
+      releaseMatching(
+        `${threadId}${KEY_SEPARATOR}${turnId}${KEY_SEPARATOR}${itemId}${KEY_SEPARATOR}`,
+      );
     },
     releaseThread(threadId) {
       releaseMatching(`${threadId}${KEY_SEPARATOR}`);
@@ -195,12 +200,12 @@ export function createBrowserStreamDeltaScheduler(): StreamDeltaScheduler {
 }
 
 function streamDeltaKey(delta: StreamDelta): string {
-  const base = `${delta.threadId}${KEY_SEPARATOR}${delta.itemId}${KEY_SEPARATOR}${delta.kind}`;
+  const base = `${delta.threadId}${KEY_SEPARATOR}${delta.turnId}${KEY_SEPARATOR}${delta.itemId}${KEY_SEPARATOR}${delta.kind}`;
   switch (delta.kind) {
     case "agentText":
       return base;
     case "commandOutput":
-      return `${base}${KEY_SEPARATOR}${delta.turnId}${KEY_SEPARATOR}${delta.stream}`;
+      return `${base}${KEY_SEPARATOR}${delta.stream}`;
     case "reasoningText":
       return `${base}${KEY_SEPARATOR}${delta.target}${KEY_SEPARATOR}${delta.index}`;
   }

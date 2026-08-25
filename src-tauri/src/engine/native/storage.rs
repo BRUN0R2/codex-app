@@ -3029,7 +3029,7 @@ fn validate_background_command_transition(
                 id,
                 command,
                 cwd,
-                process_id,
+                process_id: None,
                 status,
                 aggregated_output: Some(_),
                 live_output: None,
@@ -3038,7 +3038,7 @@ fn validate_background_command_transition(
         ) if current_id == id
             && current_command == command
             && current_cwd == cwd
-            && current_process_id == process_id
+            && current_process_id.is_some()
             && !matches!(status, ActivityStatus::InProgress) =>
         {
             Ok(())
@@ -3753,7 +3753,7 @@ mod tests {
             id: "background-command".into(),
             command: "Start-Sleep -Seconds 1".into(),
             cwd: ".".into(),
-            process_id: Some("session-1".into()),
+            process_id: matches!(status, ActivityStatus::InProgress).then(|| "session-1".into()),
             started_at: Some(1),
             source: CommandSource::Agent,
             status,
@@ -5499,6 +5499,7 @@ mod tests {
         let output = match &completed {
             ThreadItem::CommandExecution {
                 status: ActivityStatus::Completed,
+                process_id: None,
                 aggregated_output: Some(output),
                 live_output: None,
                 exit_code: Some(0),
@@ -5518,6 +5519,7 @@ mod tests {
             loaded.turns[0].items.last(),
             Some(ThreadItem::CommandExecution {
                 status: ActivityStatus::Completed,
+                process_id: None,
                 aggregated_output: Some(stored),
                 live_output: None,
                 ..

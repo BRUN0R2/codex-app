@@ -827,7 +827,10 @@ impl NativeEngine {
         thread_id: String,
     ) -> Result<OperationAck, AppError> {
         self.ensure_started()?;
-        self.inner.command_sessions.cancel_thread(&thread_id).await;
+        self.inner
+            .command_sessions
+            .cancel_thread(&thread_id)
+            .await?;
         let active_deletion = {
             let lifecycle_guard = self.inner.thread_lifecycle_gate.lock().await;
             let mut active_turns = self.inner.active_turns.lock().await;
@@ -1191,19 +1194,26 @@ impl NativeEngine {
         turn_id: String,
     ) -> Result<OperationAck, AppError> {
         self.ensure_started()?;
-        let active_turns = self.inner.active_turns.lock().await;
-        let active = active_turns
-            .get(&thread_id)
-            .ok_or_else(|| AppError::State("thread has no active turn".into()))?;
-        if active.turn_id != turn_id {
-            return Err(AppError::State(
-                "turn id does not match the active turn".into(),
-            ));
-        }
-        active
-            .cancellation
-            .send(true)
-            .map_err(|_| AppError::State("active turn is no longer listening".into()))?;
+        let cancellation_result = {
+            let active_turns = self.inner.active_turns.lock().await;
+            let active = active_turns
+                .get(&thread_id)
+                .ok_or_else(|| AppError::State("thread has no active turn".into()))?;
+            if active.turn_id != turn_id {
+                return Err(AppError::State(
+                    "turn id does not match the active turn".into(),
+                ));
+            }
+            active
+                .cancellation
+                .send(true)
+                .map_err(|_| AppError::State("active turn is no longer listening".into()))
+        };
+        self.inner
+            .command_sessions
+            .cancel_turn(&thread_id, &turn_id)
+            .await?;
+        cancellation_result?;
         Ok(OperationAck { applied: true })
     }
 
@@ -1393,7 +1403,13 @@ impl NativeEngine {
         for cancellation in cancellations {
             let _receiver_already_closed = cancellation.send(true);
         }
-        self.inner.command_sessions.shutdown().await;
+        if let Err(error) = self.inner.command_sessions.shutdown().await {
+            self.inner.emit_diagnostic(
+                app,
+                DiagnosticStream::Runtime,
+                format!("could not terminate all command sessions during shutdown: {error}"),
+            );
+        }
         self.inner.approvals.cancel_all().await;
         self.inner.auth.stop().await;
 
@@ -1554,6 +1570,14 @@ impl NativeEngineInner {
     /// same storage settlement runs directly so the persisted turn cannot stay
     /// in progress without an owner.
     async fn settle_orphaned_turn(&self, app: &AppHandle, thread_id: String, turn_id: &str) {
+        if let Err(error) = self.command_sessions.settle_turn(&thread_id, turn_id).await {
+            self.emit_diagnostic(
+                app,
+                DiagnosticStream::Runtime,
+                format!("could not terminate commands for orphaned turn `{turn_id}`: {error}"),
+            );
+            return;
+        }
         let _lifecycle_guard = self.thread_lifecycle_gate.lock().await;
         if let Err(error) = self
             .storage
@@ -1581,6 +1605,9 @@ impl NativeEngineInner {
         status: TurnStatus,
         failure: Option<OperationFailure>,
     ) -> Result<(), AppError> {
+        self.command_sessions
+            .settle_turn(&thread_id, turn_id)
+            .await?;
         let lifecycle_guard = self.thread_lifecycle_gate.lock().await;
         let completion = self
             .storage

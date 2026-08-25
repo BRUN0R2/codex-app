@@ -1,4 +1,3 @@
-import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { batch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type {
@@ -32,6 +31,7 @@ import type {
 import {
   archiveThread as archiveThreadCommand,
   cancelLogin as cancelLoginCommand,
+  confirmDesktopDialog as confirm,
   createAutomation as createAutomationCommand,
   deleteAutomation as deleteAutomationCommand,
   deleteThread as deleteThreadCommand,
@@ -49,6 +49,7 @@ import {
   loginWithChatGpt,
   logout as logoutCommand,
   markAutomationRunReviewed as markAutomationRunReviewedCommand,
+  openDesktopDialog as open,
   openExternalUrl,
   readAccount,
   readAccountProfile,
@@ -87,12 +88,7 @@ import {
   upsertAutomation,
   upsertAutomationRun,
 } from "./automations";
-import {
-  applyCommandStreamDeltasToThread,
-  readLatestTurnFailure,
-  removeItem,
-  upsertItem,
-} from "./conversation";
+import { applyCommandStreamDeltasToThread, readLatestTurnFailure } from "./conversation";
 import {
   type InitializationStage,
   InitializationTimeoutError,
@@ -165,18 +161,21 @@ import { applyThreadSummary, prependThreadHistory } from "./threadHistory";
 import { cachedThreadMatchesSummary, ThreadPageCache } from "./threadPageCache";
 import {
   applyThreadRuntimeStreamDeltas,
-  isContinuingBackgroundCommand,
+  completeThreadRuntimeTurn,
   isTimelineVisibleItem,
   mergeRuntimeThreadItems,
   type PersistedVisibleTurnsBySource,
+  queuedMessageDispatchDecision,
   readActiveTurnPlan,
   readPersistedVisibleTurns,
   isThreadActive as readThreadActive,
+  readThreadRuntimeItems,
   deleteThreadRuntime as reduceDeleteThreadRuntime,
   synchronizeThreadRuntime as reduceSynchronizeThreadRuntime,
   updateThreadRuntime as reduceUpdateThreadRuntime,
-  retainContinuingBackgroundCommands,
+  removeThreadRuntimeItemOverlay,
   type ThreadRuntimeState,
+  upsertThreadRuntimeItemOverlay,
 } from "./threadRuntime";
 import {
   applySummaryTurnCompletion,
@@ -421,7 +420,7 @@ export function createAppController(): AppController {
   const streamingItemIds = createMemo<ReadonlySet<string>>(
     () =>
       new Set(
-        (selectedRuntime()?.itemOverlays ?? [])
+        readThreadRuntimeItems(selectedRuntime())
           .filter((item) => item.type === "agentMessage")
           .map((item) => item.id),
       ),
@@ -438,7 +437,7 @@ export function createAppController(): AppController {
       : mergeRuntimeThreadItems(
           thread,
           persistedTurns(),
-          runtime?.itemOverlays ?? [],
+          runtime?.itemOverlaysByTurn ?? new Map(),
           runtime?.activeTurnId ?? null,
         );
   });
@@ -1071,7 +1070,6 @@ export function createAppController(): AppController {
         {
           streamDeltas.releaseThread(notification.params.threadId);
           let completedActiveTurn = false;
-          let backgroundCommandContinues = false;
           batch(() => {
             updateCachedThread(notification.params.threadId, (thread) =>
               applyTurnCompletion(thread, notification.params.turn),
@@ -1089,17 +1087,9 @@ export function createAppController(): AppController {
                 : current,
             );
             updateThreadRuntime(notification.params.threadId, (runtime) => {
-              completedActiveTurn = runtime.activeTurnId === notification.params.turn.id;
-              const continuingItems = completedActiveTurn
-                ? retainContinuingBackgroundCommands(runtime.itemOverlays)
-                : runtime.itemOverlays;
-              backgroundCommandContinues = continuingItems.length > 0;
-              return {
-                ...runtime,
-                activeTurnId: completedActiveTurn ? null : runtime.activeTurnId,
-                itemOverlays: continuingItems,
-                safetyBuffering: completedActiveTurn ? null : runtime.safetyBuffering,
-              };
+              const completion = completeThreadRuntimeTurn(runtime, notification.params.turn);
+              completedActiveTurn = completion.completedActiveTurn;
+              return completion.runtime;
             });
             setPendingApprovals((current) =>
               current.filter((request) => request.params.turnId !== notification.params.turn.id),
@@ -1111,11 +1101,7 @@ export function createAppController(): AppController {
               setError(notification.params.error.message);
             }
           });
-          if (
-            completedActiveTurn &&
-            !backgroundCommandContinues &&
-            notification.params.turn.status === "completed"
-          ) {
+          if (completedActiveTurn && notification.params.turn.status === "completed") {
             queueMicrotask(() => {
               void scheduleQueuedMessage(notification.params.threadId);
             });
@@ -1144,7 +1130,11 @@ export function createAppController(): AppController {
       case "item.started":
       case "item.completed":
         if (notification.method === "item.completed") {
-          streamDeltas.releaseItem(notification.params.threadId, notification.params.item.id);
+          streamDeltas.releaseItem(
+            notification.params.threadId,
+            notification.params.turnId,
+            notification.params.item.id,
+          );
           updateCachedThread(notification.params.threadId, (thread) =>
             applyTurnItem(thread, notification.params.turnId, notification.params.item),
           );
@@ -1162,16 +1152,28 @@ export function createAppController(): AppController {
           if (!isTimelineVisibleItem(item)) {
             return {
               ...runtime,
-              itemOverlays: removeItem(runtime.itemOverlays, item.id),
+              itemOverlaysByTurn: removeThreadRuntimeItemOverlay(
+                runtime.itemOverlaysByTurn,
+                notification.params.turnId,
+                item.id,
+              ),
             };
           }
           return {
             ...runtime,
             contextUsage: item.type === "contextCompaction" ? null : runtime.contextUsage,
-            itemOverlays:
+            itemOverlaysByTurn:
               notification.method === "item.completed"
-                ? removeItem(runtime.itemOverlays, item.id)
-                : upsertItem(runtime.itemOverlays, item),
+                ? removeThreadRuntimeItemOverlay(
+                    runtime.itemOverlaysByTurn,
+                    notification.params.turnId,
+                    item.id,
+                  )
+                : upsertThreadRuntimeItemOverlay(
+                    runtime.itemOverlaysByTurn,
+                    notification.params.turnId,
+                    item,
+                  ),
           };
         });
         if (
@@ -2056,11 +2058,8 @@ export function createAppController(): AppController {
     }
     try {
       const runtime = threadRuntime().get(threadId);
-      if (runtime?.itemOverlays.some(isContinuingBackgroundCommand) === true) {
-        return false;
-      }
-      const runningTurnId = runtime?.activeTurnId ?? null;
-      if (runningTurnId === null) {
+      const decision = queuedMessageDispatchDecision(runtime);
+      if (decision.type === "startTurn") {
         const response = await startTurn({
           threadId,
           clientUserMessageId: message.id,
@@ -2077,7 +2076,7 @@ export function createAppController(): AppController {
       } else {
         await steerTurn({
           threadId,
-          expectedTurnId: runningTurnId,
+          expectedTurnId: decision.turnId,
           clientUserMessageId: message.id,
           text: message.text,
           attachments: message.attachments.map((attachment) => ({ path: attachment.path })),
@@ -2671,6 +2670,7 @@ function streamDeltasFromNotification(notification: StreamNotification): readonl
         return {
           kind: "agentText",
           threadId: notification.params.threadId,
+          turnId: notification.params.turnId,
           itemId: delta.itemId,
           delta: delta.delta,
         };
@@ -2688,6 +2688,7 @@ function streamDeltasFromNotification(notification: StreamNotification): readonl
         return {
           kind: "reasoningText",
           threadId: notification.params.threadId,
+          turnId: notification.params.turnId,
           itemId: delta.itemId,
           index: delta.index,
           target: delta.kind === "reasoningSummary" ? "summary" : "content",

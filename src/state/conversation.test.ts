@@ -73,12 +73,14 @@ describe("conversation reducer", () => {
       {
         kind: "agentText",
         threadId: "thread-a",
+        turnId: "turn-a",
         itemId: `message-${target}`,
         delta: "A",
       },
       {
         kind: "agentText",
         threadId: "thread-a",
+        turnId: "turn-a",
         itemId: `message-${target}`,
         delta: "B",
       },
@@ -96,6 +98,7 @@ describe("conversation reducer", () => {
         {
           kind: "reasoningText",
           threadId: "thread-a",
+          turnId: "turn-a",
           itemId: "reasoning-a",
           index: 2,
           target: "summary",
@@ -104,6 +107,7 @@ describe("conversation reducer", () => {
         {
           kind: "reasoningText",
           threadId: "thread-a",
+          turnId: "turn-a",
           itemId: "reasoning-a",
           index: 2,
           target: "summary",

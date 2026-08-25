@@ -319,9 +319,37 @@ impl CommandSessionManager {
         ))
     }
 
-    pub(in crate::engine::native) async fn cancel_thread(&self, thread_id: &str) {
+    pub(in crate::engine::native) async fn cancel_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<(), AppError> {
         let sessions = self.sessions_for_thread(thread_id).await;
-        self.cancel_sessions(sessions).await;
+        self.close_and_remove_sessions(sessions).await
+    }
+
+    pub(in crate::engine::native) async fn cancel_turn(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), AppError> {
+        let sessions = self.sessions_for_turn(thread_id, turn_id).await;
+        for session in &sessions {
+            session.cancel();
+        }
+        let background_sessions = sessions
+            .into_iter()
+            .filter(|session| session.delivery.load(Ordering::Acquire) == DELIVERY_BACKGROUND)
+            .collect();
+        self.wait_for_sessions(background_sessions).await
+    }
+
+    pub(in crate::engine::native) async fn settle_turn(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), AppError> {
+        let sessions = self.sessions_for_turn(thread_id, turn_id).await;
+        self.close_and_remove_sessions(sessions).await
     }
 
     pub(in crate::engine::native) async fn has_running_for_thread(&self, thread_id: &str) -> bool {
@@ -330,7 +358,7 @@ impl CommandSessionManager {
         })
     }
 
-    pub(in crate::engine::native) async fn shutdown(&self) {
+    pub(in crate::engine::native) async fn shutdown(&self) -> Result<(), AppError> {
         let sessions = self
             .sessions
             .lock()
@@ -338,8 +366,7 @@ impl CommandSessionManager {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        self.cancel_sessions(sessions).await;
-        self.sessions.lock().await.clear();
+        self.close_and_remove_sessions(sessions).await
     }
 
     async fn insert(&self, session: Arc<CommandSession>) -> Result<(), AppError> {
@@ -405,22 +432,65 @@ impl CommandSessionManager {
             .collect()
     }
 
-    async fn cancel_sessions(&self, sessions: Vec<Arc<CommandSession>>) {
-        self.cancel_sessions_with_timeout(sessions, SESSION_SHUTDOWN_TIMEOUT)
-            .await;
+    async fn sessions_for_turn(&self, thread_id: &str, turn_id: &str) -> Vec<Arc<CommandSession>> {
+        self.sessions
+            .lock()
+            .await
+            .values()
+            .filter(|session| session.thread_id == thread_id && session.turn_id == turn_id)
+            .cloned()
+            .collect()
     }
 
-    async fn cancel_sessions_with_timeout(
+    async fn close_and_remove_sessions(
+        &self,
+        sessions: Vec<Arc<CommandSession>>,
+    ) -> Result<(), AppError> {
+        self.close_and_remove_sessions_with_timeout(sessions, SESSION_SHUTDOWN_TIMEOUT)
+            .await
+    }
+
+    async fn close_and_remove_sessions_with_timeout(
         &self,
         sessions: Vec<Arc<CommandSession>>,
         timeout: Duration,
-    ) {
+    ) -> Result<(), AppError> {
         for session in &sessions {
-            session.promote_to_background();
-            session.cancel();
+            session.close_with_owner();
+        }
+        self.wait_for_sessions_with_timeout(sessions.clone(), timeout)
+            .await?;
+        let mut registered = self.sessions.lock().await;
+        for session in sessions {
+            registered.remove(&session.id);
+        }
+        Ok(())
+    }
+
+    async fn wait_for_sessions(&self, sessions: Vec<Arc<CommandSession>>) -> Result<(), AppError> {
+        self.wait_for_sessions_with_timeout(sessions, SESSION_SHUTDOWN_TIMEOUT)
+            .await
+    }
+
+    async fn wait_for_sessions_with_timeout(
+        &self,
+        sessions: Vec<Arc<CommandSession>>,
+        timeout: Duration,
+    ) -> Result<(), AppError> {
+        if sessions.is_empty() {
+            return Ok(());
         }
         let waits = sessions.iter().map(|session| session.wait_terminal());
-        let _ = tokio::time::timeout(timeout, join_all(waits)).await;
+        tokio::time::timeout(timeout, join_all(waits))
+            .await
+            .map_err(|_| {
+                AppError::Tool(format!(
+                    "{} command session(s) did not terminate within {} seconds",
+                    sessions.len(),
+                    timeout.as_secs_f64()
+                ))
+            })?;
+        Ok(())
     }
 
     async fn remove(&self, session_id: &str) {
@@ -429,6 +499,14 @@ impl CommandSessionManager {
 }
 
 impl CommandSession {
+    fn close_with_owner(self: &Arc<Self>) {
+        if self.delivery.load(Ordering::Acquire) == DELIVERY_FOREGROUND {
+            self.discard_before_persistence();
+        } else {
+            self.cancel();
+        }
+    }
+
     fn discard_before_persistence(self: &Arc<Self>) {
         self.discarded.store(true, Ordering::Release);
         self.persisted_notify.notify_waiters();
@@ -534,7 +612,7 @@ impl CommandSession {
             id: self.item_id.clone(),
             command: self.command.clone(),
             cwd: self.cwd.clone(),
-            process_id: Some(self.id.clone()),
+            process_id: None,
             started_at: Some(self.started_at_ms),
             source: CommandSource::Agent,
             status,
@@ -644,7 +722,7 @@ impl CommandSession {
 impl Drop for ForegroundSessionGuard {
     fn drop(&mut self) {
         if self.armed {
-            self.session.promote_to_background();
+            self.session.discard_before_persistence();
         }
     }
 }
@@ -801,6 +879,9 @@ mod tests {
     use super::CommandTerminal;
     use super::CommandTranscriptOutputMode;
     use super::DELIVERY_BACKGROUND;
+    use super::DELIVERY_FOREGROUND;
+    use super::ForegroundSessionGuard;
+    use super::MAX_COMMAND_SESSIONS;
     use crate::engine::ActivityStatus;
     use crate::engine::CommandOutputStream;
     use crate::engine::ThreadOutput;
@@ -965,6 +1046,11 @@ mod tests {
         let manager = CommandSessionManager::default();
         let session = test_session("session-cancelled", "thread-a");
         session.persisted.store(false, Ordering::Release);
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), Arc::clone(&session));
         session
             .publish_terminal(CommandTerminal {
                 status: ActivityStatus::Failed,
@@ -976,7 +1062,11 @@ mod tests {
             .await;
         let lease = BackgroundCommandLease::new(Arc::clone(&session));
 
-        manager.cancel_sessions(vec![Arc::clone(&session)]).await;
+        let cancellation = manager.cancel_turn("thread-a", "turn-a").await;
+        assert!(
+            cancellation.is_ok(),
+            "external cancellation should reach the terminal session: {cancellation:?}"
+        );
         assert!(!session.persisted.load(Ordering::Acquire));
         assert!(!session.discarded.load(Ordering::Acquire));
 
@@ -986,22 +1076,177 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_uses_one_global_shutdown_budget() {
+    async fn turn_cancellation_is_scoped_to_the_owning_turn() {
+        let manager = CommandSessionManager::default();
+        let selected = test_session_for_turn("session-selected", "thread-a", "turn-a");
+        let selected_foreground =
+            test_session_for_turn("session-selected-foreground", "thread-a", "turn-a");
+        selected_foreground
+            .delivery
+            .store(DELIVERY_FOREGROUND, Ordering::Release);
+        let other_turn = test_session_for_turn("session-other-turn", "thread-a", "turn-b");
+        let other_thread = test_session_for_turn("session-other-thread", "thread-b", "turn-a");
+        for session in [&selected, &selected_foreground, &other_turn, &other_thread] {
+            manager
+                .sessions
+                .lock()
+                .await
+                .insert(session.id.clone(), Arc::clone(session));
+        }
+        selected
+            .publish_terminal(CommandTerminal {
+                status: ActivityStatus::Failed,
+                exit_code: None,
+                duration_ms: 1,
+                output: None,
+                summary: "cancelled".into(),
+            })
+            .await;
+
+        let cancellation = manager.cancel_turn("thread-a", "turn-a").await;
+        assert!(
+            cancellation.is_ok(),
+            "turn cancellation should complete: {cancellation:?}"
+        );
+
+        assert!(*selected.cancellation.subscribe().borrow());
+        assert!(*selected_foreground.cancellation.subscribe().borrow());
+        assert_eq!(
+            selected_foreground.delivery.load(Ordering::Acquire),
+            DELIVERY_FOREGROUND
+        );
+        assert!(!*other_turn.cancellation.subscribe().borrow());
+        assert!(!*other_thread.cancellation.subscribe().borrow());
+    }
+
+    #[tokio::test]
+    async fn failed_session_cleanup_uses_one_global_budget_and_preserves_ownership() {
         let manager = CommandSessionManager::default();
         let sessions = (0..4)
             .map(|index| test_session(&format!("session-{index}"), "thread-a"))
             .collect::<Vec<_>>();
+        for session in &sessions {
+            manager
+                .sessions
+                .lock()
+                .await
+                .insert(session.id.clone(), Arc::clone(session));
+        }
         let shutdown_budget = Duration::from_millis(100);
         let started_at = Instant::now();
 
-        manager
-            .cancel_sessions_with_timeout(sessions, shutdown_budget)
+        let result = manager
+            .close_and_remove_sessions_with_timeout(sessions.clone(), shutdown_budget)
             .await;
-
+        assert!(
+            matches!(
+                result,
+                Err(ref error) if error.to_string().contains("did not terminate")
+            ),
+            "unfinished sessions must report the exhausted shutdown budget: {result:?}"
+        );
+        assert!(
+            started_at.elapsed() >= shutdown_budget,
+            "the shutdown budget must not fail before its deadline"
+        );
         assert!(
             started_at.elapsed() < Duration::from_millis(250),
             "the shutdown budget must apply to the whole session set"
         );
+        assert_eq!(manager.sessions.lock().await.len(), sessions.len());
+        assert!(
+            sessions
+                .iter()
+                .all(|session| *session.cancellation.subscribe().borrow())
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_guard_discards_a_session_that_never_reached_persistence() {
+        let session = test_session("session-foreground", "thread-a");
+        session.persisted.store(false, Ordering::Release);
+        session
+            .delivery
+            .store(DELIVERY_FOREGROUND, Ordering::Release);
+        session.finished.store(true, Ordering::Release);
+        session.finished_notify.notify_waiters();
+
+        drop(ForegroundSessionGuard {
+            session: Arc::clone(&session),
+            armed: true,
+        });
+        session.wait_terminal().await;
+
+        assert!(session.discarded.load(Ordering::Acquire));
+        assert!(*session.cancellation.subscribe().borrow());
+        assert_eq!(
+            session.delivery.load(Ordering::Acquire),
+            DELIVERY_BACKGROUND
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_settlement_removes_only_sessions_owned_by_that_turn() {
+        let manager = CommandSessionManager::default();
+        let selected = test_session_for_turn("session-selected", "thread-a", "turn-a");
+        let other_turn = test_session_for_turn("session-other-turn", "thread-a", "turn-b");
+        let other_thread = test_session_for_turn("session-other-thread", "thread-b", "turn-a");
+        for session in [&selected, &other_turn, &other_thread] {
+            manager
+                .sessions
+                .lock()
+                .await
+                .insert(session.id.clone(), Arc::clone(session));
+        }
+        selected
+            .publish_terminal(CommandTerminal {
+                status: ActivityStatus::Failed,
+                exit_code: None,
+                duration_ms: 1,
+                output: None,
+                summary: "cancelled".into(),
+            })
+            .await;
+
+        let settlement = manager.settle_turn("thread-a", "turn-a").await;
+        assert!(
+            settlement.is_ok(),
+            "turn settlement should remove its terminal sessions: {settlement:?}"
+        );
+
+        assert!(manager.session("session-selected").await.is_err());
+        assert!(manager.session("session-other-turn").await.is_ok());
+        assert!(manager.session("session-other-thread").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn turn_settlement_releases_a_full_registry_without_leaving_terminal_sessions() {
+        let manager = CommandSessionManager::default();
+        for index in 0..MAX_COMMAND_SESSIONS {
+            let session = test_session_for_turn(&format!("session-{index}"), "thread-a", "turn-a");
+            session
+                .publish_terminal(CommandTerminal {
+                    status: ActivityStatus::Completed,
+                    exit_code: Some(0),
+                    duration_ms: 1,
+                    output: None,
+                    summary: "completed".into(),
+                })
+                .await;
+            manager
+                .sessions
+                .lock()
+                .await
+                .insert(session.id.clone(), session);
+        }
+
+        let settlement = manager.settle_turn("thread-a", "turn-a").await;
+        assert!(
+            settlement.is_ok(),
+            "turn settlement should drain the full registry: {settlement:?}"
+        );
+
+        assert!(manager.sessions.lock().await.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1054,7 +1299,61 @@ mod tests {
         assert!(polled.contains("session-started"));
 
         session.lease.discard();
-        manager.shutdown().await;
+        let shutdown = manager.shutdown().await;
+        assert!(
+            shutdown.is_ok(),
+            "discarded command should shut down cleanly: {shutdown:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn turn_settlement_terminates_a_yielded_process_and_releases_its_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let manager = CommandSessionManager::default();
+        let workspace = TempDir::new()?;
+        let workspace = tokio::fs::canonicalize(workspace.path()).await?;
+        let args = ExecCommandArgs {
+            command: "[Console]::Out.WriteLine('owned-session-started'); Start-Sleep -Seconds 30"
+                .into(),
+            cwd: ".".into(),
+            reason: "test turn-owned background cleanup".into(),
+            parallel_safe: false,
+            yield_time_ms: Some(250),
+            timeout_seconds: Some(60),
+        };
+        let (_turn_cancellation, mut turn_receiver) = watch::channel(false);
+        let outcome = manager
+            .start(
+                Weak::<NativeEngineInner>::new(),
+                None,
+                workspace,
+                args,
+                Ripgrep::for_project_tests(),
+                None,
+                "item-owned".into(),
+                "thread-owned".into(),
+                "turn-owned".into(),
+                1,
+                Duration::from_millis(250),
+                &mut turn_receiver,
+            )
+            .await?;
+        let session = match outcome {
+            CommandStartOutcome::Running(session) => session,
+            CommandStartOutcome::Completed(_) => {
+                return Err(std::io::Error::other("long command should remain active").into());
+            }
+        };
+        let session_id = session.lease.session_id().to_owned();
+        let tracked = manager.session(&session_id).await?;
+        session.lease.commit();
+
+        manager.settle_turn("thread-owned", "turn-owned").await?;
+
+        assert!(*tracked.cancellation.subscribe().borrow());
+        assert!(tracked.terminal_ready.load(Ordering::Acquire));
+        assert!(manager.session(&session_id).await.is_err());
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1320,7 +1619,11 @@ mod tests {
 
         assert!(incremental_payload.contains("benchmark-finished"));
         assert!(!incremental_payload.contains("history-ready"));
-        manager.shutdown().await;
+        let shutdown = manager.shutdown().await;
+        assert!(
+            shutdown.is_ok(),
+            "benchmark sessions should shut down cleanly: {shutdown:?}"
+        );
         BackgroundCommandBenchmarkSample {
             yield_time: yielded_at,
             independent_time: independent_elapsed,
@@ -1333,11 +1636,15 @@ mod tests {
     }
 
     fn test_session(id: &str, thread_id: &str) -> Arc<CommandSession> {
+        test_session_for_turn(id, thread_id, "turn-a")
+    }
+
+    fn test_session_for_turn(id: &str, thread_id: &str, turn_id: &str) -> Arc<CommandSession> {
         let (cancellation, _receiver) = watch::channel(false);
         Arc::new(CommandSession {
             id: id.into(),
             thread_id: thread_id.into(),
-            turn_id: "turn-a".into(),
+            turn_id: turn_id.into(),
             item_id: "item-a".into(),
             command: "Get-Date".into(),
             cwd: ".".into(),

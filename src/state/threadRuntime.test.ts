@@ -1,17 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import type { CodexThread, ThreadTurn } from "../contracts/types";
+import type { CodexThread, ThreadTurn, VisibleThreadItem } from "../contracts/types";
 import {
   applyThreadRuntimeStreamDeltas,
+  completeThreadRuntimeTurn,
   deleteThreadRuntime,
-  isContinuingBackgroundCommand,
   isThreadActive,
   isTimelineVisibleItem,
   mergeRuntimeThreadItems,
   type PersistedVisibleTurnsBySource,
+  queuedMessageDispatchDecision,
   readActiveTurnPlan,
   readPersistedVisibleTurns,
-  retainContinuingBackgroundCommands,
   synchronizeThreadRuntime,
   updateThreadRuntime,
 } from "./threadRuntime";
@@ -22,18 +22,22 @@ describe("thread runtime reducer", () => {
     let state = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
       ...runtime,
       activeTurnId: "turn-a",
-      itemOverlays: [{ type: "agentMessage", id: "message-a", text: "A", phase: null }],
+      itemOverlaysByTurn: overlays("turn-a", [
+        { type: "agentMessage", id: "message-a", text: "A", phase: null },
+      ]),
     }));
     state = updateThreadRuntime(state, "thread-b", (runtime) => ({
       ...runtime,
       activeTurnId: "turn-b",
-      itemOverlays: [{ type: "agentMessage", id: "message-b", text: "B", phase: null }],
+      itemOverlaysByTurn: overlays("turn-b", [
+        { type: "agentMessage", id: "message-b", text: "B", phase: null },
+      ]),
     }));
 
-    expect(state.get("thread-a")?.itemOverlays).toEqual([
+    expect(state.get("thread-a")?.itemOverlaysByTurn.get("turn-a")).toEqual([
       { type: "agentMessage", id: "message-a", text: "A", phase: null },
     ]);
-    expect(state.get("thread-b")?.itemOverlays).toEqual([
+    expect(state.get("thread-b")?.itemOverlaysByTurn.get("turn-b")).toEqual([
       { type: "agentMessage", id: "message-b", text: "B", phase: null },
     ]);
   });
@@ -42,11 +46,13 @@ describe("thread runtime reducer", () => {
     const streamed = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
       ...runtime,
       activeTurnId: "turn-a",
-      itemOverlays: [{ type: "agentMessage", id: "streaming", text: "parcial", phase: null }],
+      itemOverlaysByTurn: overlays("turn-a", [
+        { type: "agentMessage", id: "streaming", text: "parcial", phase: null },
+      ]),
     }));
     const refreshed = synchronizeThreadRuntime(streamed, threadFixture("inProgress"));
 
-    expect(refreshed.get("thread-a")?.itemOverlays).toEqual([
+    expect(refreshed.get("thread-a")?.itemOverlaysByTurn.get("turn-a")).toEqual([
       { type: "agentMessage", id: "streaming", text: "parcial", phase: null },
     ]);
     expect(refreshed.get("thread-a")?.activeTurnId).toBe("turn-a");
@@ -56,35 +62,42 @@ describe("thread runtime reducer", () => {
     const streamed = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
       ...runtime,
       activeTurnId: "turn-a",
-      itemOverlays: [{ type: "agentMessage", id: "streaming", text: "parcial", phase: null }],
+      itemOverlaysByTurn: overlays("turn-a", [
+        { type: "agentMessage", id: "streaming", text: "parcial", phase: null },
+      ]),
     }));
     const completed = synchronizeThreadRuntime(streamed, threadFixture("completed"));
 
-    expect(completed.get("thread-a")?.itemOverlays).toEqual([]);
+    expect(completed.get("thread-a")?.itemOverlaysByTurn.size).toBe(0);
     expect(completed.get("thread-a")?.activeTurnId).toBeNull();
     expect(deleteThreadRuntime(completed, "thread-a").has("thread-a")).toBe(false);
   });
 
-  it("keeps a yielded command live after the owning turn becomes terminal", () => {
+  it("releases every transient item when the owning turn becomes terminal", () => {
     const command = backgroundCommand();
     const running = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
       ...runtime,
       activeTurnId: "turn-a",
-      itemOverlays: [
+      itemOverlaysByTurn: overlays("turn-a", [
         { type: "agentMessage", id: "commentary", text: "Aguardando", phase: "commentary" },
         command,
-      ],
+      ]),
     }));
-    const completed = synchronizeThreadRuntime(running, threadFixture("completed"));
-    const runtime = completed.get("thread-a");
+    const runningRuntime = running.get("thread-a");
+    if (runningRuntime === undefined) {
+      throw new Error("O runtime do turno concluído não foi criado.");
+    }
+    const result = completeThreadRuntimeTurn(runningRuntime, {
+      id: "turn-a",
+    });
+    const runtime = result.runtime;
 
-    expect(runtime?.activeTurnId).toBeNull();
-    expect(runtime?.itemOverlays).toEqual([command]);
-    expect(isThreadActive(threadFixture("completed"), runtime)).toBe(true);
-    expect(isContinuingBackgroundCommand(command)).toBe(true);
-    expect(retainContinuingBackgroundCommands([command])).toEqual([command]);
+    expect(result.completedActiveTurn).toBe(true);
+    expect(runtime.activeTurnId).toBeNull();
+    expect(runtime.itemOverlaysByTurn.size).toBe(0);
+    expect(isThreadActive(threadFixture("completed"), runtime)).toBe(false);
 
-    const streamed = applyThreadRuntimeStreamDeltas(completed, [
+    const streamed = applyThreadRuntimeStreamDeltas(new Map([["thread-a", runtime]]), [
       {
         kind: "commandOutput",
         threadId: "thread-a",
@@ -94,10 +107,78 @@ describe("thread runtime reducer", () => {
         operation: { type: "append", delta: "test result: ok\n" },
       },
     ]);
-    expect(streamed.get("thread-a")?.itemOverlays[0]).toMatchObject({
-      type: "commandExecution",
-      liveOutput: { stdout: "test result: ok\n" },
+    expect(streamed.get("thread-a")?.itemOverlaysByTurn.size).toBe(0);
+  });
+
+  it("drops stale overlays before a newer active turn becomes canonical", () => {
+    const command = backgroundCommand();
+    const current = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
+      ...runtime,
+      activeTurnId: "turn-old",
+      itemOverlaysByTurn: overlays("turn-old", [
+        { type: "agentMessage", id: "commentary-old", text: "antigo", phase: "commentary" },
+        command,
+      ]),
+    }));
+    const thread: CodexThread = {
+      ...threadFixture("inProgress"),
+      turns: [
+        {
+          id: "turn-old",
+          status: "completed",
+          error: null,
+          createdAt: 1,
+          updatedAt: 2,
+          items: [],
+        },
+        {
+          id: "turn-new",
+          status: "inProgress",
+          error: null,
+          createdAt: 3,
+          updatedAt: 4,
+          items: [],
+        },
+      ],
+    };
+
+    const synchronized = synchronizeThreadRuntime(current, thread).get("thread-a");
+
+    expect(synchronized?.activeTurnId).toBe("turn-new");
+    expect(synchronized?.itemOverlaysByTurn.has("turn-old")).toBe(false);
+    expect(synchronized?.itemOverlaysByTurn.has("turn-new")).toBe(false);
+  });
+
+  it("drops transient commands for every terminal status", () => {
+    const command = backgroundCommand();
+    const runtimeMap = updateThreadRuntime(new Map(), "thread-a", (current) => ({
+      ...current,
+      activeTurnId: "turn-a",
+      itemOverlaysByTurn: overlays("turn-a", [command]),
+      safetyBuffering: {
+        fasterModel: null,
+        model: "gpt-test",
+        reasons: [],
+        showBufferingUi: true,
+        threadId: "thread-a",
+        turnId: "turn-a",
+        useCases: [],
+      },
+    }));
+    const runtime = runtimeMap.get("thread-a");
+    if (runtime === undefined) {
+      throw new Error("O runtime do turno interrompido não foi criado.");
+    }
+
+    const result = completeThreadRuntimeTurn(runtime, {
+      id: "turn-a",
     });
+
+    expect(result.completedActiveTurn).toBe(true);
+    expect(result.runtime.activeTurnId).toBeNull();
+    expect(result.runtime.itemOverlaysByTurn.size).toBe(0);
+    expect(result.runtime.safetyBuffering).toBeNull();
+    expect(isThreadActive(threadFixture("completed"), result.runtime)).toBe(false);
   });
 
   it("keeps internal command polls out of the visible timeline", () => {
@@ -132,6 +213,25 @@ describe("thread runtime reducer", () => {
     expect(isThreadActive(threadFixture("inProgress"), undefined)).toBe(true);
   });
 
+  it("steers only an active turn and starts immediately after ownership is released", () => {
+    const activeWithCommand = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
+      ...runtime,
+      activeTurnId: "turn-a",
+      itemOverlaysByTurn: overlays("turn-a", [backgroundCommand()]),
+    })).get("thread-a");
+    const backgroundOnly = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
+      ...runtime,
+      itemOverlaysByTurn: overlays("turn-a", [backgroundCommand()]),
+    })).get("thread-a");
+
+    expect(queuedMessageDispatchDecision(activeWithCommand)).toEqual({
+      type: "steerTurn",
+      turnId: "turn-a",
+    });
+    expect(queuedMessageDispatchDecision(backgroundOnly)).toEqual({ type: "startTurn" });
+    expect(queuedMessageDispatchDecision(undefined)).toEqual({ type: "startTurn" });
+  });
+
   it("groups streamed items into their canonical turn without exposing context snapshots", () => {
     const thread = threadFixture("inProgress");
     const runtimeItems = [
@@ -142,13 +242,119 @@ describe("thread runtime reducer", () => {
     const turns = mergeRuntimeThreadItems(
       thread,
       readPersistedVisibleTurns(newTurnCache(), thread),
-      runtimeItems,
+      overlays("turn-a", runtimeItems),
       "turn-a",
     );
 
     expect(turns).toHaveLength(1);
     expect(turns.at(0)?.items).toEqual(runtimeItems);
     expect(turns.at(0)?.createdAt).toBe(1);
+  });
+
+  it("keeps an older background command attached to its owning turn", () => {
+    const oldCommand = {
+      ...backgroundCommand(),
+      id: "command-old",
+      liveOutput: { stdout: "old turn\n", stderr: "", truncated: false },
+    };
+    const activeItem = {
+      type: "agentMessage" as const,
+      id: "message-new",
+      text: "turno novo",
+      phase: "commentary" as const,
+    };
+    const thread: CodexThread = {
+      ...threadFixture("inProgress"),
+      turns: [
+        {
+          id: "turn-old",
+          status: "completed",
+          error: null,
+          createdAt: 1,
+          updatedAt: 2,
+          items: [{ ...oldCommand, liveOutput: null }],
+        },
+        {
+          id: "turn-new",
+          status: "inProgress",
+          error: null,
+          createdAt: 3,
+          updatedAt: 4,
+          items: [],
+        },
+      ],
+    };
+    const turns = mergeRuntimeThreadItems(
+      thread,
+      readPersistedVisibleTurns(newTurnCache(), thread),
+      new Map([
+        ["turn-old", [oldCommand]],
+        ["turn-new", [activeItem]],
+      ]),
+      "turn-new",
+    );
+
+    expect(turns.at(0)?.id).toBe("turn-old");
+    expect(turns.at(0)?.items).toEqual([oldCommand]);
+    expect(turns.at(1)?.id).toBe("turn-new");
+    expect(turns.at(1)?.items).toEqual([activeItem]);
+  });
+
+  it("routes late command deltas only to the owning older turn", () => {
+    const oldCommand = { ...backgroundCommand(), id: "command-old" };
+    const activeItem = {
+      type: "agentMessage" as const,
+      id: "message-new",
+      text: "novo",
+      phase: null,
+    };
+    const current = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
+      ...runtime,
+      activeTurnId: "turn-new",
+      itemOverlaysByTurn: new Map([
+        ["turn-old", [oldCommand]],
+        ["turn-new", [activeItem]],
+      ]),
+    }));
+
+    const result = applyThreadRuntimeStreamDeltas(current, [
+      {
+        kind: "commandOutput",
+        threadId: "thread-a",
+        turnId: "turn-old",
+        itemId: oldCommand.id,
+        stream: "stdout",
+        operation: { type: "append", delta: "done\n" },
+      },
+    ]);
+
+    expect(result.get("thread-a")?.itemOverlaysByTurn.get("turn-old")?.[0]).toMatchObject({
+      liveOutput: { stdout: "done\n", stderr: "", truncated: false },
+    });
+    expect(result.get("thread-a")?.itemOverlaysByTurn.get("turn-new")).toEqual([activeItem]);
+  });
+
+  it("completing the current turn clears only overlays owned by that turn", () => {
+    const oldCommand = { ...backgroundCommand(), id: "command-old" };
+    const currentCommand = { ...backgroundCommand(), id: "command-current" };
+    const runtime = updateThreadRuntime(new Map(), "thread-a", (current) => ({
+      ...current,
+      activeTurnId: "turn-current",
+      itemOverlaysByTurn: new Map([
+        ["turn-old", [oldCommand]],
+        ["turn-current", [currentCommand]],
+      ]),
+    })).get("thread-a");
+    if (runtime === undefined) {
+      throw new Error("O runtime com dois turnos não foi criado.");
+    }
+
+    const result = completeThreadRuntimeTurn(runtime, {
+      id: "turn-current",
+    });
+
+    expect(result.runtime.itemOverlaysByTurn.get("turn-old")).toEqual([oldCommand]);
+    expect(result.runtime.itemOverlaysByTurn.has("turn-current")).toBe(false);
   });
 
   it("reuses persisted turn projections until the immutable turn source changes", () => {
@@ -174,7 +380,7 @@ describe("thread runtime reducer", () => {
     const turns = mergeRuntimeThreadItems(
       thread,
       readPersistedVisibleTurns(newTurnCache(), thread),
-      [
+      overlays("turn-a", [
         {
           type: "plan",
           id: "plan-1",
@@ -190,7 +396,7 @@ describe("thread runtime reducer", () => {
             { step: "Validar", status: "inProgress" },
           ],
         },
-      ],
+      ]),
       "turn-a",
     );
 
@@ -210,7 +416,9 @@ describe("thread runtime reducer", () => {
     const turns = mergeRuntimeThreadItems(
       threadFixture("inProgress"),
       persisted,
-      [{ type: "agentMessage", id: "streaming", text: "parcial", phase: null }],
+      overlays("turn-9999", [
+        { type: "agentMessage", id: "streaming", text: "parcial", phase: null },
+      ]),
       "turn-9999",
     );
 
@@ -229,22 +437,24 @@ describe("thread runtime reducer", () => {
       {
         kind: "agentText",
         threadId: "thread-a",
+        turnId: "turn-a",
         itemId: "message-a",
         delta: "A",
       },
       {
         kind: "agentText",
         threadId: "thread-b",
+        turnId: "turn-b",
         itemId: "message-b",
         delta: "B",
       },
     ]);
 
     expect(result).not.toBe(current);
-    expect(result.get("thread-a")?.itemOverlays).toEqual([
+    expect(result.get("thread-a")?.itemOverlaysByTurn.get("turn-a")).toEqual([
       { type: "agentMessage", id: "message-a", text: "A", phase: null },
     ]);
-    expect(result.get("thread-b")?.itemOverlays).toEqual([
+    expect(result.get("thread-b")?.itemOverlaysByTurn.get("turn-b")).toEqual([
       { type: "agentMessage", id: "message-b", text: "B", phase: null },
     ]);
   });
@@ -262,12 +472,19 @@ describe("thread runtime reducer", () => {
     ]);
 
     expect(result).toBe(current);
-    expect(result.get("thread-a")?.itemOverlays).toEqual([]);
+    expect(result.get("thread-a")?.itemOverlaysByTurn.size).toBe(0);
   });
 });
 
 function newTurnCache(): PersistedVisibleTurnsBySource {
   return new WeakMap<readonly ThreadTurn[], readonly VisibleThreadTurn[]>();
+}
+
+function overlays(
+  turnId: string,
+  items: readonly VisibleThreadItem[],
+): ReadonlyMap<string, readonly VisibleThreadItem[]> {
+  return new Map([[turnId, items]]);
 }
 
 function backgroundCommand() {

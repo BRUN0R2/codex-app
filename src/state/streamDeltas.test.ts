@@ -92,13 +92,38 @@ describe("stream delta batcher", () => {
 
     batcher.enqueue(agentDelta("A"));
     batcher.enqueue(agentDelta("stale"));
-    batcher.releaseItem("thread-a", "message-a");
+    batcher.releaseItem("thread-a", "turn-a", "message-a");
     batcher.enqueue(agentDelta("B"));
     batcher.dispose();
     batcher.enqueue(agentDelta("C"));
     scheduler.flush();
 
     expect(batches).toEqual([[agentDelta("A")], [agentDelta("B")]]);
+  });
+
+  it("releases one turn without discarding deltas for the same item id in another turn", () => {
+    const scheduler = new ManualScheduler();
+    const batches: (readonly StreamDelta[])[] = [];
+    const batcher = createStreamDeltaBatcher({
+      apply: (deltas) => batches.push(deltas),
+      reportError: (reason) => {
+        throw reason;
+      },
+      scheduler,
+    });
+
+    batcher.enqueue(agentDelta("A", "turn-a"));
+    batcher.enqueue(agentDelta("stale-a", "turn-a"));
+    batcher.enqueue(agentDelta("B", "turn-b"));
+    batcher.enqueue(agentDelta("pending-b", "turn-b"));
+    batcher.releaseItem("thread-a", "turn-a", "message-a");
+    batcher.flush();
+
+    expect(batches).toEqual([
+      [agentDelta("A", "turn-a")],
+      [agentDelta("B", "turn-b")],
+      [agentDelta("pending-b", "turn-b")],
+    ]);
   });
 
   it("coalesces adjacent command appends without reordering control operations", () => {
@@ -126,10 +151,11 @@ describe("stream delta batcher", () => {
   });
 });
 
-function agentDelta(delta: string): StreamDelta {
+function agentDelta(delta: string, turnId = "turn-a"): StreamDelta {
   return {
     kind: "agentText",
     threadId: "thread-a",
+    turnId,
     itemId: "message-a",
     delta,
   };
@@ -143,6 +169,7 @@ function reasoningDelta(
   return {
     kind: "reasoningText",
     threadId: "thread-a",
+    turnId: "turn-a",
     itemId: "reasoning-a",
     index,
     target,
