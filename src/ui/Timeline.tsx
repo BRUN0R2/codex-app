@@ -3369,7 +3369,14 @@ function ExpandedChangeDiff(props: {
   readonly mode: "split" | "unified";
 }) {
   const document = createMemo(() => activityContentProjectionCache.diffDocument(props.change));
-  return <DiffView document={document()} mode={props.mode} path={props.change.path} />;
+  return (
+    <DiffView
+      document={document()}
+      mode={props.mode}
+      path={props.change.path}
+      viewportSizing="intrinsic"
+    />
+  );
 }
 
 function createTimelineFileChangeEntries(

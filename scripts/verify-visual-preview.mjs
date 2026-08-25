@@ -29,6 +29,11 @@ const VIEWPORTS = [
   { width: 1280, height: 820 },
   { width: 1920, height: 1080 },
 ];
+const REVIEW_VIEWPORTS = [
+  { width: 775, height: 407 },
+  { width: 920, height: 640 },
+  { width: 1280, height: 820 },
+];
 const REQUESTED_SCENARIOS = new Set(
   (process.env.CODEX_VISUAL_SCENARIOS ?? "")
     .split(",")
@@ -248,6 +253,54 @@ const SCENARIOS = [
     )`,
     auditExpression: syntaxHighlightedDiffVisualAuditExpression,
     validate: validateSyntaxHighlightedDiffMetrics,
+  },
+  {
+    id: "review-file-layout",
+    url: TIMELINE_STRESS_PREVIEW_URL,
+    viewports: REVIEW_VIEWPORTS,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de timeline expandida"),
+    )`,
+    prepareExpression: `(() => {
+      void (async () => {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const waitUntil = async (label, predicate) => {
+          const deadline = performance.now() + 5_000;
+          while (!predicate()) {
+            if (performance.now() > deadline) {
+              throw new Error("Tempo esgotado preparando " + label + ".");
+            }
+            await frame();
+          }
+        };
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Estresse de timeline expandida"),
+        );
+        threadButton?.click();
+        await waitUntil(
+          "o gatilho da revisão",
+          () => document.querySelector(".plan-review-trigger") instanceof HTMLButtonElement,
+        );
+        document.querySelector(".plan-review-trigger")?.click();
+        await waitUntil(
+          "a lista de arquivos da revisão",
+          () => document.querySelector(".review-file-option") instanceof HTMLButtonElement,
+        );
+        const largeFile = [...document.querySelectorAll(".review-file-option")].find(
+          (option) => option.querySelector("code")?.textContent?.endsWith("module-15.ts"),
+        );
+        if (!(largeFile instanceof HTMLButtonElement)) {
+          throw new Error("O arquivo grande da revisão está ausente.");
+        }
+        largeFile.click();
+        await frame();
+        await frame();
+      })();
+    })()`,
+    readyExpression: `document.querySelector(".review-file-option.selected code")?.textContent?.endsWith("module-15.ts") === true &&
+      document.querySelector(".review-panel .diff-virtual-row") !== null`,
+    auditExpression: reviewFileLayoutVisualAuditExpression,
+    validate: validateReviewFileLayoutMetrics,
   },
   {
     id: "syntax-highlighted-created-file",
@@ -622,11 +675,12 @@ async function main() {
   const browserPath = resolveBrowserPath();
   const browserProfile = await mkdtemp(path.join(os.tmpdir(), "codex-app-visual-"));
   const debugPort = await reservePort();
+  // Browser fixtures are guarded by import.meta.env.DEV; the production build is validated
+  // separately, while this server keeps those deterministic fixtures available to the audit.
   const server = spawn(
     process.execPath,
     [
       VITE_ENTRY,
-      "preview",
       "--host",
       "127.0.0.1",
       "--mode",
@@ -693,7 +747,7 @@ async function main() {
       throw new Error(`Cenários visuais desconhecidos: ${unknownScenarios.join(", ")}`);
     }
     for (const scenario of scenarios) {
-      for (const viewport of VIEWPORTS) {
+      for (const viewport of scenario.viewports ?? VIEWPORTS) {
         reports.push(await auditViewport(debugPort, viewport, scenario));
       }
     }
@@ -3143,6 +3197,29 @@ function timelinePerformanceStressPrepareExpression() {
           }
           visualDriftPx = currentTarget.getBoundingClientRect().top - targetTop;
         }
+        const diffViewportIntegrity = [...document.querySelectorAll(".diff-viewport")].map(
+          (viewport) => {
+            const rows = [...viewport.querySelectorAll(".diff-virtual-row")];
+            const rowTops = rows.map((row) => row.getBoundingClientRect().top);
+            const canvas = viewport.querySelector(".diff-virtual-canvas");
+            return {
+              canvasConnected:
+                canvas instanceof HTMLElement &&
+                canvas.isConnected &&
+                canvas.parentElement?.classList.contains("diff-virtual-table") === true,
+              canvasHeight:
+                canvas instanceof HTMLElement ? canvas.getBoundingClientRect().height : null,
+              clientHeight: viewport.clientHeight,
+              declaredRows: Number(
+                viewport.querySelector(".diff-virtual-table")?.getAttribute("aria-rowcount") ??
+                  Number.NaN,
+              ),
+              mountedRows: rows.length,
+              rowGaps: rowTops.slice(1).map((top, index) => top - (rowTops[index] ?? top)),
+              scrollHeight: viewport.scrollHeight,
+            };
+          },
+        );
 
         window.__timelinePerformanceStressMetrics = {
           visitedItems: visited.size,
@@ -3195,6 +3272,7 @@ function timelinePerformanceStressPrepareExpression() {
           mountedActivityItems: document.querySelectorAll(".agent-activity-virtual-item").length,
           mountedSourceRows: document.querySelectorAll(".tool-source-line").length,
           mountedDiffRows: document.querySelectorAll(".diff-virtual-row").length,
+          diffViewportIntegrity,
           settledDeferredBodies: document.querySelectorAll(
             '[data-activity-content="deferred"]',
           ).length,
@@ -4258,6 +4336,19 @@ function syntaxHighlightedDiffVisualAuditExpression() {
       changedIndicatorWidth: changedIndicatorStyle?.width ?? null,
       changedIndicatorPosition: changedIndicatorStyle?.position ?? null,
       diffRowHeights: rows.map((row) => row.getBoundingClientRect().height),
+      diffRowTopOffsets: rows.map(
+        (row) => row.getBoundingClientRect().top - viewport.getBoundingClientRect().top,
+      ),
+      diffRowInlineTops: rows.map((row) =>
+        row instanceof HTMLElement ? row.style.top : null,
+      ),
+      diffViewportHeight: viewport.getBoundingClientRect().height,
+      diffViewportClientHeight: viewport.clientHeight,
+      diffViewportScrollHeight: viewport.scrollHeight,
+      diffCanvasHeight:
+        viewport.querySelector(".diff-virtual-canvas") instanceof HTMLElement
+          ? viewport.querySelector(".diff-virtual-canvas").getBoundingClientRect().height
+          : null,
       stickyGutterMovement:
         initialStickyLeft === null || scrolledStickyLeft === null
           ? null
@@ -4275,6 +4366,68 @@ function syntaxHighlightedDiffVisualAuditExpression() {
       ),
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
       viewportHorizontalOverflow: viewport.scrollWidth - viewport.clientWidth,
+    };
+  })()`;
+}
+
+function reviewFileLayoutVisualAuditExpression() {
+  return `(() => {
+    const panel = document.querySelector(".review-panel");
+    const content = panel?.querySelector(".review-panel-content");
+    const fileList = panel?.querySelector(".review-file-list");
+    const stage = panel?.querySelector(".review-file-stage");
+    const header = stage?.querySelector(".review-file-header");
+    const diffViewport = stage?.querySelector(".diff-viewport");
+    const table = diffViewport?.querySelector(".diff-virtual-table");
+    const canvas = diffViewport?.querySelector(".diff-virtual-canvas");
+    const selectedFile = fileList?.querySelector(".review-file-option.selected code");
+    if (
+      !(panel instanceof HTMLElement) ||
+      !(content instanceof HTMLElement) ||
+      !(fileList instanceof HTMLElement) ||
+      !(stage instanceof HTMLElement) ||
+      !(header instanceof HTMLElement) ||
+      !(diffViewport instanceof HTMLElement) ||
+      !(table instanceof HTMLTableElement) ||
+      !(canvas instanceof HTMLTableSectionElement) ||
+      !(selectedFile instanceof HTMLElement)
+    ) {
+      throw new Error("A estrutura completa da revisão está ausente.");
+    }
+    const rows = [...diffViewport.querySelectorAll(".diff-virtual-row")];
+    const viewportBounds = diffViewport.getBoundingClientRect();
+    const rowTopOffsets = rows.map(
+      (row) => row.getBoundingClientRect().top - viewportBounds.top,
+    );
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      panelHeight: panel.getBoundingClientRect().height,
+      contentHeight: content.getBoundingClientRect().height,
+      contentDisplay: getComputedStyle(content).display,
+      contentGridTemplateRows: getComputedStyle(content).gridTemplateRows,
+      fileListHeight: fileList.getBoundingClientRect().height,
+      fileListMaxHeight: getComputedStyle(fileList).maxHeight,
+      fileListScrollHeight: fileList.scrollHeight,
+      fileListScrollable: fileList.scrollHeight > fileList.clientHeight,
+      fileCount: fileList.querySelectorAll(".review-file-option").length,
+      selectedFile: selectedFile.textContent?.trim() ?? null,
+      stageHeight: stage.getBoundingClientRect().height,
+      headerHeight: header.getBoundingClientRect().height,
+      diffViewportHeight: viewportBounds.height,
+      diffViewportClientHeight: diffViewport.clientHeight,
+      diffViewportInlineHeight: diffViewport.style.height,
+      diffViewportScrollHeight: diffViewport.scrollHeight,
+      declaredRows: Number.parseInt(table.getAttribute("aria-rowcount") ?? "0", 10),
+      mountedRows: rows.length,
+      mountedRowIndexes: rows.map((row) =>
+        Number.parseInt(row.getAttribute("aria-rowindex") ?? "0", 10),
+      ),
+      rowTopOffsets,
+      rowGaps: rowTopOffsets.slice(1).map(
+        (top, index) => top - (rowTopOffsets[index] ?? top),
+      ),
+      canvasHeight: canvas.getBoundingClientRect().height,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
 }
@@ -5624,6 +5777,60 @@ function validateIntrinsicActivityInteraction(interaction, label, tolerance) {
   );
 }
 
+function validateReviewFileLayoutMetrics(metrics, viewport) {
+  const tolerance = 1;
+  const maximumListHeight = Math.min(220, metrics.contentHeight * 0.32);
+  const expectedMountedRows = Math.min(
+    metrics.declaredRows,
+    Math.ceil(metrics.diffViewportClientHeight / 20),
+  );
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado na revisão em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "a revisão criou overflow horizontal global");
+  assert(metrics.fileCount === 60, "a revisão não reuniu os sessenta arquivos alterados do turno");
+  assert(metrics.fileListScrollable, "a lista extensa da revisão não preservou sua própria rolagem");
+  assert(
+    metrics.contentDisplay === "grid" && metrics.fileListMaxHeight === "none",
+    "a revisão não usa trilhas determinísticas para dividir lista e diff",
+  );
+  assert(
+    metrics.selectedFile?.endsWith("module-15.ts"),
+    "a auditoria não selecionou o diff grande da revisão",
+  );
+  assert(
+    metrics.fileListHeight <= maximumListHeight + tolerance,
+    `a lista consumiu ${metrics.fileListHeight.toFixed(1)} px de ${metrics.contentHeight.toFixed(1)} px disponíveis`,
+  );
+  assert(
+    Math.abs(metrics.contentHeight - metrics.fileListHeight - metrics.stageHeight) <= tolerance,
+    "a lista e o estágio não dividem integralmente a área útil da revisão",
+  );
+  assert(
+    Math.abs(metrics.stageHeight - metrics.headerHeight - metrics.diffViewportHeight) <= tolerance,
+    "o diff não preenche a área restante abaixo do cabeçalho do arquivo",
+  );
+  assert(
+    metrics.diffViewportHeight >= Math.min(120, metrics.contentHeight * 0.4),
+    `a viewport do diff ficou comprimida a ${metrics.diffViewportHeight.toFixed(1)} px`,
+  );
+  assert(
+    metrics.declaredRows > expectedMountedRows &&
+      metrics.mountedRows === expectedMountedRows &&
+      metrics.mountedRowIndexes[0] === 1,
+    `a janela virtual montou ${metrics.mountedRows} linhas para ${metrics.diffViewportClientHeight.toFixed(1)} px (${metrics.declaredRows} declaradas)`,
+  );
+  assert(
+    metrics.rowGaps.every((gap) => Math.abs(gap - 20) <= tolerance),
+    "as linhas montadas na revisão perderam o passo virtual de 20 px",
+  );
+  assert(
+    metrics.canvasHeight >= metrics.diffViewportScrollHeight - tolerance,
+    "o canvas virtual da revisão ficou menor que sua área rolável",
+  );
+}
+
 function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
@@ -5758,6 +5965,21 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
   assert(
     metrics.diffRowHeights.length > 0 && metrics.diffRowHeights.every((height) => height === 20),
     "as linhas do diff perderam a métrica vertical oficial de 20 px",
+  );
+  assert(
+    metrics.diffRowTopOffsets.length > 1 &&
+      metrics.diffRowTopOffsets.every(
+        (top, index) => Math.abs(top - index * 20) <= tolerance,
+      ) &&
+      metrics.diffRowInlineTops.every((top, index) => top === `${index * 20}px`),
+    "as linhas do diff não ocupam posições verticais consecutivas",
+  );
+  assert(
+    metrics.diffCanvasHeight !== null &&
+      metrics.diffCanvasHeight >= metrics.diffRowTopOffsets.length * 20 &&
+      metrics.diffViewportHeight === metrics.diffViewportClientHeight &&
+      metrics.diffViewportScrollHeight >= metrics.diffViewportClientHeight,
+    "o canvas virtual do diff não representa a geometria rolável do documento",
   );
   assert(metrics.viewportHorizontalOverflow > 0, "a regressão não exercitou rolagem horizontal");
   assert(
@@ -6429,6 +6651,20 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
   );
   assert(metrics.mountedSourceRows <= 800, "linhas demais de ferramentas permaneceram montadas");
   assert(metrics.mountedDiffRows <= 500, "linhas demais de diff permaneceram montadas");
+  assert(
+    metrics.diffViewportIntegrity.length > 0 &&
+      metrics.diffViewportIntegrity.every(
+        (entry) =>
+          entry.canvasConnected === true &&
+          entry.canvasHeight !== null &&
+          entry.canvasHeight >= entry.clientHeight &&
+          entry.scrollHeight >= entry.clientHeight &&
+          entry.declaredRows > 0 &&
+          entry.mountedRows > 0 &&
+          entry.rowGaps.every((gap) => Math.abs(gap - 20) <= tolerance),
+      ),
+    `os canvases de diff perderam linhas ou geometria após a reciclagem: ${JSON.stringify(metrics.diffViewportIntegrity)}`,
+  );
   assert(
     metrics.settledDeferredBodies === 0,
     "corpos adiados permaneceram após o scroll estabilizar",

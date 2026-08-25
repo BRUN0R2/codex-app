@@ -119,6 +119,7 @@ export function ReviewPanel(props: ReviewPanelProps) {
                     document={entry().document}
                     mode={props.mode}
                     path={entry().change.path}
+                    viewportSizing="container"
                   />
                 </Show>
               </>

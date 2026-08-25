@@ -892,13 +892,48 @@ function previewTimelineStressSource(index: number): string {
   ).join("\n");
 }
 
+interface PreviewTimelineDiffShape {
+  readonly additions: number;
+  readonly context: number;
+  readonly deletions: number;
+}
+
+const PREVIEW_TIMELINE_DIFF_SHAPES: readonly PreviewTimelineDiffShape[] = [
+  { additions: 5, context: 20, deletions: 8 },
+  { additions: 8, context: 20, deletions: 5 },
+  { additions: 1, context: 0, deletions: 1 },
+  { additions: 3, context: 0, deletions: 3 },
+  { additions: 150, context: 0, deletions: 150 },
+  { additions: 150, context: 0, deletions: 150 },
+  { additions: 150, context: 0, deletions: 150 },
+  { additions: 233, context: 0, deletions: 233 },
+];
+
+function previewTimelineStressDiffShape(index: number): PreviewTimelineDiffShape {
+  const changeIndex = Math.floor((index - 1) / 3);
+  const shape = PREVIEW_TIMELINE_DIFF_SHAPES[changeIndex % PREVIEW_TIMELINE_DIFF_SHAPES.length];
+  if (shape === undefined) {
+    throw new Error("O estresse da timeline perdeu sua forma de diff.");
+  }
+  return shape;
+}
+
 function previewTimelineStressDiff(index: number): string {
+  const shape = previewTimelineStressDiffShape(index);
   return [
-    "@@ -1,90 +1,90 @@",
-    ...Array.from({ length: 90 }, (_, lineIndex) => [
-      `-const previous_${index}_${lineIndex} = ${lineIndex};`,
-      `+const optimized_${index}_${lineIndex} = ${lineIndex + 1};`,
-    ]).flat(),
+    `@@ -1,${shape.deletions + shape.context} +1,${shape.additions + shape.context} @@`,
+    ...Array.from(
+      { length: shape.context },
+      (_, lineIndex) => ` const retained_${index}_${lineIndex} = ${lineIndex};`,
+    ),
+    ...Array.from(
+      { length: shape.deletions },
+      (_, lineIndex) => `-const previous_${index}_${lineIndex} = ${lineIndex};`,
+    ),
+    ...Array.from(
+      { length: shape.additions },
+      (_, lineIndex) => `+const optimized_${index}_${lineIndex} = ${lineIndex + 1};`,
+    ),
   ].join("\n");
 }
 
@@ -958,7 +993,8 @@ function previewTimelineStressActivities(): readonly VisibleThreadItem[] {
             previewTimelineStressSource(ordinal),
           ),
         } satisfies VisibleThreadItem;
-      case 2:
+      case 2: {
+        const shape = previewTimelineStressDiffShape(ordinal);
         return {
           type: "fileChange",
           id: `timeline-stress-change-${ordinal}`,
@@ -967,11 +1003,12 @@ function previewTimelineStressActivities(): readonly VisibleThreadItem[] {
             {
               path: `src/stress/module-${ordinal}.ts`,
               kind: { type: "update", movePath: null },
-              lineStats: { additions: 90, deletions: 90 },
+              lineStats: { additions: shape.additions, deletions: shape.deletions },
               diff: previewTimelineStressDiff(ordinal),
             },
           ],
         } satisfies VisibleThreadItem;
+      }
       default:
         throw new Error("O gerador de estresse da timeline produziu uma categoria inválida.");
     }

@@ -1,13 +1,35 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  calculateDiffViewportIntrinsicHeight,
   calculateDiffVirtualRange,
   DIFF_OVERSCAN_ROWS,
   DIFF_ROW_HEIGHT_PX,
+  DIFF_VIEWPORT_MAX_HEIGHT_PX,
   MAX_DIFF_CANVAS_HEIGHT_PX,
+  resolveDiffVirtualizationHeight,
 } from "./diffViewport";
 
 describe("diff viewport", () => {
+  it("separates intrinsic presentation height from the rendered virtualization height", () => {
+    const intrinsicHeight = calculateDiffViewportIntrinsicHeight({
+      hidden: false,
+      rowCount: 300,
+    });
+
+    expect(intrinsicHeight).toBe(DIFF_VIEWPORT_MAX_HEIGHT_PX);
+    expect(resolveDiffVirtualizationHeight(intrinsicHeight, 159.171_875)).toBe(159.171_875);
+    expect(resolveDiffVirtualizationHeight(intrinsicHeight, 0)).toBe(intrinsicHeight);
+    expect(resolveDiffVirtualizationHeight(intrinsicHeight, null)).toBe(intrinsicHeight);
+  });
+
+  it("keeps short and hidden diff viewports intrinsically bounded", () => {
+    expect(calculateDiffViewportIntrinsicHeight({ hidden: false, rowCount: 8 })).toBe(
+      8 * DIFF_ROW_HEIGHT_PX,
+    );
+    expect(calculateDiffViewportIntrinsicHeight({ hidden: true, rowCount: 300 })).toBe(1);
+  });
+
   it("keeps a million-row diff fully addressable with a bounded mounted window", () => {
     const range = calculateDiffVirtualRange({
       rowCount: 1_000_000,

@@ -13,6 +13,31 @@ export interface DiffVirtualRange {
   readonly totalHeight: number;
 }
 
+export function calculateDiffViewportIntrinsicHeight(input: {
+  readonly hidden: boolean;
+  readonly rowCount: number;
+}): number {
+  if (!Number.isInteger(input.rowCount) || input.rowCount < 0) {
+    throw new Error("Diff row count must be a non-negative integer.");
+  }
+  return Math.max(
+    1,
+    input.hidden ? 1 : Math.min(DIFF_VIEWPORT_MAX_HEIGHT_PX, input.rowCount * DIFF_ROW_HEIGHT_PX),
+  );
+}
+
+export function resolveDiffVirtualizationHeight(
+  intrinsicHeight: number,
+  observedHeight: number | null,
+): number {
+  if (!Number.isFinite(intrinsicHeight) || intrinsicHeight <= 0) {
+    throw new Error("Diff intrinsic viewport height must be a positive finite number.");
+  }
+  return observedHeight !== null && Number.isFinite(observedHeight) && observedHeight > 0
+    ? observedHeight
+    : intrinsicHeight;
+}
+
 export function calculateDiffVirtualRange(input: {
   readonly overscanRows?: number;
   readonly rowCount: number;
