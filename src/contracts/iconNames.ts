@@ -66,6 +66,7 @@ export const ICON_NAMES = [
   "plant",
   "plus",
   "puzzle",
+  "read",
   "reset",
   "scale",
   "search",

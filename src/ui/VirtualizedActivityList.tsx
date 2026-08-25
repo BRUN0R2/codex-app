@@ -1,6 +1,4 @@
 import {
-  type Accessor,
-  batch,
   createEffect,
   createMemo,
   createSignal,
@@ -8,7 +6,7 @@ import {
   type JSX,
   onCleanup,
   onMount,
-  type Setter,
+  Show,
   untrack,
 } from "solid-js";
 
@@ -26,14 +24,16 @@ import {
   projectVirtualLogicalOffset,
   resolveBoundedVirtualViewport,
 } from "./boundedVirtualViewport";
-import { observeElementResize } from "./elementResize";
-import { type KeyedVirtualSlot, reconcileKeyedVirtualSlots } from "./keyedVirtualSlots";
+import { observeElementResize, readResizeObserverBorderBoxHeight } from "./elementResize";
+import { createKeyedVirtualRenderSlotStore } from "./keyedVirtualRenderSlots";
 import { useTimelineActivityContext } from "./timelineActivityContext";
 import type { VariableSizeVirtualizer, VirtualItemSource } from "./variableSizeVirtualizer";
 import { findViewportVisualAnchorIndex } from "./viewportAnchor";
+import { resumeVirtualRowsCanvases, suspendVirtualRowsCanvases } from "./virtualRowsWindow";
 
 const ACTIVITY_INTERSECTION_OVERSCAN_VIEWPORTS = 1;
-const ACTIVITY_MOVING_OVERSCAN_ITEMS = 0;
+const ACTIVITY_COLLAPSED_MOVING_OVERSCAN_ITEMS = 4;
+const ACTIVITY_EXPANDED_MOVING_OVERSCAN_ITEMS = 0;
 const ACTIVITY_SETTLED_OVERSCAN_ITEMS = 2;
 
 interface ActivityVirtualRange {
@@ -43,35 +43,27 @@ interface ActivityVirtualRange {
   readonly visibleStart: number;
 }
 
-interface ActivityRenderSlot {
-  readonly index: Accessor<number>;
-  readonly key: Accessor<string>;
-  readonly setPosition: Setter<ActivityRenderSlotPosition>;
-  readonly slotId: number;
-}
-
-interface ActivityRenderSlotPosition {
-  readonly index: number;
-  readonly key: string;
-}
-
 interface PendingActivityMeasurement {
   readonly size: number;
   readonly version: ActivityMeasurementVersion;
 }
 
-export function VirtualizedActivityList(props: {
+export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(props: {
   readonly contentRevision?: number | undefined;
   readonly estimateRevision?: number | undefined;
   readonly estimateItemSize?: ((key: string, index: number) => number) | undefined;
   readonly groupKey: string;
-  readonly itemSource: VirtualItemSource;
+  readonly itemSource: TItemSource;
   readonly renderItem: (
+    source: () => TItemSource,
     key: () => string,
     index: () => number,
     materializeBody: () => boolean,
   ) => JSX.Element;
-  readonly reuseGroupForKey: (key: string, index: number) => string;
+  readonly renderUniformItem?:
+    | ((source: () => TItemSource, key: () => string, index: () => number) => JSX.Element)
+    | undefined;
+  readonly reuseGroupForItem: (source: TItemSource, key: string, index: number) => string;
   readonly uniformEstimate?: number | undefined;
   readonly virtualize: boolean;
 }) {
@@ -88,6 +80,8 @@ export function VirtualizedActivityList(props: {
   const [nearViewport, setNearViewport] = createSignal(false);
   const [retainedAnchorIndex, setRetainedAnchorIndex] = createSignal<number | null>(null);
   const [revision, setRevision] = createSignal(0);
+  const usesUniformCollapsedEstimates = () =>
+    props.uniformEstimate !== undefined && props.estimateItemSize === undefined;
   const activation = createMemo(() => {
     const groupKey = props.groupKey;
     const itemSource = props.itemSource;
@@ -139,7 +133,11 @@ export function VirtualizedActivityList(props: {
     const stableRange = overscanActivityVirtualRange(
       virtualRange,
       props.itemSource.count,
-      context.minimalOverscan() ? ACTIVITY_MOVING_OVERSCAN_ITEMS : ACTIVITY_SETTLED_OVERSCAN_ITEMS,
+      context.minimalOverscan()
+        ? usesUniformCollapsedEstimates()
+          ? ACTIVITY_COLLAPSED_MOVING_OVERSCAN_ITEMS
+          : ACTIVITY_EXPANDED_MOVING_OVERSCAN_ITEMS
+        : ACTIVITY_SETTLED_OVERSCAN_ITEMS,
     );
     const anchorIndex = retainedAnchorIndex();
     const anchoredRange = includeRetainedActivityAnchor(previousRange, stableRange, anchorIndex);
@@ -151,51 +149,38 @@ export function VirtualizedActivityList(props: {
       visibleStart: virtualRange.start,
     });
   });
-  const visibleKeys = createMemo(() => {
-    const current = range();
-    return Array.from({ length: current.end - current.start }, (_, index) =>
-      props.itemSource.keyAt(current.start + index),
-    );
+  const mountedRange = createMemo<{ readonly end: number; readonly start: number }>(
+    (previousRange) => {
+      const current = range();
+      return previousRange !== undefined &&
+        previousRange.start === current.start &&
+        previousRange.end === current.end
+        ? previousRange
+        : { end: current.end, start: current.start };
+    },
+  );
+  const renderSlotStore = createKeyedVirtualRenderSlotStore<TItemSource>();
+  const uniformRenderSlots = createMemo<readonly number[]>((previousSlots) => {
+    const current = mountedRange();
+    const slotCount = current.end - current.start;
+    return previousSlots !== undefined && previousSlots.length === slotCount
+      ? previousSlots
+      : Array.from({ length: slotCount }, (_, index) => index);
   });
-  const visibleItems = createMemo(() => {
-    const start = range().start;
-    return visibleKeys().map((key, index) => ({
-      key,
-      reuseGroup: props.reuseGroupForKey(key, start + index),
-    }));
-  });
-  let slotAssignments: readonly KeyedVirtualSlot[] = [];
-  let renderedSlotSequence: readonly ActivityRenderSlot[] = [];
-  const [renderSlots, setRenderSlots] = createSignal<readonly ActivityRenderSlot[]>([]);
   createEffect(() => {
-    const currentRange = range();
-    const nextAssignments = reconcileKeyedVirtualSlots(slotAssignments, visibleItems());
-    if (nextAssignments === slotAssignments) {
+    if (usesUniformCollapsedEstimates()) {
       return;
     }
-    const nextRenderSlots: ActivityRenderSlot[] = [];
-    batch(() => {
-      for (const assignment of nextAssignments) {
-        const slot =
-          findActivityRenderSlot(renderedSlotSequence, assignment.slotId) ??
-          createActivityRenderSlot(assignment);
-        slot.setPosition((current) => {
-          const index = currentRange.start + assignment.index;
-          return current.key === assignment.key && current.index === index
-            ? current
-            : { index, key: assignment.key };
-        });
-        nextRenderSlots.push(slot);
-      }
-      const sequenceChanged =
-        renderedSlotSequence.length !== nextRenderSlots.length ||
-        nextRenderSlots.some((slot, index) => renderedSlotSequence[index] !== slot);
-      if (sequenceChanged) {
-        renderedSlotSequence = nextRenderSlots;
-        setRenderSlots(nextRenderSlots);
-      }
-    });
-    slotAssignments = nextAssignments;
+    const source = props.itemSource;
+    const current = mountedRange();
+    renderSlotStore.reconcileRange(
+      source,
+      current.start,
+      current.end,
+      readVirtualItemKey,
+      props.reuseGroupForItem,
+      3,
+    );
   });
   const physicalTotalSize = createMemo(() => {
     revision();
@@ -246,6 +231,25 @@ export function VirtualizedActivityList(props: {
       scrollTop: viewport.scrollTop,
       viewportSize: viewport.size,
     }).offset;
+  }
+
+  function uniformItemSize(): number {
+    const estimate = props.uniformEstimate;
+    if (estimate === undefined) {
+      throw new Error("Uniform activity rows require a fixed item-size estimate.");
+    }
+    return estimate;
+  }
+
+  function renderUniformItem(
+    source: () => TItemSource,
+    key: () => string,
+    index: () => number,
+  ): JSX.Element {
+    return (
+      props.renderUniformItem?.(source, key, index) ??
+      props.renderItem(source, key, index, () => true)
+    );
   }
 
   function scheduleGeometrySynchronization(): void {
@@ -382,6 +386,9 @@ export function VirtualizedActivityList(props: {
             ? [measurement.key]
             : [];
         });
+        if (changedMeasurementKeys.length === 0) {
+          return;
+        }
         commitVirtualizerMutation(
           () => currentVirtualizer.measureBatch(measurements).changed,
           changedMeasurementKeys,
@@ -425,10 +432,15 @@ export function VirtualizedActivityList(props: {
       synchronizedEstimateRevision = targetEstimateRevision;
       return;
     }
-    const start = range().start;
-    const estimates = visibleKeys()
-      .map((key, index) => ({ key, size: estimateItemSize(key, start + index) }))
-      .filter((estimate) => virtualizer().estimatedSizeOf(estimate.key) !== estimate.size);
+    const currentWindow = mountedRange();
+    const estimates = Array.from(
+      { length: currentWindow.end - currentWindow.start },
+      (_, localIndex) => {
+        const index = currentWindow.start + localIndex;
+        const key = props.itemSource.keyAt(index);
+        return { key, size: estimateItemSize(key, index) };
+      },
+    ).filter((estimate) => virtualizer().estimatedSizeOf(estimate.key) !== estimate.size);
     if (estimates.length === 0) {
       return;
     }
@@ -493,7 +505,9 @@ export function VirtualizedActivityList(props: {
   return (
     <div
       class="agent-activity-list agent-activity-virtual-list"
-      data-virtual-activity-count={visibleKeys().length}
+      data-virtual-activity-count={mountedRange().end - mountedRange().start}
+      data-virtual-activity-end={mountedRange().end}
+      data-virtual-activity-start={mountedRange().start}
       data-virtual-activity-total={props.itemSource.count}
       ref={listElement}
       style={{ height: `${physicalTotalSize()}px` }}
@@ -507,46 +521,102 @@ export function VirtualizedActivityList(props: {
           )}px, 0)`,
         }}
       >
-        <For each={renderSlots()}>
-          {(slot) => {
-            const itemIndex = slot.index;
-            return (
-              <VirtualizedActivityItem
-                itemKey={slot.key}
-                itemIndex={slot.index}
-                onMeasure={measureItem}
-                render={props.renderItem}
-                reservedSize={() => {
-                  revision();
-                  return virtualizer().sizeOf(itemIndex());
-                }}
-                top={() => {
-                  revision();
-                  return virtualizer().offsetOf(itemIndex()) - visibleWindowOffset();
-                }}
-                shouldMaterializeBody={() => {
-                  const currentRange = range();
-                  return shouldMaterializeActivityBody(
-                    itemIndex(),
-                    currentRange.visibleStart,
-                    currentRange.visibleEnd,
-                    context.contentDeferred(),
-                  );
-                }}
-              />
-            );
-          }}
-        </For>
+        <Show
+          when={usesUniformCollapsedEstimates()}
+          fallback={
+            <For each={renderSlotStore.renderSlots()}>
+              {(slot) => {
+                const position = slot.position;
+                const active = createMemo(() => position().active);
+                const itemPosition = createMemo<{
+                  readonly index: number;
+                  readonly key: string;
+                  readonly source: TItemSource;
+                }>((previousPosition) => {
+                  const nextPosition = position();
+                  return previousPosition !== undefined &&
+                    previousPosition.index === nextPosition.index &&
+                    previousPosition.key === nextPosition.key &&
+                    previousPosition.source === nextPosition.source
+                    ? previousPosition
+                    : {
+                        index: nextPosition.index,
+                        key: nextPosition.key,
+                        source: nextPosition.source,
+                      };
+                });
+                const itemIndex = () => itemPosition().index;
+                return (
+                  <VirtualizedActivityItem
+                    active={active}
+                    itemKey={() => itemPosition().key}
+                    itemIndex={itemIndex}
+                    itemSource={() => itemPosition().source}
+                    onMeasure={measureItem}
+                    render={props.renderItem}
+                    reservedSize={() => {
+                      revision();
+                      return virtualizer().sizeOf(itemIndex());
+                    }}
+                    top={() => {
+                      revision();
+                      return virtualizer().offsetOf(itemIndex()) - visibleWindowOffset();
+                    }}
+                    shouldMaterializeBody={() => {
+                      const currentRange = range();
+                      return shouldMaterializeActivityBody(
+                        itemIndex(),
+                        currentRange.visibleStart,
+                        currentRange.visibleEnd,
+                        context.contentDeferred(),
+                      );
+                    }}
+                  />
+                );
+              }}
+            </For>
+          }
+        >
+          <For each={uniformRenderSlots()}>
+            {(slotIndex) => {
+              const itemIndex = createMemo(() => mountedRange().start + slotIndex);
+              const itemSource = () => props.itemSource;
+              const itemKey = createMemo(() => itemSource().keyAt(itemIndex()));
+              return (
+                <div
+                  class="agent-activity-render-slot agent-activity-virtual-item"
+                  data-activity-content="materialized"
+                  data-virtual-activity-key={itemKey()}
+                  style={{
+                    transform: `translateY(${Math.round(slotIndex * uniformItemSize())}px)`,
+                  }}
+                >
+                  {renderUniformItem(itemSource, itemKey, itemIndex)}
+                </div>
+              );
+            }}
+          </For>
+        </Show>
       </div>
     </div>
   );
 }
 
-function VirtualizedActivityItem(props: {
+function readVirtualItemKey<TItemSource extends VirtualItemSource>(
+  source: TItemSource,
+  index: number,
+): string {
+  return source.keyAt(index);
+}
+
+function VirtualizedActivityItem<TItemSource extends VirtualItemSource>(props: {
+  readonly active: () => boolean;
   readonly itemKey: () => string;
   readonly itemIndex: () => number;
+  readonly itemSource: () => TItemSource;
   readonly onMeasure: (key: string, size: number) => void;
   readonly render: (
+    source: () => TItemSource,
     key: () => string,
     index: () => number,
     materializeBody: () => boolean,
@@ -562,11 +632,16 @@ function VirtualizedActivityItem(props: {
   );
   const materializeBody = () =>
     props.shouldMaterializeBody() || materializedKey() === props.itemKey();
-  const shouldObserveSize = createMemo(materializeBody);
+  const shouldObserveSize = createMemo(() => props.active() && materializeBody());
 
-  function measure(): void {
+  function measure(entry?: ResizeObserverEntry): void {
     if (element !== undefined) {
-      props.onMeasure(props.itemKey(), element.getBoundingClientRect().height);
+      props.onMeasure(
+        props.itemKey(),
+        entry === undefined
+          ? element.getBoundingClientRect().height
+          : (readResizeObserverBorderBoxHeight(entry) ?? element.getBoundingClientRect().height),
+      );
     }
   }
 
@@ -585,48 +660,41 @@ function VirtualizedActivityItem(props: {
     releaseResizeObservation?.();
     releaseResizeObservation = observeElementResize(element, measure);
   });
-  onCleanup(() => releaseResizeObservation?.());
+  createEffect(() => {
+    const active = props.active();
+    if (element === undefined) {
+      return;
+    }
+    if (active) {
+      resumeVirtualRowsCanvases(element);
+    } else {
+      suspendVirtualRowsCanvases(element);
+    }
+  });
+  onCleanup(() => {
+    releaseResizeObservation?.();
+  });
 
   return (
     <div
-      class="agent-activity-virtual-item"
-      data-activity-content={materializeBody() ? "materialized" : "deferred"}
-      data-virtual-activity-key={props.itemKey()}
+      aria-hidden={props.active() ? undefined : "true"}
+      class="agent-activity-render-slot"
+      classList={{ "agent-activity-virtual-item": props.active() }}
+      data-activity-content={
+        props.active() ? (materializeBody() ? "materialized" : "deferred") : undefined
+      }
+      data-virtual-activity-key={props.active() ? props.itemKey() : undefined}
       ref={element}
       style={{
+        display: props.active() ? undefined : "none",
         height: materializeBody() ? undefined : `${Math.round(props.reservedSize())}px`,
         overflow: materializeBody() ? undefined : "clip",
-        top: `${Math.round(props.top())}px`,
+        transform: `translateY(${Math.round(props.top())}px)`,
       }}
     >
-      {props.render(props.itemKey, props.itemIndex, materializeBody)}
+      {props.render(props.itemSource, props.itemKey, props.itemIndex, materializeBody)}
     </div>
   );
-}
-
-function createActivityRenderSlot(assignment: KeyedVirtualSlot): ActivityRenderSlot {
-  const [position, setPosition] = createSignal<ActivityRenderSlotPosition>({
-    index: assignment.index,
-    key: assignment.key,
-  });
-  return {
-    index: () => position().index,
-    key: () => position().key,
-    setPosition,
-    slotId: assignment.slotId,
-  };
-}
-
-function findActivityRenderSlot(
-  slots: readonly ActivityRenderSlot[],
-  slotId: number,
-): ActivityRenderSlot | undefined {
-  for (const slot of slots) {
-    if (slot.slotId === slotId) {
-      return slot;
-    }
-  }
-  return undefined;
 }
 
 function preserveActivityVirtualRange(

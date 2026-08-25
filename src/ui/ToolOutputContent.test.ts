@@ -22,9 +22,12 @@ describe("tool output content", () => {
       [21, "    /* comentário"],
       [22, "       continua */"],
     ]);
-    expect(projection?.lines[0]?.tokens?.some((token) => token.kind === "keyword")).toBe(true);
-    expect(projection?.lines[1]?.tokens?.some((token) => token.kind === "comment")).toBe(true);
-    expect(projection?.lines[2]?.tokens?.map((token) => token.kind)).toEqual(["comment"]);
+    if (projection === null) {
+      throw new Error("A projeção válida de leitura não foi criada.");
+    }
+    expect(projection.tokensAt(0)?.some((token) => token.kind === "keyword")).toBe(true);
+    expect(projection.tokensAt(1)?.some((token) => token.kind === "comment")).toBe(true);
+    expect(projection.tokensAt(2)?.map((token) => token.kind)).toEqual(["comment"]);
     expect(projection).toMatchObject({ lineNumberDigits: 2 });
     expect(projection?.maximumColumns).toBeGreaterThan(1);
   });

@@ -43,7 +43,7 @@ export function isWebSearchTool(name: string): boolean {
 export function toolIconName(name: string): IconName {
   switch (name) {
     case "read_file":
-      return "book";
+      return "read";
     case "list_files":
       return "folder";
     case "search_text":

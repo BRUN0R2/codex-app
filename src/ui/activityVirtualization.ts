@@ -223,7 +223,7 @@ export class ActivityVirtualizerStore {
     this.#touch(groupKey, record);
     return {
       appliedEstimateRevision: estimateRevision,
-      estimatesComplete: uniformEstimate !== undefined,
+      estimatesComplete: estimateItemSize === undefined,
       keysChanged,
       measurementsReset: layoutMeasurementsReset || resetUniformEstimates || sourceChanged,
       virtualizer: record.virtualizer,

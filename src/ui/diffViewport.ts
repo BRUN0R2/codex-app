@@ -1,6 +1,7 @@
 import { calculateFixedRowVirtualRange } from "./fixedRowVirtualization";
 
-export const DIFF_ROW_HEIGHT_PX = 22;
+export const DIFF_ROW_HEIGHT_PX = 20;
+export const DIFF_VIEWPORT_MAX_HEIGHT_PX = 360;
 export const DIFF_OVERSCAN_ROWS = 0;
 export const MAX_DIFF_CANVAS_HEIGHT_PX = 8_000_000;
 

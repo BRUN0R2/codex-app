@@ -8,31 +8,35 @@ import { DIFF_ROW_HEIGHT_PX, type DiffVirtualRange } from "./diffViewport";
 import type { SyntaxLine } from "./syntax/contracts";
 import { DiffSyntaxHighlighter } from "./syntax/diffHighlighter";
 import { escapeHtml, syntaxLineToHtml } from "./syntax/render";
-import { type VirtualRowsLease, VirtualRowsPool } from "./virtualRowsPool";
+import { VirtualRowsWindow } from "./virtualRowsWindow";
 
 export type DiffVirtualRowsMode = "split" | "unified";
 
 const MAXIMUM_WINDOWS_PER_DOCUMENT = 16;
 const highlighter = new DiffSyntaxHighlighter();
-const rowsByDocument = new WeakMap<DiffDocument, Map<string, VirtualRowsPool>>();
+const rowsByDocument = new WeakMap<DiffDocument, Map<string, VirtualRowsWindow>>();
 
-export function acquireDiffVirtualRows(input: {
+export function readDiffVirtualRows(input: {
   readonly document: DiffDocument;
   readonly mode: DiffVirtualRowsMode;
   readonly path: string;
   readonly range: DiffVirtualRange;
-}): VirtualRowsLease {
+}): VirtualRowsWindow {
   const key = `${input.path}\u0000${input.mode}\u0000${input.range.start}\u0000${input.range.end}\u0000${Math.round(input.range.offsetTop)}`;
   const cache = readDocumentCache(input.document);
   const cached = cache.get(key);
   if (cached !== undefined) {
     cache.delete(key);
     cache.set(key, cached);
-    return cached.acquire();
+    return cached;
   }
   const markup = input.mode === "split" ? renderSplitRows(input) : renderUnifiedRows(input);
-  const pool = new VirtualRowsPool(parseRows(markup, input.range.totalHeight));
-  cache.set(key, pool);
+  const rows = new VirtualRowsWindow({
+    owner: input.document,
+    template: parseRows(markup, input.range.totalHeight),
+    variant: `${input.path}\u0000${input.mode}`,
+  });
+  cache.set(key, rows);
   while (cache.size > MAXIMUM_WINDOWS_PER_DOCUMENT) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) {
@@ -40,7 +44,7 @@ export function acquireDiffVirtualRows(input: {
     }
     cache.delete(oldest);
   }
-  return pool.acquire();
+  return rows;
 }
 
 function renderUnifiedRows(input: {
@@ -72,11 +76,8 @@ function renderUnifiedRow(
   tokens: SyntaxLine | null,
 ): string {
   const opening = `<tr aria-rowindex="${rowIndex + 1}" class="diff-virtual-row unified-diff-row is-${row.type}" style="top:${Math.round(top)}px">`;
-  if (row.type === "hunk" || row.type === "meta") {
-    return `${opening}<td class="unified-diff-hunk" colspan="4">${escapeHtml(row.content)}</td></tr>`;
-  }
-  const prefix = row.type === "addition" ? "+" : row.type === "deletion" ? "−" : "";
-  return `${opening}<th class="diff-line-number old" scope="row">${row.oldNumber ?? ""}</th><th class="diff-line-number new" scope="row">${row.newNumber ?? ""}</th><td aria-hidden="true" class="diff-line-prefix">${prefix}</td><td class="unified-diff-code"><code>${renderSyntaxContent(row.content, tokens)}</code></td></tr>`;
+  const lineNumber = row.type === "deletion" ? row.oldNumber : row.newNumber;
+  return `${opening}<th class="diff-line-number" scope="row"><span class="diff-line-number-content">${lineNumber ?? ""}</span></th><td class="unified-diff-code"><code>${renderSyntaxContent(row.content, tokens)}</code></td></tr>`;
 }
 
 function renderSplitRows(input: {
@@ -105,11 +106,7 @@ function renderSplitRow(
   rowIndex: number,
   top: number,
 ): string {
-  const header = row.leftType === "header";
-  const opening = `<tr aria-rowindex="${rowIndex + 1}" class="diff-virtual-row split-diff-row${header ? " is-header" : ""}" style="top:${Math.round(top)}px">`;
-  if (header) {
-    return `${opening}<td class="split-diff-hunk" colspan="4">${escapeHtml(row.leftContent)}</td></tr>`;
-  }
+  const opening = `<tr aria-rowindex="${rowIndex + 1}" class="diff-virtual-row split-diff-row" style="top:${Math.round(top)}px">`;
   const leftTokens = highlighter.render(
     document,
     path,
@@ -120,7 +117,7 @@ function renderSplitRow(
     path,
     readSplitSourceIndex(projection.rightSourceIndexes, rowIndex),
   );
-  return `${opening}<th class="diff-line-number left" scope="row">${row.leftNumber ?? ""}</th><td class="split-diff-cell left ${row.leftType}"><code>${renderSyntaxContent(row.leftContent, leftTokens)}</code></td><th class="diff-line-number right" scope="row">${row.rightNumber ?? ""}</th><td class="split-diff-cell right ${row.rightType}"><code>${renderSyntaxContent(row.rightContent, rightTokens)}</code></td></tr>`;
+  return `${opening}<th class="diff-line-number left" scope="row"><span class="diff-line-number-content">${row.leftNumber ?? ""}</span></th><td class="split-diff-cell left ${row.leftType}"><code>${renderSyntaxContent(row.leftContent, leftTokens)}</code></td><th class="diff-line-number right" scope="row"><span class="diff-line-number-content">${row.rightNumber ?? ""}</span></th><td class="split-diff-cell right ${row.rightType}"><code>${renderSyntaxContent(row.rightContent, rightTokens)}</code></td></tr>`;
 }
 
 function readSplitSourceIndex(indexes: Uint32Array, rowIndex: number): number | null {
@@ -135,7 +132,7 @@ function renderSyntaxContent(content: string, tokens: SyntaxLine | null): string
   return tokens === null ? escapeHtml(content) : syntaxLineToHtml(tokens);
 }
 
-function readDocumentCache(document: DiffDocument): Map<string, VirtualRowsPool> {
+function readDocumentCache(document: DiffDocument): Map<string, VirtualRowsWindow> {
   let cache = rowsByDocument.get(document);
   if (cache === undefined) {
     cache = new Map();

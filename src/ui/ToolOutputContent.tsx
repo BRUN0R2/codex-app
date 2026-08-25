@@ -3,6 +3,7 @@ import { createMemo, For, Match, Switch } from "solid-js";
 import type { ThreadOutput, ToolOutputPresentation } from "../contracts/types";
 import { activityContentProjectionCache } from "./activityContentProjectionCache";
 import { ImagePreview } from "./ImagePreview";
+import { PlainTextOutput } from "./PlainTextOutput";
 import { SyntaxTokens } from "./syntax/SyntaxTokens";
 import {
   projectImageToolOutput,
@@ -37,6 +38,9 @@ export function ToolOutputContent(props: {
 
   return (
     <Switch fallback={<pre class="command-card-output">{props.text}</pre>}>
+      <Match when={props.presentation.type === "plainText"}>
+        <PlainTextOutput output={props.output} text={props.text} />
+      </Match>
       <Match when={props.presentation.type === "image"}>
         <div class="tool-image-output">
           <Switch

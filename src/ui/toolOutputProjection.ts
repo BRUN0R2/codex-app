@@ -16,13 +16,13 @@ const IMAGE_TOOL_DATA_URL = new RegExp(
 export interface SourceOutputLine {
   readonly content: string;
   readonly number: number;
-  readonly tokens: SyntaxLine | null;
 }
 
 export interface SourceOutputProjection {
   readonly lineNumberDigits: number;
   readonly lines: readonly SourceOutputLine[];
   readonly maximumColumns: number;
+  readonly tokensAt: (index: number) => SyntaxLine | null;
 }
 
 export type SearchOutputLine =
@@ -53,6 +53,7 @@ export function projectSourceOutput(text: string, path: string): SourceOutputPro
 
   const language = syntaxLanguageFromPath(path);
   const tokenizer = language === "plainText" ? null : new SyntaxLineTokenizer(language);
+  const cachedTokens: Array<SyntaxLine | null | undefined> = [];
   let highlightedBytes = 0;
   let highlighting = tokenizer !== null;
   let lineNumberDigits = 1;
@@ -63,16 +64,35 @@ export function projectSourceOutput(text: string, path: string): SourceOutputPro
     }
     lineNumberDigits = Math.max(lineNumberDigits, String(line.number).length);
     maximumColumns = Math.max(maximumColumns, monospaceColumnCount(line.content));
-    const lineBytes = utf8ByteLength(line.content) + 1;
-    highlighting =
-      highlighting &&
-      line.content.length <= MAX_SOURCE_LINE_CHARACTERS &&
-      highlightedBytes + lineBytes <= MAX_SOURCE_HIGHLIGHT_BYTES;
-    const tokens = highlighting ? (tokenizer?.tokenize(line.content) ?? null) : null;
-    highlightedBytes += lineBytes;
-    return { ...line, tokens };
+    return line;
   });
-  return { lineNumberDigits, lines, maximumColumns };
+  return {
+    lineNumberDigits,
+    lines,
+    maximumColumns,
+    tokensAt(index) {
+      if (!Number.isSafeInteger(index) || index < 0 || index >= lines.length) {
+        throw new Error("O índice sintático da leitura de arquivo é inválido.");
+      }
+      if (tokenizer === null) {
+        return null;
+      }
+      for (let nextIndex = cachedTokens.length; nextIndex <= index; nextIndex += 1) {
+        const line = lines[nextIndex];
+        if (line === undefined) {
+          throw new Error(`A linha de leitura ${nextIndex} não existe.`);
+        }
+        const lineBytes = utf8ByteLength(line.content) + 1;
+        highlighting =
+          highlighting &&
+          line.content.length <= MAX_SOURCE_LINE_CHARACTERS &&
+          highlightedBytes + lineBytes <= MAX_SOURCE_HIGHLIGHT_BYTES;
+        cachedTokens.push(highlighting ? tokenizer.tokenize(line.content) : null);
+        highlightedBytes += lineBytes;
+      }
+      return cachedTokens[index] ?? null;
+    },
+  };
 }
 
 export function projectSearchOutput(text: string): readonly SearchOutputLine[] {

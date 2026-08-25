@@ -43,10 +43,7 @@ export function useTimelineDisclosure(
   key: () => string,
   initialOpen: () => boolean = () => false,
 ): TimelineDisclosureBinding {
-  const context = useContext(TimelineDisclosureContext);
-  if (context === undefined) {
-    throw new Error("O estado visual da timeline não foi inicializado.");
-  }
+  const context = useTimelineDisclosureContext();
 
   const storageKey = createMemo(() => timelineDisclosureChildKey(context.keyPrefix(), key()));
   const isOpen = createMemo(() => context.store.read(storageKey(), initialOpen()));
@@ -71,4 +68,17 @@ export function useTimelineDisclosure(
     subtreeRevision: () => context.store.subtreeRevision(storageKey()),
     toggle: () => setOpen(!isOpen()),
   };
+}
+
+export function useTimelineDisclosureStorageKey(key: () => string): () => TimelineDisclosureKey {
+  const context = useTimelineDisclosureContext();
+  return () => timelineDisclosureChildKey(context.keyPrefix(), key());
+}
+
+function useTimelineDisclosureContext(): TimelineDisclosureContextValue {
+  const context = useContext(TimelineDisclosureContext);
+  if (context === undefined) {
+    throw new Error("O estado visual da timeline não foi inicializado.");
+  }
+  return context;
 }

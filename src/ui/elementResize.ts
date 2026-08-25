@@ -10,6 +10,11 @@ export type ElementResizeObserverFactory = (
 
 export type ElementResizeDeliveryScheduler = (callback: () => void) => () => void;
 
+export function readResizeObserverBorderBoxHeight(entry: ResizeObserverEntry): number | null {
+  const blockSize = entry.borderBoxSize?.[0]?.blockSize;
+  return blockSize !== undefined && Number.isFinite(blockSize) && blockSize >= 0 ? blockSize : null;
+}
+
 export class ElementResizeObserverHub {
   readonly #createObserver: ElementResizeObserverFactory;
   readonly #scheduleDelivery: ElementResizeDeliveryScheduler;

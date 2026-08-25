@@ -1,6 +1,10 @@
 import { performance } from "node:perf_hooks";
 
-import { createDiffDocument, summarizeDiff } from "../src/ui/diffDocument.ts";
+import {
+  countDiffDisplayRows,
+  createDiffDocument,
+  summarizeDiff,
+} from "../src/ui/diffDocument.ts";
 import { calculateDiffVirtualRange, DIFF_ROW_HEIGHT_PX } from "../src/ui/diffViewport.ts";
 import type { SyntaxBlock, SyntaxLimits } from "../src/ui/syntax/contracts.ts";
 import { DiffSyntaxHighlighter } from "../src/ui/syntax/diffHighlighter.ts";
@@ -17,6 +21,8 @@ const SINGLE_LINE_SYNTAX_LIMITS: SyntaxLimits = {
 const diff = createSyntheticDiff(MODIFICATION_COUNT);
 
 const statsMeasurement = measure(() => summarizeDiff(diff));
+const unifiedRowCountMeasurement = measure(() => countDiffDisplayRows(diff, "unified"));
+const splitRowCountMeasurement = measure(() => countDiffDisplayRows(diff, "split"));
 const documentMeasurement = measure(() => createDiffDocument(diff));
 const document = documentMeasurement.value;
 const splitProjectionMilliseconds = duration(() => document.splitProjection());
@@ -104,8 +110,10 @@ const largeHunkFallbackMilliseconds = duration(() => {
 if (
   statsMeasurement.value.additions !== MODIFICATION_COUNT ||
   statsMeasurement.value.deletions !== MODIFICATION_COUNT ||
-  document.unifiedRows.length !== MODIFICATION_COUNT * 3 + 1 ||
-  document.splitProjection().rows.length !== MODIFICATION_COUNT * 2 + 1 ||
+  unifiedRowCountMeasurement.value !== MODIFICATION_COUNT * 3 ||
+  splitRowCountMeasurement.value !== MODIFICATION_COUNT * 2 ||
+  document.unifiedRows.length !== unifiedRowCountMeasurement.value ||
+  document.splitProjection().rows.length !== splitRowCountMeasurement.value ||
   maximumMountedRows > 74 ||
   viewportChecksum <= 0 ||
   fullHighlightChecksum <= 0 ||
@@ -122,6 +130,8 @@ process.stdout.write(
       sourceLines: MODIFICATION_COUNT * 3 + 1,
       samples: SAMPLE_COUNT,
       statsMedianMs: statsMeasurement.medianMilliseconds,
+      unifiedRowCountMedianMs: unifiedRowCountMeasurement.medianMilliseconds,
+      splitRowCountMedianMs: splitRowCountMeasurement.medianMilliseconds,
       documentMedianMs: documentMeasurement.medianMilliseconds,
       splitProjectionMs: roundMilliseconds(splitProjectionMilliseconds),
       fullDocumentHighlightMs: roundMilliseconds(fullHighlightMilliseconds),

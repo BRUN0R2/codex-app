@@ -1,7 +1,7 @@
 import { monospaceColumnCount } from "./monospace";
 import { DIFF_SYNTAX_LIMITS } from "./syntax/contracts";
 
-export type UnifiedDiffLineType = "addition" | "context" | "deletion" | "hunk" | "meta";
+export type UnifiedDiffLineType = "addition" | "context" | "deletion";
 
 export interface UnifiedDiffLine {
   readonly content: string;
@@ -18,10 +18,10 @@ export interface DiffStats {
 export interface SplitDiffRow {
   readonly leftNumber: number | null;
   readonly leftContent: string;
-  readonly leftType: "removed" | "empty" | "normal" | "header";
+  readonly leftType: "removed" | "empty" | "normal";
   readonly rightNumber: number | null;
   readonly rightContent: string;
-  readonly rightType: "added" | "empty" | "normal" | "header";
+  readonly rightType: "added" | "empty" | "normal";
 }
 
 export interface SplitDiffProjection {
@@ -45,6 +45,7 @@ export interface DiffSyntaxLocation {
 }
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u;
+const HUNK_BOUNDARY = /^@@(?:\s|$)/u;
 const NO_NEWLINE_MARKER = "\\ No newline at end of file";
 
 export class DiffDocument {
@@ -154,6 +155,15 @@ export function createDiffDocument(diff: string): DiffDocument {
     append(line);
   }
 
+  function beginSyntaxHunk(): void {
+    currentSyntaxHunk = {
+      characterLength: 0,
+      lineCount: 0,
+      lines: [],
+      startRow: parsed.length,
+    };
+  }
+
   for (const [index, line] of lines.entries()) {
     if (index === lines.length - 1 && line.length === 0) {
       continue;
@@ -169,14 +179,13 @@ export function createDiffDocument(diff: string): DiffDocument {
       oldLine = Number(oldStart);
       newLine = Number(newStart);
       sawHunk = true;
-      append({ content: line, newNumber: null, oldNumber: null, type: "hunk" });
-      currentSyntaxHunk = {
-        characterLength: 0,
-        lineCount: 0,
-        lines: [],
-        startRow: parsed.length,
-      };
-      syntaxHunks.push(currentSyntaxHunk);
+      beginSyntaxHunk();
+      continue;
+    }
+
+    if (HUNK_BOUNDARY.test(line)) {
+      sawHunk = true;
+      beginSyntaxHunk();
       continue;
     }
 
@@ -188,7 +197,6 @@ export function createDiffDocument(diff: string): DiffDocument {
       continue;
     }
     if (isDiffMetadata(line)) {
-      append({ content: line, newNumber: null, oldNumber: null, type: "meta" });
       continue;
     }
 
@@ -242,7 +250,7 @@ export function summarizeDiff(diff: string): DiffStats {
     if (index === lines.length - 1 && line.length === 0) {
       continue;
     }
-    if (HUNK_HEADER.test(line)) {
+    if (HUNK_BOUNDARY.test(line)) {
       sawHunk = true;
       continue;
     }
@@ -259,6 +267,40 @@ export function summarizeDiff(diff: string): DiffStats {
     deletions += Number(line.startsWith("-"));
   }
   return { additions, deletions };
+}
+
+export function countDiffDisplayRows(diff: string, mode: "split" | "unified"): number {
+  let additions = 0;
+  let deletions = 0;
+  let rows = 0;
+
+  function flushChangedLines(): void {
+    rows += deletions === 0 ? additions : Math.max(deletions, additions);
+    additions = 0;
+    deletions = 0;
+  }
+
+  visitDiffContentLines(diff, (type) => {
+    if (mode === "unified") {
+      rows += 1;
+      return;
+    }
+    if (type === "deletion") {
+      if (additions > 0) {
+        flushChangedLines();
+      }
+      deletions += 1;
+      return;
+    }
+    if (type === "addition") {
+      additions += 1;
+      return;
+    }
+    flushChangedLines();
+    rows += 1;
+  });
+  flushChangedLines();
+  return rows;
 }
 
 function projectSplitDiff(lines: readonly UnifiedDiffLine[]): SplitDiffProjection {
@@ -286,23 +328,6 @@ function projectSplitDiff(lines: readonly UnifiedDiffLine[]): SplitDiffProjectio
     const line = lines[index];
     if (line === undefined) {
       break;
-    }
-
-    if (line.type === "hunk" || line.type === "meta") {
-      append(
-        {
-          leftNumber: null,
-          leftContent: line.content,
-          leftType: "header",
-          rightNumber: null,
-          rightContent: line.content,
-          rightType: "header",
-        },
-        null,
-        null,
-      );
-      index += 1;
-      continue;
     }
 
     if (line.type === "deletion") {
@@ -399,6 +424,36 @@ function measureLineNumberDigits(lines: readonly UnifiedDiffLine[]): {
     new: Math.max(1, String(maximumNew).length),
     old: Math.max(1, String(maximumOld).length),
   };
+}
+
+function visitDiffContentLines(diff: string, visit: (type: UnifiedDiffLineType) => void): void {
+  let lineStart = 0;
+  let sawHunk = false;
+  while (lineStart < diff.length) {
+    let lineEnd = lineStart;
+    while (
+      lineEnd < diff.length &&
+      diff.charCodeAt(lineEnd) !== 10 &&
+      diff.charCodeAt(lineEnd) !== 13
+    ) {
+      lineEnd += 1;
+    }
+    const line = diff.slice(lineStart, lineEnd);
+    const separator = diff.charCodeAt(lineEnd);
+    lineStart = separator === 13 && diff.charCodeAt(lineEnd + 1) === 10 ? lineEnd + 2 : lineEnd + 1;
+
+    if (HUNK_BOUNDARY.test(line)) {
+      sawHunk = true;
+      continue;
+    }
+    if (!sawHunk && (line.startsWith("--- ") || line.startsWith("+++ "))) {
+      continue;
+    }
+    if (line === NO_NEWLINE_MARKER || isDiffMetadata(line)) {
+      continue;
+    }
+    visit(line.startsWith("+") ? "addition" : line.startsWith("-") ? "deletion" : "context");
+  }
 }
 
 function isDiffMetadata(line: string): boolean {

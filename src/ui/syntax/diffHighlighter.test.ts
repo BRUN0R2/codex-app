@@ -17,16 +17,16 @@ describe("diff syntax highlighter", () => {
       ].join("\n"),
     );
     const highlighter = new DiffSyntaxHighlighter();
-    const opening = highlighter.render(document, "src/main.rs", 3);
-    const continuation = highlighter.render(document, "src/main.rs", 4);
+    const opening = highlighter.render(document, "src/main.rs", 2);
+    const continuation = highlighter.render(document, "src/main.rs", 3);
 
     expect(opening?.some((token) => token.kind === "comment")).toBe(true);
     expect(continuation?.map((token) => token.kind)).toEqual(["comment"]);
     expect(continuation === null ? null : continuation.map((token) => token.text).join("")).toBe(
       "       continues */",
     );
-    expect(highlighter.render(document, "src/main.rs", 4)).toBe(continuation);
-    expect(new DiffSyntaxHighlighter().render(document, "src/main.rs", 4)).toBe(continuation);
+    expect(highlighter.render(document, "src/main.rs", 3)).toBe(continuation);
+    expect(new DiffSyntaxHighlighter().render(document, "src/main.rs", 3)).toBe(continuation);
   });
 
   it("tokenizes only through the furthest requested source line", () => {
@@ -36,11 +36,11 @@ describe("diff syntax highlighter", () => {
     const tokenize = vi.spyOn(SyntaxLineTokenizer.prototype, "tokenize");
     const highlighter = new DiffSyntaxHighlighter();
     try {
-      expect(highlighter.render(document, "src/incremental.ts", 1)).not.toBeNull();
+      expect(highlighter.render(document, "src/incremental.ts", 0)).not.toBeNull();
       expect(tokenize).toHaveBeenCalledTimes(1);
-      expect(highlighter.render(document, "src/incremental.ts", 3)).not.toBeNull();
-      expect(tokenize).toHaveBeenCalledTimes(3);
       expect(highlighter.render(document, "src/incremental.ts", 2)).not.toBeNull();
+      expect(tokenize).toHaveBeenCalledTimes(3);
+      expect(highlighter.render(document, "src/incremental.ts", 1)).not.toBeNull();
       expect(tokenize).toHaveBeenCalledTimes(3);
     } finally {
       tokenize.mockRestore();
@@ -50,7 +50,7 @@ describe("diff syntax highlighter", () => {
   it("falls back for unknown files and pathological hunks", () => {
     const ordinary = createDiffDocument("@@ -1 +1 @@\n+const answer = 42;");
     const highlighter = new DiffSyntaxHighlighter();
-    expect(highlighter.render(ordinary, "file.unknown", 1)).toBeNull();
+    expect(highlighter.render(ordinary, "file.unknown", 0)).toBeNull();
 
     const oversized = createDiffDocument(
       `@@ -1,257 +1,257 @@\n${Array.from(
@@ -58,7 +58,7 @@ describe("diff syntax highlighter", () => {
         (_, index) => ` const value_${index} = ${index};`,
       ).join("\n")}`,
     );
-    expect(highlighter.render(oversized, "src/large.ts", 1)).toBeNull();
+    expect(highlighter.render(oversized, "src/large.ts", 0)).toBeNull();
 
     const boundary = createDiffDocument(
       `@@ -1,256 +1,256 @@\n${Array.from(
@@ -67,7 +67,7 @@ describe("diff syntax highlighter", () => {
       ).join("\n")}`,
     );
     expect(
-      highlighter.render(boundary, "src/boundary.ts", 1)?.some((token) => token.kind === "keyword"),
+      highlighter.render(boundary, "src/boundary.ts", 0)?.some((token) => token.kind === "keyword"),
     ).toBe(true);
   });
 
@@ -80,8 +80,8 @@ describe("diff syntax highlighter", () => {
       ).join("\n")}`,
     );
     const highlighter = new DiffSyntaxHighlighter();
-    const opening = highlighter.render(document, "src/semantic.rs", 1);
-    const ending = highlighter.render(document, "src/semantic.rs", lineCount);
+    const opening = highlighter.render(document, "src/semantic.rs", 0);
+    const ending = highlighter.render(document, "src/semantic.rs", lineCount - 1);
 
     expect(opening?.some((token) => token.kind === "keyword")).toBe(true);
     expect(opening?.some((token) => token.kind === "type")).toBe(true);

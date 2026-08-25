@@ -1,16 +1,22 @@
 import type { FileChange } from "../contracts/types";
 import type { AgentActivityItem } from "./agentActivityPresentation";
+import { countDiffDisplayRows } from "./diffDocument";
+import { DIFF_ROW_HEIGHT_PX, DIFF_VIEWPORT_MAX_HEIGHT_PX } from "./diffViewport";
 import {
   encodeTimelineIdentitySegment,
   timelineFileChangeIdentity,
   timelineItemIdentity,
 } from "./timelineIdentity";
+import { splitOutputLines } from "./toolOutputProjection";
 import type { VirtualItemSource } from "./variableSizeVirtualizer";
 
-export const COLLAPSED_ACTIVITY_ITEM_ESTIMATE_PX = 26;
+export const COLLAPSED_ACTIVITY_ITEM_ESTIMATE_PX = 27;
 export const COLLAPSED_OUTPUT_ACTIVITY_ITEM_ESTIMATE_PX = 28;
+export const EXPANDED_OUTPUT_ACTIVITY_CHROME_HEIGHT_PX = 82;
 export const EXPANDED_OUTPUT_ACTIVITY_ITEM_ESTIMATE_PX = 287;
-export const EXPANDED_DIFF_ACTIVITY_ITEM_ESTIMATE_PX = 398;
+export const EXPANDED_DIFF_ACTIVITY_CHROME_HEIGHT_PX = 71;
+export const MAXIMUM_EXPANDED_DIFF_ACTIVITY_ITEM_ESTIMATE_PX =
+  EXPANDED_DIFF_ACTIVITY_CHROME_HEIGHT_PX + DIFF_VIEWPORT_MAX_HEIGHT_PX;
 
 export type ActivityListEntry =
   | {
@@ -26,6 +32,12 @@ export type ActivityListEntry =
 
 export interface ActivityListProjection extends VirtualItemSource {
   readonly entryAt: (index: number, expectedKey?: string) => ActivityListEntry;
+  readonly fileChangeAt: (index: number, expectedKey?: string) => FileChange;
+  readonly itemAt: (
+    index: number,
+    expectedKey?: string,
+  ) => Exclude<AgentActivityItem, { readonly type: "fileChange" }>;
+  readonly kindAt: (index: number) => ActivityListEntry["kind"];
   readonly reuseGroupAt: (index: number) => string;
 }
 
@@ -47,8 +59,11 @@ type ActivityListSegment =
       readonly start: number;
     };
 
-const ACTIVITY_PROJECTION_CACHE_CAPACITY = 256;
-const ACTIVITY_PROJECTION_CACHE_MASK = ACTIVITY_PROJECTION_CACHE_CAPACITY - 1;
+const DEFAULT_ACTIVITY_PROJECTION_CACHE_CAPACITY = 256;
+const EXTREME_ACTIVITY_PROJECTION_ITEM_THRESHOLD = 4_096;
+const MINIMUM_EXTREME_ACTIVITY_PROJECTION_CACHE_CAPACITY = 8_192;
+const MAXIMUM_EXTREME_ACTIVITY_PROJECTION_CACHE_CAPACITY = 131_072;
+const RECENT_ACTIVITY_PROJECTION_REVERSE_INDEX_CAPACITY = 512;
 
 export function createActivityListProjection(
   items: readonly AgentActivityItem[],
@@ -90,16 +105,17 @@ export function createActivityListProjection(
         : COLLAPSED_OUTPUT_ACTIVITY_ITEM_ESTIMATE_PX);
   }
 
-  const cachedIndexes = new Int32Array(ACTIVITY_PROJECTION_CACHE_CAPACITY);
+  const cacheCapacity = activityProjectionCacheCapacity(count);
+  const cacheMask = cacheCapacity - 1;
+  const cachedIndexes = new Int32Array(cacheCapacity);
   cachedIndexes.fill(-1);
-  const cachedEntries = new Array<ActivityListEntry | undefined>(
-    ACTIVITY_PROJECTION_CACHE_CAPACITY,
-  );
-  const cachedKeys = new Array<string | undefined>(ACTIVITY_PROJECTION_CACHE_CAPACITY);
+  const cachedEntries = new Array<ActivityListEntry | undefined>(cacheCapacity);
+  const cachedKeys = new Array<string | undefined>(cacheCapacity);
+  const cachedIndexesByKey = new Map<string, number>();
 
   function keyAt(index: number): string {
     assertActivityListIndex(index, count);
-    const cacheIndex = index & ACTIVITY_PROJECTION_CACHE_MASK;
+    const cacheIndex = index & cacheMask;
     const cached = cachedIndexes[cacheIndex] === index ? cachedKeys[cacheIndex] : undefined;
     if (cached !== undefined) {
       return cached;
@@ -107,13 +123,13 @@ export function createActivityListProjection(
     const segment = segmentAt(segments, index);
     const key =
       segment.kind === "item" ? segment.key : fileChangeEntryKey(segment, index - segment.start);
-    cacheProjectionValue(cachedIndexes, cachedKeys, cachedEntries, index, key);
+    cacheProjectionValue(cachedIndexes, cachedKeys, cachedEntries, cachedIndexesByKey, index, key);
     return key;
   }
 
   function entryAt(index: number, expectedKey?: string): ActivityListEntry {
     assertActivityListIndex(index, count);
-    const cacheIndex = index & ACTIVITY_PROJECTION_CACHE_MASK;
+    const cacheIndex = index & cacheMask;
     const cached = cachedIndexes[cacheIndex] === index ? cachedEntries[cacheIndex] : undefined;
     if (cached !== undefined) {
       if (expectedKey !== undefined && cached.key !== expectedKey) {
@@ -161,13 +177,19 @@ export function createActivityListProjection(
         ? COLLAPSED_ACTIVITY_ITEM_ESTIMATE_PX
         : COLLAPSED_OUTPUT_ACTIVITY_ITEM_ESTIMATE_PX;
     },
+    fileChangeAt(index, expectedKey) {
+      assertExpectedActivityListKey(index, count, keyAt, expectedKey);
+      const segment = segmentAt(segments, index);
+      if (segment.kind !== "fileChange") {
+        throw new Error("A entrada virtualizada não contém uma alteração de arquivo.");
+      }
+      return readFileChange(segment, index - segment.start);
+    },
     identity: items,
     indexOf(key) {
-      for (let cacheIndex = 0; cacheIndex < cachedKeys.length; cacheIndex += 1) {
-        if (cachedKeys[cacheIndex] === key) {
-          const cachedIndex = cachedIndexes[cacheIndex] ?? -1;
-          return cachedIndex < 0 ? null : cachedIndex;
-        }
+      const cachedIndex = cachedIndexesByKey.get(key);
+      if (cachedIndex !== undefined) {
+        return cachedIndex;
       }
       const segment = findSegmentForKey(segmentsByKeyPrefix, key);
       if (segment === undefined) {
@@ -177,15 +199,45 @@ export function createActivityListProjection(
       if (index === null) {
         return null;
       }
-      cacheProjectionValue(cachedIndexes, cachedKeys, cachedEntries, index, key);
+      cacheProjectionValue(
+        cachedIndexes,
+        cachedKeys,
+        cachedEntries,
+        cachedIndexesByKey,
+        index,
+        key,
+      );
       return index;
     },
+    itemAt(index, expectedKey) {
+      assertExpectedActivityListKey(index, count, keyAt, expectedKey);
+      const segment = segmentAt(segments, index);
+      if (segment.kind !== "item") {
+        throw new Error("A entrada virtualizada não contém uma atividade executável.");
+      }
+      return segment.item;
+    },
     keyAt,
+    kindAt(index) {
+      assertActivityListIndex(index, count);
+      return segmentAt(segments, index).kind;
+    },
     reuseGroupAt(index) {
       const segment = segmentAt(segments, index);
-      return segment.kind === "fileChange" ? segment.kind : segment.item.type;
+      return segment.kind === "fileChange" ? segment.kind : activityItemReuseGroup(segment.item);
     },
   };
+}
+
+function activityProjectionCacheCapacity(itemCount: number): number {
+  if (itemCount < EXTREME_ACTIVITY_PROJECTION_ITEM_THRESHOLD) {
+    return DEFAULT_ACTIVITY_PROJECTION_CACHE_CAPACITY;
+  }
+  let capacity = MINIMUM_EXTREME_ACTIVITY_PROJECTION_CACHE_CAPACITY;
+  while (capacity < itemCount && capacity < MAXIMUM_EXTREME_ACTIVITY_PROJECTION_CACHE_CAPACITY) {
+    capacity *= 2;
+  }
+  return capacity;
 }
 
 export function projectActivityListEntries(
@@ -202,24 +254,94 @@ export function activityListEntryDisclosureKey(entry: ActivityListEntry): string
   return `${entry.item.type === "commandExecution" ? "command" : "tool"}:${entry.item.id}`;
 }
 
-export function estimateActivityListEntrySize(entry: ActivityListEntry, open: boolean): number {
+export function estimateActivityListEntrySize(
+  entry: ActivityListEntry,
+  open: boolean,
+  diffDisplay: "split" | "unified" = "unified",
+): number {
   if (!open) {
     return entry.kind === "fileChange"
       ? COLLAPSED_ACTIVITY_ITEM_ESTIMATE_PX
       : COLLAPSED_OUTPUT_ACTIVITY_ITEM_ESTIMATE_PX;
   }
   return entry.kind === "fileChange"
-    ? EXPANDED_DIFF_ACTIVITY_ITEM_ESTIMATE_PX
-    : EXPANDED_OUTPUT_ACTIVITY_ITEM_ESTIMATE_PX;
+    ? estimateExpandedDiffActivityItemSize(entry.change, diffDisplay)
+    : estimateExpandedOutputActivityItemSize(entry.item);
+}
+
+export function estimateExpandedDiffActivityItemSize(
+  change: FileChange,
+  diffDisplay: "split" | "unified",
+): number {
+  const visibleRows = Math.min(
+    countDiffDisplayRows(change.diff, diffDisplay),
+    DIFF_VIEWPORT_MAX_HEIGHT_PX / DIFF_ROW_HEIGHT_PX,
+  );
+  return EXPANDED_DIFF_ACTIVITY_CHROME_HEIGHT_PX + visibleRows * DIFF_ROW_HEIGHT_PX;
+}
+
+function estimateExpandedOutputActivityItemSize(
+  item: Exclude<AgentActivityItem, { readonly type: "fileChange" }>,
+): number {
+  const failureFooterHeight =
+    item.type !== "toolExecution" && item.type !== "commandExecution"
+      ? 0
+      : item.status === "failed" || item.status === "declined"
+        ? 23
+        : 0;
+  if (item.type !== "toolExecution") {
+    return EXPANDED_OUTPUT_ACTIVITY_ITEM_ESTIMATE_PX + failureFooterHeight;
+  }
+  const output = item.output;
+  if (output === null || output.preview.length === 0) {
+    return EXPANDED_OUTPUT_ACTIVITY_CHROME_HEIGHT_PX + failureFooterHeight;
+  }
+  switch (item.outputPresentation.type) {
+    case "fileList":
+    case "searchResults":
+    case "sourceFile": {
+      const paginationHeight = output.nextCursor === null ? 0 : 32;
+      const contentHeight = splitOutputLines(output.preview).length * 22 + paginationHeight;
+      return (
+        EXPANDED_OUTPUT_ACTIVITY_CHROME_HEIGHT_PX +
+        Math.min(
+          EXPANDED_OUTPUT_ACTIVITY_ITEM_ESTIMATE_PX - EXPANDED_OUTPUT_ACTIVITY_CHROME_HEIGHT_PX,
+          contentHeight,
+        ) +
+        failureFooterHeight
+      );
+    }
+    case "image":
+    case "plainText":
+      return EXPANDED_OUTPUT_ACTIVITY_ITEM_ESTIMATE_PX + failureFooterHeight;
+  }
 }
 
 export function activityListEntryReuseGroup(entry: ActivityListEntry): string {
-  return entry.kind === "fileChange" ? entry.kind : entry.item.type;
+  return entry.kind === "fileChange" ? entry.kind : activityItemReuseGroup(entry.item);
+}
+
+function activityItemReuseGroup(
+  item: Exclude<AgentActivityItem, { readonly type: "fileChange" }>,
+): string {
+  return item.type === "toolExecution" ? `${item.type}:${item.outputPresentation.type}` : item.type;
 }
 
 function assertActivityListIndex(index: number, count: number): void {
   if (!Number.isInteger(index) || index < 0 || index >= count) {
     throw new Error("O índice da entrada virtual de atividade é inválido.");
+  }
+}
+
+function assertExpectedActivityListKey(
+  index: number,
+  count: number,
+  keyAt: (index: number) => string,
+  expectedKey: string | undefined,
+): void {
+  assertActivityListIndex(index, count);
+  if (expectedKey !== undefined && keyAt(index) !== expectedKey) {
+    throw activityListPositionError(expectedKey);
   }
 }
 
@@ -259,13 +381,7 @@ function fileChangeEntryKey(
   localIndex: number,
 ): string {
   const change = readFileChange(segment, localIndex);
-  let occurrence = 0;
-  for (let index = 0; index < localIndex; index += 1) {
-    if (segment.item.changes[index]?.path === change.path) {
-      occurrence += 1;
-    }
-  }
-  const changeIdentity = timelineFileChangeIdentity(change, occurrence);
+  const changeIdentity = timelineFileChangeIdentity(change, localIndex);
   return `${segment.keyPrefix}${encodeTimelineIdentitySegment(changeIdentity)}`;
 }
 
@@ -294,22 +410,14 @@ function findFileChangeIndex(
   if (path === null) {
     return null;
   }
-  const occurrenceText = changeIdentity.slice(encodeTimelineIdentitySegment(path).length);
-  if (!/^\d+$/u.test(occurrenceText)) {
+  const ordinalText = changeIdentity.slice(encodeTimelineIdentitySegment(path).length);
+  if (!/^\d+$/u.test(ordinalText)) {
     return null;
   }
-  const expectedOccurrence = Number(occurrenceText);
-  let occurrence = 0;
-  for (let localIndex = 0; localIndex < segment.item.changes.length; localIndex += 1) {
-    if (segment.item.changes[localIndex]?.path !== path) {
-      continue;
-    }
-    if (occurrence === expectedOccurrence) {
-      return segment.start + localIndex;
-    }
-    occurrence += 1;
-  }
-  return null;
+  const ordinal = Number(ordinalText);
+  return Number.isSafeInteger(ordinal) && segment.item.changes[ordinal]?.path === path
+    ? segment.start + ordinal
+    : null;
 }
 
 function decodeIdentitySegment(value: string): string | null {
@@ -331,13 +439,24 @@ function cacheProjectionValue(
   cachedIndexes: Int32Array,
   cachedKeys: Array<string | undefined>,
   cachedEntries: Array<ActivityListEntry | undefined>,
+  cachedIndexesByKey: Map<string, number>,
   index: number,
   key: string,
 ): void {
-  const cacheIndex = index & ACTIVITY_PROJECTION_CACHE_MASK;
+  const cacheIndex = index & (cachedIndexes.length - 1);
   cachedIndexes[cacheIndex] = index;
   cachedKeys[cacheIndex] = key;
   cachedEntries[cacheIndex] = undefined;
+  if (
+    !cachedIndexesByKey.has(key) &&
+    cachedIndexesByKey.size >= RECENT_ACTIVITY_PROJECTION_REVERSE_INDEX_CAPACITY
+  ) {
+    const oldestKey = cachedIndexesByKey.keys().next().value;
+    if (oldestKey !== undefined) {
+      cachedIndexesByKey.delete(oldestKey);
+    }
+  }
+  cachedIndexesByKey.set(key, index);
 }
 
 function activityListPositionError(key: string): Error {

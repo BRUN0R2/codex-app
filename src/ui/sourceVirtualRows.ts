@@ -1,23 +1,23 @@
 import type { FixedRowVirtualRange } from "./fixedRowVirtualization";
 import { escapeHtml, syntaxLineToHtml } from "./syntax/render";
 import type { SourceOutputProjection } from "./toolOutputProjection";
-import { type VirtualRowsLease, VirtualRowsPool } from "./virtualRowsPool";
+import { VirtualRowsWindow } from "./virtualRowsWindow";
 
 const MAXIMUM_WINDOWS_PER_PROJECTION = 16;
-const rowsByProjection = new WeakMap<SourceOutputProjection, Map<string, VirtualRowsPool>>();
+const rowsByProjection = new WeakMap<SourceOutputProjection, Map<string, VirtualRowsWindow>>();
 
-export function acquireSourceVirtualRows(
+export function readSourceVirtualRows(
   projection: SourceOutputProjection,
   range: FixedRowVirtualRange,
   rowHeight: number,
-): VirtualRowsLease {
-  const key = `${range.start}\u0000${range.end}\u0000${Math.round(range.offset)}`;
+): VirtualRowsWindow {
+  const key = `${range.start}\u0000${range.end}\u0000${Math.round(range.offset)}\u0000${rowHeight}`;
   const cache = readProjectionCache(projection);
   const cached = cache.get(key);
   if (cached !== undefined) {
     cache.delete(key);
     cache.set(key, cached);
-    return cached.acquire();
+    return cached;
   }
   let markup = "";
   for (let rowIndex = range.start; rowIndex < range.end; rowIndex += 1) {
@@ -26,11 +26,16 @@ export function acquireSourceVirtualRows(
       throw new Error(`A linha de código ${rowIndex} não existe.`);
     }
     const top = range.offset + (rowIndex - range.start) * rowHeight;
-    const content = line.tokens === null ? escapeHtml(line.content) : syntaxLineToHtml(line.tokens);
+    const tokens = projection.tokensAt(rowIndex);
+    const content = tokens === null ? escapeHtml(line.content) : syntaxLineToHtml(tokens);
     markup += `<tr aria-rowindex="${rowIndex + 1}" class="tool-source-line" style="top:${Math.round(top)}px"><th class="tool-source-line-number" scope="row">${line.number}</th><td><code>${content}</code></td></tr>`;
   }
-  const pool = new VirtualRowsPool(parseRows(markup, range.physicalTotalSize));
-  cache.set(key, pool);
+  const rows = new VirtualRowsWindow({
+    owner: projection,
+    template: parseRows(markup, range.physicalTotalSize),
+    variant: `source\u0000${rowHeight}`,
+  });
+  cache.set(key, rows);
   while (cache.size > MAXIMUM_WINDOWS_PER_PROJECTION) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) {
@@ -38,10 +43,10 @@ export function acquireSourceVirtualRows(
     }
     cache.delete(oldest);
   }
-  return pool.acquire();
+  return rows;
 }
 
-function readProjectionCache(projection: SourceOutputProjection): Map<string, VirtualRowsPool> {
+function readProjectionCache(projection: SourceOutputProjection): Map<string, VirtualRowsWindow> {
   let cache = rowsByProjection.get(projection);
   if (cache === undefined) {
     cache = new Map();

@@ -7,6 +7,6 @@ describe("activity labels", () => {
     expect(isFileReadTool("read_file")).toBe(true);
     expect(isFileReadTool("READ_FILE")).toBe(true);
     expect(isExplorationTool("read_file")).toBe(false);
-    expect(toolIconName("read_file")).toBe("book");
+    expect(toolIconName("read_file")).toBe("read");
   });
 });

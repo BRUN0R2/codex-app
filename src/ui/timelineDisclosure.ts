@@ -29,7 +29,8 @@ const DISCLOSURE_NODE_CACHE_CAPACITY = 512;
 
 export function createTimelineDisclosureStore(): TimelineDisclosureStore {
   const root = createDisclosureNode(null);
-  const nodeCache = new Map<string, DisclosureNode>();
+  const explicitOpenByKey = new Map<TimelineDisclosureKey, boolean>();
+  const nodeCache = new Map<string, DisclosureNode | null>();
   const [revision, setRevision] = createSignal(0);
 
   return {
@@ -40,10 +41,12 @@ export function createTimelineDisclosureStore(): TimelineDisclosureStore {
     },
     read(key, fallback = false) {
       revision();
-      return findDisclosureNode(root, nodeCache, key)?.explicitOpen ?? fallback;
+      return explicitOpenByKey.get(key) ?? fallback;
     },
     setOpen(key, open) {
       if (setDisclosureOpen(root, key, open)) {
+        recordExplicitDisclosureState(explicitOpenByKey, key, open);
+        nodeCache.clear();
         setRevision((current) => current + 1);
       }
     },
@@ -52,6 +55,21 @@ export function createTimelineDisclosureStore(): TimelineDisclosureStore {
       return findDisclosureNode(root, nodeCache, key)?.subtreeRevision ?? 0;
     },
   };
+}
+
+function recordExplicitDisclosureState(
+  explicitOpenByKey: Map<TimelineDisclosureKey, boolean>,
+  key: TimelineDisclosureKey,
+  open: boolean,
+): void {
+  if (!open) {
+    for (const candidate of explicitOpenByKey.keys()) {
+      if (candidate !== key && candidate.startsWith(key)) {
+        explicitOpenByKey.delete(candidate);
+      }
+    }
+  }
+  explicitOpenByKey.set(key, open);
 }
 
 function createDisclosureNode(parent: DisclosureNode | null): DisclosureNode {
@@ -68,10 +86,13 @@ function createDisclosureNode(parent: DisclosureNode | null): DisclosureNode {
 
 function findDisclosureNode(
   root: DisclosureNode,
-  nodeCache: Map<string, DisclosureNode>,
+  nodeCache: Map<string, DisclosureNode | null>,
   key: TimelineDisclosureKey,
 ): DisclosureNode | null {
   const cached = nodeCache.get(key);
+  if (cached === null) {
+    return null;
+  }
   if (cached !== undefined) {
     if (isDisclosureNodeActive(root, cached)) {
       return cached;
@@ -82,6 +103,7 @@ function findDisclosureNode(
   for (const prefix of timelineIdentityPrefixes(key)) {
     const child = node.children.get(prefix);
     if (child === undefined) {
+      cacheDisclosureNode(nodeCache, key, null);
       return null;
     }
     node = child;
@@ -155,9 +177,9 @@ function setDisclosureOpen(
 }
 
 function cacheDisclosureNode(
-  nodeCache: Map<string, DisclosureNode>,
+  nodeCache: Map<string, DisclosureNode | null>,
   key: TimelineDisclosureKey,
-  node: DisclosureNode,
+  node: DisclosureNode | null,
 ): void {
   if (!nodeCache.has(key) && nodeCache.size >= DISCLOSURE_NODE_CACHE_CAPACITY) {
     const oldestKey = nodeCache.keys().next().value;

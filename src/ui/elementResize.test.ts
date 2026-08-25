@@ -1,8 +1,23 @@
 import { describe, expect, it } from "vitest";
 
-import { type ElementResizeObserverAdapter, ElementResizeObserverHub } from "./elementResize";
+import {
+  type ElementResizeObserverAdapter,
+  ElementResizeObserverHub,
+  readResizeObserverBorderBoxHeight,
+} from "./elementResize";
 
 describe("shared element resize observer", () => {
+  it("reads the delivered border-box height without another layout measurement", () => {
+    expect(
+      readResizeObserverBorderBoxHeight({
+        borderBoxSize: [{ blockSize: 247.5, inlineSize: 800 }],
+      } as unknown as ResizeObserverEntry),
+    ).toBe(247.5);
+    expect(
+      readResizeObserverBorderBoxHeight({ borderBoxSize: [] } as unknown as ResizeObserverEntry),
+    ).toBeNull();
+  });
+
   it("shares one native observation and releases it after the final listener", () => {
     let observer: FakeResizeObserver | undefined;
     const scheduler = new FakeResizeScheduler();

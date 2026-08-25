@@ -436,15 +436,16 @@ const PREVIEW_CONTEXT_THREAD = {
               kind: { type: "update", movePath: null },
               lineStats: { additions: 6, deletions: 2 },
               diff: [
-                "@@ -1,4 +1,7 @@",
+                "@@ -80,4 +80,7 @@",
                 " use std::time::Instant;",
                 "-const SAMPLE_COUNT: usize = 5;",
                 "-fn old_benchmark() {}",
+                "@@",
                 "+#[test]",
                 "+fn benchmark_targeted_output_search() {",
                 "+    const TARGET_BYTES: usize = 64 * 1_024 * 1_024;",
                 '+    let message = r#"ready"#;',
-                '+    assert!(message.contains("ready"));',
+                '+    assert!(message.contains("ready"), "benchmark output must preserve the ready marker across the entire retained command transcript");',
                 "+}",
                 " fn helper() {}",
               ].join("\n"),
@@ -879,6 +880,9 @@ const PREVIEW_CHAT_REFERENCE_THREAD = {
 const PREVIEW_TIMELINE_STRESS_ACTIVITY_COUNT = 180;
 const PREVIEW_TIMELINE_FILE_CHANGE_CHUNK_SIZE = 1_000;
 const PREVIEW_TIMELINE_MAX_FILE_COUNT = 100_000;
+const PREVIEW_ACTIVITY_RECONCILIATION_COMMAND_COUNT = 64;
+const PREVIEW_ACTIVITY_RECONCILIATION_COMMAND_ID =
+  "fc_0dcf3068ac8a016b016a8d7160898c87d28d89439526a8ea4b";
 
 function previewTimelineStressSource(index: number): string {
   return Array.from(
@@ -925,6 +929,20 @@ function previewTimelineStressActivities(): readonly VisibleThreadItem[] {
           durationMs: ordinal * 7,
         } satisfies VisibleThreadItem;
       case 1:
+        if (Math.floor(index / 3) % 2 === 1) {
+          return {
+            type: "toolExecution",
+            id: `timeline-stress-tool-${ordinal}`,
+            name: "search_text",
+            description: `Search src/stress/module-${ordinal}.ts`,
+            status: "completed",
+            outputPresentation: { type: "searchResults" },
+            output: previewOutput(
+              `timeline-stress-tool-output-${ordinal}`,
+              `src/stress/module-${ordinal}.ts:1:export const stressValue = ${ordinal};`,
+            ),
+          } satisfies VisibleThreadItem;
+        }
         return {
           type: "toolExecution",
           id: `timeline-stress-tool-${ordinal}`,
@@ -1109,6 +1127,46 @@ const PREVIEW_TIMELINE_LIGHT_THREAD = {
   ],
 } as const satisfies CodexThread;
 
+const PREVIEW_ACTIVITY_RECONCILIATION_THREAD = {
+  id: "preview-activity-reconciliation-thread",
+  mode: "codex",
+  preview: "Reconciliação de comandos paralelos",
+  name: "Reconciliação de comandos paralelos",
+  cwd: PREVIEW_WORKSPACE,
+  projectPath: PREVIEW_WORKSPACE,
+  createdAt: PREVIEW_NOW_SECONDS - 300,
+  updatedAt: PREVIEW_NOW_SECONDS,
+  recencyAt: PREVIEW_NOW_SECONDS,
+  status: { type: "active", activeFlags: [] },
+  turns: [
+    {
+      id: "preview-activity-reconciliation-turn",
+      status: "inProgress",
+      error: null,
+      createdAt: PREVIEW_NOW_SECONDS - 300,
+      updatedAt: PREVIEW_NOW_SECONDS,
+      items: [
+        {
+          type: "userMessage",
+          id: "activity-reconciliation-user-message",
+          content: [
+            {
+              type: "text",
+              text: "Execute comandos paralelos e preserve cada atividade durante conclusões fora de ordem.",
+            },
+          ],
+        },
+        {
+          type: "agentMessage",
+          id: "activity-reconciliation-commentary",
+          text: "Executando comandos paralelos com conclusões fora de ordem.",
+          phase: "commentary",
+        },
+      ],
+    },
+  ],
+} as const satisfies CodexThread;
+
 const PREVIEW_THREADS = {
   data: [previewThreadSummary(PREVIEW_CONTEXT_THREAD)],
   nextCursor: null,
@@ -1244,10 +1302,14 @@ export function setupBrowserPreview(): void {
   const previewParameters = new URLSearchParams(window.location.search);
   const preferenceUpdateDelay = previewDelay(previewParameters.get("preferenceDelay"));
   const timelineStressPreview = previewParameters.get("timelineStress") === "1";
+  const activityReconciliationPreview =
+    timelineStressPreview && previewParameters.get("activityReconciliation") === "1";
   const timelineFileCount = timelineStressPreview
     ? previewTimelineFileCount(previewParameters.get("timelineFiles"))
     : 0;
-  const timelineStressThread = previewTimelineStressThread(timelineFileCount);
+  const timelineStressThread = activityReconciliationPreview
+    ? PREVIEW_ACTIVITY_RECONCILIATION_THREAD
+    : previewTimelineStressThread(timelineFileCount);
   const timelineStressThreads = {
     data: [
       previewThreadSummary(timelineStressThread),
@@ -1279,6 +1341,7 @@ export function setupBrowserPreview(): void {
   }
   saveProjects(PREVIEW_PROJECTS);
   const previewBrowserTabs = new Map<string, BrowserTabSnapshot>();
+  let activityReconciliationScheduled = false;
 
   installBrowserPreviewRuntime((command, args) => {
     switch (command) {
@@ -1434,6 +1497,14 @@ export function setupBrowserPreview(): void {
         if (resumedThread === undefined) {
           throw new Error("A tarefa solicitada não existe na prévia de estresse.");
         }
+        if (
+          activityReconciliationPreview &&
+          resumedThread.id === PREVIEW_ACTIVITY_RECONCILIATION_THREAD.id &&
+          !activityReconciliationScheduled
+        ) {
+          activityReconciliationScheduled = true;
+          schedulePreviewActivityReconciliation();
+        }
         return {
           thread: resumedThread,
           cwd: resumedThread.cwd,
@@ -1588,6 +1659,156 @@ export function setupBrowserPreview(): void {
     };
     requestAnimationFrame(publishMetrics);
   }
+}
+
+function schedulePreviewActivityReconciliation(): void {
+  const root = document.documentElement;
+  const threadId = PREVIEW_ACTIVITY_RECONCILIATION_THREAD.id;
+  const turnId = PREVIEW_ACTIVITY_RECONCILIATION_THREAD.turns[0]?.id;
+  if (turnId === undefined) {
+    throw new Error("A prévia de reconciliação não contém um turno.");
+  }
+  const commands = Array.from(
+    { length: PREVIEW_ACTIVITY_RECONCILIATION_COMMAND_COUNT },
+    (_, index) => previewActivityReconciliationCommand(index, "inProgress"),
+  );
+  const completionOrder = [
+    ...commands.filter((_, index) => index % 2 === 0).reverse(),
+    ...commands.filter((_, index) => index % 2 === 1).reverse(),
+  ];
+  let warmupFrames = 6;
+  let started = 0;
+  let completed = 0;
+  let identityComparisons = 0;
+  let identityChanges = 0;
+  let mountedByKey = new Map<string, Element>();
+  const startedAt = performance.now();
+  const setMetric = (name: string, value: string) => {
+    root.setAttribute(`data-activity-reconciliation-${name}`, value);
+  };
+  setMetric("state", "scheduled");
+
+  const sampleMountedIdentity = () => {
+    const nextMountedByKey = new Map<string, Element>();
+    for (const element of document.querySelectorAll(
+      ".agent-activity-virtual-item[data-virtual-activity-key]",
+    )) {
+      const key = element.getAttribute("data-virtual-activity-key");
+      if (key === null) {
+        continue;
+      }
+      nextMountedByKey.set(key, element);
+      const previous = mountedByKey.get(key);
+      if (previous !== undefined) {
+        identityComparisons += 1;
+        if (previous !== element) {
+          identityChanges += 1;
+        }
+      }
+    }
+    mountedByKey = nextMountedByKey;
+  };
+
+  const publishFrame = () => {
+    sampleMountedIdentity();
+    if (warmupFrames > 0) {
+      warmupFrames -= 1;
+      requestAnimationFrame(publishFrame);
+      return;
+    }
+    if (
+      started >= 8 &&
+      started < commands.length &&
+      document.querySelector(".agent-activity-group[open] .agent-activity-virtual-list") === null
+    ) {
+      setMetric("state", "awaiting-mounted-list");
+      requestAnimationFrame(publishFrame);
+      return;
+    }
+    setMetric("state", completed > 0 ? "completing" : "starting");
+    for (let batchIndex = 0; batchIndex < 2; batchIndex += 1) {
+      if (started < commands.length) {
+        const command = commands[started];
+        if (command === undefined) {
+          throw new Error("A prévia perdeu um comando que deveria iniciar.");
+        }
+        if (
+          !emitBrowserPreviewRuntimeEvent("engine://notification", {
+            method: "item.started",
+            params: { threadId, turnId, item: command },
+          })
+        ) {
+          requestAnimationFrame(publishFrame);
+          return;
+        }
+        started += 1;
+        setMetric("started", String(started));
+        continue;
+      }
+      if (completed < completionOrder.length) {
+        const command = completionOrder[completed];
+        if (command === undefined) {
+          throw new Error("A prévia perdeu um comando que deveria concluir.");
+        }
+        const commandIndex = commands.findIndex((candidate) => candidate.id === command.id);
+        if (
+          commandIndex < 0 ||
+          !emitBrowserPreviewRuntimeEvent("engine://notification", {
+            method: "item.completed",
+            params: {
+              threadId,
+              turnId,
+              item: previewActivityReconciliationCommand(commandIndex, "completed"),
+            },
+          })
+        ) {
+          requestAnimationFrame(publishFrame);
+          return;
+        }
+        completed += 1;
+        setMetric("completed", String(completed));
+      }
+    }
+    if (completed < completionOrder.length) {
+      requestAnimationFrame(publishFrame);
+      return;
+    }
+    requestAnimationFrame(() => {
+      sampleMountedIdentity();
+      setMetric("identity-comparisons", String(identityComparisons));
+      setMetric("identity-changes", String(identityChanges));
+      setMetric("duration-ms", (performance.now() - startedAt).toFixed(3));
+      setMetric("state", "completed");
+    });
+  };
+  requestAnimationFrame(publishFrame);
+}
+
+function previewActivityReconciliationCommand(
+  index: number,
+  status: "completed" | "inProgress",
+): Extract<VisibleThreadItem, { readonly type: "commandExecution" }> {
+  if (!Number.isInteger(index) || index < 0) {
+    throw new Error("O índice do comando de reconciliação é inválido.");
+  }
+  const ordinal = index + 1;
+  return {
+    type: "commandExecution",
+    id: index === 0 ? PREVIEW_ACTIVITY_RECONCILIATION_COMMAND_ID : `parallel-command-${ordinal}`,
+    command: `pnpm exec benchmark --case parallel-${ordinal}`,
+    cwd: PREVIEW_WORKSPACE,
+    processId: status === "inProgress" ? `preview-process-${ordinal}` : null,
+    startedAt: PREVIEW_NOW_SECONDS * 1_000 + ordinal,
+    source: "agent",
+    status,
+    aggregatedOutput:
+      status === "completed"
+        ? previewOutput(`parallel-command-output-${ordinal}`, `parallel ${ordinal}: ok`)
+        : null,
+    liveOutput: null,
+    exitCode: status === "completed" ? 0 : null,
+    durationMs: status === "completed" ? ordinal * 3 : null,
+  };
 }
 
 function previewBrowserMetrics(conversationId: string): readonly BrowserActionMetric[] {

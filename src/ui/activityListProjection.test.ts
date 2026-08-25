@@ -5,7 +5,7 @@ import {
   COLLAPSED_ACTIVITY_ITEM_ESTIMATE_PX,
   COLLAPSED_OUTPUT_ACTIVITY_ITEM_ESTIMATE_PX,
   createActivityListProjection,
-  EXPANDED_DIFF_ACTIVITY_ITEM_ESTIMATE_PX,
+  EXPANDED_DIFF_ACTIVITY_CHROME_HEIGHT_PX,
   EXPANDED_OUTPUT_ACTIVITY_ITEM_ESTIMATE_PX,
   estimateActivityListEntrySize,
   projectActivityListEntries,
@@ -34,10 +34,23 @@ describe("activity list projection", () => {
     const projection = createActivityListProjection([item]);
 
     expect(projection.count).toBe(100_000);
-    expect(projection.estimatedOffsetOf(projection.count)).toBe(2_600_000);
+    expect(projection.estimatedOffsetOf(projection.count)).toBe(2_700_000);
     expect(pathReads).toBe(0);
     expect(projection.entryAt(0).kind).toBe("fileChange");
     expect(pathReads).toBe(1);
+    const lastEntry = projection.entryAt(99_999);
+    expect(pathReads).toBe(2);
+    projection.entryAt(99_743);
+    expect(pathReads).toBe(3);
+    projection.entryAt(65_536);
+    expect(pathReads).toBe(4);
+    projection.entryAt(0);
+    expect(pathReads).toBe(4);
+    expect(projection.indexOf(lastEntry.key)).toBe(99_999);
+    expect(pathReads).toBe(4);
+    expect(projection.kindAt(0)).toBe("fileChange");
+    expect(projection.fileChangeAt(0, projection.keyAt(0))).toBe(change);
+    expect(() => projection.fileChangeAt(0, lastEntry.key)).toThrow("perdeu sua posição");
   });
 
   it("flattens every changed file into the virtualized activity sequence", () => {
@@ -90,7 +103,11 @@ describe("activity list projection", () => {
     const entries = projectActivityListEntries([command, changes]);
     const firstActivity = entries[0];
     const firstChange = entries[1];
-    if (firstActivity === undefined || firstChange === undefined) {
+    if (
+      firstActivity === undefined ||
+      firstChange === undefined ||
+      firstChange.kind !== "fileChange"
+    ) {
       throw new Error("The projected activity sequence is incomplete.");
     }
 
@@ -106,10 +123,64 @@ describe("activity list projection", () => {
       COLLAPSED_ACTIVITY_ITEM_ESTIMATE_PX,
     );
     expect(estimateActivityListEntrySize(firstChange, true)).toBe(
-      EXPANDED_DIFF_ACTIVITY_ITEM_ESTIMATE_PX,
+      EXPANDED_DIFF_ACTIVITY_CHROME_HEIGHT_PX + 40,
     );
+    expect(
+      estimateActivityListEntrySize(
+        {
+          ...firstChange,
+          change: {
+            ...firstChange.change,
+            diff: "-first\n-second\n+replacement",
+          },
+        },
+        true,
+        "split",
+      ),
+    ).toBe(EXPANDED_DIFF_ACTIVITY_CHROME_HEIGHT_PX + 40);
     expect(activityListEntryReuseGroup(firstActivity)).toBe("commandExecution");
     expect(activityListEntryReuseGroup(firstChange)).toBe("fileChange");
     expect(activityListEntryDisclosureKey(firstChange)).toBe(firstChange.key);
+    expect(createActivityListProjection([command, changes]).itemAt(0)).toBe(command);
+  });
+
+  it("separates tool rows whose expanded structures are incompatible", () => {
+    const sourceTool = {
+      type: "toolExecution",
+      id: "source-tool",
+      name: "read_file",
+      description: "Leu src/example.ts",
+      status: "completed",
+      outputPresentation: { type: "sourceFile", path: "src/example.ts" },
+      output: {
+        id: "source-output",
+        preview: "1: const first = 1;\n2: const second = 2;",
+        byteLength: 42,
+        nextCursor: null,
+      },
+    } as const satisfies AgentActivityItem;
+    const searchTool = {
+      type: "toolExecution",
+      id: "search-tool",
+      name: "search_text",
+      description: "Search src/example.ts",
+      status: "completed",
+      outputPresentation: { type: "searchResults" },
+      output: {
+        id: "search-output",
+        preview: "src/example.ts:1:const first = 1;",
+        byteLength: 33,
+        nextCursor: null,
+      },
+    } as const satisfies AgentActivityItem;
+    const projection = createActivityListProjection([sourceTool, searchTool]);
+
+    expect(projection.reuseGroupAt(0)).toBe("toolExecution:sourceFile");
+    expect(projection.reuseGroupAt(1)).toBe("toolExecution:searchResults");
+    expect(activityListEntryReuseGroup(projection.entryAt(0))).not.toBe(
+      activityListEntryReuseGroup(projection.entryAt(1)),
+    );
+    expect(estimateActivityListEntrySize(projection.entryAt(0), true)).toBe(126);
+    expect(estimateActivityListEntrySize(projection.entryAt(1), true)).toBe(104);
   });
 });

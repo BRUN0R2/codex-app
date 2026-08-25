@@ -1,9 +1,9 @@
 import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 
 import { calculateFixedRowVirtualRange } from "./fixedRowVirtualization";
-import { acquireSourceVirtualRows } from "./sourceVirtualRows";
+import { readSourceVirtualRows } from "./sourceVirtualRows";
 import type { SourceOutputProjection } from "./toolOutputProjection";
-import type { VirtualRowsLease } from "./virtualRowsPool";
+import { releaseVirtualRowsCanvas, type VirtualRowsWindow } from "./virtualRowsWindow";
 
 const SOURCE_ROW_HEIGHT_PX = 22;
 const SOURCE_OVERSCAN_ROWS = 0;
@@ -13,7 +13,7 @@ const MAX_SOURCE_CANVAS_HEIGHT_PX = 8_000_000;
 export function VirtualizedSourceOutput(props: { readonly projection: SourceOutputProjection }) {
   let viewportElement: HTMLDivElement | undefined;
   let canvasElement: HTMLTableSectionElement | undefined;
-  let rowsLease: VirtualRowsLease | undefined;
+  let rowsWindow: VirtualRowsWindow | undefined;
   let observedLines = props.projection.lines;
   let knownScrollLeft = 0;
   let knownScrollTop = 0;
@@ -39,19 +39,12 @@ export function VirtualizedSourceOutput(props: { readonly projection: SourceOutp
       `max(100%, calc(${props.projection.maximumColumns + props.projection.lineNumberDigits}ch + 30px))`,
   );
   createEffect(() => {
-    const nextLease = acquireSourceVirtualRows(props.projection, range(), SOURCE_ROW_HEIGHT_PX);
-    if (canvasElement === undefined) {
-      rowsLease = nextLease;
-      return;
+    const nextWindow = readSourceVirtualRows(props.projection, range(), SOURCE_ROW_HEIGHT_PX);
+    rowsWindow = nextWindow;
+    if (canvasElement !== undefined) {
+      canvasElement = nextWindow.renderInto(canvasElement).canvas;
     }
-    const previousLease = rowsLease;
-    canvasElement.replaceWith(nextLease.element);
-    canvasElement = nextLease.element;
-    previousLease?.release();
-    rowsLease = nextLease;
   });
-  onCleanup(() => rowsLease?.release());
-
   function updateViewportScroll(event: Event & { readonly currentTarget: HTMLDivElement }): void {
     knownScrollLeft = Math.max(0, event.currentTarget.scrollLeft);
     knownScrollTop = Math.max(0, event.currentTarget.scrollTop);
@@ -72,6 +65,11 @@ export function VirtualizedSourceOutput(props: { readonly projection: SourceOutp
     }
     observedLines = lines;
   });
+  onCleanup(() => {
+    if (canvasElement !== undefined) {
+      releaseVirtualRowsCanvas(canvasElement);
+    }
+  });
 
   return (
     <div
@@ -89,16 +87,24 @@ export function VirtualizedSourceOutput(props: { readonly projection: SourceOutp
         aria-label="Código lido do arquivo"
         aria-rowcount={props.projection.lines.length}
         class="tool-source-output tool-source-virtual-table"
-        style={{ width: canvasWidth() }}
+        style={{
+          "--tool-source-line-number-width": `calc(${props.projection.lineNumberDigits}ch + 10px)`,
+          width: canvasWidth(),
+        }}
       >
         <tbody
           class="tool-source-virtual-canvas"
           ref={(element) => {
             canvasElement = element;
-            if (rowsLease !== undefined) {
-              element.replaceWith(rowsLease.element);
-              canvasElement = rowsLease.element;
-            }
+            queueMicrotask(() => {
+              if (
+                canvasElement === element &&
+                rowsWindow !== undefined &&
+                element.parentNode !== null
+              ) {
+                canvasElement = rowsWindow.renderInto(element).canvas;
+              }
+            });
           }}
         />
       </table>

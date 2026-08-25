@@ -1922,8 +1922,13 @@ function decodeUserContent(value: unknown, path: string): UserContent {
   }
 }
 
+const FILE_CHANGE_KEYS = ["diff", "kind", "lineStats", "path"] as const;
+const FILE_CHANGE_LINE_STATS_KEYS = ["additions", "deletions"] as const;
+const FILE_CHANGE_KIND_KEYS = ["movePath", "type"] as const;
+const FILE_CHANGE_SIMPLE_KIND_KEYS = ["type"] as const;
+
 function decodeFileChange(value: unknown, path: string): FileChange {
-  const object = exactRecord(value, path, ["diff", "kind", "lineStats", "path"]);
+  const object = exactRecord(value, path, FILE_CHANGE_KEYS);
   return {
     path: text(object.path, `${path}.path`, 4_096),
     kind: decodeFileChangeKind(object.kind, `${path}.kind`),
@@ -1936,7 +1941,7 @@ function decodeFileChange(value: unknown, path: string): FileChange {
 }
 
 function decodeFileChangeLineStats(value: unknown, path: string) {
-  const object = exactRecord(value, path, ["additions", "deletions"]);
+  const object = exactRecord(value, path, FILE_CHANGE_LINE_STATS_KEYS);
   return {
     additions: integer(object.additions, `${path}.additions`, 0, 1_000_000_000),
     deletions: integer(object.deletions, `${path}.deletions`, 0, 1_000_000_000),
@@ -1949,11 +1954,11 @@ function decodeFileChangeKind(value: unknown, path: string): FileChangeKind {
   switch (type) {
     case "add":
     case "delete": {
-      exactRecord(object, path, ["type"]);
+      exactRecord(object, path, FILE_CHANGE_SIMPLE_KIND_KEYS);
       return { type };
     }
     case "update": {
-      const change = exactRecord(object, path, ["movePath", "type"]);
+      const change = exactRecord(object, path, FILE_CHANGE_KIND_KEYS);
       return { type, movePath: nullableText(change.movePath, `${path}.movePath`) };
     }
     default:
@@ -2299,12 +2304,18 @@ function record(value: unknown, path: string): UnknownRecord {
 }
 
 function exactKeys(object: UnknownRecord, path: string, expected: readonly string[]): void {
-  const actual = Object.keys(object).sort();
-  const sortedExpected = [...expected].sort();
-  if (
-    actual.length !== sortedExpected.length ||
-    actual.some((key, index) => key !== sortedExpected[index])
-  ) {
+  let actualKeyCount = 0;
+  let unexpectedKey = false;
+  for (const key in object) {
+    if (!Object.hasOwn(object, key)) {
+      continue;
+    }
+    actualKeyCount += 1;
+    unexpectedKey ||= !expected.includes(key);
+  }
+  if (actualKeyCount !== expected.length || unexpectedKey) {
+    const actual = Object.keys(object).sort();
+    const sortedExpected = [...expected].sort();
     throw new ContractError(
       path,
       `expected keys ${sortedExpected.join(", ")}; received ${actual.join(", ")}`,

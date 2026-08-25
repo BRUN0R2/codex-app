@@ -10,6 +10,7 @@ import {
   onMount,
   Show,
   Switch,
+  untrack,
 } from "solid-js";
 
 import type { FileChange, ThreadItem, VisibleThreadItem } from "../contracts/types";
@@ -36,11 +37,10 @@ import type { VisibleThreadTurn } from "../state/visibleTurnSequence";
 import { activityContentProjectionCache } from "./activityContentProjectionCache";
 import { fileName, isFileReadTool, toolIconName, toolLabel } from "./activityLabels";
 import {
-  type ActivityListEntry,
+  type ActivityListProjection,
   activityListEntryDisclosureKey,
   COLLAPSED_ACTIVITY_ITEM_ESTIMATE_PX,
   createActivityListProjection,
-  EXPANDED_DIFF_ACTIVITY_ITEM_ESTIMATE_PX,
   estimateActivityListEntrySize,
 } from "./activityListProjection";
 import {
@@ -70,9 +70,13 @@ import {
 import { CodexGlyph } from "./CodexGlyph";
 import { presentAssistantText } from "./contentReferenceMarkers";
 import { DiffView } from "./DiffView";
-import { observeElementResize } from "./elementResize";
+import { observeElementResize, readResizeObserverBorderBoxHeight } from "./elementResize";
 import { fileChangeLineStats } from "./fileChangeStats";
-import { FrontendFailureContext, useFrontendFailureReporter } from "./frontendFailure";
+import {
+  FrontendFailureContext,
+  frontendFailureMessage,
+  useFrontendFailureReporter,
+} from "./frontendFailure";
 import { Icon, type IconName } from "./Icon";
 import { TimelineTurnRenderFailure } from "./RenderFailure";
 import {
@@ -93,6 +97,7 @@ import {
 import {
   TimelineActivityContext,
   type TimelineActivityContextValue,
+  type TimelineActivityViewportSnapshot,
   type TimelineActivityVisualAnchor,
 } from "./timelineActivityContext";
 import { createTimelineDisclosureStore, type TimelineDisclosureKey } from "./timelineDisclosure";
@@ -103,6 +108,7 @@ import {
   timelineDisclosureChildKey,
   timelineDisclosureNamespacePrefix,
   useTimelineDisclosure,
+  useTimelineDisclosureStorageKey,
 } from "./timelineDisclosureContext";
 import { timelineFileChangeIdentity, timelineItemRenderIdentity } from "./timelineIdentity";
 import {
@@ -153,16 +159,24 @@ import {
 } from "./turnPresentation";
 import { type UserMessageEntry, UserMessageNavigator } from "./UserMessageNavigator";
 import { VirtualizedActivityList } from "./VirtualizedActivityList";
-import { VariableSizeVirtualizer } from "./variableSizeVirtualizer";
+import { VariableSizeVirtualizer, type VirtualRange } from "./variableSizeVirtualizer";
 import { findViewportVisualAnchorIndex } from "./viewportAnchor";
 
 const controlledTimelineDisclosureKeys = new WeakMap<HTMLElement, () => TimelineDisclosureKey>();
+const DIFF_COPY_FEEDBACK_RESET_MILLISECONDS = 2_000;
 
 function bindControlledTimelineDisclosure(
   element: HTMLElement,
   disclosure: TimelineDisclosureBinding,
 ): void {
-  controlledTimelineDisclosureKeys.set(element, disclosure.storageKey);
+  bindControlledTimelineDisclosureKey(element, disclosure.storageKey);
+}
+
+function bindControlledTimelineDisclosureKey(
+  element: HTMLElement,
+  storageKey: () => TimelineDisclosureKey,
+): void {
+  controlledTimelineDisclosureKeys.set(element, storageKey);
 }
 
 interface StarterSuggestion {
@@ -248,6 +262,12 @@ interface TimelineLayoutSnapshot {
   readonly trackHeight: number;
 }
 
+interface TimelineVirtualViewport {
+  offset: number;
+  scrollTop: number;
+  size: number;
+}
+
 export function Timeline(props: {
   readonly bottomOcclusion: number;
   readonly controller: TimelineController;
@@ -305,11 +325,23 @@ export function Timeline(props: {
   const programmaticScroll = new TimelineProgrammaticScrollTracker();
   let virtualizer = new VariableSizeVirtualizer(TIMELINE_ESTIMATED_TURN_HEIGHT);
   const [virtualRevision, setVirtualRevision] = createSignal(0);
-  const [virtualViewport, setVirtualViewport] = createSignal({
-    offset: 0,
-    scrollTop: 0,
-    size: 1,
-  });
+  const virtualViewportBufferA: TimelineVirtualViewport = { offset: 0, scrollTop: 0, size: 1 };
+  const virtualViewportBufferB: TimelineVirtualViewport = { offset: 0, scrollTop: 0, size: 1 };
+  const [virtualViewport, setVirtualViewportSignal] =
+    createSignal<TimelineVirtualViewport>(virtualViewportBufferA);
+  function commitVirtualViewport(offset: number, scrollTop: number, size: number): void {
+    setVirtualViewportSignal((current) => {
+      if (current.offset === offset && current.scrollTop === scrollTop && current.size === size) {
+        return current;
+      }
+      const next =
+        current === virtualViewportBufferA ? virtualViewportBufferB : virtualViewportBufferA;
+      next.offset = offset;
+      next.scrollTop = scrollTop;
+      next.size = size;
+      return next;
+    });
+  }
   const [scrollbar, setScrollbar] = createSignal<ScrollbarMetrics>({
     maximumScroll: 0,
     scrollable: false,
@@ -335,14 +367,21 @@ export function Timeline(props: {
     const preferences = props.controller.config()?.config.desktop;
     return [width, preferences?.uiFontSize ?? 14, preferences?.diffDisplay ?? "unified"].join(":");
   });
-  const activityViewportGeometry = createMemo(() => {
+  const activityViewport = createMemo<TimelineActivityViewportSnapshot | null>((previous) => {
     virtualRevision();
     const viewport = virtualViewport();
-    return {
-      scrollTop: viewport.scrollTop,
-      size: Math.max(1, viewport.size - props.bottomOcclusion),
-    };
-  });
+    const element = scrollElement;
+    if (element === undefined) {
+      return null;
+    }
+    const size = Math.max(1, viewport.size - props.bottomOcclusion);
+    return previous !== null &&
+      previous.element === element &&
+      previous.scrollTop === viewport.scrollTop &&
+      previous.size === size
+      ? previous
+      : { element, scrollTop: viewport.scrollTop, size };
+  }, null);
   const activityContext: TimelineActivityContextValue = {
     preserveVisualAnchor: (anchor) => {
       if (scrollElement === undefined || pendingActivityVisualAnchor !== undefined) {
@@ -358,16 +397,7 @@ export function Timeline(props: {
     notifyLayoutChange: disclosureContext.onLayoutChange,
     sessions: activitySessions,
     shouldPreserveAnchor: () => !followingLatest() && !programmaticTimelineNavigationActive(),
-    viewport: () => {
-      const viewport = activityViewportGeometry();
-      return scrollElement === undefined
-        ? null
-        : {
-            element: scrollElement,
-            scrollTop: viewport.scrollTop,
-            size: viewport.size,
-          };
-    },
+    viewport: activityViewport,
   };
   const virtualGeometry = createMemo(() => {
     virtualRevision();
@@ -378,9 +408,9 @@ export function Timeline(props: {
       viewportSize: viewport.size,
     });
   });
-  const virtualRange = createMemo(() => {
+  const virtualRange = createMemo<VirtualRange>((previousRange) => {
     const viewport = virtualGeometry();
-    return virtualizer.range(
+    const nextRange = virtualizer.range(
       viewport.logicalOffset,
       viewport.viewportSize,
       Math.max(
@@ -388,6 +418,11 @@ export function Timeline(props: {
         viewport.viewportSize * TIMELINE_VIRTUAL_OVERSCAN_VIEWPORTS,
       ),
     );
+    return previousRange !== undefined &&
+      previousRange.start === nextRange.start &&
+      previousRange.end === nextRange.end
+      ? previousRange
+      : nextRange;
   });
   const virtualTurns = createMemo(() => {
     const range = virtualRange();
@@ -632,18 +667,11 @@ export function Timeline(props: {
     if (scrollElement === undefined || virtualListElement === undefined) {
       return;
     }
-    const nextViewport = {
-      offset: Math.max(0, scrollElement.scrollTop - virtualListElement.offsetTop),
-      scrollTop: Math.max(0, scrollElement.scrollTop),
-      size: Math.max(1, scrollElement.clientHeight),
-    };
-    setVirtualViewport((current) => {
-      return current.offset === nextViewport.offset &&
-        current.scrollTop === nextViewport.scrollTop &&
-        current.size === nextViewport.size
-        ? current
-        : nextViewport;
-    });
+    commitVirtualViewport(
+      Math.max(0, scrollElement.scrollTop - virtualListElement.offsetTop),
+      Math.max(0, scrollElement.scrollTop),
+      Math.max(1, scrollElement.clientHeight),
+    );
   }
 
   function scrollTimelineTo(
@@ -859,11 +887,7 @@ export function Timeline(props: {
       savedScrollTop: anchoredVirtualOffset ?? savedScrollTop,
     });
     setFollowingLatest(following);
-    setVirtualViewport({
-      offset: initialVirtualOffset,
-      scrollTop: initialVirtualOffset,
-      size: viewportSize,
-    });
+    commitVirtualViewport(initialVirtualOffset, initialVirtualOffset, viewportSize);
     setVirtualRevision((revision) => revision + 1);
 
     timelineRestorationFrame = requestAnimationFrame(() => {
@@ -928,15 +952,15 @@ export function Timeline(props: {
       const nextAnchorOffset = virtualizer.resolveAnchorOffset(anchor.anchor);
       if (nextAnchorOffset !== null) {
         const viewport = virtualViewport();
-        setVirtualViewport({
-          offset: virtualLogicalToPhysicalOffset(
+        commitVirtualViewport(
+          virtualLogicalToPhysicalOffset(
             Math.max(0, nextAnchorOffset - anchor.viewportOffset),
             virtualizer.totalSize(),
             viewport.size,
           ),
-          scrollTop: viewport.scrollTop,
-          size: viewport.size,
-        });
+          viewport.scrollTop,
+          viewport.size,
+        );
       }
     } else if (followingLatest()) {
       const viewport = virtualViewport();
@@ -945,11 +969,11 @@ export function Timeline(props: {
         physicalOffset: 0,
         viewportSize: viewport.size,
       }).physicalTotalSize;
-      setVirtualViewport({
-        offset: Math.max(0, physicalTotalSize - viewport.size),
-        scrollTop: viewport.scrollTop,
-        size: viewport.size,
-      });
+      commitVirtualViewport(
+        Math.max(0, physicalTotalSize - viewport.size),
+        viewport.scrollTop,
+        viewport.size,
+      );
     }
     setVirtualRevision((revision) => revision + 1);
     synchronizeScroll();
@@ -1066,6 +1090,10 @@ export function Timeline(props: {
         const nextSize = Math.max(1, Math.round(measurement.size));
         return index !== null && virtualizer.sizeOf(index) !== nextSize ? [measurement.key] : [];
       });
+      if (changedMeasurementKeys.length === 0) {
+        measuredTimelineLayoutRevision = timelineLayoutRevision;
+        return;
+      }
       const anchor = captureTimelineViewportAnchor(undefined, null, changedMeasurementKeys);
       const batch = virtualizer.measureBatch(measurements);
       if (!batch.changed) {
@@ -1105,11 +1133,9 @@ export function Timeline(props: {
     }
     const { clientHeight, listOffset, scrollHeight, trackHeight } = layout;
     const scrollTop = scrollElement.scrollTop;
-    const nextViewport = {
-      offset: Math.max(0, scrollTop - listOffset),
-      scrollTop: Math.max(0, scrollTop),
-      size: Math.max(1, clientHeight),
-    };
+    const nextViewportOffset = Math.max(0, scrollTop - listOffset);
+    const nextViewportScrollTop = Math.max(0, scrollTop);
+    const nextViewportSize = Math.max(1, clientHeight);
     const nextScrollbar = calculateTimelineScrollbar({
       clientHeight,
       scrollHeight,
@@ -1140,13 +1166,7 @@ export function Timeline(props: {
       setShowScrollToEnd(!isNearEnd);
       setActiveTimelineFollowing(nextFollowingLatest);
       setActiveUserMessageIndex(nextActiveUserMessageIndex);
-      setVirtualViewport((current) =>
-        current.offset === nextViewport.offset &&
-        current.scrollTop === nextViewport.scrollTop &&
-        current.size === nextViewport.size
-          ? current
-          : nextViewport,
-      );
+      commitVirtualViewport(nextViewportOffset, nextViewportScrollTop, nextViewportSize);
     });
     if (
       userInitiated &&
@@ -1170,8 +1190,15 @@ export function Timeline(props: {
     }
   }
 
-  function claimTimelineScrollOwnership(preserveWheelHandoff = false): void {
+  function claimTimelineScrollOwnership(
+    preserveWheelHandoff = false,
+    releaseFollowing = true,
+  ): void {
     cancelPendingUserMessageNavigation();
+    if (timelineRestorationFrame !== undefined) {
+      cancelAnimationFrame(timelineRestorationFrame);
+      timelineRestorationFrame = undefined;
+    }
     const programmaticSmoothActive = programmaticScroll.smoothActive();
     programmaticScroll.cancel();
     if (programmaticSmoothActive && scrollElement !== undefined) {
@@ -1181,6 +1208,9 @@ export function Timeline(props: {
     pendingVirtualAnchorCorrection = undefined;
     if (!preserveWheelHandoff) {
       cancelTimelineWheelHandoff();
+    }
+    if (releaseFollowing) {
+      setActiveTimelineFollowing(false);
     }
   }
 
@@ -1226,8 +1256,8 @@ export function Timeline(props: {
     if (event.ctrlKey || event.shiftKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
       return;
     }
-    claimTimelineScrollOwnership(true);
     const nestedRegion = readNestedTimelineScrollRegion(event.target);
+    claimTimelineScrollOwnership(true, nestedRegion === null);
     if (nestedRegion === null) {
       cancelTimelineWheelHandoff();
       scheduleTimelineFrame(true, false);
@@ -1255,6 +1285,7 @@ export function Timeline(props: {
       cancelTimelineWheelHandoff();
       return;
     }
+    setActiveTimelineFollowing(false);
     event.preventDefault();
     nestedRegion.scrollTop = transfer.nestedScrollTop;
     const target = resolveTimelineWheelHandoffTarget({
@@ -1916,9 +1947,14 @@ function VirtualConversationTurn(props: {
   const reportFailure = useFrontendFailureReporter();
   const turn = createMemo(props.turn);
 
-  function measure(): void {
+  function measure(entry?: ResizeObserverEntry): void {
     if (element !== undefined) {
-      props.onMeasure(props.measurementKey, element.getBoundingClientRect().height);
+      props.onMeasure(
+        props.measurementKey,
+        entry === undefined
+          ? element.getBoundingClientRect().height
+          : (readResizeObserverBorderBoxHeight(entry) ?? element.getBoundingClientRect().height),
+      );
     }
   }
 
@@ -2312,13 +2348,9 @@ function ImageViewGroup(props: {
         data-timeline-disclosure=""
         ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
       >
-        <span class="activity-icon">
-          <Icon name="image" size={13} />
-        </span>
+        <TimelineActivityIcon name="image" />
         <span class="activity-title">{label()}</span>
-        <span class="activity-chevron">
-          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-        </span>
+        <TimelineDisclosureIcon expanded={disclosure.isOpen()} />
       </summary>
       <Show when={disclosure.isOpen()}>
         <section aria-label={label()} class="image-view-grid">
@@ -2404,6 +2436,7 @@ function AgentActivityGroup(props: {
     return estimateActivityListEntrySize(
       entry,
       disclosure.descendantContext.store.read(storageKey),
+      props.diffDisplay ?? "unified",
     );
   };
   const usesUniformCollapsedFileEstimates = createMemo(
@@ -2419,9 +2452,24 @@ function AgentActivityGroup(props: {
     if (openCount === 0) {
       return COLLAPSED_ACTIVITY_ITEM_ESTIMATE_PX;
     }
-    return openCount === listProjection().count
-      ? EXPANDED_DIFF_ACTIVITY_ITEM_ESTIMATE_PX
-      : undefined;
+    const projection = listProjection();
+    if (openCount !== projection.count || projection.count === 0) {
+      return undefined;
+    }
+    const sampleCount = Math.min(9, projection.count);
+    let sampledSize = 0;
+    for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+      const entryIndex =
+        sampleCount === 1
+          ? 0
+          : Math.round((sampleIndex * (projection.count - 1)) / (sampleCount - 1));
+      sampledSize += estimateActivityListEntrySize(
+        projection.entryAt(entryIndex),
+        true,
+        props.diffDisplay ?? "unified",
+      );
+    }
+    return Math.round(sampledSize / sampleCount);
   });
 
   return (
@@ -2442,16 +2490,10 @@ function AgentActivityGroup(props: {
           ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
         >
           <Show when={iconKind()}>
-            {(kind) => (
-              <span class="activity-icon">
-                <Icon name={agentActivityIcon(kind())} size={13} />
-              </span>
-            )}
+            {(kind) => <TimelineActivityIcon name={agentActivityIcon(kind())} />}
           </Show>
           <ActivityHeadline active={props.isCurrent} text={title()} />
-          <span class="activity-chevron">
-            <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-          </span>
+          <TimelineDisclosureIcon expanded={disclosure.isOpen()} />
         </summary>
         <Show when={disclosure.isOpen()}>
           <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
@@ -2464,16 +2506,25 @@ function AgentActivityGroup(props: {
                 estimateRevision={disclosure.openDescendantCount()}
                 groupKey={disclosure.storageKey()}
                 itemSource={listProjection()}
-                renderItem={(entryKey, entryIndex, materializeBody) => (
-                  <ActivityListEntryView
+                renderItem={(projection, entryKey, entryIndex, materializeBody) => (
+                  <ActivityListProjectionView
                     clock={props.clock}
                     diffDisplay={props.diffDisplay}
-                    entry={listProjection().entryAt(entryIndex(), entryKey())}
+                    entryIndex={entryIndex}
+                    entryKey={entryKey}
                     materializeBody={materializeBody}
+                    projection={projection}
                   />
                 )}
-                reuseGroupForKey={(_entryKey, entryIndex) =>
-                  listProjection().reuseGroupAt(entryIndex)
+                renderUniformItem={(projection, entryKey, entryIndex) => (
+                  <CollapsedActivityListProjectionView
+                    entryIndex={entryIndex}
+                    entryKey={entryKey}
+                    projection={projection}
+                  />
+                )}
+                reuseGroupForItem={(projection, _entryKey, entryIndex) =>
+                  projection.reuseGroupAt(entryIndex)
                 }
                 uniformEstimate={uniformListEntryEstimate()}
                 virtualize={
@@ -2490,52 +2541,44 @@ function AgentActivityGroup(props: {
   );
 }
 
-function ActivityListEntryView(props: {
+function ActivityListProjectionView(props: {
   readonly clock: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
-  readonly entry: ActivityListEntry;
+  readonly entryIndex: () => number;
+  readonly entryKey: () => string;
   readonly materializeBody: () => boolean;
+  readonly projection: () => ActivityListProjection;
 }) {
-  const entry = createMemo(() => props.entry);
-  return (
-    <Switch>
-      <Match when={entry().kind === "fileChange"}>
-        <Change
-          change={readFileChangeActivityEntry(entry()).change}
-          diffDisplay={props.diffDisplay}
-          disclosureKey={activityListEntryDisclosureKey(entry())}
-          materializeBody={props.materializeBody}
-        />
-      </Match>
-      <Match when={entry().kind === "item"}>
-        <TimelineItem
-          clock={props.clock}
-          diffDisplay={props.diffDisplay}
-          item={readItemActivityEntry(entry()).item}
-          materializeBody={props.materializeBody}
-          variant="grouped"
-        />
-      </Match>
-    </Switch>
+  const kind = untrack(() => props.projection().kindAt(props.entryIndex()));
+  const change = () => props.projection().fileChangeAt(props.entryIndex(), props.entryKey());
+  const item = () => props.projection().itemAt(props.entryIndex(), props.entryKey());
+  return kind === "fileChange" ? (
+    <Change
+      change={change()}
+      diffDisplay={props.diffDisplay}
+      disclosureKey={props.entryKey()}
+      materializeBody={props.materializeBody}
+    />
+  ) : (
+    <TimelineItem
+      clock={props.clock}
+      diffDisplay={props.diffDisplay}
+      item={item()}
+      materializeBody={props.materializeBody}
+      variant="grouped"
+    />
   );
 }
 
-function readFileChangeActivityEntry(
-  entry: ActivityListEntry,
-): Extract<ActivityListEntry, { readonly kind: "fileChange" }> {
-  if (entry.kind !== "fileChange") {
-    throw new Error("A entrada virtualizada não contém uma alteração de arquivo.");
-  }
-  return entry;
-}
-
-function readItemActivityEntry(
-  entry: ActivityListEntry,
-): Extract<ActivityListEntry, { readonly kind: "item" }> {
-  if (entry.kind !== "item") {
-    throw new Error("A entrada virtualizada não contém uma atividade executável.");
-  }
-  return entry;
+function CollapsedActivityListProjectionView(props: {
+  readonly entryIndex: () => number;
+  readonly entryKey: () => string;
+  readonly projection: () => ActivityListProjection;
+}) {
+  const change = createMemo(() =>
+    props.projection().fileChangeAt(props.entryIndex(), props.entryKey()),
+  );
+  return <CollapsedChange change={change()} disclosureKey={props.entryKey()} />;
 }
 
 function agentActivityIcon(kind: AgentActivityKind | undefined): IconName {
@@ -2543,7 +2586,7 @@ function agentActivityIcon(kind: AgentActivityKind | undefined): IconName {
     case "fileChanges":
       return "edit";
     case "fileReads":
-      return "book";
+      return "read";
     case "exploration":
       return "file";
     case "commands":
@@ -2554,6 +2597,29 @@ function agentActivityIcon(kind: AgentActivityKind | undefined): IconName {
     default:
       return "sparkles";
   }
+}
+
+function TimelineActivityIcon(props: { readonly name: IconName }) {
+  return (
+    <span aria-hidden="true" class="activity-icon">
+      <Icon name={props.name} size={16} />
+    </span>
+  );
+}
+
+function TimelineDisclosureIcon(props: {
+  readonly class?: string | undefined;
+  readonly expanded: boolean;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      class={props.class ?? "activity-chevron"}
+      classList={{ "is-expanded": props.expanded }}
+    >
+      <Icon name="chevronRight" size={14} />
+    </span>
+  );
 }
 
 function EmptyConversation(props: {
@@ -2611,11 +2677,21 @@ interface TimelineItemProps {
 }
 
 function TimelineItem(props: TimelineItemProps) {
+  if (props.variant === "grouped") {
+    return (
+      <TimelineItemContent
+        active={props.active}
+        clock={props.clock}
+        diffDisplay={props.diffDisplay}
+        item={props.item}
+        materializeBody={props.materializeBody}
+        streaming={props.streaming}
+        variant={props.variant}
+      />
+    );
+  }
   return (
-    <Show
-      keyed
-      when={props.variant === "grouped" ? props.item.type : timelineItemRenderIdentity(props.item)}
-    >
+    <Show keyed when={timelineItemRenderIdentity(props.item)}>
       {(_identity) => (
         <TimelineItemContent
           active={props.active}
@@ -2681,9 +2757,7 @@ function ContextCompaction(props: {
 }) {
   return (
     <section class="context-compaction-row" id={props.item.id}>
-      <span class="activity-icon">
-        <Icon name="layers" size={13} />
-      </span>
+      <TimelineActivityIcon name="layers" />
       <ActivityHeadline
         active={props.active === true}
         class="activity-title compaction-text"
@@ -2721,6 +2795,8 @@ function CommandItem(props: {
 }) {
   let outputScrollElement: HTMLDivElement | undefined;
   let followLiveOutput = true;
+  let knownOutputScrollLeft = 0;
+  let knownOutputScrollTop = 0;
   let activeItemId = props.item.id;
   const disclosure = useTimelineDisclosure(() => `command:${props.item.id}`);
   const output = () => props.item.aggregatedOutput;
@@ -2747,15 +2823,26 @@ function CommandItem(props: {
     }
     activeItemId = itemId;
     followLiveOutput = true;
-    if (outputScrollElement !== undefined) {
+    if (
+      outputScrollElement !== undefined &&
+      (knownOutputScrollTop !== 0 || knownOutputScrollLeft !== 0)
+    ) {
       outputScrollElement.scrollTop = 0;
       outputScrollElement.scrollLeft = 0;
     }
+    knownOutputScrollTop = 0;
+    knownOutputScrollLeft = 0;
   });
 
   createEffect(() => {
-    liveOutput();
-    if (!disclosure.isOpen() || !followLiveOutput) {
+    const currentLiveOutput = liveOutput();
+    if (
+      currentLiveOutput === null ||
+      output() !== null ||
+      props.item.status !== "inProgress" ||
+      !disclosure.isOpen() ||
+      !followLiveOutput
+    ) {
       return;
     }
     queueMicrotask(() => {
@@ -2769,10 +2856,10 @@ function CommandItem(props: {
     if (outputScrollElement === undefined) {
       return;
     }
+    knownOutputScrollTop = outputScrollElement.scrollTop;
+    knownOutputScrollLeft = outputScrollElement.scrollLeft;
     followLiveOutput =
-      outputScrollElement.scrollHeight -
-        outputScrollElement.clientHeight -
-        outputScrollElement.scrollTop <=
+      outputScrollElement.scrollHeight - outputScrollElement.clientHeight - knownOutputScrollTop <=
       LIVE_OUTPUT_FOLLOW_EPSILON_PX;
   }
 
@@ -2787,16 +2874,12 @@ function CommandItem(props: {
         data-timeline-disclosure=""
         ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
       >
-        <span class="activity-icon">
-          <Icon name="terminal" size={13} />
-        </span>
+        <TimelineActivityIcon name="terminal" />
         <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
         <Show when={!backgroundRunning() && duration()}>
           {(visibleDuration) => <span class="activity-elapsed">· {visibleDuration()}</span>}
         </Show>
-        <span class="activity-chevron">
-          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-        </span>
+        <TimelineDisclosureIcon expanded={disclosure.isOpen()} />
       </summary>
       <Show when={disclosure.isOpen() && (props.materializeBody?.() ?? true)}>
         <div class="command-card-inner">
@@ -2899,15 +2982,6 @@ function ToolItem(props: {
     }
   });
 
-  const headline = () => (
-    <>
-      <span class="activity-icon">
-        <Icon name={toolIconName(props.item.name)} size={13} />
-      </span>
-      <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
-    </>
-  );
-
   return (
     <Show
       when={hasDetails()}
@@ -2916,7 +2990,7 @@ function ToolItem(props: {
           class="activity-card activity-summary tool-activity-card tool-activity-row"
           classList={{ "grouped-activity-item": props.variant === "grouped" }}
         >
-          {headline()}
+          <ToolActivityHeadline item={props.item} title={title()} />
         </div>
       }
     >
@@ -2930,10 +3004,8 @@ function ToolItem(props: {
           data-timeline-disclosure=""
           ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
         >
-          {headline()}
-          <span class="activity-chevron">
-            <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-          </span>
+          <ToolActivityHeadline item={props.item} title={title()} />
+          <TimelineDisclosureIcon expanded={disclosure.isOpen()} />
         </summary>
         <Show when={disclosure.isOpen() && (props.materializeBody?.() ?? true)}>
           <div class="command-card-inner">
@@ -2961,6 +3033,18 @@ function ToolItem(props: {
         </Show>
       </details>
     </Show>
+  );
+}
+
+function ToolActivityHeadline(props: {
+  readonly item: Extract<ThreadItem, { type: "toolExecution" }>;
+  readonly title: string;
+}) {
+  return (
+    <>
+      <TimelineActivityIcon name={toolIconName(props.item.name)} />
+      <ActivityHeadline active={props.item.status === "inProgress"} text={props.title} />
+    </>
   );
 }
 
@@ -3028,13 +3112,9 @@ function FileChangeGroup(props: {
         data-timeline-disclosure=""
         ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
       >
-        <span class="activity-icon">
-          <Icon name="edit" size={13} />
-        </span>
+        <TimelineActivityIcon name="edit" />
         <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
-        <span class="activity-chevron">
-          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-        </span>
+        <TimelineDisclosureIcon expanded={disclosure.isOpen()} />
       </summary>
       <Show when={disclosure.isOpen() && (props.materializeBody?.() ?? true)}>
         <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
@@ -3076,41 +3156,209 @@ function Change(props: {
         data-timeline-disclosure=""
         ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
       >
-        <span class="activity-icon">
-          <Icon name="edit" size={13} />
-        </span>
+        <TimelineActivityIcon name="edit" />
         <span class="file-change-action">{fileChangeActionLabel(kind())}</span>
-        <span class="diff-file-identity">
-          <code title={path()}>{fileName(path())}</code>
-        </span>
-        <Show when={kind() !== "update"}>
-          <span class={`change-kind kind-${kind()}`}>{kind() === "add" ? "NOVO" : "EXCLUÍDO"}</span>
-        </Show>
-        <Show when={additions() > 0}>
-          <span class="diff-stat additions" title={`${additions()} linhas adicionadas`}>
-            +{additions()}
+        <Show when={!disclosure.isOpen()}>
+          <span class="diff-file-identity">
+            <code title={path()}>{fileName(path())}</code>
           </span>
+          <Show when={kind() !== "update"}>
+            <span class={`change-kind kind-${kind()}`}>
+              {kind() === "add" ? "NOVO" : "EXCLUÍDO"}
+            </span>
+          </Show>
+          <Show when={additions() > 0}>
+            <span class="diff-stat additions" title={`${additions()} linhas adicionadas`}>
+              +{additions()}
+            </span>
+          </Show>
+          <Show when={deletions() > 0}>
+            <span class="diff-stat deletions" title={`${deletions()} linhas removidas`}>
+              -{deletions()}
+            </span>
+          </Show>
         </Show>
-        <Show when={deletions() > 0}>
-          <span class="diff-stat deletions" title={`${deletions()} linhas removidas`}>
-            −{deletions()}
-          </span>
-        </Show>
-        <span aria-hidden="true" class="diff-file-chevron">
-          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-        </span>
+        <TimelineDisclosureIcon class="diff-file-chevron" expanded={disclosure.isOpen()} />
       </summary>
       <Show when={bodyChange()}>
         {(bodyChange) => (
-          <Show
-            when={bodyChange().diff.trim().length > 0}
-            fallback={<div class="diff-empty-state">Nenhuma diferença textual disponível.</div>}
-          >
-            <ExpandedChangeDiff change={bodyChange()} mode={props.diffDisplay ?? "unified"} />
-          </Show>
+          <div class="diff-panel">
+            <DiffPanelHeader change={bodyChange()} />
+            <Show
+              when={bodyChange().diff.trim().length > 0}
+              fallback={<div class="diff-empty-state">Nenhuma diferença textual disponível.</div>}
+            >
+              <ExpandedChangeDiff change={bodyChange()} mode={props.diffDisplay ?? "unified"} />
+            </Show>
+          </div>
         )}
       </Show>
     </details>
+  );
+}
+
+function CollapsedChange(props: { readonly change: FileChange; readonly disclosureKey: string }) {
+  let detailsElement: HTMLDetailsElement | undefined;
+  let actionElement: HTMLSpanElement | undefined;
+  let fileElement: HTMLElement | undefined;
+  let kindElement: HTMLSpanElement | undefined;
+  let additionsElement: HTMLSpanElement | undefined;
+  let deletionsElement: HTMLSpanElement | undefined;
+  const storageKey = useTimelineDisclosureStorageKey(() => props.disclosureKey);
+  const initialChange = props.change;
+  const initialKind = initialChange.kind.type;
+  const initialPath = initialChange.path;
+  const initialStats = fileChangeLineStats(initialChange);
+  let previousKind = initialKind;
+  let previousPath = initialPath;
+  let previousAdditions = initialStats.additions;
+  let previousDeletions = initialStats.deletions;
+
+  createEffect(() => {
+    const change = props.change;
+    const kind = change.kind.type;
+    const path = change.path;
+    const stats = fileChangeLineStats(change);
+    if (
+      detailsElement === undefined ||
+      actionElement === undefined ||
+      fileElement === undefined ||
+      kindElement === undefined ||
+      additionsElement === undefined ||
+      deletionsElement === undefined
+    ) {
+      return;
+    }
+    if (kind !== previousKind) {
+      detailsElement.setAttribute("data-kind", kind);
+      actionElement.textContent = fileChangeActionLabel(kind);
+      kindElement.className = `change-kind kind-${kind}`;
+      kindElement.hidden = kind === "update";
+      kindElement.textContent = kind === "add" ? "NOVO" : "EXCLUÍDO";
+      previousKind = kind;
+    }
+    if (path !== previousPath) {
+      fileElement.title = path;
+      fileElement.textContent = fileName(path);
+      previousPath = path;
+    }
+    if (stats.additions !== previousAdditions) {
+      additionsElement.hidden = stats.additions === 0;
+      additionsElement.title = `${stats.additions} linhas adicionadas`;
+      additionsElement.textContent = `+${stats.additions}`;
+      previousAdditions = stats.additions;
+    }
+    if (stats.deletions !== previousDeletions) {
+      deletionsElement.hidden = stats.deletions === 0;
+      deletionsElement.title = `${stats.deletions} linhas removidas`;
+      deletionsElement.textContent = `-${stats.deletions}`;
+      previousDeletions = stats.deletions;
+    }
+  });
+
+  return (
+    <details class="diff-block file-change-diff" data-kind={initialKind} ref={detailsElement}>
+      <summary
+        data-timeline-disclosure=""
+        ref={(element) => bindControlledTimelineDisclosureKey(element, storageKey)}
+      >
+        <TimelineActivityIcon name="edit" />
+        <span class="file-change-action" ref={actionElement}>
+          {fileChangeActionLabel(initialKind)}
+        </span>
+        <span class="diff-file-identity">
+          <code ref={fileElement} title={initialPath}>
+            {fileName(initialPath)}
+          </code>
+        </span>
+        <span
+          class={`change-kind kind-${initialKind}`}
+          hidden={initialKind === "update"}
+          ref={kindElement}
+        >
+          {initialKind === "add" ? "NOVO" : "EXCLUÍDO"}
+        </span>
+        <span
+          class="diff-stat additions"
+          hidden={initialStats.additions === 0}
+          ref={additionsElement}
+          title={`${initialStats.additions} linhas adicionadas`}
+        >
+          +{initialStats.additions}
+        </span>
+        <span
+          class="diff-stat deletions"
+          hidden={initialStats.deletions === 0}
+          ref={deletionsElement}
+          title={`${initialStats.deletions} linhas removidas`}
+        >
+          -{initialStats.deletions}
+        </span>
+        <TimelineDisclosureIcon class="diff-file-chevron" expanded={false} />
+      </summary>
+    </details>
+  );
+}
+
+function DiffPanelHeader(props: { readonly change: FileChange }) {
+  const reportFailure = useFrontendFailureReporter();
+  const [copyState, setCopyState] = createSignal<"copied" | "failed" | "idle">("idle");
+  const stats = createMemo(() => fileChangeLineStats(props.change));
+  let resetTimer: number | undefined;
+
+  onCleanup(() => window.clearTimeout(resetTimer));
+
+  async function copyDiff(): Promise<void> {
+    window.clearTimeout(resetTimer);
+    try {
+      if (navigator.clipboard === undefined) {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(props.change.diff);
+      setCopyState("copied");
+    } catch (reason) {
+      reportFailure(frontendFailureMessage("Falha ao copiar a edição", reason));
+      setCopyState("failed");
+    }
+    resetTimer = window.setTimeout(
+      () => setCopyState("idle"),
+      DIFF_COPY_FEEDBACK_RESET_MILLISECONDS,
+    );
+  }
+
+  const copyLabel = () => {
+    switch (copyState()) {
+      case "copied":
+        return "Edição copiada";
+      case "failed":
+        return "Falha ao copiar a edição";
+      case "idle":
+        return "Copiar edição";
+    }
+  };
+
+  return (
+    <div class="diff-panel-header">
+      <span class="diff-file-identity">
+        <code title={props.change.path}>{fileName(props.change.path)}</code>
+      </span>
+      <Show when={stats().additions > 0}>
+        <span class="diff-stat additions">+{stats().additions}</span>
+      </Show>
+      <Show when={stats().deletions > 0}>
+        <span class="diff-stat deletions">-{stats().deletions}</span>
+      </Show>
+      <button
+        aria-label={copyLabel()}
+        aria-live="polite"
+        class="diff-panel-copy"
+        onClick={() => void copyDiff()}
+        title={copyLabel()}
+        type="button"
+      >
+        <Icon name={copyState() === "copied" ? "check" : "copy"} size={13} />
+      </button>
+    </div>
   );
 }
 

@@ -13,8 +13,11 @@ const HOME_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1`;
 const CHAT_REFERENCE_PREVIEW_URL = `${HOME_PREVIEW_URL}&chatReference=1`;
 const TIMELINE_STRESS_PREVIEW_URL = `${HOME_PREVIEW_URL}&timelineStress=1`;
 const TIMELINE_EXTREME_PREVIEW_URL = `${TIMELINE_STRESS_PREVIEW_URL}&timelineFiles=100000`;
+const ACTIVITY_RECONCILIATION_PREVIEW_URL = `${TIMELINE_STRESS_PREVIEW_URL}&activityReconciliation=1`;
 const BROWSER_PANEL_PREVIEW_URL = `${TIMELINE_STRESS_PREVIEW_URL}&browser=1`;
 const BROWSER_DEBUG_PREVIEW_URL = `${BROWSER_PANEL_PREVIEW_URL}&browserMetrics=1`;
+const OFFICIAL_READ_ICON_PATH =
+  "M16.3965 5.01128C16.3963 4.93399 16.3489 4.87691 16.293 4.85406L16.2354 4.84332C13.9306 4.91764 12.5622 5.32101 10.665 6.34722V16.3716C11.3851 15.9994 12.0688 15.7115 12.7861 15.5015C13.8286 15.1965 14.9113 15.0633 16.2402 15.0435L16.2979 15.0308C16.353 15.0063 16.3965 14.9483 16.3965 14.8755V5.01128ZM3.54492 14.8765C3.54492 14.9725 3.62159 15.0422 3.70117 15.0435L4.19629 15.0562C5.94062 15.1247 7.26036 15.4201 8.65918 16.0484C8.05544 15.1706 7.14706 14.436 6.17871 14.1109V14.1099C5.56757 13.9045 5.16816 13.3314 5.16797 12.6988V4.98882C4.86679 4.93786 4.60268 4.8999 4.28223 4.87457L3.72754 4.84429C3.62093 4.84079 3.54505 4.92417 3.54492 5.01226V14.8765ZM17.7266 14.8755C17.7266 15.6314 17.1607 16.2751 16.4121 16.3628L16.2598 16.3736C15.0122 16.3922 14.0555 16.5159 13.1602 16.7779C12.2629 17.0404 11.3966 17.4508 10.3369 18.0738C10.129 18.1959 9.87099 18.1958 9.66309 18.0738C7.71455 16.9283 6.31974 16.4689 4.12988 16.3853L3.68164 16.3736C2.85966 16.3614 2.21484 15.6838 2.21484 14.8765V5.01226C2.21497 4.15391 2.93263 3.4871 3.77246 3.51519L4.39844 3.54937C4.67996 3.57191 4.92258 3.60421 5.16797 3.64214V2.51031C5.16797 1.44939 6.29018 0.645615 7.31055 1.15679L7.31152 1.15582C8.78675 1.89511 10.0656 3.33006 10.5352 4.91461C12.3595 3.98907 13.8688 3.58817 16.1924 3.51324L16.3506 3.51714C17.1285 3.5741 17.7264 4.23496 17.7266 5.01128V14.8755ZM6.49805 12.6988C6.49824 12.7723 6.5442 12.8296 6.60254 12.8492L6.96289 12.9859C7.85245 13.3586 8.68125 13.9846 9.33496 14.7496V5.5816C9.08794 4.37762 8.13648 3.1566 6.95801 2.47613L6.71582 2.34527C6.67779 2.32617 6.6337 2.32502 6.58301 2.35796C6.52946 2.39279 6.49805 2.44863 6.49805 2.51031V12.6988Z";
 const SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=general`;
 const USAGE_SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=usage`;
 const SETTINGS_INTERACTION_PREVIEW_URL = `${SETTINGS_PREVIEW_URL}&preferenceDelay=400`;
@@ -233,6 +236,9 @@ const SCENARIOS = [
         if (block instanceof HTMLDetailsElement && !block.open) {
           block.querySelector(":scope > summary")?.click();
         }
+        requestAnimationFrame(() =>
+          block?.scrollIntoView({ behavior: "auto", block: "start" }),
+        );
       }));
     })()`,
     readyExpression: `[...document.querySelectorAll(".file-change-diff .diff-file-identity code")].some(
@@ -266,6 +272,17 @@ const SCENARIOS = [
     auditExpression: highlightedToolOutputVisualAuditExpression,
     interact: exerciseHighlightedReadInteraction,
     validate: validateHighlightedToolOutputMetrics,
+  },
+  {
+    id: "composer-popover-layering",
+    url: TIMELINE_STRESS_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de timeline expandida"),
+    )`,
+    prepareExpression: composerPopoverLayeringPrepareExpression(),
+    readyExpression: `window.__previewComposerPopoverLayeringReady === true`,
+    auditExpression: composerPopoverLayeringVisualAuditExpression,
+    validate: validateComposerPopoverLayeringMetrics,
   },
   {
     id: "chat-reference",
@@ -562,6 +579,18 @@ const SCENARIOS = [
     readyExpression: `window.__previewImageViewReady === true`,
     auditExpression: imageViewGroupVisualAuditExpression,
     validate: validateImageViewGroupMetrics,
+  },
+  {
+    id: "activity-reconciliation-stream",
+    url: ACTIVITY_RECONCILIATION_PREVIEW_URL,
+    readyTimeoutMs: 15_000,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Reconciliação de comandos paralelos"),
+    )`,
+    prepareExpression: activityReconciliationPrepareExpression(),
+    readyExpression: `window.__activityReconciliationReady === true`,
+    auditExpression: activityReconciliationAuditExpression,
+    validate: validateActivityReconciliationMetrics,
   },
   {
     id: "timeline-performance-stress",
@@ -1045,6 +1074,7 @@ function previewFileDetailPrepareExpression(fileName) {
               throw new Error("O diff criado não materializou suas linhas visíveis.");
             }
             const tokens = [...diffViewport.querySelectorAll(".syntax-token")];
+            const rows = [...diffViewport.querySelectorAll(".unified-diff-row")];
             window.__previewCreatedFileMetrics = {
               tokenKinds: [
                 ...new Set(
@@ -1060,7 +1090,19 @@ function previewFileDetailPrepareExpression(fileName) {
               newlineMetadataRows: [...diffViewport.querySelectorAll(".unified-diff-hunk")].filter(
                 (element) => element.textContent?.includes("No newline at end of file"),
               ).length,
+              structuralMetadataRows: diffViewport.querySelectorAll(
+                ".unified-diff-row.is-hunk, .unified-diff-row.is-meta, .unified-diff-hunk, .split-diff-hunk",
+              ).length,
+              containsStructuralMetadata: [
+                "@@ ",
+                "diff --git ",
+                "No newline at end of file",
+              ].some((marker) => (diffViewport.textContent ?? "").includes(marker)),
               codeInset: code.getBoundingClientRect().left - diffViewport.getBoundingClientRect().left,
+              lineNumberCellsPerRow: rows.map(
+                (row) => row.querySelectorAll(":scope > .diff-line-number").length,
+              ),
+              markerCellCount: diffViewport.querySelectorAll(".diff-line-prefix").length,
               horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
             };
             return;
@@ -1154,10 +1196,38 @@ function previewHighlightedToolOutputsPrepareExpression() {
             const sourceTokens = [...source.querySelectorAll(".syntax-token")];
             const searchTokens = [...search.querySelectorAll(".syntax-token")];
             const sourceSummary = sourceCard.querySelector(":scope > summary");
+            const readIcon = sourceSummary?.querySelector(".activity-icon svg");
+            const readChevron = sourceSummary?.querySelector(".activity-chevron");
+            const readChevronIcon = readChevron?.querySelector("svg");
+            const readIconBounds = readIcon?.getBoundingClientRect();
+            const readChevronBounds = readChevronIcon?.getBoundingClientRect();
             window.__previewHighlightedToolMetrics = {
               readIconPaths: [
                 ...(sourceSummary?.querySelectorAll(".activity-icon svg path") ?? []),
               ].map((path) => path.getAttribute("d")),
+              readIconFill: readIcon?.getAttribute("fill") ?? null,
+              readIconRtlFlip: readIcon?.hasAttribute("data-rtl-flip") ?? false,
+              readIconSize:
+                readIconBounds === undefined
+                  ? null
+                  : { height: readIconBounds.height, width: readIconBounds.width },
+              readIconStroke: readIcon?.getAttribute("stroke") ?? null,
+              readIconStrokeWidth: readIcon?.getAttribute("stroke-width") ?? null,
+              readIconViewBox: readIcon?.getAttribute("viewBox") ?? null,
+              readChevronOpacity:
+                readChevron === null || readChevron === undefined
+                  ? null
+                  : Number.parseFloat(getComputedStyle(readChevron).opacity),
+              readChevronPath:
+                readChevronIcon?.querySelector("path")?.getAttribute("d") ?? null,
+              readChevronSize:
+                readChevronBounds === undefined
+                  ? null
+                  : { height: readChevronBounds.height, width: readChevronBounds.width },
+              readChevronTransform:
+                readChevronIcon === null || readChevronIcon === undefined
+                  ? null
+                  : getComputedStyle(readChevronIcon).transform,
               readTitle:
                 sourceSummary?.querySelector(".activity-title-base")?.textContent?.trim() ?? null,
               sourceLineNumbers: [...source.querySelectorAll(".tool-source-line-number")].map(
@@ -1190,6 +1260,241 @@ function previewHighlightedToolOutputsPrepareExpression() {
           timeline.scrollTop = Math.max(0, timeline.scrollTop - 140);
         }
       }
+    })();
+  })()`;
+}
+
+function composerPopoverLayeringPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      try {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const waitUntil = async (label, predicate, timeoutMs = 4000) => {
+          const deadline = performance.now() + timeoutMs;
+          while (!predicate()) {
+            if (performance.now() >= deadline) {
+              throw new Error("Tempo excedido aguardando " + label + ".");
+            }
+            await frame();
+          }
+        };
+        const rectangle = (element) => {
+          const bounds = element.getBoundingClientRect();
+          return {
+            top: bounds.top,
+            right: bounds.right,
+            bottom: bounds.bottom,
+            left: bounds.left,
+            width: bounds.width,
+            height: bounds.height,
+          };
+        };
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Estresse de timeline expandida"),
+        );
+        threadButton?.click();
+        await waitUntil(
+          "o compositor e o resumo das alterações",
+          () =>
+            document.querySelector(".composer-wrap") !== null &&
+            document.querySelector(".plan-progress-pill") !== null &&
+            document.querySelector(".permission-button") !== null,
+        );
+        await waitUntil(
+          "a timeline de estresse",
+          () =>
+            document.querySelector(".command-activity-card") !== null ||
+            document.querySelector(".agent-activity-group") !== null ||
+            document.querySelector('button[aria-label="Mostrar trabalho do agente"]') !== null,
+        );
+        document.querySelectorAll('button[aria-label="Mostrar trabalho do agente"]').forEach(
+          (button) => button.click(),
+        );
+        document.querySelectorAll(".agent-activity-group:not([open]) > summary").forEach(
+          (summary) => summary.click(),
+        );
+        await waitUntil(
+          "uma linha de comando materializada",
+          () =>
+            document.querySelector(
+              ".command-activity-card > summary .activity-icon svg",
+            ) !== null,
+        );
+
+        const measureMenu = async (name, triggerSelector, menuSelector) => {
+          const trigger = document.querySelector(triggerSelector);
+          if (!(trigger instanceof HTMLButtonElement)) {
+            throw new Error("Controle ausente para o menu " + name + ".");
+          }
+          trigger.click();
+          await frame();
+          await frame();
+          const menu = document.querySelector(menuSelector);
+          const status = document.querySelector(".plan-progress-pill");
+          if (!(menu instanceof HTMLElement) || !(status instanceof HTMLElement)) {
+            throw new Error("Superfícies ausentes ao medir o menu " + name + ".");
+          }
+          const menuBounds = rectangle(menu);
+          const statusBounds = rectangle(status);
+          const intersection = {
+            top: Math.max(menuBounds.top, statusBounds.top),
+            right: Math.min(menuBounds.right, statusBounds.right),
+            bottom: Math.min(menuBounds.bottom, statusBounds.bottom),
+            left: Math.max(menuBounds.left, statusBounds.left),
+          };
+          const overlapWidth = Math.max(0, intersection.right - intersection.left);
+          const overlapHeight = Math.max(0, intersection.bottom - intersection.top);
+          const samplePoints =
+            overlapWidth === 0 || overlapHeight === 0
+              ? []
+              : [
+                  [0.15, 0.2],
+                  [0.5, 0.2],
+                  [0.85, 0.2],
+                  [0.15, 0.8],
+                  [0.5, 0.8],
+                  [0.85, 0.8],
+                ].map(([horizontal, vertical]) => ({
+                  x: intersection.left + overlapWidth * horizontal,
+                  y: intersection.top + overlapHeight * vertical,
+                }));
+          return {
+            name,
+            menuBounds,
+            statusBounds,
+            overlapHeight,
+            overlapWidth,
+            paintedInFront: samplePoints.map(({ x, y }) => {
+              const paintedElement = document.elementFromPoint(x, y);
+              return paintedElement !== null && menu.contains(paintedElement);
+            }),
+          };
+        };
+
+        const menus = [];
+        menus.push(await measureMenu("add", ".add-button", ".add-menu"));
+        menus.push(
+          await measureMenu("permission", ".permission-button", ".permission-menu"),
+        );
+        menus.push(await measureMenu("model", ".model-button", ".model-menu"));
+        const permissionButton = document.querySelector(".permission-button");
+        if (!(permissionButton instanceof HTMLButtonElement)) {
+          throw new Error("O controle de permissões desapareceu durante a auditoria.");
+        }
+        permissionButton.click();
+        await frame();
+        await frame();
+
+        const composer = document.querySelector(".composer-wrap");
+        const chatPage = document.querySelector(".chat-page");
+        const dock = document.querySelector(".chat-dock");
+        const progress = document.querySelector(".plan-progress");
+        const timelineFrame = document.querySelector(".timeline-frame");
+        const timeline = timelineFrame?.querySelector(".timeline");
+        const timelineInner = timeline?.querySelector(".timeline-inner");
+        const surfaceScrollbar = timelineFrame?.querySelector(".surface-scrollbar");
+        const scrollbarDown = surfaceScrollbar?.querySelector(".surface-scrollbar-arrow.down");
+        const permissionMenu = document.querySelector(".permission-menu");
+        const commandIcon = document.querySelector(
+          ".command-activity-card > summary .activity-icon svg",
+        );
+        const commandFrame = commandIcon?.querySelector("rect");
+        const commandIconBounds = commandIcon?.getBoundingClientRect();
+        if (
+          !(composer instanceof HTMLElement) ||
+          !(chatPage instanceof HTMLElement) ||
+          !(dock instanceof HTMLElement) ||
+          !(progress instanceof HTMLElement) ||
+          !(timelineFrame instanceof HTMLElement) ||
+          !(timeline instanceof HTMLElement) ||
+          !(timelineInner instanceof HTMLElement) ||
+          !(surfaceScrollbar instanceof HTMLElement) ||
+          !(scrollbarDown instanceof HTMLButtonElement) ||
+          !(permissionMenu instanceof HTMLElement) ||
+          !(commandIcon instanceof SVGElement) ||
+          !(commandFrame instanceof SVGRectElement) ||
+          commandIconBounds === undefined
+        ) {
+          throw new Error("A hierarquia final de camadas do dock está incompleta.");
+        }
+        timeline.scrollTop = timeline.scrollHeight;
+        await frame();
+        await frame();
+        const mountedTimelineItems = [...document.querySelectorAll(".timeline-virtual-item")];
+        const lastTimelineItem = mountedTimelineItems.reduce(
+          (latest, candidate) =>
+            latest === null ||
+            candidate.getBoundingClientRect().bottom > latest.getBoundingClientRect().bottom
+              ? candidate
+              : latest,
+          null,
+        );
+        if (!(lastTimelineItem instanceof HTMLElement)) {
+          throw new Error("O último item da timeline não está materializado no limite inferior.");
+        }
+        const rootStyle = getComputedStyle(document.documentElement);
+        const chatPageBounds = rectangle(chatPage);
+        const dockBounds = rectangle(dock);
+        const timelineBounds = rectangle(timelineFrame);
+        const timelineViewportBounds = rectangle(timeline);
+        const scrollbarBounds = rectangle(surfaceScrollbar);
+        const scrollbarDownBounds = rectangle(scrollbarDown);
+        const lastTimelineItemBounds = rectangle(lastTimelineItem);
+        window.__previewComposerPopoverLayeringMetrics = {
+          chatPageBounds,
+          chatPageDisplay: getComputedStyle(chatPage).display,
+          chatDockHeight: Number.parseFloat(
+            getComputedStyle(chatPage).getPropertyValue("--chat-dock-height"),
+          ),
+          composerIsolation: getComputedStyle(composer).isolation,
+          composerLayer: Number.parseInt(getComputedStyle(composer).zIndex, 10),
+          commandFrame: {
+            height: commandFrame.getAttribute("height"),
+            rx: commandFrame.getAttribute("rx"),
+            width: commandFrame.getAttribute("width"),
+            x: commandFrame.getAttribute("x"),
+            y: commandFrame.getAttribute("y"),
+          },
+          commandIconPaths: [...commandIcon.querySelectorAll("path")].map((path) =>
+            path.getAttribute("d"),
+          ),
+          commandIconSize: {
+            height: commandIconBounds.height,
+            width: commandIconBounds.width,
+          },
+          commandIconViewBox: commandIcon.getAttribute("viewBox"),
+          dockLayer: rootStyle.getPropertyValue("--layer-chat-dock").trim(),
+          dockBounds,
+          dockPosition: getComputedStyle(dock).position,
+          horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+          menus,
+          permissionMenuBounds: rectangle(permissionMenu),
+          permissionMenuLayer: Number.parseInt(getComputedStyle(permissionMenu).zIndex, 10),
+          popoverLayer: rootStyle.getPropertyValue("--layer-local-popover").trim(),
+          scrollbarBounds,
+          scrollbarDownBounds,
+          scrollbarBottomGap: chatPageBounds.bottom - scrollbarDownBounds.bottom,
+          statusLayer: Number.parseInt(getComputedStyle(progress).zIndex, 10),
+          lastTimelineItemBounds,
+          lastTimelineItemDockGap: dockBounds.top - lastTimelineItemBounds.bottom,
+          timelineAtEnd:
+            timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop,
+          timelineBounds,
+          timelineBottomPadding: Number.parseFloat(getComputedStyle(timelineInner).paddingBottom),
+          timelinePosition: getComputedStyle(timelineFrame).position,
+          timelineViewportBounds,
+          timelineDockGap: dockBounds.top - timelineBounds.bottom,
+          timelineDockOverlap: Math.max(
+            0,
+            Math.min(timelineBounds.bottom, dockBounds.bottom) -
+              Math.max(timelineBounds.top, dockBounds.top),
+          ),
+        };
+      } catch (error) {
+        window.__previewComposerPopoverLayeringError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      }
+      window.__previewComposerPopoverLayeringReady = true;
     })();
   })()`;
 }
@@ -1520,17 +1825,28 @@ function nestedScrollWheelOwnershipPrepareExpression() {
         if (!(timeline instanceof HTMLElement)) {
           throw new Error("A timeline do cenário de wheel nativo está ausente.");
         }
-        timeline.dispatchEvent(
-          new WheelEvent("wheel", {
-            bubbles: true,
-            cancelable: true,
-            deltaMode: 0,
-            deltaY: -1,
-          }),
-        );
-        timeline.scrollTop = 0;
-        await new Promise((resolve) => setTimeout(resolve, 180));
-        await frame();
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          timeline.dispatchEvent(
+            new WheelEvent("wheel", {
+              bubbles: true,
+              cancelable: true,
+              deltaMode: 0,
+              deltaY: -1,
+            }),
+          );
+          timeline.scrollTop = 0;
+          await new Promise((resolve) => setTimeout(resolve, 180));
+          await frame();
+          if (timeline.scrollTop <= 1) {
+            break;
+          }
+        }
+        if (timeline.scrollTop > 1) {
+          throw new Error(
+            "A timeline não estabilizou no topo antes do teste de wheel aninhado.",
+          );
+        }
+        const materializationSamples = [];
         for (let index = 0; index < 24; index += 1) {
           const sourceWrapper = document.querySelector(
             '[data-virtual-activity-key^="13:toolExecution|22:timeline-stress-tool-2|"]',
@@ -1540,6 +1856,12 @@ function nestedScrollWheelOwnershipPrepareExpression() {
           );
           const source = sourceWrapper?.querySelector("details");
           const diff = diffWrapper?.querySelector("details");
+          materializationSamples.push({
+            diffMounted: diffWrapper !== null,
+            index,
+            sourceMounted: sourceWrapper !== null,
+            scrollTop: timeline.scrollTop,
+          });
           for (const details of [source, diff]) {
             if (details instanceof HTMLDetailsElement && !details.open) {
               details.querySelector(":scope > summary")?.click();
@@ -1597,6 +1919,15 @@ function nestedScrollWheelOwnershipPrepareExpression() {
                 clientHeight: timeline.clientHeight,
                 scrollHeight: timeline.scrollHeight,
                 scrollTop: timeline.scrollTop,
+              },
+              virtualList: {
+                materializationSamples,
+                mountedKeys: [...document.querySelectorAll(
+                  ".agent-activity-virtual-item[data-virtual-activity-key]",
+                )].map((element) => element.getAttribute("data-virtual-activity-key")),
+                total: document
+                  .querySelector(".agent-activity-virtual-list")
+                  ?.getAttribute("data-virtual-activity-total"),
               },
               viewport: { height: window.innerHeight, width: window.innerWidth },
             }),
@@ -1762,6 +2093,14 @@ async function exerciseNestedScrollWheelOwnership(client) {
         };
         timeline.addEventListener("wheel", listener);
         window.__previewNestedWheelSample = {
+          canvasBefore: region.querySelector(
+            "${label}" === "diff"
+              ? ".diff-virtual-canvas"
+              : ".tool-source-virtual-canvas",
+          ),
+          rowSelector:
+            "${label}" === "diff" ? ".diff-virtual-row" : ".tool-source-line",
+          rowsBefore: null,
           events,
           expectedNestedDelta: direction * expectedNestedDelta,
           label: "${label}",
@@ -1777,6 +2116,34 @@ async function exerciseNestedScrollWheelOwnership(client) {
           x,
           y,
         };
+      })()`,
+      false,
+    );
+    await client.evaluate(
+      `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+      true,
+    );
+    await client.evaluate(
+      `(() => {
+        const sample = window.__previewNestedWheelSample;
+        if (
+          sample === undefined ||
+          sample.label !== "${label}" ||
+          !(sample.region instanceof HTMLElement)
+        ) {
+          throw new Error("A janela virtual ficou inconsistente antes do wheel: ${label}.");
+        }
+        sample.rowsBefore = new Map(
+          [...sample.region.querySelectorAll(sample.rowSelector)].map((row) => [
+            row.getAttribute("aria-rowindex"),
+            row,
+          ]),
+        );
+        sample.canvasBefore = sample.region.querySelector(
+          "${label}" === "diff"
+            ? ".diff-virtual-canvas"
+            : ".tool-source-virtual-canvas",
+        );
       })()`,
       false,
     );
@@ -1813,10 +2180,31 @@ async function exerciseNestedScrollWheelOwnership(client) {
           throw new Error("A amostra de wheel ficou inconsistente para ${label}.");
         }
         sample.timeline.removeEventListener("wheel", sample.listener);
+        const currentCanvas = sample.region.querySelector(
+          "${label}" === "diff"
+            ? ".diff-virtual-canvas"
+            : ".tool-source-virtual-canvas",
+        );
+        const currentRows = [...sample.region.querySelectorAll(sample.rowSelector)];
+        let rowIdentityComparisons = 0;
+        let rowIdentityChanges = 0;
+        for (const row of currentRows) {
+          const key = row.getAttribute("aria-rowindex");
+          const previous = sample.rowsBefore?.get(key);
+          if (previous === undefined) {
+            continue;
+          }
+          rowIdentityComparisons += 1;
+          rowIdentityChanges += previous === row ? 0 : 1;
+        }
         return {
+          canvasIdentityChanged: sample.canvasBefore !== currentCanvas,
           events: sample.events,
           expectedNestedDelta: sample.expectedNestedDelta,
+          mountedRows: currentRows.length,
           nestedDelta: sample.region.scrollTop - sample.nestedStart,
+          rowIdentityChanges,
+          rowIdentityComparisons,
           timelineDelta: sample.timeline.scrollTop - sample.timelineStart,
         };
       })()`,
@@ -2116,6 +2504,7 @@ async function exerciseIntrinsicSummaryInteraction(
       window.__capturePreviewIntrinsicActivity = () => ({
         actionColor: getComputedStyle(action).color,
         chevronOpacity: Number.parseFloat(getComputedStyle(chevron).opacity),
+        expanded: summary.closest("details")?.hasAttribute("open") === true,
         hovered: summary.matches(":hover"),
         iconColor: getComputedStyle(icon).color,
         identityColor: getComputedStyle(identity).color,
@@ -2568,6 +2957,65 @@ function timelinePerformanceStressPrepareExpression() {
         await new Promise((resolve) => setTimeout(resolve, 150));
         window.__timelineStressProgress = { phase: "rapid-scroll-complete" };
 
+        let iconIntegrityComparisons = 0;
+        let iconIntegrityFailures = 0;
+        const iconIntegrityKinds = new Set();
+        const iconIntegritySamples = [];
+        const iconCorrectnessStarted = performance.now();
+        await new Promise((resolve) => {
+          const inspectIcons = (now) => {
+            for (const summary of document.querySelectorAll(
+              ".tool-activity-card > .activity-summary, .tool-activity-card.tool-activity-row",
+            )) {
+              const title = summary.querySelector(".activity-title-base")?.textContent ?? "";
+              const toolLabel =
+                summary.closest(".tool-activity-card")?.querySelector(".command-card-header")
+                  ?.textContent ?? "";
+              const icon = summary.querySelector(":scope > .activity-icon svg");
+              const expectedKind =
+                toolLabel === "Leitura de arquivo" || title.includes("leitura de arquivo")
+                ? "read"
+                : toolLabel === "Busca no projeto" || title.includes("Search ")
+                  ? "search"
+                  : null;
+              if (expectedKind === null || !(icon instanceof SVGSVGElement)) {
+                continue;
+              }
+              iconIntegrityComparisons += 1;
+              iconIntegrityKinds.add(expectedKind);
+              const valid =
+                expectedKind === "read"
+                  ? icon.getAttribute("fill") === "currentColor" &&
+                    icon.getAttribute("stroke") === "none" &&
+                    icon.getAttribute("viewBox") === "0 0 20 20" &&
+                    icon.querySelectorAll(":scope > path").length === 1 &&
+                    icon.querySelector(":scope > circle") === null
+                  : icon.getAttribute("fill") === "none" &&
+                    icon.getAttribute("stroke") === "currentColor" &&
+                    icon.getAttribute("viewBox") === "0 0 24 24" &&
+                    icon.querySelectorAll(":scope > path").length === 1 &&
+                    icon.querySelectorAll(":scope > circle").length === 1;
+              if (!valid) {
+                iconIntegrityFailures += 1;
+                if (iconIntegritySamples.length < 5) {
+                  iconIntegritySamples.push({ expectedKind, markup: icon.outerHTML, title });
+                }
+              }
+            }
+            const maximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+            const phase = ((now - iconCorrectnessStarted) % 500) / 500;
+            timeline.scrollTop = phase <= 0.5
+              ? maximum * phase * 2
+              : maximum * (2 - phase * 2);
+            if (now - iconCorrectnessStarted >= 1000) {
+              resolve();
+            } else {
+              requestAnimationFrame(inspectIcons);
+            }
+          };
+          requestAnimationFrame(inspectIcons);
+        });
+
         const lightButton = [...document.querySelectorAll(".thread-main")].find(
           (button) => button.textContent?.includes("Chat leve de controle"),
         );
@@ -2736,6 +3184,10 @@ function timelinePerformanceStressPrepareExpression() {
           missingSummaryFrames,
           consecutiveSummaryComparisons,
           summaryIdentityChanges,
+          iconIntegrityComparisons,
+          iconIntegrityFailures,
+          iconIntegrityKinds: [...iconIntegrityKinds].sort(),
+          iconIntegritySamples,
           reopenMs,
           visualDriftPx,
           domNodes: document.getElementsByTagName("*").length,
@@ -2760,6 +3212,61 @@ function timelinePerformanceStressPrepareExpression() {
   })()`;
 }
 
+function activityReconciliationPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      try {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const waitUntil = async (label, predicate, timeoutMs) => {
+          const deadline = performance.now() + timeoutMs;
+          while (!predicate()) {
+            if (performance.now() > deadline) {
+              throw new Error("Tempo esgotado preparando " + label + ".");
+            }
+            await frame();
+          }
+        };
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Reconciliação de comandos paralelos"),
+        );
+        threadButton?.click();
+        await waitUntil(
+          "o turno de reconciliação",
+          () => document.querySelector(".conversation-turn") !== null,
+          3000,
+        );
+        document.querySelector('button[aria-label="Mostrar trabalho do agente"]')?.click();
+        await waitUntil(
+          "o grupo inicial de comandos",
+          () => document.querySelector(".agent-activity-group > summary") !== null,
+          3000,
+        );
+        document.querySelector(".agent-activity-group:not([open]) > summary")?.click();
+        await waitUntil(
+          "a lista montada de comandos",
+          () => document.querySelector(".agent-activity-virtual-item") !== null,
+          3000,
+        );
+        await waitUntil(
+          "a conclusão fora de ordem dos comandos",
+          () => document.documentElement.dataset.activityReconciliationState === "completed",
+          10000,
+        );
+        document.querySelector('button[aria-label="Mostrar trabalho do agente"]')?.click();
+        await frame();
+        document.querySelector(".agent-activity-group:not([open]) > summary")?.click();
+        await frame();
+        await frame();
+      } catch (error) {
+        window.__activityReconciliationError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      } finally {
+        window.__activityReconciliationReady = true;
+      }
+    })();
+  })()`;
+}
+
 function timelinePerformanceStressAuditExpression() {
   return `(() => {
     if (window.__timelinePerformanceStressError !== undefined) {
@@ -2771,6 +3278,37 @@ function timelinePerformanceStressAuditExpression() {
     return {
       viewport: { width: innerWidth, height: innerHeight },
       ...window.__timelinePerformanceStressMetrics,
+    };
+  })()`;
+}
+
+function activityReconciliationAuditExpression() {
+  return `(() => {
+    if (window.__activityReconciliationError !== undefined) {
+      throw new Error(window.__activityReconciliationError);
+    }
+    const root = document.documentElement;
+    const virtualList = document.querySelector(".agent-activity-virtual-list");
+    const mountedKeys = [...document.querySelectorAll(
+      ".agent-activity-virtual-item[data-virtual-activity-key]",
+    )].map((element) => element.getAttribute("data-virtual-activity-key"));
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      state: root.dataset.activityReconciliationState ?? null,
+      started: Number(root.dataset.activityReconciliationStarted ?? Number.NaN),
+      completed: Number(root.dataset.activityReconciliationCompleted ?? Number.NaN),
+      durationMs: Number(root.dataset.activityReconciliationDurationMs ?? Number.NaN),
+      identityComparisons: Number(
+        root.dataset.activityReconciliationIdentityComparisons ?? Number.NaN,
+      ),
+      identityChanges: Number(root.dataset.activityReconciliationIdentityChanges ?? Number.NaN),
+      turnFailures: document.querySelectorAll(".turn-failure").length,
+      totalActivities: Number(
+        virtualList?.getAttribute("data-virtual-activity-total") ?? Number.NaN,
+      ),
+      mountedActivities: mountedKeys.length,
+      uniqueMountedActivities: new Set(mountedKeys).size,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
 }
@@ -3109,7 +3647,22 @@ function timelineExtremeFilesPrepareExpression() {
         let missingSummaryFrames = 0;
         let consecutiveSummaryComparisons = 0;
         let summaryIdentityChanges = 0;
+        let wrapperIdentityChanges = 0;
+        let nextElementIdentity = 0;
+        const identityChanges = [];
+        const elementIdentities = new WeakMap();
+        let previousMountedRange = null;
         let previousSummariesByKey = new Map();
+        let previousWrappersByKey = new Map();
+        const elementIdentity = (element) => {
+          let identity = elementIdentities.get(element);
+          if (identity === undefined) {
+            identity = nextElementIdentity;
+            nextElementIdentity += 1;
+            elementIdentities.set(element, identity);
+          }
+          return identity;
+        };
         const observer = PerformanceObserver.supportedEntryTypes?.includes("longtask")
           ? new PerformanceObserver((list) => {
               longTasks.push(...list.getEntries().map((entry) => entry.duration));
@@ -3145,12 +3698,18 @@ function timelineExtremeFilesPrepareExpression() {
         const correctnessStarted = performance.now();
         await new Promise((resolve) => {
           const inspectFrame = (now) => {
+            const virtualList = document.querySelector(".agent-activity-virtual-list");
+            const mountedRange = {
+              end: Number(virtualList?.getAttribute("data-virtual-activity-end")),
+              start: Number(virtualList?.getAttribute("data-virtual-activity-start")),
+            };
             const mountedWrappers = document.querySelectorAll(".agent-activity-virtual-item");
             const mountedItems = mountedWrappers.length;
             const mountedSummaries = document.querySelectorAll(
               ".agent-activity-virtual-item summary",
             ).length;
             const currentSummariesByKey = new Map();
+            const currentWrappersByKey = new Map();
             for (const wrapper of mountedWrappers) {
               const key = wrapper.getAttribute("data-virtual-activity-key");
               const summary = wrapper.querySelector("summary");
@@ -3162,9 +3721,33 @@ function timelineExtremeFilesPrepareExpression() {
                 consecutiveSummaryComparisons += 1;
                 summaryIdentityChanges += previousSummary === summary ? 0 : 1;
               }
+              const previousWrapper = previousWrappersByKey.get(key);
+              if (
+                identityChanges.length < 20 &&
+                ((previousSummary !== undefined && previousSummary !== summary) ||
+                  (previousWrapper !== undefined && previousWrapper !== wrapper))
+              ) {
+                identityChanges.push({
+                  currentSummary: elementIdentity(summary),
+                  currentWrapper: elementIdentity(wrapper),
+                  key,
+                  mountedRange,
+                  previousMountedRange,
+                  previousSummary:
+                    previousSummary === undefined ? null : elementIdentity(previousSummary),
+                  previousWrapper:
+                    previousWrapper === undefined ? null : elementIdentity(previousWrapper),
+                  scrollTop: timeline.scrollTop,
+                });
+              }
+              wrapperIdentityChanges +=
+                previousWrapper === undefined || previousWrapper === wrapper ? 0 : 1;
               currentSummariesByKey.set(key, summary);
+              currentWrappersByKey.set(key, wrapper);
             }
             previousSummariesByKey = currentSummariesByKey;
+            previousWrappersByKey = currentWrappersByKey;
+            previousMountedRange = mountedRange;
             maximumMountedItems = Math.max(maximumMountedItems, mountedItems);
             const deferredBodyElements = document.querySelectorAll(
               '[data-activity-content="deferred"]',
@@ -3196,6 +3779,24 @@ function timelineExtremeFilesPrepareExpression() {
           };
           requestAnimationFrame(inspectFrame);
         });
+        const settlementMaximum = Math.max(
+          0,
+          timeline.scrollHeight - timeline.clientHeight,
+        );
+        timeline.scrollTop = Math.round(settlementMaximum * 0.5);
+        await waitUntil(
+          "uma âncora extrema visível",
+          () => {
+            const timelineBounds = timeline.getBoundingClientRect();
+            return [...document.querySelectorAll(".agent-activity-virtual-item")].some(
+              (element) => {
+                const bounds = element.getBoundingClientRect();
+                return bounds.bottom >= timelineBounds.top && bounds.top <= timelineBounds.bottom;
+              },
+            );
+          },
+          3000,
+        );
         await frame();
         await frame();
         const timelineRect = timeline.getBoundingClientRect();
@@ -3270,6 +3871,8 @@ function timelineExtremeFilesPrepareExpression() {
           missingSummaryFrames,
           consecutiveSummaryComparisons,
           summaryIdentityChanges,
+          wrapperIdentityChanges,
+          identityChanges,
           settledDeferredBodies: document.querySelectorAll(
             '[data-activity-content="deferred"]',
           ).length,
@@ -3446,7 +4049,46 @@ function syntaxHighlightedDiffVisualAuditExpression() {
     const tokenColors = [...new Set(tokens.map((token) => getComputedStyle(token).color))];
     const addition = viewport.querySelector(".unified-diff-row.is-addition .unified-diff-code");
     const deletion = viewport.querySelector(".unified-diff-row.is-deletion .unified-diff-code");
+    const additionRow = addition?.closest(".unified-diff-row");
+    const deletionRow = deletion?.closest(".unified-diff-row");
     const context = viewport.querySelector(".unified-diff-row.is-context");
+    const panel = block.querySelector(".diff-panel");
+    const panelHeader = block.querySelector(".diff-panel-header");
+    const panelCopy = panelHeader?.querySelector(".diff-panel-copy");
+    const outerSummary = block.querySelector(":scope > summary");
+    const rows = [...viewport.querySelectorAll(".unified-diff-row")];
+    const table = viewport.querySelector(".diff-virtual-table");
+    const lineNumberBounds = rows.flatMap((row) => {
+      const cell = row.querySelector(".diff-line-number");
+      return cell instanceof HTMLElement ? [cell.getBoundingClientRect()] : [];
+    });
+    const lineNumberLefts = lineNumberBounds.map((bounds) => bounds.left);
+    const lineNumberCells = rows.flatMap((row) => {
+      const cell = row.querySelector(".diff-line-number");
+      return cell instanceof HTMLElement ? [cell] : [];
+    });
+    const lineNumberContents = lineNumberCells.flatMap((cell) => {
+      const content = cell.querySelector(".diff-line-number-content");
+      return content instanceof HTMLElement ? [content] : [];
+    });
+    const changedLineNumber = viewport.querySelector(
+      ".unified-diff-row.is-addition .diff-line-number",
+    );
+    const changedLineNumberStyle =
+      changedLineNumber instanceof HTMLElement ? getComputedStyle(changedLineNumber) : null;
+    const changedIndicatorStyle =
+      changedLineNumber instanceof HTMLElement
+        ? getComputedStyle(changedLineNumber, "::before")
+        : null;
+    const initialScrollLeft = viewport.scrollLeft;
+    const initialStickyLeft = changedLineNumber?.getBoundingClientRect().left ?? null;
+    viewport.scrollLeft = viewport.scrollWidth;
+    const scrolledStickyLeft = changedLineNumber?.getBoundingClientRect().left ?? null;
+    const stickyOffsetFromViewport =
+      scrolledStickyLeft === null
+        ? null
+        : scrolledStickyLeft - viewport.getBoundingClientRect().left;
+    viewport.scrollLeft = initialScrollLeft;
     const rootStyle = getComputedStyle(document.documentElement);
     return {
       viewport: { width: innerWidth, height: innerHeight },
@@ -3455,19 +4097,121 @@ function syntaxHighlightedDiffVisualAuditExpression() {
       tokenCount: tokens.length,
       contextHasSyntax: context?.querySelector(".syntax-token") instanceof HTMLElement,
       additionBackground:
-        addition instanceof HTMLElement ? getComputedStyle(addition).backgroundColor : null,
+        additionRow instanceof HTMLElement ? getComputedStyle(additionRow).backgroundColor : null,
       deletionBackground:
+        deletionRow instanceof HTMLElement ? getComputedStyle(deletionRow).backgroundColor : null,
+      additionCellBackground:
+        addition instanceof HTMLElement ? getComputedStyle(addition).backgroundColor : null,
+      deletionCellBackground:
         deletion instanceof HTMLElement ? getComputedStyle(deletion).backgroundColor : null,
+      panelBackground:
+        panel instanceof HTMLElement ? getComputedStyle(panel).backgroundColor : null,
+      viewportBackground: getComputedStyle(viewport).backgroundColor,
+      viewportOpacity: getComputedStyle(viewport).opacity,
+      viewportFilter: getComputedStyle(viewport).filter,
+      viewportBackdropFilter: getComputedStyle(viewport).backdropFilter,
+      additionRowWidth:
+        additionRow instanceof HTMLElement ? additionRow.getBoundingClientRect().width : null,
+      deletionRowWidth:
+        deletionRow instanceof HTMLElement ? deletionRow.getBoundingClientRect().width : null,
+      tableWidth: table instanceof HTMLElement ? table.getBoundingClientRect().width : null,
+      additionRowRightGap:
+        additionRow instanceof HTMLElement && table instanceof HTMLElement
+          ? table.getBoundingClientRect().right - additionRow.getBoundingClientRect().right
+          : null,
+      deletionRowRightGap:
+        deletionRow instanceof HTMLElement && table instanceof HTMLElement
+          ? table.getBoundingClientRect().right - deletionRow.getBoundingClientRect().right
+          : null,
       keywordColor: rootStyle.getPropertyValue("--syntax-keyword").trim(),
       stringColor: rootStyle.getPropertyValue("--syntax-string").trim(),
+      expandedSummaryHasIdentity:
+        block.querySelector(":scope > summary .diff-file-identity") instanceof HTMLElement,
+      expandedSummaryAlignItems:
+        outerSummary instanceof HTMLElement ? getComputedStyle(outerSummary).alignItems : null,
+      expandedSummaryBorderBottomWidth:
+        outerSummary instanceof HTMLElement
+          ? getComputedStyle(outerSummary).borderBottomWidth
+          : null,
+      panelHeaderFile: panelHeader?.querySelector("code")?.textContent?.trim() ?? null,
+      panelHeaderFileDecoration:
+        panelHeader?.querySelector("code") instanceof HTMLElement
+          ? getComputedStyle(panelHeader.querySelector("code")).textDecorationLine
+          : null,
+      panelHeaderStats: [...(panelHeader?.querySelectorAll(".diff-stat") ?? [])].map(
+        (element) => element.textContent?.trim() ?? "",
+      ),
+      panelHeaderHeight:
+        panelHeader instanceof HTMLElement ? panelHeader.getBoundingClientRect().height : null,
+      panelHeaderAlignItems:
+        panelHeader instanceof HTMLElement ? getComputedStyle(panelHeader).alignItems : null,
+      panelHeaderChildCenterOffsets:
+        panelHeader instanceof HTMLElement
+          ? [...panelHeader.querySelectorAll(".diff-file-identity code, .diff-stat")].map(
+              (element) => {
+                const headerBounds = panelHeader.getBoundingClientRect();
+                const elementBounds = element.getBoundingClientRect();
+                return (
+                  elementBounds.top +
+                  elementBounds.height / 2 -
+                  (headerBounds.top + headerBounds.height / 2)
+                );
+              },
+            )
+          : [],
+      panelCopyLabel: panelCopy?.getAttribute("aria-label") ?? null,
       codeText: viewport.querySelector(".unified-diff-code code")?.textContent ?? null,
       codeInset:
         addition instanceof HTMLElement
           ? addition.getBoundingClientRect().left - viewport.getBoundingClientRect().left
           : null,
+      lineNumberCellsPerRow: rows.map(
+        (row) => row.querySelectorAll(":scope > .diff-line-number").length,
+      ),
+      lineNumberLeftSpread:
+        lineNumberLefts.length === 0
+          ? null
+          : Math.max(...lineNumberLefts) - Math.min(...lineNumberLefts),
+      lineNumberValues: rows.map(
+        (row) => row.querySelector(":scope > .diff-line-number")?.textContent?.trim() ?? "",
+      ),
+      lineNumberContentOverflow: lineNumberContents.map(
+        (content) => content.scrollWidth - content.clientWidth,
+      ),
+      lineNumberContentContainment: lineNumberContents.map((content) => {
+        const contentBounds = content.getBoundingClientRect();
+        const cellBounds = content.closest(".diff-line-number")?.getBoundingClientRect();
+        return cellBounds === undefined
+          ? null
+          : {
+              left: contentBounds.left - cellBounds.left,
+              right: cellBounds.right - contentBounds.right,
+            };
+      }),
+      lineNumberWidths: lineNumberBounds.map((bounds) => bounds.width),
+      lineNumberBoxSizing: changedLineNumberStyle?.boxSizing ?? null,
+      lineNumberPaddingLeft: changedLineNumberStyle?.paddingLeft ?? null,
+      lineNumberPaddingRight: changedLineNumberStyle?.paddingRight ?? null,
+      lineNumberDividerWidth: changedLineNumberStyle?.borderRightWidth ?? null,
+      lineNumberBackground: changedLineNumberStyle?.backgroundColor ?? null,
+      changedIndicatorWidth: changedIndicatorStyle?.width ?? null,
+      changedIndicatorPosition: changedIndicatorStyle?.position ?? null,
+      diffRowHeights: rows.map((row) => row.getBoundingClientRect().height),
+      stickyGutterMovement:
+        initialStickyLeft === null || scrolledStickyLeft === null
+          ? null
+          : Math.abs(scrolledStickyLeft - initialStickyLeft),
+      stickyOffsetFromViewport,
+      markerCellCount: viewport.querySelectorAll(".diff-line-prefix").length,
       newlineMetadataRows: [...viewport.querySelectorAll(".unified-diff-hunk")].filter(
         (element) => element.textContent?.includes("No newline at end of file"),
       ).length,
+      structuralMetadataRows: viewport.querySelectorAll(
+        ".unified-diff-row.is-hunk, .unified-diff-row.is-meta, .unified-diff-hunk, .split-diff-hunk",
+      ).length,
+      containsStructuralMetadata: ["@@ ", "diff --git ", "No newline at end of file"].some(
+        (marker) => (viewport.textContent ?? "").includes(marker),
+      ),
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
       viewportHorizontalOverflow: viewport.scrollWidth - viewport.clientWidth,
     };
@@ -3500,6 +4244,7 @@ function syntaxHighlightedCreatedFileVisualAuditExpression() {
       throw new Error("Diff de arquivo Rust criado está ausente.");
     }
     const tokens = [...viewport.querySelectorAll(".syntax-token")];
+    const rows = [...viewport.querySelectorAll(".unified-diff-row")];
     return {
       viewport: { width: innerWidth, height: innerHeight },
       tokenKinds: [
@@ -3516,7 +4261,17 @@ function syntaxHighlightedCreatedFileVisualAuditExpression() {
       newlineMetadataRows: [...viewport.querySelectorAll(".unified-diff-hunk")].filter(
         (element) => element.textContent?.includes("No newline at end of file"),
       ).length,
+      structuralMetadataRows: viewport.querySelectorAll(
+        ".unified-diff-row.is-hunk, .unified-diff-row.is-meta, .unified-diff-hunk, .split-diff-hunk",
+      ).length,
+      containsStructuralMetadata: ["@@ ", "diff --git ", "No newline at end of file"].some(
+        (marker) => (viewport.textContent ?? "").includes(marker),
+      ),
       codeInset: code.getBoundingClientRect().left - viewport.getBoundingClientRect().left,
+      lineNumberCellsPerRow: rows.map(
+        (row) => row.querySelectorAll(":scope > .diff-line-number").length,
+      ),
+      markerCellCount: viewport.querySelectorAll(".diff-line-prefix").length,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
@@ -3539,11 +4294,38 @@ function highlightedToolOutputVisualAuditExpression() {
     const sourceTokens = [...source.querySelectorAll(".syntax-token")];
     const searchTokens = [...search.querySelectorAll(".syntax-token")];
     const sourceSummary = source.closest(".tool-activity-card")?.querySelector(":scope > summary");
+    const readIcon = sourceSummary?.querySelector(".activity-icon svg");
+    const readIconBounds = readIcon?.getBoundingClientRect();
+    const readChevron = sourceSummary?.querySelector(".activity-chevron");
+    const readChevronIcon = readChevron?.querySelector("svg");
+    const readChevronBounds = readChevronIcon?.getBoundingClientRect();
     return {
       viewport: { width: innerWidth, height: innerHeight },
       readIconPaths: [
         ...(sourceSummary?.querySelectorAll(".activity-icon svg path") ?? []),
       ].map((path) => path.getAttribute("d")),
+      readIconFill: readIcon?.getAttribute("fill") ?? null,
+      readIconRtlFlip: readIcon?.hasAttribute("data-rtl-flip") ?? false,
+      readIconSize:
+        readIconBounds === undefined
+          ? null
+          : { height: readIconBounds.height, width: readIconBounds.width },
+      readIconStroke: readIcon?.getAttribute("stroke") ?? null,
+      readIconStrokeWidth: readIcon?.getAttribute("stroke-width") ?? null,
+      readIconViewBox: readIcon?.getAttribute("viewBox") ?? null,
+      readChevronOpacity:
+        readChevron === null || readChevron === undefined
+          ? null
+          : Number.parseFloat(getComputedStyle(readChevron).opacity),
+      readChevronPath: readChevronIcon?.querySelector("path")?.getAttribute("d") ?? null,
+      readChevronSize:
+        readChevronBounds === undefined
+          ? null
+          : { height: readChevronBounds.height, width: readChevronBounds.width },
+      readChevronTransform:
+        readChevronIcon === null || readChevronIcon === undefined
+          ? null
+          : getComputedStyle(readChevronIcon).transform,
       readTitle:
         sourceSummary?.querySelector(".activity-title-base")?.textContent?.trim() ?? null,
       sourceLineNumbers: [...source.querySelectorAll(".tool-source-line-number")].map(
@@ -3569,6 +4351,22 @@ function highlightedToolOutputVisualAuditExpression() {
       searchHorizontalOverflow: search.scrollWidth - search.clientWidth,
       readInteraction: window.__previewReadActivityInteraction ?? null,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function composerPopoverLayeringVisualAuditExpression() {
+  return `(() => {
+    if (window.__previewComposerPopoverLayeringError !== undefined) {
+      throw new Error(window.__previewComposerPopoverLayeringError);
+    }
+    if (window.__previewComposerPopoverLayeringMetrics === undefined) {
+      throw new Error("As métricas de camadas dos painéis do compositor estão ausentes.");
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      ...window.__previewComposerPopoverLayeringMetrics,
+      permissionMenuOpen: document.querySelector(".permission-menu") instanceof HTMLElement,
     };
   })()`;
 }
@@ -4443,6 +5241,18 @@ function validateNestedScrollWheelOwnershipMetrics(metrics, viewport) {
       `${label} também deslocou a timeline em ${internal.timelineDelta}px`,
     );
     assert(
+      internal.canvasIdentityChanged === false,
+      `${label} substituiu o canvas virtual durante o wheel interno`,
+    );
+    assert(
+      internal.rowIdentityComparisons > 0 && internal.mountedRows > 0,
+      `${label} não preservou linhas sobrepostas suficientes para validar identidade`,
+    );
+    assert(
+      internal.rowIdentityChanges === 0,
+      `${label} remontou ${internal.rowIdentityChanges} linhas ainda visíveis durante o scroll`,
+    );
+    assert(
       handoff.events.length === 4,
       `${label} não recebeu os quatro eventos reais de wheel no limite`,
     );
@@ -4619,7 +5429,7 @@ function validateSingleFileChangeMetrics(metrics, viewport) {
   );
   assert(metrics.deletedFileBadge === "EXCLUÍDO", "o arquivo excluído perdeu seu selo");
   assert(
-    metrics.deletedFileDeletions === "−288",
+    metrics.deletedFileDeletions === "-288",
     "o arquivo excluído não exibe o total autoritativo de linhas removidas",
   );
   assert(
@@ -4644,8 +5454,17 @@ function validateIntrinsicActivityInteraction(interaction, label, tolerance) {
     `a área interativa da ${label} ainda ocupa a fileira inteira`,
   );
   assert(
-    interaction.rest.chevronOpacity === 0 && interaction.far.chevronOpacity === 0,
-    `a seta da ${label} ficou visível sem proximidade real`,
+    interaction.rest.expanded === interaction.far.expanded &&
+      interaction.rest.expanded === interaction.hover.expanded,
+    `a interação alterou indevidamente o estado expandido da ${label}`,
+  );
+  const restingChevronOpacity = interaction.rest.expanded ? 1 : 0;
+  assert(
+    interaction.rest.chevronOpacity === restingChevronOpacity &&
+      interaction.far.chevronOpacity === restingChevronOpacity,
+    interaction.rest.expanded
+      ? `a seta da ${label} expandida não permaneceu visível`
+      : `a seta da ${label} ficou visível sem proximidade real`,
   );
   assert(
     interaction.rest.hovered === false && interaction.far.hovered === false,
@@ -4697,24 +5516,130 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
   assert(metrics.tokenColorCount >= 7, "a paleta sintática não possui cores distintas suficientes");
   assert(metrics.contextHasSyntax === true, "linhas de contexto não receberam syntax highlighting");
   assert(
-    metrics.additionBackground !== null &&
-      metrics.additionBackground !== "rgba(0, 0, 0, 0)",
-    "o realce removeu o fundo semântico de adição",
+    metrics.additionBackground === "rgb(31, 73, 50)",
+    "o fundo semântico de adição não está sólido e nítido",
   );
   assert(
-    metrics.deletionBackground !== null &&
-      metrics.deletionBackground !== "rgba(0, 0, 0, 0)",
-    "o realce removeu o fundo semântico de remoção",
+    metrics.deletionBackground === "rgb(82, 39, 37)",
+    "o fundo semântico de remoção não está sólido e nítido",
   );
   assert(
     metrics.additionBackground !== metrics.deletionBackground,
     "adição e remoção perderam distinção visual",
   );
-  assert(metrics.keywordColor === "#d5a6ff", "keywords não usam a paleta sintática");
+  assert(metrics.keywordColor === "#c77dff", "keywords não usam o roxo neon da paleta sintática");
   assert(metrics.stringColor === "#ffb38a", "strings não usam a paleta sintática");
+  assert(
+    metrics.expandedSummaryHasIdentity === false &&
+      metrics.panelHeaderFile === "engine.rs" &&
+      metrics.panelHeaderFileDecoration === "none" &&
+      metrics.panelHeaderStats.length === 2,
+    "o diff expandido não usa o cabeçalho interno enxuto do Codex",
+  );
+  assert(
+    metrics.expandedSummaryAlignItems === "center" &&
+      metrics.panelHeaderAlignItems === "center" &&
+      metrics.expandedSummaryBorderBottomWidth === "0px" &&
+      metrics.panelHeaderChildCenterOffsets.length === 3 &&
+      metrics.panelHeaderChildCenterOffsets.every((offset) => Math.abs(offset) <= tolerance),
+    "o cabeçalho do diff não centraliza verticalmente o arquivo e as estatísticas",
+  );
+  assert(
+    Math.abs(metrics.panelHeaderHeight - 30) <= tolerance &&
+      metrics.panelCopyLabel === "Copiar edição",
+    "o cabeçalho interno do diff perdeu altura ou ação de copiar",
+  );
+  assert(
+    metrics.panelBackground === "rgb(24, 24, 24)" &&
+      metrics.viewportBackground === "rgba(0, 0, 0, 0)" &&
+      metrics.viewportOpacity === "1" &&
+      metrics.viewportFilter === "none" &&
+      metrics.viewportBackdropFilter === "none",
+    "o viewport do diff voltou a sobrepor uma segunda superfície ao código",
+  );
+  assert(
+    metrics.additionCellBackground === "rgba(0, 0, 0, 0)" &&
+      metrics.deletionCellBackground === "rgba(0, 0, 0, 0)",
+    "as células voltaram a duplicar o preenchimento semântico da linha",
+  );
+  assert(
+    metrics.additionRowWidth !== null &&
+      metrics.deletionRowWidth !== null &&
+      metrics.tableWidth !== null &&
+      metrics.additionRowWidth + tolerance >= metrics.tableWidth &&
+      metrics.deletionRowWidth + tolerance >= metrics.tableWidth &&
+      Math.abs(metrics.additionRowRightGap) <= tolerance &&
+      Math.abs(metrics.deletionRowRightGap) <= tolerance,
+    "o preenchimento semântico não alcança o fim da largura rolável do diff",
+  );
   assert(metrics.codeText?.includes("use std::time::Instant;"), "o diff perdeu o texto do código");
-  assert(metrics.codeInset !== null && metrics.codeInset <= 90, "o gutter do diff continua largo demais");
+  assert(metrics.codeInset !== null && metrics.codeInset <= 64, "o gutter do diff continua largo demais");
+  assert(
+    metrics.lineNumberCellsPerRow.length > 0 &&
+      metrics.lineNumberCellsPerRow.every((count) => count === 1),
+    "o diff unificado não preserva uma única coluna semântica de números",
+  );
+  assert(
+    metrics.lineNumberLeftSpread !== null && metrics.lineNumberLeftSpread <= tolerance,
+    "a coluna numérica do diff perdeu o alinhamento vertical",
+  );
+  assert(
+    metrics.lineNumberValues.every((value) => /^\d+$/u.test(value)),
+    "o diff misturou marcadores de edição aos números de linha",
+  );
+  assert(
+    metrics.lineNumberValues.some((value) => Number(value) >= 80),
+    "a regressão visual não cobre números de linha com múltiplos dígitos",
+  );
+  assert(
+    metrics.lineNumberContentOverflow.length > 0 &&
+      metrics.lineNumberContentOverflow.every((overflow) => overflow <= tolerance),
+    "o conteúdo numérico do diff está recortado",
+  );
+  assert(
+    metrics.lineNumberContentContainment.every(
+      (containment) =>
+        containment !== null && containment.left >= -tolerance && containment.right >= -tolerance,
+    ),
+    "os números de linha escapam dos limites semânticos do gutter",
+  );
+  assert(
+    metrics.lineNumberWidths.length > 0 &&
+      Math.min(...metrics.lineNumberWidths) >= 30 &&
+      Math.max(...metrics.lineNumberWidths) - Math.min(...metrics.lineNumberWidths) <= tolerance,
+    "o gutter não mantém uma largura intrínseca estável",
+  );
+  assert(
+    metrics.lineNumberBoxSizing === "border-box" &&
+      Number.parseFloat(metrics.lineNumberPaddingLeft) > 0 &&
+      Number.parseFloat(metrics.lineNumberPaddingRight) > 0 &&
+      metrics.lineNumberDividerWidth === "0px" &&
+      metrics.lineNumberBackground === metrics.additionBackground,
+    "o gutter não forma uma faixa contínua com a linha alterada",
+  );
+  assert(
+    metrics.changedIndicatorWidth === "4px" &&
+      metrics.changedIndicatorPosition === "absolute",
+    "a barra de alteração não está desacoplada da largura numérica",
+  );
+  assert(
+    metrics.diffRowHeights.length > 0 && metrics.diffRowHeights.every((height) => height === 20),
+    "as linhas do diff perderam a métrica vertical oficial de 20 px",
+  );
+  assert(metrics.viewportHorizontalOverflow > 0, "a regressão não exercitou rolagem horizontal");
+  assert(
+    metrics.stickyGutterMovement !== null &&
+      metrics.stickyGutterMovement <= tolerance &&
+      metrics.stickyOffsetFromViewport !== null &&
+      Math.abs(metrics.stickyOffsetFromViewport) <= tolerance,
+    "o gutter numérico não permanece fixo durante a rolagem horizontal",
+  );
+  assert(metrics.markerCellCount === 0, "o diff mantém marcadores de edição redundantes");
   assert(metrics.newlineMetadataRows === 0, "metadados de newline ainda consomem linhas visuais");
+  assert(
+    metrics.structuralMetadataRows === 0 && metrics.containsStructuralMetadata === false,
+    "metadados estruturais do patch ainda consomem linhas visuais",
+  );
 }
 
 function validateSyntaxHighlightedCreatedFileMetrics(metrics, viewport) {
@@ -4732,7 +5657,17 @@ function validateSyntaxHighlightedCreatedFileMetrics(metrics, viewport) {
   assert(metrics.additionRows > 0, "o arquivo criado não renderizou linhas adicionadas");
   assert(metrics.deletionRows === 0, "o arquivo criado inventou linhas removidas");
   assert(metrics.newlineMetadataRows === 0, "o arquivo criado exibe metadado de newline redundante");
-  assert(metrics.codeInset <= 90, "o arquivo criado mantém um gutter largo demais");
+  assert(
+    metrics.structuralMetadataRows === 0 && metrics.containsStructuralMetadata === false,
+    "o arquivo criado ainda exibe metadados estruturais redundantes",
+  );
+  assert(metrics.codeInset <= 64, "o arquivo criado mantém um gutter largo demais");
+  assert(
+    metrics.lineNumberCellsPerRow.length > 0 &&
+      metrics.lineNumberCellsPerRow.every((count) => count === 1),
+    "o arquivo criado não preserva uma única coluna numérica",
+  );
+  assert(metrics.markerCellCount === 0, "o arquivo criado mantém marcadores redundantes");
 }
 
 function validateHighlightedToolOutputMetrics(metrics, viewport) {
@@ -4758,14 +5693,129 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
     `a leitura perdeu sua semântica de execução (${JSON.stringify(metrics.readTitle)})`,
   );
   assert(
-    JSON.stringify(metrics.readIconPaths) ===
-      JSON.stringify([
-        "M12 7v14",
-        "M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z",
-      ]),
+    JSON.stringify(metrics.readIconPaths) === JSON.stringify([OFFICIAL_READ_ICON_PATH]),
     "a leitura não usa fielmente o ícone oficial de livro aberto",
   );
+  assert(
+    Math.abs(metrics.readIconSize?.width - 16) <= tolerance &&
+      Math.abs(metrics.readIconSize?.height - 16) <= tolerance,
+    "o livro aberto não preserva a apresentação oficial de 16x16",
+  );
+  assert(
+    metrics.readIconViewBox === "0 0 20 20" &&
+      metrics.readIconFill === "currentColor" &&
+      metrics.readIconStroke === "none" &&
+      metrics.readIconStrokeWidth === null &&
+      metrics.readIconRtlFlip === true,
+    "o livro aberto não preserva a apresentação preenchida oficial",
+  );
+  assert(
+    Math.abs(metrics.readChevronSize?.width - 14) <= tolerance &&
+      Math.abs(metrics.readChevronSize?.height - 14) <= tolerance,
+    "a seta da leitura não usa a apresentação oficial de 14x14",
+  );
+  assert(
+    metrics.readChevronPath === "m9 18 6-6-6-6" &&
+      metrics.readChevronOpacity === 1 &&
+      /^matrix\(0, 1, -1, 0, 0, 0\)$/u.test(metrics.readChevronTransform ?? ""),
+    "a seta expandida da leitura não permanece apontada para baixo",
+  );
   validateIntrinsicActivityInteraction(metrics.readInteraction, "leitura de arquivo", tolerance);
+}
+
+function validateComposerPopoverLayeringMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado nas camadas do compositor em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "os painéis criaram overflow horizontal");
+  assert(
+    metrics.chatPageDisplay === "block" &&
+      metrics.timelinePosition === "absolute" &&
+      metrics.dockPosition === "absolute",
+    "a timeline não ocupa mais a janela inteira sob o dock medido",
+  );
+  assert(metrics.composerIsolation === "isolate", "o compositor não possui isolamento de camadas");
+  assert(
+    Number(metrics.dockLayer) > metrics.composerLayer &&
+      metrics.composerLayer > metrics.statusLayer,
+    "a hierarquia semântica do dock, compositor e status está invertida",
+  );
+  assert(
+    Math.abs(metrics.timelineBounds.top - metrics.chatPageBounds.top) <= tolerance &&
+      Math.abs(metrics.timelineBounds.bottom - metrics.chatPageBounds.bottom) <= tolerance &&
+      Math.abs(metrics.timelineViewportBounds.top - metrics.chatPageBounds.top) <= tolerance &&
+      Math.abs(metrics.timelineViewportBounds.bottom - metrics.chatPageBounds.bottom) <= tolerance,
+    "a viewport rolável não alcança os dois limites verticais da página de chat",
+  );
+  assert(
+    Math.abs(metrics.timelineDockOverlap - metrics.dockBounds.height) <= tolerance &&
+      Math.abs(metrics.timelineDockGap + metrics.dockBounds.height) <= tolerance,
+    "o dock não está sobreposto à viewport de tela inteira",
+  );
+  assert(
+    Math.abs(metrics.scrollbarBounds.top - metrics.chatPageBounds.top) <= tolerance &&
+      Math.abs(metrics.scrollbarBounds.bottom - metrics.chatPageBounds.bottom) <= tolerance &&
+      Math.abs(metrics.scrollbarBottomGap) <= tolerance,
+    "a seta inferior do scrollbar não alcança o rodapé da janela",
+  );
+  assert(
+    Math.abs(metrics.chatDockHeight - Math.ceil(metrics.dockBounds.height)) <= tolerance &&
+      metrics.timelineBottomPadding + tolerance >= metrics.chatDockHeight + 32 &&
+      metrics.timelineAtEnd <= tolerance &&
+      metrics.lastTimelineItemDockGap >= 31,
+    "o dock de tela inteira voltou a ocultar o último item da conversa",
+  );
+  assert(
+    Number(metrics.popoverLayer) === metrics.permissionMenuLayer &&
+      metrics.permissionMenuLayer > metrics.composerLayer,
+    "os painéis locais não possuem prioridade sobre o conteúdo do compositor",
+  );
+  assert(metrics.permissionMenuOpen === true, "o painel de permissões não permaneceu aberto");
+  assert(metrics.menus.length === 3, "nem todos os painéis do compositor foram auditados");
+  for (const menu of metrics.menus) {
+    assert(
+      menu.menuBounds.left >= -tolerance &&
+        menu.menuBounds.right <= viewport.width + tolerance &&
+        menu.menuBounds.top >= -tolerance &&
+        menu.menuBounds.bottom <= viewport.height + tolerance,
+      `o painel ${menu.name} ultrapassou a viewport`,
+    );
+    if (menu.overlapWidth > tolerance && menu.overlapHeight > tolerance) {
+      assert(
+        menu.paintedInFront.length === 6 && menu.paintedInFront.every(Boolean),
+        `o painel ${menu.name} foi pintado atrás do resumo de alterações`,
+      );
+    }
+  }
+  for (const requiredOverlap of ["add", "permission"]) {
+    const menu = metrics.menus.find((candidate) => candidate.name === requiredOverlap);
+    assert(
+      menu?.overlapWidth > tolerance && menu.overlapHeight > tolerance,
+      `o cenário não exercitou a sobreposição do painel ${requiredOverlap}`,
+    );
+  }
+  assert(
+    metrics.permissionMenuBounds.left >= -tolerance &&
+      metrics.permissionMenuBounds.right <= viewport.width + tolerance &&
+      metrics.permissionMenuBounds.top >= -tolerance &&
+      metrics.permissionMenuBounds.bottom <= viewport.height + tolerance,
+    "o painel final de permissões ultrapassou a viewport",
+  );
+  assert(
+    Math.abs(metrics.commandIconSize?.width - 16) <= tolerance &&
+      Math.abs(metrics.commandIconSize?.height - 16) <= tolerance &&
+      metrics.commandIconViewBox === "0 0 24 24",
+    "o ícone de comando perdeu sua apresentação compacta de 16x16",
+  );
+  assert(
+    JSON.stringify(metrics.commandFrame) ===
+      JSON.stringify({ height: "16", rx: "2.25", width: "20", x: "2", y: "4" }) &&
+      JSON.stringify(metrics.commandIconPaths) ===
+        JSON.stringify(["m7 9 3 3-3 3", "M13 15h4"]),
+    "o ícone de comando não preserva a moldura horizontal e o espaçamento interno",
+  );
 }
 
 function validateProjectOpenWorkspaceMetrics(metrics, viewport) {
@@ -5163,6 +6213,16 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
     `o scroll rápido substituiu ${metrics.summaryIdentityChanges} resumos que continuavam visíveis`,
   );
   assert(
+    metrics.iconIntegrityComparisons > 0 &&
+      metrics.iconIntegrityKinds.includes("read") &&
+      metrics.iconIntegrityKinds.includes("search"),
+    "o teste não reciclou ícones de leitura e busca pelo mesmo slot virtual",
+  );
+  assert(
+    metrics.iconIntegrityFailures === 0,
+    `a reciclagem deformou ${metrics.iconIntegrityFailures} ícones: ${JSON.stringify(metrics.iconIntegritySamples)}`,
+  );
+  assert(
     metrics.legacyPlaceholderFrames === 0,
     "o scroll rápido recuperou placeholders de carregamento legados",
   );
@@ -5224,6 +6284,30 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
   assert(metrics.horizontalOverflow <= tolerance, "o estresse criou overflow horizontal");
 }
 
+function validateActivityReconciliationMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado na reconciliação em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.state === "completed", "a reconciliação paralela não foi concluída");
+  assert(metrics.started === 64, `somente ${metrics.started} comandos foram iniciados`);
+  assert(metrics.completed === 64, `somente ${metrics.completed} comandos foram concluídos`);
+  assert(metrics.turnFailures === 0, "a conclusão fora de ordem derrubou a renderização do turno");
+  assert(metrics.totalActivities === 64, "a projeção perdeu comandos concluídos fora de ordem");
+  assert(metrics.identityComparisons > 0, "nenhum slot retido foi comparado durante o streaming");
+  assert(
+    metrics.identityChanges === 0,
+    `${metrics.identityChanges} atividades retidas recriaram o contêiner DOM`,
+  );
+  assert(
+    metrics.mountedActivities === metrics.uniqueMountedActivities,
+    "a janela montada contém chaves duplicadas",
+  );
+  assert(metrics.durationMs < 10_000, "a reconciliação paralela ultrapassou 10 s");
+  assert(metrics.horizontalOverflow <= tolerance, "a reconciliação criou overflow horizontal");
+}
+
 function validateTimelineExtremeFilesMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
@@ -5271,6 +6355,10 @@ function validateTimelineExtremeFilesMetrics(metrics, viewport) {
   assert(
     metrics.summaryIdentityChanges === 0,
     `o cenário extremo substituiu ${metrics.summaryIdentityChanges} resumos que continuavam visíveis`,
+  );
+  assert(
+    metrics.wrapperIdentityChanges === 0,
+    `o cenário extremo substituiu ${metrics.wrapperIdentityChanges} contêineres que continuavam visíveis`,
   );
   assert(
     metrics.legacyPlaceholderFrames === 0,

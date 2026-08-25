@@ -80,17 +80,17 @@
   --full-access-border: rgb(251 106 34 / 28%);
   --red: var(--red-400);
   --red-soft: rgb(250 66 62 / 18%);
-  --diff-surface: #1b1b1b;
-  --diff-gutter: #161616;
-  --diff-added-background: rgb(74 222 128 / 17%);
-  --diff-deleted-background: rgb(250 66 62 / 18%);
+  --diff-surface: var(--bg);
+  --diff-gutter: var(--diff-surface);
+  --diff-added-background: #1f4932;
+  --diff-deleted-background: #522725;
   --diff-added-foreground: #4ade80;
   --diff-deleted-foreground: #ff6764;
   --syntax-attribute: #f2b8ff;
   --syntax-comment: #a9b2bd;
   --syntax-constant: #b8e8b0;
   --syntax-function: #f6d98b;
-  --syntax-keyword: #d5a6ff;
+  --syntax-keyword: #c77dff;
   --syntax-number: #a9d7ff;
   --syntax-operator: #e2e5e9;
   --syntax-property: #91cbff;
@@ -127,6 +127,10 @@
   --layer-modal: 10000;
   --layer-settings: 200;
   --layer-toast: 300;
+  --layer-chat-dock: 9;
+  --layer-chat-status: 1;
+  --layer-chat-composer: 2;
+  --layer-local-popover: 30;
   --radius-token-row: 9999px;
   --font-caption: 12px;
   --font-small: 13px;
@@ -2586,7 +2590,7 @@ pre {
 
 .chat-dock {
   position: absolute;
-  z-index: 9;
+  z-index: var(--layer-chat-dock);
   right: 0;
   bottom: 0;
   left: 0;
@@ -3651,7 +3655,7 @@ pre {
   contain: layout paint style;
 }
 
-.agent-activity-virtual-item {
+.agent-activity-render-slot {
   position: absolute;
   top: 0;
   left: 0;
@@ -3814,6 +3818,20 @@ pre {
   color: var(--codex-chat-muted);
 }
 
+.activity-chevron > svg,
+.diff-file-chevron > svg {
+  transition: transform 180ms ease;
+}
+
+.activity-chevron.is-expanded {
+  opacity: 1;
+}
+
+.activity-chevron.is-expanded > svg,
+.diff-file-chevron.is-expanded > svg {
+  transform: rotate(90deg);
+}
+
 .command-card-inner {
   min-width: 0;
   max-width: 100%;
@@ -3917,7 +3935,7 @@ pre {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   outline: none;
-  contain: layout paint style;
+  contain: strict;
   overflow-anchor: none;
 }
 
@@ -3943,10 +3961,14 @@ pre {
 .tool-source-virtual-table .tool-source-line {
   position: absolute;
   left: 0;
-  display: grid;
+  display: flex;
   width: 100%;
-  grid-template-columns: max-content minmax(max-content, 1fr);
-  contain: layout paint style;
+  contain: strict;
+}
+
+.tool-source-virtual-table .tool-source-line > td {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .tool-source-line,
@@ -3972,6 +3994,7 @@ pre {
   position: sticky;
   left: 0;
   min-width: calc(2ch + 10px);
+  flex: 0 0 var(--tool-source-line-number-width);
   padding-inline: 5px;
   border-right: 1px solid var(--color-token-border-light) !important;
   background: var(--gray-800);
@@ -4141,6 +4164,7 @@ pre {
   width: fit-content;
   max-width: 100%;
   min-height: 24px;
+  align-items: center;
   gap: 6px;
   padding: 0;
   border: 0;
@@ -4149,6 +4173,11 @@ pre {
 
 .file-change-diff[open] > summary {
   border-bottom: 0;
+}
+
+.file-change-diff > summary .activity-icon,
+.file-change-diff > summary .diff-file-chevron {
+  align-self: center;
 }
 
 .file-change-action {
@@ -4175,11 +4204,71 @@ pre {
     text-decoration-color 120ms ease;
 }
 
-.file-change-diff > .diff-viewport,
-.file-change-diff > .diff-empty-state {
+.file-change-diff > .diff-panel {
+  overflow: hidden;
   margin: 4px 0 8px 22px;
   border: 1px solid var(--color-token-border-heavy);
   border-radius: 8px;
+  background: var(--diff-surface);
+}
+
+.diff-panel-header {
+  display: flex;
+  min-width: 0;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 5px 0 10px;
+  border-bottom: 1px solid var(--color-token-border);
+  background: var(--gray-800);
+}
+
+.diff-panel-header .diff-file-identity code {
+  overflow: hidden;
+  color: var(--color-token-text-secondary);
+  font-family: var(--font-sans-default);
+  font-size: 12px;
+  font-weight: 450;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-panel-header .diff-file-identity,
+.diff-panel-header .diff-stat {
+  line-height: 18px;
+}
+
+.diff-panel-copy {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  align-self: center;
+  place-items: center;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-token-text-tertiary);
+}
+
+.diff-panel-copy:hover,
+.diff-panel-copy:focus-visible {
+  background: var(--surface-hover);
+  color: var(--color-token-text-primary);
+}
+
+.diff-panel > .diff-viewport {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.diff-panel > .diff-empty-state {
+  border: 0;
+  border-radius: 0;
 }
 
 .diff-file-identity {
@@ -4233,6 +4322,10 @@ pre {
   transition:
     color 120ms ease,
     opacity 120ms ease;
+}
+
+.diff-file-chevron.is-expanded {
+  opacity: 1;
 }
 
 .file-change-diff > summary:hover .activity-icon,
@@ -4544,14 +4637,16 @@ pre {
 }
 
 .composer-wrap {
+  position: relative;
+  z-index: var(--layer-chat-composer);
   width: min(var(--thread-content-max-width), calc(100% - 32px));
   margin: 0 auto;
   padding: 0 0 16px;
+  isolation: isolate;
 }
 
 .composer-queue {
   position: relative;
-  z-index: 0;
   display: flex;
   flex-direction: column;
   margin: 0 14px -10px;
@@ -4643,7 +4738,7 @@ pre {
 
 .queued-message-menu {
   position: absolute;
-  z-index: 30;
+  z-index: var(--layer-local-popover);
   right: 0;
   bottom: calc(100% + 6px);
   display: grid;
@@ -4675,7 +4770,7 @@ pre {
 
 .plan-progress {
   position: relative;
-  z-index: 12;
+  z-index: var(--layer-chat-status);
   display: flex;
   width: min(var(--thread-content-max-width), calc(100% - 32px));
   justify-content: center;
@@ -5845,7 +5940,7 @@ pre {
 
 .composer-popover {
   position: absolute;
-  z-index: 30;
+  z-index: var(--layer-local-popover);
   bottom: calc(100% + 10px);
   overflow: hidden;
   border: 1px solid #454545;
@@ -7816,7 +7911,7 @@ pre {
   scrollbar-gutter: stable;
   background: var(--diff-surface);
   outline: none;
-  contain: layout paint style;
+  contain: strict;
   overflow-anchor: none;
 }
 
@@ -7825,6 +7920,12 @@ pre {
 }
 
 .diff-virtual-table {
+  --diff-line-number-inline-start: 1.5ch;
+  --diff-line-number-inline-end: 0.75ch;
+  --diff-line-number-inline-padding: calc(
+    var(--diff-line-number-inline-start) + var(--diff-line-number-inline-end)
+  );
+
   position: relative;
   display: block;
   min-width: 100%;
@@ -7834,7 +7935,7 @@ pre {
   color: var(--color-token-text-secondary);
   font-family: var(--font-mono-default);
   font-size: var(--codex-chat-code-font-size);
-  line-height: 22px;
+  line-height: 20px;
 }
 
 .diff-virtual-canvas {
@@ -7846,46 +7947,55 @@ pre {
 .diff-virtual-row {
   position: absolute;
   left: 0;
-  display: grid;
+  display: flex;
   width: 100%;
-  height: 22px;
+  height: 20px;
   align-items: stretch;
-  contain: layout paint style;
+  contain: strict;
 }
 
 .diff-viewport.is-unified .diff-virtual-row {
-  grid-template-columns:
-    var(--diff-old-line-number-width)
-    var(--diff-new-line-number-width)
-    14px
-    minmax(0, 1fr);
+  --diff-primary-line-number-width: var(--diff-line-number-width);
 }
 
-.diff-viewport.is-split .diff-virtual-row {
-  grid-template-columns:
-    var(--diff-old-line-number-width)
-    minmax(0, 1fr)
-    var(--diff-new-line-number-width)
-    minmax(0, 1fr);
+.diff-viewport.is-unified .diff-line-number {
+  flex: 0 0 var(--diff-primary-line-number-width);
+}
+
+.diff-viewport.is-unified .unified-diff-code {
+  flex: 1 1 auto;
+}
+
+.diff-viewport.is-split .diff-line-number.left {
+  flex: 0 0 var(--diff-old-line-number-width);
+}
+
+.diff-viewport.is-split .diff-line-number.right {
+  flex: 0 0 var(--diff-new-line-number-width);
+}
+
+.diff-viewport.is-split .split-diff-cell {
+  flex: 1 1 0;
 }
 
 .diff-virtual-row > td,
 .diff-virtual-row > th {
   display: block;
   min-width: 0;
-  height: 22px;
+  height: 20px;
   padding-block: 0;
   overflow: hidden;
   border: 0;
   color: inherit;
   font: inherit;
-  line-height: 22px;
+  line-height: 20px;
   text-align: left;
 }
 
 .diff-line-number {
-  padding-inline: 4px;
-  border-right: 1px solid var(--color-token-border-light);
+  position: relative;
+  box-sizing: border-box;
+  padding: 0 var(--diff-line-number-inline-end) 0 var(--diff-line-number-inline-start);
   background: var(--diff-gutter);
   color: var(--color-token-text-tertiary);
   font-variant-numeric: tabular-nums;
@@ -7893,15 +8003,54 @@ pre {
   user-select: none;
 }
 
-.diff-line-prefix {
-  padding: 0 1px;
-  color: var(--color-token-text-tertiary);
-  text-align: center;
-  user-select: none;
+.diff-viewport.is-unified .diff-line-number {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+}
+
+.diff-line-number-content {
+  position: relative;
+  z-index: 1;
+  display: inline-block;
+  min-width: var(--diff-line-number-content-width);
+}
+
+.diff-viewport.is-split .diff-line-number.left .diff-line-number-content {
+  min-width: var(--diff-old-line-number-content-width);
+}
+
+.diff-viewport.is-split .diff-line-number.right .diff-line-number-content {
+  min-width: var(--diff-new-line-number-content-width);
+}
+
+.unified-diff-row.is-addition .diff-line-number::before,
+.unified-diff-row.is-deletion .diff-line-number::before {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4px;
+  height: 100%;
+  content: "";
+  pointer-events: none;
+}
+
+.unified-diff-row.is-addition .diff-line-number::before {
+  background: var(--diff-added-foreground);
+}
+
+.unified-diff-row.is-deletion .diff-line-number::before {
+  background: var(--diff-deleted-foreground);
+}
+
+.unified-diff-row.is-addition + .unified-diff-row.is-addition .diff-line-number::before,
+.unified-diff-row.is-deletion + .unified-diff-row.is-deletion .diff-line-number::before {
+  top: -1px;
+  height: calc(100% + 1px);
 }
 
 .unified-diff-code {
-  padding-inline: 4px 8px;
+  padding-inline: 1ch;
   white-space: pre;
 }
 
@@ -7911,43 +8060,22 @@ pre {
   white-space: pre;
 }
 
-.unified-diff-row.is-addition > * {
+.unified-diff-row.is-addition {
   background: var(--diff-added-background);
 }
 
-.unified-diff-row.is-deletion > * {
+.unified-diff-row.is-deletion {
   background: var(--diff-deleted-background);
 }
 
-.unified-diff-row.is-addition > :first-child {
-  border-left: 3px solid var(--diff-added-foreground);
-}
-
-.unified-diff-row.is-deletion > :first-child {
-  border-left: 3px solid var(--diff-deleted-foreground);
-}
-
-.unified-diff-row.is-addition .diff-line-prefix {
+.unified-diff-row.is-addition .diff-line-number {
+  background: var(--diff-added-background);
   color: var(--diff-added-foreground);
 }
 
-.unified-diff-row.is-deletion .diff-line-prefix {
+.unified-diff-row.is-deletion .diff-line-number {
+  background: var(--diff-deleted-background);
   color: var(--diff-deleted-foreground);
-}
-
-.unified-diff-hunk,
-.split-diff-hunk {
-  grid-column: 1 / -1;
-  padding: 0 8px;
-  background: var(--state-soft);
-  color: var(--muted-bright);
-  font-style: normal;
-  white-space: pre;
-}
-
-.unified-diff-row.is-meta .unified-diff-hunk {
-  background: rgb(255 255 255 / 2%);
-  color: var(--color-token-text-tertiary);
 }
 
 .split-diff-cell {

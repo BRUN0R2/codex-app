@@ -133,6 +133,7 @@ describe("ActivityVirtualizerStore", () => {
     );
 
     expect(keyReads).toBe(0);
+    expect(activation.estimatesComplete).toBe(false);
     expect(activation.virtualizer.totalSize()).toBe(2_600_000);
     expect(activation.virtualizer.estimate("file-50000", 398)).toBe(true);
     expect(activation.virtualizer.totalSize()).toBe(2_600_372);
