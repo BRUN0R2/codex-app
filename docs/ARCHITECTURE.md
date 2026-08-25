@@ -100,16 +100,22 @@ flowchart LR
     Manager -->|ultrapassa o yield| Session["Sessão persistida inProgress"]
     Session --> Work["Agente executa trabalho independente"]
     Work --> Poll["poll_command por cursor"]
+    Turn["Turno entra em settlement"] --> Close["Cancela e drena sessões do turnId"]
+    Close --> Process
     Process --> Finalizer["Finalizador após drenar stdout/stderr"]
     Finalizer --> Transaction["Item + ThreadOutput em transação única"]
     Transaction --> Event["Evento terminal roteado pelo turnId"]
+    Event --> TurnEvent["Só então publica turn.completed"]
 ```
 
 A sessão devolvida ao agente possui uma licença exclusiva: commit confirma que
 o item inicial já foi persistido e publicado; abandono da licença descarta e
-cancela a sessão. A finalização não depende da tarefa continuar visível nem do
-agente permanecer bloqueado. Deltas carregam `turnId`, portanto uma sessão antiga
-atualiza sua própria tarefa sem contaminar o overlay da conversa selecionada.
+cancela a sessão. A sessão é um recurso estritamente pertencente ao turno: antes
+de qualquer settlement terminal, o manager cancela as árvores ainda ativas,
+drena seus dois pipes, persiste os itens terminais e remove todas as sessões
+daquele `turnId`. O evento `turn.completed` é publicado somente depois dessa
+barreira. Deltas carregam `turnId`, portanto nenhuma atualização pode migrar para
+outro turno durante a execução.
 
 Um turno só se torna ativo após persistência e aquisição exclusiva do
 `thread_id`. Falha ao publicar seus eventos iniciais executa rollback antes de a
@@ -180,18 +186,18 @@ comando nativo retryable são repetidas com backoff limitado; erros permanentes 
 contrato e storage continuam explícitos. `engine_start` já entrega configuração,
 eliminando uma segunda travessia IPC do caminho crítico.
 
-Catálogos de modelos são lazy por produto, mantêm uma única requisição em voo e
-reaproveitam o último valor válido no frontend e no Rust. Abertura de conversa
-usa uma cache LRU de páginas com oito entradas. A página inicial contém até 64
-itens de transcript e 4 MiB; páginas anteriores contêm até 256 itens e 4 MiB.
-Fragmentos do mesmo turno na fronteira são reunidos por identidade, sem perder
-ordem ou duplicar conteúdo. Conversas arquivadas só são consultadas quando a
 O preview de desenvolvimento usa `infrastructure/runtimeBridge.ts` em vez de
 reescrever `window.__TAURI_INTERNALS__`. A mesma infraestrutura frontend chama o
 runtime Tauri em produção e um backend determinístico em memória no navegador.
 Isso mantém o app totalmente interativo em navegadores anexados que protegem os
 internals próprios e evita transformar a validação visual em capturas estáticas.
 
+Catálogos de modelos são lazy por produto, mantêm uma única requisição em voo e
+reaproveitam o último valor válido no frontend e no Rust. Abertura de conversa
+usa uma cache LRU de páginas com oito entradas. A página inicial contém até 64
+itens de transcript e 4 MiB; páginas anteriores contêm até 256 itens e 4 MiB.
+Fragmentos do mesmo turno na fronteira são reunidos por identidade, sem perder
+ordem ou duplicar conteúdo. Conversas arquivadas só são consultadas quando a
 página correspondente das configurações é realmente aberta.
 
 `ProfileView.tsx` renderiza o conteúdo de Perfil dentro de
@@ -277,16 +283,16 @@ geometria ficar estável. Para mensagens fora da janela, o offset do turno serve
 somente para montá-las e a âncora real faz o alinhamento final. Scroll, resize,
 medição e sincronização compartilham um único coordenador por frame, que reúne
 leituras antes das escritas para não forçar layout no caminho quente. Itens
+geométricos estáveis (`clientHeight`, `scrollHeight`, offset da lista e altura da
+pista) formam um snapshot renovado somente quando o layout muda; frames de
+scroll ordinário atualizam a posição contra esse snapshot, sem consultar layout
+depois da reciclagem reativa. Itens
 virtuais usam coordenadas inteiras de layout, sem `translate3d`, e toda expansão
 participa da mesma política de viewport. Regiões de código limitadas, como
 comando, leitura e diff, declaram explicitamente
 `data-timeline-scroll-region`; não existe descoberta heurística com
 `getComputedStyle` durante wheel. Enquanto houver faixa interna elas consomem o
 movimento. Ao alcançar um limite, somente o excedente exato é transferido para a
-geométricos estáveis (`clientHeight`, `scrollHeight`, offset da lista e altura da
-pista) formam um snapshot renovado somente quando o layout muda; frames de
-scroll ordinário atualizam a posição contra esse snapshot, sem consultar layout
-depois da reciclagem reativa. Itens
 timeline no mesmo evento. Um wheel totalmente interno não altera a política de
 acompanhamento da conversa. O eixo vertical mantém chaining nativo para touch e
 o eixo horizontal do diff permanece contido.
@@ -369,11 +375,12 @@ são limitados por ela.
 `response.output_item.added` preserva a fase de mensagem antes do primeiro
 delta. Por isso “Pensando” aparece imediatamente, acompanha o título da atividade
 mais recente e desaparece quando a resposta final começa, sem montar cards
-vazios. A atividade ativa usa uma única cópia visual e uma única faixa de
-reflexo. A mesma faixa atravessa o texto três vezes sem sobreposição, com pausas
-explícitas dentro de um ciclo de 2 s e atraso inicial de 80 ms. A animação é
-GPU-only, respeita a política global de movimento reduzido e não duplica nós de
-texto.
+vazios. Na variante visual de 21 de agosto, a atividade ativa mantém uma cópia
+semântica e uma camada decorativa `aria-hidden`. A faixa cruza o texto em 48
+degraus durante o primeiro quarto de um ciclo de 2 s, após atraso inicial de
+600 ms, e permanece em pausa por aproximadamente 1,5 s até a repetição. O
+texto-base usa o mesmo cinza e peso das atividades concluídas; somente a faixa
+usa a cor primária, ampliando o contraste do brilho sem adicionar outra animação.
 Disclosures de atividade, comando e diff nascem fechados e só montam o corpo
 pesado quando abertos. Chaves de expansão são hierárquicas e isoladas pelo
 identificador da conversa: sobrevivem à desmontagem temporária e à troca de

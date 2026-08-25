@@ -47,9 +47,6 @@ export function TurnProgress(props: TurnProgressProps) {
                 id={POPOVER_ID}
                 role="tooltip"
               >
-                <Show when={plan().explanation}>
-                  {(explanation) => <p class="plan-progress-explanation">{explanation()}</p>}
-                </Show>
                 <ol>
                   <For each={plan().steps}>
                     {(step) => (

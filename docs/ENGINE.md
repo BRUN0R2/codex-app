@@ -109,6 +109,12 @@ ou parâmetro CDP arbitrário atravessa o provider. O screenshot segue dentro do
 array `function_call_output.output` junto ao texto do snapshot, conforme o
 contrato multimodal da Responses API.
 
+O cursor visual do agente não recebe eventos de ponteiro e permanece visível na
+última posição entre ações. Movimento normal e arraste usam amostras de entrada
+com a mesma curva de aceleração da animação visual, portanto hover, deslocamento
+e clique acompanham o ponteiro neon em vez de saltarem diretamente ao destino.
+A entrada física do usuário permanece nativa e não é bloqueada pelo overlay.
+
 A versão IPC 15 adiciona saída transitória de comandos ao
 `item.streamDeltas`. Cada delta identifica `stdout` ou `stderr` e carrega uma
 operação fechada: `append`, `backspace`, `clearCurrentLine` ou `truncated`.
@@ -428,7 +434,7 @@ comando completo permanece dentro do disclosure.
 primeiro plano. O padrão é dez segundos e o intervalo fechado permitido é de
 250 ms a 30 s. Se o processo ultrapassa esse prazo, a chamada retorna
 `session_id`, `cursor`, tempo decorrido e o snapshot disponível, enquanto o
-processo continua sob ownership do `NativeEngine`. O item permanece
+processo continua sob ownership do `NativeEngine` e do turno que o criou. O item permanece
 `inProgress`, continua recebendo `stdout`/`stderr` em tempo real e o agente pode
 executar trabalho independente antes de consultar a sessão novamente. A
 promoção não publica um falso terminal: ela atualiza o mesmo overlay por
@@ -439,7 +445,8 @@ transação terminal.
 opcional e espera de zero a 30 segundos. Consultas da mesma sessão são
 serializadas; sessões diferentes continuam independentes. O manager mantém no
 máximo 32 sessões, remove primeiro a terminal mais antiga e nunca abandona um
-processo ativo para abrir espaço. Um cursor append-only recebe apenas o delta
+processo ativo para abrir espaço. O settlement do turno remove todas as suas
+sessões, inclusive terminais já consultadas. Um cursor append-only recebe apenas o delta
 posterior; se o terminal reescreveu conteúdo com backspace, carriage return ou
 limpeza de linha, a resposta muda explicitamente para `output_mode: snapshot`.
 Cursores futuros são rejeitados. Checkpoints são limitados, o transcript ao vivo
@@ -448,10 +455,11 @@ fonte autoritativa após a conclusão.
 
 Itens `poll_command` permanecem no histórico causal enviado ao provider, mas são
 filtrados da projeção visual para que esperas repetidas não criem cartões
-“Comando verificado”. Se um turno terminal chega antes de uma sessão em
-background, o frontend retém somente os comandos ainda ativos, continua
-aplicando seus deltas e posterga mensagens enfileiradas até a última sessão
-terminar.
+“Comando verificado”. Uma sessão em background existe somente enquanto seu turno
+permanece ativo. Antes do evento terminal do turno, o backend cancela e drena
+qualquer processo restante, publica o `item.completed` autoritativo e remove a
+sessão do registry. Assim, mensagens enfileiradas iniciam o próximo turno sem
+depender de um processo antigo e nenhum comando pode escapar para outro turno.
 
 Uma licença RAII acompanha cada sessão entregue ao agente. Persistir o item
 consome a licença por `commit`; qualquer retorno antecipado, cancelamento ou
@@ -459,9 +467,12 @@ falha antes disso executa `discard`, cancela a árvore e libera o finalizador.
 Depois do commit, conclusão, timeout e cancelamento atualizam o mesmo
 `CommandExecution` e seu `ThreadOutput` em uma única transação SQLite. O evento
 terminal só é publicado depois da drenagem dos dois pipes. Exclusão da tarefa e
-encerramento cancelam e drenam suas sessões; fork é recusado enquanto existir
-comando ativo. Na inicialização, qualquer item de atividade que um processo
-anterior deixou `inProgress` é marcado como falha explícita.
+encerramento cancelam e drenam suas sessões; conclusão, falha e interrupção do
+turno fazem o mesmo antes do settlement; fork é recusado enquanto existir comando
+ativo. Uma execução de primeiro plano abandonada antes de entregar sua licença é
+descartada por RAII, nunca promovida para uma sessão sem proprietário. Na
+inicialização, qualquer item de atividade que um processo anterior deixou
+`inProgress` é marcado como falha explícita.
 
 `stdout` e `stderr` são drenados concorrentemente para arquivos temporários,
 normalizados incrementalmente e persistidos em blocos UTF-8 de 64 KiB, sem corte

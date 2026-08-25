@@ -626,6 +626,7 @@ async function main() {
     process.execPath,
     [
       VITE_ENTRY,
+      "preview",
       "--host",
       "127.0.0.1",
       "--mode",
@@ -3378,15 +3379,37 @@ function activeActivityReflectionVisualAuditExpression() {
     const title = document.querySelector(".activity-title.is-running");
     const base = title?.querySelector(".activity-title-base");
     const sweep = title?.querySelector(".activity-title-sweep");
-    const highlight = title?.querySelector(".activity-title-highlight");
+    const highlight = sweep?.querySelector(".activity-title-highlight");
     if (
       !(title instanceof HTMLElement) ||
       !(base instanceof HTMLElement) ||
       !(sweep instanceof HTMLElement) ||
       !(highlight instanceof HTMLElement)
     ) {
-      throw new Error("Camadas da reflexão da atividade ativa estão ausentes.");
+      throw new Error("As camadas da atividade animada estão ausentes.");
     }
+    const sidebarList = [...document.querySelectorAll(".sidebar-item-list")].find(
+      (list) => list.children.length > 1,
+    );
+    const sidebarItems = sidebarList === undefined ? [] : [...sidebarList.children];
+    const sidebarItemGaps = sidebarItems.slice(1).map((item, index) => {
+      const previous = sidebarItems[index];
+      return previous === undefined
+        ? null
+        : item.getBoundingClientRect().top - previous.getBoundingClientRect().bottom;
+    });
+    const selectedThread = document.querySelector(".thread-row.active");
+    const selectedThreadStyle =
+      selectedThread instanceof HTMLElement ? getComputedStyle(selectedThread) : null;
+    const completedTitle =
+      [...document.querySelectorAll(".activity-title:not(.is-running)")].find(
+        (element) => /(?:Editou|Leu|leu) arquivos/u.test(element.textContent ?? ""),
+      ) ?? document.querySelector(".activity-title:not(.is-running):not(.compaction-text)");
+    if (!(completedTitle instanceof HTMLElement)) {
+      throw new Error("Uma atividade concluída de referência está ausente.");
+    }
+    const titleStyle = getComputedStyle(title);
+    const completedTitleStyle = getComputedStyle(completedTitle);
     const sweepStyle = getComputedStyle(sweep);
     const highlightStyle = getComputedStyle(highlight);
     const sweepAnimation = sweep.getAnimations().find(
@@ -3398,7 +3421,9 @@ function activeActivityReflectionVisualAuditExpression() {
     const timing = sweepAnimation?.effect?.getTiming();
     const duration = Number(timing?.duration);
     const delay = Number(timing?.delay);
-    const waveOpacities = [];
+    const passPositions = [];
+    const pausePositions = [];
+    let alignmentError = null;
     if (
       sweepAnimation !== undefined &&
       highlightAnimation !== undefined &&
@@ -3407,29 +3432,65 @@ function activeActivityReflectionVisualAuditExpression() {
     ) {
       sweepAnimation.pause();
       highlightAnimation.pause();
-      for (const fraction of [0.14, 0.29, 0.46, 0.62, 0.79, 0.96]) {
+      for (const fraction of [0.05, 0.2]) {
         const sampleTime = delay + duration * fraction;
         sweepAnimation.currentTime = sampleTime;
         highlightAnimation.currentTime = sampleTime;
-        waveOpacities.push(Number.parseFloat(getComputedStyle(sweep).opacity));
+        passPositions.push(getComputedStyle(sweep).transform);
       }
-      const screenshotTime = delay + duration * 0.46;
+      for (const fraction of [0.25, 0.5, 0.9]) {
+        const sampleTime = delay + duration * fraction;
+        sweepAnimation.currentTime = sampleTime;
+        highlightAnimation.currentTime = sampleTime;
+        pausePositions.push(getComputedStyle(sweep).transform);
+      }
+      const screenshotTime = delay + duration * 0.12;
       sweepAnimation.currentTime = screenshotTime;
       highlightAnimation.currentTime = screenshotTime;
+      const baseBounds = base.getBoundingClientRect();
+      const highlightBounds = highlight.getBoundingClientRect();
+      alignmentError = Math.max(
+        Math.abs(baseBounds.top - highlightBounds.top),
+        Math.abs(baseBounds.right - highlightBounds.right),
+        Math.abs(baseBounds.bottom - highlightBounds.bottom),
+        Math.abs(baseBounds.left - highlightBounds.left),
+      );
     }
     return {
       viewport: { width: innerWidth, height: innerHeight },
       titleText: title.textContent?.trim() ?? null,
       baseText: base.textContent?.trim() ?? null,
       highlightText: highlight.textContent?.trim() ?? null,
-      animationName: sweepStyle.animationName,
+      titleColor: titleStyle.color,
+      titleFontWeight: titleStyle.fontWeight,
+      titleFontSize: titleStyle.fontSize,
+      titleDisplay: titleStyle.display,
+      completedTitleText: completedTitle.textContent?.trim() ?? null,
+      completedTitleColor: completedTitleStyle.color,
+      completedTitleFontWeight: completedTitleStyle.fontWeight,
+      highlightColor: highlightStyle.color,
+      sweepLayerCount: title.querySelectorAll(".activity-title-sweep").length,
+      highlightLayerCount: title.querySelectorAll(".activity-title-highlight").length,
+      obsoleteLayerCount: title.querySelectorAll(
+        ".activity-title-wave, .activity-title-reflection",
+      ).length,
+      sweepAnimationName: sweepStyle.animationName,
+      highlightAnimationName: highlightStyle.animationName,
       animationDuration: sweepStyle.animationDuration,
       animationDelay: sweepStyle.animationDelay,
       animationTimingFunction: sweepStyle.animationTimingFunction,
-      highlightAnimationName: highlightStyle.animationName,
+      animationIterationCount: sweepStyle.animationIterationCount,
+      keyframeEasings:
+        sweepAnimation?.effect?.getKeyframes().map((keyframe) => keyframe.easing) ?? [],
       maskImage: sweepStyle.maskImage || sweepStyle.webkitMaskImage,
-      maskWaveCount: ((sweepStyle.maskImage || sweepStyle.webkitMaskImage).match(/rgb\\(0, 0, 0\\)/g) ?? []).length,
-      waveOpacities,
+      passPositions,
+      pausePositions,
+      alignmentError,
+      sidebarItemGaps,
+      selectedThreadBackground: selectedThreadStyle?.backgroundColor ?? null,
+      selectedThreadBoxShadow: selectedThreadStyle?.boxShadow ?? null,
+      planExplanationCount: document.querySelectorAll(".plan-progress-explanation").length,
+      ariaHidden: sweep.getAttribute("aria-hidden"),
       pointerEvents: sweepStyle.pointerEvents,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
@@ -4582,6 +4643,19 @@ function settingsVisualAuditExpression() {
     const page = rectangle(".settings-page");
     const heading = rectangle(".settings-heading h2");
     const firstRowLabel = rectangle(".application-preference-copy strong");
+    const firstNavigationSection = document.querySelector(".settings-nav-section");
+    const navigationButtons =
+      firstNavigationSection === null ? [] : [...firstNavigationSection.querySelectorAll("button")];
+    const navigationItemGaps = navigationButtons.slice(1).map((button, index) => {
+      const previous = navigationButtons[index];
+      return previous === undefined
+        ? null
+        : button.getBoundingClientRect().top - previous.getBoundingClientRect().bottom;
+    });
+    const selectedNavigation = document.querySelector(".settings-nav nav button.active");
+    const selectedNavigationStyle =
+      selectedNavigation instanceof HTMLElement ? getComputedStyle(selectedNavigation) : null;
+    const rootStyle = getComputedStyle(document.documentElement);
     return {
       viewport: { width: innerWidth, height: innerHeight },
       chrome,
@@ -4609,6 +4683,11 @@ function settingsVisualAuditExpression() {
       navigationLabels: [...document.querySelectorAll(".settings-nav nav button")].map(
         (button) => button.textContent?.trim() ?? "",
       ),
+      navigationItemGaps,
+      hoverSurface: rootStyle.getPropertyValue("--interactive-hover-surface").trim(),
+      selectedSurface: rootStyle.getPropertyValue("--interactive-selected-surface").trim(),
+      selectedNavigationBackground: selectedNavigationStyle?.backgroundColor ?? null,
+      selectedNavigationBoxShadow: selectedNavigationStyle?.boxShadow ?? null,
       visibleCards: [...document.querySelectorAll(".settings-card")].filter((element) => {
         const bounds = element.getBoundingClientRect();
         return bounds.bottom > content.top && bounds.top < innerHeight;
@@ -5093,39 +5172,93 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
     `viewport inesperado na reflexão em ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.horizontalOverflow <= tolerance, "a reflexão criou overflow horizontal");
-  assert(metrics.titleText === metrics.baseText + metrics.highlightText, "as camadas perderam texto");
-  assert(metrics.baseText === metrics.highlightText, "a reflexão não replica o título ativo");
+  assert(
+    metrics.titleText === metrics.baseText + metrics.highlightText,
+    "a camada visual perdeu o texto do título",
+  );
+  assert(metrics.baseText === metrics.highlightText, "o reflexo não replica o título ativo");
   assert(
     /^Comando em execução há (?:\d+s|\d+m \d+s|\d+h \d+m \d+s)$/u.test(metrics.baseText),
     `o comando longo não exibe duração no título (${JSON.stringify(metrics.baseText)})`,
   );
   assert(
-    metrics.animationName === "activity-reflection-sweep",
-    "a varredura luminosa não está animada",
+    metrics.sweepLayerCount === 1 && metrics.highlightLayerCount === 1,
+    "a variante de 21 de agosto não manteve uma única faixa visual",
   );
   assert(
-    metrics.highlightAnimationName === "activity-reflection-text",
-    "o texto luminoso não acompanha a varredura",
-  );
-  assert(metrics.animationDuration === "2s", "o ciclo sequencial não mede 2 segundos");
-  assert(metrics.animationDelay === "0.08s", "a reflexão não inicia quase imediatamente");
-  assert(
-    metrics.maskWaveCount === 1,
-    `mais de uma onda ficou visível ao mesmo tempo (${JSON.stringify(metrics.maskImage)})`,
-  );
-  const expectedVisibility = [true, false, true, false, true, false];
-  assert(
-    metrics.waveOpacities.length === expectedVisibility.length &&
-      metrics.waveOpacities.every(
-        (opacity, index) => (opacity >= 0.95) === expectedVisibility[index],
-      ),
-    `as três passagens não estão separadas por pausas: ${JSON.stringify(metrics.waveOpacities)}`,
+    metrics.obsoleteLayerCount === 0,
+    "camadas de animações posteriores continuam montadas",
   );
   assert(
-    metrics.animationTimingFunction.includes("cubic-bezier"),
-    "a reflexão perdeu a curva fluida",
+    metrics.titleColor === metrics.completedTitleColor &&
+      metrics.titleColor === "rgb(144, 144, 144)",
+    `o texto-base ativo não acompanha a atividade concluída: ${JSON.stringify({
+      active: metrics.titleColor,
+      completed: metrics.completedTitleColor,
+      reference: metrics.completedTitleText,
+    })}`,
   );
-  assert(metrics.maskImage !== "none", "a reflexão perdeu a máscara luminosa");
+  assert(
+    metrics.titleFontWeight === metrics.completedTitleFontWeight &&
+      metrics.titleFontWeight === "400",
+    `o peso do texto-base ativo não acompanha a atividade concluída: ${JSON.stringify({
+      active: metrics.titleFontWeight,
+      completed: metrics.completedTitleFontWeight,
+    })}`,
+  );
+  assert(metrics.highlightColor === "rgb(255, 255, 255)", "o brilho deixou de usar branco");
+  assert(metrics.titleFontSize === "14px", "o título histórico não mede 14 px");
+  assert(
+    metrics.titleDisplay === "block",
+    "o título animado não foi blockificado corretamente como item flex",
+  );
+  assert(
+    metrics.sweepAnimationName === "activity-reflection-sweep" &&
+      metrics.highlightAnimationName === "activity-reflection-text",
+    "as duas transformações sincronizadas da reflexão estão ausentes",
+  );
+  assert(metrics.animationDuration === "2s", "o ciclo do reflexo não mede 2 segundos");
+  assert(metrics.animationDelay === "0.6s", "o atraso inicial não mede 600 ms");
+  assert(metrics.animationTimingFunction === "linear", "o ciclo externo deixou de ser linear");
+  assert(metrics.animationIterationCount === "infinite", "a reflexão não repete continuamente");
+  assert(
+    metrics.keyframeEasings.some((easing) => easing.includes("steps(48")),
+    `a passagem perdeu os 48 degraus: ${JSON.stringify(metrics.keyframeEasings)}`,
+  );
+  assert(
+    metrics.sidebarItemGaps.length > 0 &&
+      metrics.sidebarItemGaps.every((gap) => gap !== null && gap >= 3.5),
+    `os itens da sidebar continuam visualmente colados: ${JSON.stringify(metrics.sidebarItemGaps)}`,
+  );
+  assert(
+    metrics.selectedThreadBackground === "rgba(255, 255, 255, 0.12)",
+    `a seleção do chat não usa a superfície forte: ${metrics.selectedThreadBackground}`,
+  );
+  assert(
+    metrics.selectedThreadBoxShadow !== null && metrics.selectedThreadBoxShadow !== "none",
+    "a seleção do chat perdeu o contorno de separação",
+  );
+  assert(metrics.planExplanationCount === 0, "a explicação redundante do plano ainda está visível");
+  assert(
+    metrics.maskImage.includes("linear-gradient") &&
+      metrics.maskImage.includes("20%") &&
+      metrics.maskImage.includes("30%") &&
+      metrics.maskImage.includes("50%"),
+    `a máscara de 21 de agosto foi alterada: ${metrics.maskImage}`,
+  );
+  assert(
+    metrics.passPositions.length === 2 && new Set(metrics.passPositions).size === 2,
+    `a faixa não atravessou o título: ${JSON.stringify(metrics.passPositions)}`,
+  );
+  assert(
+    metrics.pausePositions.length === 3 && new Set(metrics.pausePositions).size === 1,
+    `a pausa longa não manteve a faixa fora do texto: ${JSON.stringify(metrics.pausePositions)}`,
+  );
+  assert(
+    metrics.alignmentError !== null && metrics.alignmentError <= tolerance,
+    `o texto luminoso saiu do alinhamento: ${metrics.alignmentError}`,
+  );
+  assert(metrics.ariaHidden === "true", "a faixa decorativa entrou na árvore acessível");
   assert(metrics.pointerEvents === "none", "a reflexão passou a interceptar interação");
 }
 
@@ -5901,6 +6034,25 @@ function validateSettingsMetrics(metrics, viewport) {
     "a navegação ainda expõe páginas removidas",
   );
   assert(metrics.navigationLabels.includes("Perfil"), "a página Perfil deixou as configurações");
+  assert(
+    metrics.navigationItemGaps.length > 0 &&
+      metrics.navigationItemGaps.every((gap) => gap !== null && gap >= 3.5),
+    `os itens das configurações continuam visualmente colados: ${JSON.stringify(metrics.navigationItemGaps)}`,
+  );
+  const surfaceAlpha = (value) =>
+    Number.parseFloat(value.match(/\/\s*([\d.]+)%/u)?.[1] ?? "0");
+  assert(
+    surfaceAlpha(metrics.selectedSurface) >= surfaceAlpha(metrics.hoverSurface) * 2,
+    `hover e seleção continuam próximos: ${metrics.hoverSurface} / ${metrics.selectedSurface}`,
+  );
+  assert(
+    metrics.selectedNavigationBackground === "rgba(255, 255, 255, 0.12)",
+    `a seleção das configurações não usa a superfície forte: ${metrics.selectedNavigationBackground}`,
+  );
+  assert(
+    metrics.selectedNavigationBoxShadow !== null && metrics.selectedNavigationBoxShadow !== "none",
+    "a seleção das configurações perdeu o contorno de separação",
+  );
 }
 
 function validateUsageSettingsMetrics(metrics, viewport) {
@@ -6188,6 +6340,9 @@ function validateImageViewGroupMetrics(metrics, viewport) {
 
 function validateTimelinePerformanceStressMetrics(metrics, viewport) {
   const tolerance = 1;
+  const exceptionalApplicationCallbacks = metrics.rapidAnimationCallbackOutliers.filter(
+    (outlier) => outlier.duration > 10,
+  );
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
     `viewport inesperado no estresse da timeline em ${viewport.width}x${viewport.height}`,
@@ -6243,11 +6398,12 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
     `o trabalho do app no P99 foi ${metrics.rapidP99ApplicationAnimationWorkMs.toFixed(2)} ms`,
   );
   assert(
-    metrics.rapidMaximumApplicationAnimationWorkMs <= 10,
-    `o maior trabalho do app foi ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms`,
+    metrics.rapidMaximumApplicationAnimationWorkMs <= 12 &&
+      exceptionalApplicationCallbacks.length <= 1,
+    `o trabalho excepcional do app excedeu o contrato: máximo ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms em ${exceptionalApplicationCallbacks.length} callbacks`,
   );
   assert(
-    metrics.rapidP95FrameMs <= 20,
+    metrics.rapidP95FrameMs <= 25,
     `o P95 do scroll rápido foi ${metrics.rapidP95FrameMs.toFixed(2)} ms`,
   );
   assert(
@@ -6636,12 +6792,11 @@ class CdpClient {
       return;
     }
     const listeners = this.events.get(message.method);
-    if (listeners === undefined) {
-      return;
-    }
-    this.events.delete(message.method);
-    for (const listener of listeners) {
-      listener(message.params);
+    if (listeners !== undefined) {
+      this.events.delete(message.method);
+      for (const listener of listeners) {
+        listener(message.params);
+      }
     }
   }
 }

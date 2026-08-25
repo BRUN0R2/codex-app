@@ -391,7 +391,7 @@ export function Sidebar(props: SidebarProps) {
             onToggle={() => setPinnedExpanded((value) => !value)}
           />
           <Show when={pinnedExpanded() || normalizedSearchQuery().length > 0}>
-            <div class="pinned-threads">
+            <div class="pinned-threads sidebar-item-list">
               <For each={pinnedProjectGroups()}>
                 {(group) => (
                   <ProjectGroup
@@ -474,49 +474,51 @@ export function Sidebar(props: SidebarProps) {
               </Show>
             }
           >
-            <For each={visibleGrouped()}>
-              {(group) => (
-                <ProjectGroup
-                  collapsed={props.collapsed}
-                  controller={props.controller}
-                  expanded={isProjectExpanded(group.project)}
-                  onBeginRename={beginRename}
-                  onOpenWorkspace={props.onOpenWorkspace}
-                  onShowChat={props.onShowChat}
-                  onSubmitRename={submitRename}
-                  onToggleExpanded={() =>
-                    props.controller.toggleProjectExpanded(group.project.path)
-                  }
-                  onToggleThreadList={() =>
-                    props.controller.toggleProjectThreadListExpanded(group.project.path)
-                  }
-                  project={group.project}
-                  renameValue={renameValue()}
-                  renamingId={renamingId()}
-                  setRenameValue={setRenameValue}
-                  threadListExpanded={props.controller.projectThreadListExpanded(
-                    group.project.path,
-                  )}
-                  threads={group.threads}
-                />
-              )}
-            </For>
-            <Show
-              when={
-                normalizedSearchQuery().length === 0 &&
-                projectSectionGroups().length > MAX_VISIBLE_PROJECT_GROUPS
-              }
-            >
-              <button
-                aria-expanded={showAllProjects()}
-                class="sidebar-pagination-button"
-                onClick={() => setShowAllProjects((value) => !value)}
-                type="button"
+            <div class="sidebar-item-list">
+              <For each={visibleGrouped()}>
+                {(group) => (
+                  <ProjectGroup
+                    collapsed={props.collapsed}
+                    controller={props.controller}
+                    expanded={isProjectExpanded(group.project)}
+                    onBeginRename={beginRename}
+                    onOpenWorkspace={props.onOpenWorkspace}
+                    onShowChat={props.onShowChat}
+                    onSubmitRename={submitRename}
+                    onToggleExpanded={() =>
+                      props.controller.toggleProjectExpanded(group.project.path)
+                    }
+                    onToggleThreadList={() =>
+                      props.controller.toggleProjectThreadListExpanded(group.project.path)
+                    }
+                    project={group.project}
+                    renameValue={renameValue()}
+                    renamingId={renamingId()}
+                    setRenameValue={setRenameValue}
+                    threadListExpanded={props.controller.projectThreadListExpanded(
+                      group.project.path,
+                    )}
+                    threads={group.threads}
+                  />
+                )}
+              </For>
+              <Show
+                when={
+                  normalizedSearchQuery().length === 0 &&
+                  projectSectionGroups().length > MAX_VISIBLE_PROJECT_GROUPS
+                }
               >
-                <span>{showAllProjects() ? "Mostrar menos" : "Mostrar mais"}</span>
-                <Icon name={showAllProjects() ? "chevronDown" : "chevronRight"} size={12} />
-              </button>
-            </Show>
+                <button
+                  aria-expanded={showAllProjects()}
+                  class="sidebar-pagination-button"
+                  onClick={() => setShowAllProjects((value) => !value)}
+                  type="button"
+                >
+                  <span>{showAllProjects() ? "Mostrar menos" : "Mostrar mais"}</span>
+                  <Icon name={showAllProjects() ? "chevronDown" : "chevronRight"} size={12} />
+                </button>
+              </Show>
+            </div>
           </Show>
         </Show>
 
@@ -544,22 +546,24 @@ export function Sidebar(props: SidebarProps) {
                 </Show>
               }
             >
-              <For each={ungrouped()}>
-                {(thread) => (
-                  <ThreadButton
-                    controller={props.controller}
-                    onBeginRename={beginRename}
-                    onShowChat={props.onShowChat}
-                    onSubmitRename={submitRename}
-                    onTogglePinned={() => props.controller.togglePinnedThread(thread.id)}
-                    pinned={props.controller.pinnedThreadIds().includes(thread.id)}
-                    renameValue={renameValue()}
-                    renaming={renamingId() === thread.id}
-                    setRenameValue={setRenameValue}
-                    thread={thread}
-                  />
-                )}
-              </For>
+              <div class="sidebar-item-list">
+                <For each={ungrouped()}>
+                  {(thread) => (
+                    <ThreadButton
+                      controller={props.controller}
+                      onBeginRename={beginRename}
+                      onShowChat={props.onShowChat}
+                      onSubmitRename={submitRename}
+                      onTogglePinned={() => props.controller.togglePinnedThread(thread.id)}
+                      pinned={props.controller.pinnedThreadIds().includes(thread.id)}
+                      renameValue={renameValue()}
+                      renaming={renamingId() === thread.id}
+                      setRenameValue={setRenameValue}
+                      thread={thread}
+                    />
+                  )}
+                </For>
+              </div>
             </Show>
             <Show
               when={

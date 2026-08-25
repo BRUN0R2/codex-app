@@ -330,17 +330,16 @@ export function Timeline(props: {
   const [virtualViewport, setVirtualViewportSignal] =
     createSignal<TimelineVirtualViewport>(virtualViewportBufferA);
   function commitVirtualViewport(offset: number, scrollTop: number, size: number): void {
-    setVirtualViewportSignal((current) => {
-      if (current.offset === offset && current.scrollTop === scrollTop && current.size === size) {
-        return current;
-      }
-      const next =
-        current === virtualViewportBufferA ? virtualViewportBufferB : virtualViewportBufferA;
-      next.offset = offset;
-      next.scrollTop = scrollTop;
-      next.size = size;
-      return next;
-    });
+    const current = untrack(virtualViewport);
+    if (current.offset === offset && current.scrollTop === scrollTop && current.size === size) {
+      return;
+    }
+    const next =
+      current === virtualViewportBufferA ? virtualViewportBufferB : virtualViewportBufferA;
+    next.offset = offset;
+    next.scrollTop = scrollTop;
+    next.size = size;
+    setVirtualViewportSignal(next);
   }
   const [scrollbar, setScrollbar] = createSignal<ScrollbarMetrics>({
     maximumScroll: 0,
@@ -1158,11 +1157,12 @@ export function Timeline(props: {
       scrollHeight,
       scrollTop,
     });
+    const currentScrollbar = untrack(scrollbar);
     batch(() => {
       updateActivityContentDeferral(scrollTop, clientHeight);
-      setScrollbar((current) =>
-        sameScrollbarMetrics(current, nextScrollbar) ? current : nextScrollbar,
-      );
+      if (!sameScrollbarMetrics(currentScrollbar, nextScrollbar)) {
+        setScrollbar(nextScrollbar);
+      }
       setShowScrollToEnd(!isNearEnd);
       setActiveTimelineFollowing(nextFollowingLatest);
       setActiveUserMessageIndex(nextActiveUserMessageIndex);
@@ -1329,50 +1329,52 @@ export function Timeline(props: {
     disclosureContext.onLayoutChange();
   }
 
+  function runScheduledTimelineFrame(): void {
+    animationFrame = undefined;
+    const shouldSynchronizeLayout = pendingLayoutSynchronization;
+    const shouldMeasureAsUserScroll = shouldMeasureTimelineScrollAsUserInitiated({
+      explicitUserInput: pendingExplicitUserScrollMeasurement,
+      layoutRequested: shouldSynchronizeLayout,
+      unownedScroll: pendingUnownedScrollMeasurement,
+    });
+    pendingExplicitUserScrollMeasurement = false;
+    pendingLayoutSynchronization = false;
+    pendingUnownedScrollMeasurement = false;
+    if (scrollElement === undefined) {
+      return;
+    }
+    const synchronizedLayout = shouldSynchronizeLayout ? readTimelineLayoutSnapshot() : null;
+    applyPendingVirtualAnchorCorrection();
+    applyPendingActivityVisualAnchor();
+    if (shouldMeasureAsUserScroll) {
+      measureScroll(true, synchronizedLayout);
+    }
+    if (
+      shouldSynchronizeTimelineToEnd({
+        followingLatest: followingLatest(),
+        layoutRequested: shouldSynchronizeLayout,
+      })
+    ) {
+      scrollTimelineTo(
+        synchronizedLayout?.scrollHeight ?? scrollElement.scrollHeight,
+        "auto",
+        synchronizedLayout ?? undefined,
+      );
+      measureScroll(false, synchronizedLayout);
+      return;
+    }
+    if (!shouldMeasureAsUserScroll) {
+      measureScroll(false, synchronizedLayout);
+    }
+  }
+
   function scheduleTimelineFrame(userInitiated: boolean, synchronizeLayout: boolean): void {
     pendingExplicitUserScrollMeasurement ||= userInitiated;
     pendingLayoutSynchronization ||= synchronizeLayout;
     if (timelineRestorationFrame !== undefined || animationFrame !== undefined) {
       return;
     }
-    animationFrame = requestAnimationFrame(() => {
-      animationFrame = undefined;
-      const shouldSynchronizeLayout = pendingLayoutSynchronization;
-      const shouldMeasureAsUserScroll = shouldMeasureTimelineScrollAsUserInitiated({
-        explicitUserInput: pendingExplicitUserScrollMeasurement,
-        layoutRequested: shouldSynchronizeLayout,
-        unownedScroll: pendingUnownedScrollMeasurement,
-      });
-      pendingExplicitUserScrollMeasurement = false;
-      pendingLayoutSynchronization = false;
-      pendingUnownedScrollMeasurement = false;
-      if (scrollElement === undefined) {
-        return;
-      }
-      const synchronizedLayout = shouldSynchronizeLayout ? readTimelineLayoutSnapshot() : null;
-      applyPendingVirtualAnchorCorrection();
-      applyPendingActivityVisualAnchor();
-      if (shouldMeasureAsUserScroll) {
-        measureScroll(true, synchronizedLayout);
-      }
-      if (
-        shouldSynchronizeTimelineToEnd({
-          followingLatest: followingLatest(),
-          layoutRequested: shouldSynchronizeLayout,
-        })
-      ) {
-        scrollTimelineTo(
-          synchronizedLayout?.scrollHeight ?? scrollElement.scrollHeight,
-          "auto",
-          synchronizedLayout ?? undefined,
-        );
-        measureScroll(false, synchronizedLayout);
-        return;
-      }
-      if (!shouldMeasureAsUserScroll) {
-        measureScroll(false, synchronizedLayout);
-      }
-    });
+    animationFrame = requestAnimationFrame(runScheduledTimelineFrame);
   }
 
   function synchronizeScroll(): void {

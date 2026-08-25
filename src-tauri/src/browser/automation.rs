@@ -8,10 +8,12 @@ use tokio::time::{sleep, timeout};
 use crate::error::AppError;
 
 const WEBVIEW_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
-const CURSOR_MOVE_DURATION: Duration = Duration::from_millis(140);
+const CURSOR_MOVE_DURATION: Duration = Duration::from_millis(180);
+const CURSOR_MOVE_STEPS: u32 = 10;
 const POINTER_PRESS_DURATION: Duration = Duration::from_millis(45);
 const POST_ACTION_SETTLE_DURATION: Duration = Duration::from_millis(180);
-const DRAG_STEPS: u32 = 10;
+const DRAG_MOVE_DURATION: Duration = Duration::from_millis(260);
+const DRAG_STEPS: u32 = 14;
 const MAX_SCREENSHOT_BASE64_BYTES: usize = 1_300_000;
 const SCREENSHOT_QUALITIES: [u8; 3] = [72, 52, 36];
 
@@ -63,6 +65,10 @@ pub(crate) const BROWSER_AGENT_INITIALIZATION_SCRIPT: &str = r##"
     cursorHost: null,
     cursorNode: null,
     cursorLabel: null,
+    cursorAnimation: null,
+    cursorX: -80,
+    cursorY: -80,
+    cursorVisible: false,
   };
 
   Object.defineProperty(globalThis, stateKey, {
@@ -146,7 +152,7 @@ pub(crate) const BROWSER_AGENT_INITIALIZATION_SCRIPT: &str = r##"
       position: "fixed",
       top: "0",
       transform: "translate3d(-80px, -80px, 0)",
-      transition: "transform 140ms cubic-bezier(.2,.8,.2,1), opacity 120ms ease",
+      transition: "opacity 120ms ease",
       zIndex: "2147483647",
       opacity: "0",
     });
@@ -157,23 +163,30 @@ pub(crate) const BROWSER_AGENT_INITIALIZATION_SCRIPT: &str = r##"
       :host { color-scheme: dark; }
       .pointer {
         position: relative;
-        width: 22px;
-        height: 28px;
-        filter: drop-shadow(0 2px 3px rgb(0 0 0 / .55));
+        width: 30px;
+        height: 38px;
+        filter:
+          drop-shadow(0 0 4px rgb(255 115 0 / 1))
+          drop-shadow(0 0 12px rgb(255 76 0 / .82))
+          drop-shadow(0 4px 4px rgb(0 0 0 / .68));
       }
       svg { display: block; overflow: visible; }
       .badge {
         position: absolute;
-        top: 20px;
-        left: 15px;
+        top: 29px;
+        left: 22px;
         max-width: 150px;
-        padding: 2px 6px;
+        padding: 2px 8px;
         overflow: hidden;
-        border: 1px solid rgb(255 255 255 / .18);
+        border: 1px solid rgb(255 112 0 / .86);
         border-radius: 999px;
-        background: #d97706;
-        color: #fff;
-        font: 600 10px/14px system-ui, sans-serif;
+        background: rgb(17 8 3 / .96);
+        color: #ffe3c2;
+        box-shadow:
+          0 0 0 1px rgb(0 0 0 / .46) inset,
+          0 0 12px rgb(255 76 0 / .52);
+        font: 650 11px/15px system-ui, sans-serif;
+        letter-spacing: .01em;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
@@ -181,9 +194,17 @@ pub(crate) const BROWSER_AGENT_INITIALIZATION_SCRIPT: &str = r##"
     const pointer = document.createElement("div");
     pointer.className = "pointer";
     pointer.innerHTML = `
-      <svg aria-hidden="true" width="22" height="28" viewBox="0 0 22 28">
-        <path d="M2 2.5 19 17l-8.1 1.15L7 26 2 2.5Z" fill="#f59e0b" stroke="#111827" stroke-width="2" stroke-linejoin="round"/>
-        <path d="m10.8 18.2 4.5 6.1" stroke="#111827" stroke-width="2.2" stroke-linecap="round"/>
+      <svg aria-hidden="true" width="30" height="38" viewBox="0 0 30 38">
+        <defs>
+          <filter id="codex-neon-halo" x="-80%" y="-70%" width="260%" height="260%">
+            <feGaussianBlur stdDeviation="2.8"/>
+          </filter>
+        </defs>
+        <path d="M3.2 2.8 26.2 21.3l-10.4 1.5-5 10.3L3.2 2.8Z" fill="#ff6200" stroke="#ff6200" stroke-width="7" stroke-linejoin="round" opacity=".62" filter="url(#codex-neon-halo)"/>
+        <path d="M3.2 2.8 26.2 21.3l-10.4 1.5-5 10.3L3.2 2.8Z" fill="#ff6800" stroke="#160801" stroke-width="5" stroke-linejoin="round"/>
+        <path d="M3.2 2.8 26.2 21.3l-10.4 1.5-5 10.3L3.2 2.8Z" fill="#ff6800" stroke="#fff0df" stroke-width="2.4" stroke-linejoin="round"/>
+        <path d="m15.8 23 6.1 8.3" stroke="#160801" stroke-width="5" stroke-linecap="round"/>
+        <path d="m15.8 23 6.1 8.3" stroke="#ff7a12" stroke-width="2.2" stroke-linecap="round"/>
       </svg>
       <span class="badge">Codex</span>
     `;
@@ -195,17 +216,55 @@ pub(crate) const BROWSER_AGENT_INITIALIZATION_SCRIPT: &str = r##"
     return pointer;
   };
 
-  state.moveCursor = (x, y, label = "Codex") => {
+  state.moveCursor = (x, y, label = "Codex", duration = 180) => {
     ensureCursor();
     if (!state.cursorHost) {
-      return false;
+      return { x: 0, y: 0, visible: false };
     }
     if (state.cursorLabel) {
       state.cursorLabel.textContent = boundedText(label, 80) || "Codex";
     }
+    const targetX = Math.round(Number(x) || 0);
+    const targetY = Math.round(Number(y) || 0);
+    const requestedDuration = Math.min(600, Math.max(0, Number(duration) || 0));
+    const motionDuration = matchMedia("(prefers-reduced-motion: reduce)").matches
+      ? 0
+      : requestedDuration;
+    const previous = {
+      x: state.cursorVisible ? state.cursorX : targetX,
+      y: state.cursorVisible ? state.cursorY : targetY,
+      visible: state.cursorVisible,
+    };
+    state.cursorAnimation?.cancel();
     state.cursorHost.style.opacity = "1";
-    state.cursorHost.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`;
-    return true;
+    const targetTransform = `translate3d(${targetX}px, ${targetY}px, 0)`;
+    if (state.cursorVisible && motionDuration > 0) {
+      const animation = state.cursorHost.animate(
+        [
+          { transform: `translate3d(${state.cursorX}px, ${state.cursorY}px, 0)` },
+          { transform: targetTransform },
+        ],
+        {
+          duration: motionDuration,
+          easing: "cubic-bezier(.22,1,.36,1)",
+          fill: "both",
+        },
+      );
+      state.cursorAnimation = animation;
+      animation.addEventListener("finish", () => {
+        if (state.cursorAnimation === animation) {
+          state.cursorHost.style.transform = targetTransform;
+          state.cursorAnimation = null;
+          animation.cancel();
+        }
+      }, { once: true });
+    } else {
+      state.cursorHost.style.transform = targetTransform;
+    }
+    state.cursorX = targetX;
+    state.cursorY = targetY;
+    state.cursorVisible = true;
+    return previous;
   };
 
   if (document.documentElement) {
@@ -826,13 +885,16 @@ pub(crate) async fn drag(
         }),
     )
     .await?;
-    for step in 1..=DRAG_STEPS {
-        let progress = f64::from(step) / f64::from(DRAG_STEPS);
-        let x = start.x + (end.x - start.x) * progress;
-        let y = start.y + (end.y - start.y) * progress;
-        move_pointer(webview, x, y, "Arraste do Codex", 1).await?;
-        sleep(Duration::from_millis(24)).await;
-    }
+    move_pointer_with_timing(
+        webview,
+        end.x,
+        end.y,
+        "Arraste do Codex",
+        1,
+        DRAG_MOVE_DURATION,
+        DRAG_STEPS,
+    )
+    .await?;
     dispatch_mouse(
         webview,
         json!({
@@ -876,28 +938,89 @@ async fn move_pointer(
     label: &str,
     buttons: u8,
 ) -> Result<(), AppError> {
+    move_pointer_with_timing(
+        webview,
+        x,
+        y,
+        label,
+        buttons,
+        CURSOR_MOVE_DURATION,
+        CURSOR_MOVE_STEPS,
+    )
+    .await
+}
+
+async fn move_pointer_with_timing(
+    webview: &Webview,
+    x: f64,
+    y: f64,
+    label: &str,
+    buttons: u8,
+    duration: Duration,
+    steps: u32,
+) -> Result<(), AppError> {
+    #[derive(Deserialize)]
+    struct CursorOrigin {
+        x: f64,
+        y: f64,
+        visible: bool,
+    }
+
     let label = serde_json::to_string(label)
         .map_err(|error| AppError::Tool(format!("browser cursor label is invalid: {error}")))?;
-    execute_script(
+    let origin: CursorOrigin = evaluate_json(
         webview,
         &format!(
-            "(() => globalThis[Symbol.for(\"codex.desktop.browser-agent.v1\")]?.moveCursor({x}, {y}, {label}) ?? false)()"
+            "(() => globalThis[Symbol.for(\"codex.desktop.browser-agent.v1\")]?.moveCursor({x}, {y}, {label}, {}) ?? {{ x: {x}, y: {y}, visible: false }})()",
+            duration.as_millis(),
         ),
     )
     .await?;
-    dispatch_mouse(
-        webview,
-        json!({
-            "type": "mouseMoved",
-            "x": x,
-            "y": y,
-            "button": if buttons == 0 { "none" } else { "left" },
-            "buttons": buttons,
-        }),
-    )
-    .await?;
-    sleep(CURSOR_MOVE_DURATION).await;
+    let samples = if origin.visible {
+        cursor_motion_samples(origin.x, origin.y, x, y, steps)
+    } else {
+        vec![(x, y)]
+    };
+    let step_duration = if origin.visible && !samples.is_empty() {
+        Duration::from_secs_f64(duration.as_secs_f64() / samples.len() as f64)
+    } else {
+        Duration::from_millis(28)
+    };
+    for (sample_x, sample_y) in samples {
+        dispatch_mouse(
+            webview,
+            json!({
+                "type": "mouseMoved",
+                "x": sample_x,
+                "y": sample_y,
+                "button": if buttons == 0 { "none" } else { "left" },
+                "buttons": buttons,
+            }),
+        )
+        .await?;
+        sleep(step_duration).await;
+    }
     Ok(())
+}
+
+fn cursor_motion_samples(
+    start_x: f64,
+    start_y: f64,
+    end_x: f64,
+    end_y: f64,
+    steps: u32,
+) -> Vec<(f64, f64)> {
+    let steps = steps.max(1);
+    (1..=steps)
+        .map(|step| {
+            let progress = f64::from(step) / f64::from(steps);
+            let eased = 1.0 - (1.0 - progress).powi(3);
+            (
+                start_x + (end_x - start_x) * eased,
+                start_y + (end_y - start_y) * eased,
+            )
+        })
+        .collect()
 }
 
 async fn dispatch_mouse(webview: &Webview, parameters: Value) -> Result<(), AppError> {
@@ -1215,7 +1338,10 @@ fn elapsed_millis(started_at: Instant) -> Result<u64, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserMouseButton, button_mask, key_descriptor, modifier_mask};
+    use super::{
+        BROWSER_AGENT_INITIALIZATION_SCRIPT, BrowserMouseButton, button_mask,
+        cursor_motion_samples, key_descriptor, modifier_mask,
+    };
 
     #[test]
     fn browser_input_contract_maps_buttons_and_modifiers() {
@@ -1236,5 +1362,28 @@ mod tests {
         assert_eq!(letter.code, "KeyA");
         assert_eq!(letter.text.as_deref(), Some("a"));
         assert!(key_descriptor("unsupported key").is_err());
+    }
+
+    #[test]
+    fn cursor_motion_is_smooth_monotonic_and_finishes_on_target() {
+        let samples = cursor_motion_samples(10.0, 20.0, 110.0, 70.0, 10);
+
+        assert_eq!(samples.len(), 10);
+        assert!(
+            samples
+                .windows(2)
+                .all(|pair| pair[0].0 < pair[1].0 && pair[0].1 < pair[1].1)
+        );
+        assert_eq!(samples.last().copied(), Some((110.0, 70.0)));
+        assert!(samples[0].0 > 10.0);
+    }
+
+    #[test]
+    fn cursor_visual_is_thick_neon_and_remains_visible_between_actions() {
+        assert!(BROWSER_AGENT_INITIALIZATION_SCRIPT.contains("width=\"30\" height=\"38\""));
+        assert!(BROWSER_AGENT_INITIALIZATION_SCRIPT.contains("stroke-width=\"5\""));
+        assert!(BROWSER_AGENT_INITIALIZATION_SCRIPT.contains("#ff6800"));
+        assert!(BROWSER_AGENT_INITIALIZATION_SCRIPT.contains("#fff0df"));
+        assert!(!BROWSER_AGENT_INITIALIZATION_SCRIPT.contains("cursorIdleTimer"));
     }
 }
