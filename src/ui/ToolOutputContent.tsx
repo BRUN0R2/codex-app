@@ -1,22 +1,28 @@
 import { createMemo, For, Match, Switch } from "solid-js";
 
-import type { ToolOutputPresentation } from "../contracts/types";
+import type { ThreadOutput, ToolOutputPresentation } from "../contracts/types";
+import { activityContentProjectionCache } from "./activityContentProjectionCache";
 import { ImagePreview } from "./ImagePreview";
 import { SyntaxTokens } from "./syntax/SyntaxTokens";
 import {
   projectImageToolOutput,
   projectSearchOutput,
-  projectSourceOutput,
   splitOutputLines,
 } from "./toolOutputProjection";
+import { VirtualizedSourceOutput } from "./VirtualizedSourceOutput";
 
 export function ToolOutputContent(props: {
+  readonly output: ThreadOutput;
   readonly presentation: ToolOutputPresentation;
   readonly text: string;
 }) {
-  const sourceLines = createMemo(() =>
+  const sourceProjection = createMemo(() =>
     props.presentation.type === "sourceFile"
-      ? projectSourceOutput(props.text, props.presentation.path)
+      ? activityContentProjectionCache.sourceProjection(
+          props.output,
+          props.text,
+          props.presentation.path,
+        )
       : null,
   );
   const searchLines = createMemo(() =>
@@ -49,27 +55,8 @@ export function ToolOutputContent(props: {
           </Switch>
         </div>
       </Match>
-      <Match when={props.presentation.type === "sourceFile" && sourceLines()}>
-        {(lines) => (
-          <table aria-label="Código lido do arquivo" class="tool-source-output">
-            <tbody>
-              <For each={lines()}>
-                {(line) => (
-                  <tr class="tool-source-line">
-                    <th class="tool-source-line-number" scope="row">
-                      {line.number}
-                    </th>
-                    <td>
-                      <code>
-                        <SyntaxTokens content={line.content} tokens={line.tokens} />
-                      </code>
-                    </td>
-                  </tr>
-                )}
-              </For>
-            </tbody>
-          </table>
-        )}
+      <Match when={props.presentation.type === "sourceFile" && sourceProjection()}>
+        {(projection) => <VirtualizedSourceOutput projection={projection()} />}
       </Match>
       <Match when={props.presentation.type === "searchResults" && searchLines()}>
         {(lines) => (

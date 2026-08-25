@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createDiffDocument } from "../diffDocument";
 import { DiffSyntaxHighlighter } from "./diffHighlighter";
+import { SyntaxLineTokenizer } from "./tokenizer";
 
 describe("diff syntax highlighter", () => {
-  it("highlights a complete hunk once and preserves multiline state", () => {
+  it("highlights a hunk incrementally and preserves multiline state", () => {
     const document = createDiffDocument(
       [
         "@@ -1,4 +1,4 @@",
@@ -25,6 +26,25 @@ describe("diff syntax highlighter", () => {
       "       continues */",
     );
     expect(highlighter.render(document, "src/main.rs", 4)).toBe(continuation);
+    expect(new DiffSyntaxHighlighter().render(document, "src/main.rs", 4)).toBe(continuation);
+  });
+
+  it("tokenizes only through the furthest requested source line", () => {
+    const document = createDiffDocument(
+      "@@ -0,0 +1,5 @@\n+const one = 1;\n+const two = 2;\n+const three = 3;\n+const four = 4;\n+const five = 5;",
+    );
+    const tokenize = vi.spyOn(SyntaxLineTokenizer.prototype, "tokenize");
+    const highlighter = new DiffSyntaxHighlighter();
+    try {
+      expect(highlighter.render(document, "src/incremental.ts", 1)).not.toBeNull();
+      expect(tokenize).toHaveBeenCalledTimes(1);
+      expect(highlighter.render(document, "src/incremental.ts", 3)).not.toBeNull();
+      expect(tokenize).toHaveBeenCalledTimes(3);
+      expect(highlighter.render(document, "src/incremental.ts", 2)).not.toBeNull();
+      expect(tokenize).toHaveBeenCalledTimes(3);
+    } finally {
+      tokenize.mockRestore();
+    }
   });
 
   it("falls back for unknown files and pathological hunks", () => {

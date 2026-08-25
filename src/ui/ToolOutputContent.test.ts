@@ -8,7 +8,7 @@ import {
 
 describe("tool output content", () => {
   it("preserves read_file line numbers, indentation and multiline syntax state", () => {
-    const lines = projectSourceOutput(
+    const projection = projectSourceOutput(
       [
         "20:     const LIMIT: usize = 1_024;",
         "21:     /* comentário",
@@ -17,14 +17,16 @@ describe("tool output content", () => {
       "src/main.rs",
     );
 
-    expect(lines?.map((line) => [line.number, line.content])).toEqual([
+    expect(projection?.lines.map((line) => [line.number, line.content])).toEqual([
       [20, "    const LIMIT: usize = 1_024;"],
       [21, "    /* comentário"],
       [22, "       continua */"],
     ]);
-    expect(lines?.[0]?.tokens?.some((token) => token.kind === "keyword")).toBe(true);
-    expect(lines?.[1]?.tokens?.some((token) => token.kind === "comment")).toBe(true);
-    expect(lines?.[2]?.tokens?.map((token) => token.kind)).toEqual(["comment"]);
+    expect(projection?.lines[0]?.tokens?.some((token) => token.kind === "keyword")).toBe(true);
+    expect(projection?.lines[1]?.tokens?.some((token) => token.kind === "comment")).toBe(true);
+    expect(projection?.lines[2]?.tokens?.map((token) => token.kind)).toEqual(["comment"]);
+    expect(projection).toMatchObject({ lineNumberDigits: 2 });
+    expect(projection?.maximumColumns).toBeGreaterThan(1);
   });
 
   it("rejects malformed numbered source instead of guessing its structure", () => {

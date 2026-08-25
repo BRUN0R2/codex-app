@@ -72,8 +72,32 @@ describe("agent activity presentation", () => {
     ];
 
     expect(agentActivitySummaryLabel(items)).toBe(
-      "Chamou uma ferramenta, editou um arquivo, leu arquivos, executou um comando e pesquisou na web",
+      "Chamou uma ferramenta, editou um arquivo, executou leitura de um arquivo, executou um comando e pesquisou na web",
     );
+  });
+
+  it("counts file reads independently and reports concurrent reads in progress", () => {
+    const completed = [
+      tool("read-1", "read_file"),
+      tool("read-2", "read_file"),
+      tool("search-1", "search_text"),
+    ];
+    const running = completed.slice(0, 2).map((item) => ({
+      ...item,
+      status: "inProgress" as const,
+    }));
+
+    expect(agentActivitySummaryLabel(completed)).toBe(
+      "Executou leitura de 2 arquivos e explorou arquivos",
+    );
+    expect(summarizeAgentActivity(completed).map(({ kind }) => kind)).toEqual([
+      "fileReads",
+      "exploration",
+    ]);
+    expect(activeAgentActivity(running)).toEqual({
+      kind: "fileReads",
+      label: "Lendo 2 arquivos",
+    });
   });
 
   it("projects consecutive image views as the official dedicated image group", () => {

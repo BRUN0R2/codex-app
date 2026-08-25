@@ -2795,6 +2795,7 @@ pre {
   position: relative;
   width: 100%;
   min-width: 0;
+  contain: layout paint style;
 }
 
 .timeline-virtual-item {
@@ -3647,6 +3648,7 @@ pre {
   display: block;
   width: 100%;
   padding-top: 0;
+  contain: layout paint style;
 }
 
 .agent-activity-virtual-item {
@@ -3656,14 +3658,17 @@ pre {
   width: 100%;
   min-width: 0;
   padding-bottom: 2px;
-  contain: layout style;
+  contain: layout paint style;
 }
 
-.agent-activity-scroll-placeholder {
-  width: min(72%, 420px);
-  height: 26px;
-  border-radius: 7px;
-  background: linear-gradient(90deg, rgb(255 255 255 / 3%), rgb(255 255 255 / 6%));
+.agent-activity-virtual-window {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  min-width: 0;
+  contain: layout style;
+  will-change: transform;
 }
 
 .grouped-activity-item {
@@ -3673,9 +3678,14 @@ pre {
 
 .grouped-activity-item > .activity-summary,
 .tool-activity-row.grouped-activity-item {
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   min-height: 26px;
   padding: 1px 0;
+}
+
+.tool-activity-row.grouped-activity-item {
+  cursor: default;
 }
 
 .grouped-activity-item .activity-chevron {
@@ -3686,31 +3696,25 @@ pre {
 }
 
 .grouped-activity-item > .activity-summary:hover .activity-chevron,
-.grouped-activity-item > .activity-summary:focus-visible .activity-chevron,
-.grouped-activity-item[open] > .activity-summary .activity-chevron {
+.grouped-activity-item > .activity-summary:focus-visible .activity-chevron {
   color: var(--color-token-text-primary);
   opacity: 1;
 }
 
+.grouped-activity-item > .activity-summary .activity-icon,
+.grouped-activity-item > .activity-summary .activity-title {
+  transition: color 120ms ease;
+}
+
+.grouped-activity-item > .activity-summary:hover .activity-icon,
+.grouped-activity-item > .activity-summary:hover .activity-title,
+.grouped-activity-item > .activity-summary:focus-visible .activity-icon,
+.grouped-activity-item > .activity-summary:focus-visible .activity-title {
+  color: var(--color-token-text-primary);
+}
+
 .grouped-activity-item .command-card-inner {
   margin: 3px 0 7px;
-}
-
-.grouped-activity-item .file-change-list {
-  gap: 2px;
-  padding: 1px 0 5px;
-}
-
-.grouped-file-change-set {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  padding: 1px 0 2px;
-}
-
-.grouped-file-change-set .file-change-list {
-  gap: 2px;
-  padding: 1px 0 5px;
 }
 
 .activity-icon {
@@ -3890,7 +3894,6 @@ pre {
   line-height: 22px;
 }
 
-.tool-source-output,
 .tool-search-output {
   display: block;
   width: 100%;
@@ -3900,12 +3903,50 @@ pre {
   overscroll-behavior-inline: contain;
 }
 
-.tool-source-output tbody,
 .tool-search-output tbody {
   display: table;
   width: max-content;
   min-width: 100%;
   border-collapse: collapse;
+}
+
+.tool-source-viewport {
+  position: relative;
+  max-width: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  outline: none;
+  contain: layout paint style;
+  overflow-anchor: none;
+}
+
+.tool-source-viewport:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--focus-ring);
+}
+
+.tool-source-virtual-table {
+  position: relative;
+  display: block;
+  min-width: 100%;
+  overflow: visible;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.tool-source-virtual-canvas {
+  position: relative;
+  display: block;
+  min-width: 100%;
+}
+
+.tool-source-virtual-table .tool-source-line {
+  position: absolute;
+  left: 0;
+  display: grid;
+  width: 100%;
+  grid-template-columns: max-content minmax(max-content, 1fr);
+  contain: layout paint style;
 }
 
 .tool-source-line,
@@ -4096,6 +4137,9 @@ pre {
 }
 
 .file-change-diff > summary {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
   min-height: 24px;
   gap: 6px;
   padding: 0;
@@ -4109,8 +4153,9 @@ pre {
 
 .file-change-action {
   flex: 0 0 auto;
-  color: var(--color-token-text-secondary);
+  color: var(--codex-chat-muted);
   font-size: 13px;
+  transition: color 120ms ease;
 }
 
 .file-change-diff .diff-file-identity {
@@ -4118,13 +4163,16 @@ pre {
 }
 
 .file-change-diff .diff-file-identity code {
-  color: var(--color-token-text-secondary);
+  color: var(--codex-chat-muted);
   font-size: 13px;
   font-weight: 400;
   text-decoration: underline;
   text-decoration-color: var(--color-token-text-tertiary);
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
+  transition:
+    color 120ms ease,
+    text-decoration-color 120ms ease;
 }
 
 .file-change-diff > .diff-viewport,
@@ -4181,6 +4229,26 @@ pre {
   flex: 0 0 16px;
   place-items: center;
   color: var(--color-token-text-tertiary);
+  opacity: 0;
+  transition:
+    color 120ms ease,
+    opacity 120ms ease;
+}
+
+.file-change-diff > summary:hover .activity-icon,
+.file-change-diff > summary:hover .file-change-action,
+.file-change-diff > summary:hover .diff-file-identity code,
+.file-change-diff > summary:focus-visible .activity-icon,
+.file-change-diff > summary:focus-visible .file-change-action,
+.file-change-diff > summary:focus-visible .diff-file-identity code {
+  color: var(--color-token-text-primary);
+  text-decoration-color: var(--color-token-text-primary);
+}
+
+.file-change-diff > summary:hover .diff-file-chevron,
+.file-change-diff > summary:focus-visible .diff-file-chevron {
+  color: var(--color-token-text-primary);
+  opacity: 1;
 }
 
 .diff-empty-state {
@@ -7748,6 +7816,8 @@ pre {
   scrollbar-gutter: stable;
   background: var(--diff-surface);
   outline: none;
+  contain: layout paint style;
+  overflow-anchor: none;
 }
 
 .diff-viewport:focus-visible {
@@ -7780,6 +7850,7 @@ pre {
   width: 100%;
   height: 22px;
   align-items: stretch;
+  contain: layout paint style;
 }
 
 .diff-viewport.is-unified .diff-virtual-row {

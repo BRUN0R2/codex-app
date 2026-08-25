@@ -1,3 +1,4 @@
+import { monospaceColumnCount } from "./monospace";
 import { DIFF_SYNTAX_LIMITS } from "./syntax/contracts";
 
 export type UnifiedDiffLineType = "addition" | "context" | "deletion" | "hunk" | "meta";
@@ -45,7 +46,6 @@ export interface DiffSyntaxLocation {
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u;
 const NO_NEWLINE_MARKER = "\\ No newline at end of file";
-const TAB_COLUMNS = 4;
 
 export class DiffDocument {
   readonly newLineNumberDigits: number;
@@ -259,14 +259,6 @@ export function summarizeDiff(diff: string): DiffStats {
     deletions += Number(line.startsWith("-"));
   }
   return { additions, deletions };
-}
-
-export function monospaceColumnCount(value: string): number {
-  let columns = 0;
-  for (const character of value) {
-    columns = character === "\t" ? columns + (TAB_COLUMNS - (columns % TAB_COLUMNS)) : columns + 1;
-  }
-  return columns;
 }
 
 function projectSplitDiff(lines: readonly UnifiedDiffLine[]): SplitDiffProjection {

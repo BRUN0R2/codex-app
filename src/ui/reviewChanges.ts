@@ -65,26 +65,19 @@ export class ReviewDocumentStore {
 }
 
 export class ReviewStatisticsStore {
-  #statsByPath = new Map<string, { readonly change: FileChange; readonly stats: DiffStats }>();
+  readonly #parsedStats = new WeakMap<FileChange, DiffStats>();
 
   summarize(changes: readonly FileChange[]): ReviewStats {
-    const nextByPath = new Map<
-      string,
-      { readonly change: FileChange; readonly stats: DiffStats }
-    >();
     let additions = 0;
     let deletions = 0;
     for (const change of changes) {
-      const current = this.#statsByPath.get(change.path);
-      const entry =
-        current !== undefined && sameFileChange(current.change, change)
-          ? current
-          : { change, stats: fileChangeLineStats(change) };
-      nextByPath.set(change.path, entry);
-      additions += entry.stats.additions;
-      deletions += entry.stats.deletions;
+      const stats =
+        change.lineStats ??
+        this.#parsedStats.get(change) ??
+        cacheParsedFileChangeStats(this.#parsedStats, change);
+      additions += stats.additions;
+      deletions += stats.deletions;
     }
-    this.#statsByPath = nextByPath;
     return { additions, deletions, fileCount: changes.length };
   }
 }
@@ -97,23 +90,36 @@ export function latestTurnFileChanges(
 }
 
 function mergeFileChanges(items: readonly FileChangeItem[]): readonly FileChange[] {
-  const byPath = new Map<string, FileChange>();
+  let changeCount = 0;
+  for (const item of items) {
+    changeCount += item.changes.length;
+  }
+  if (changeCount === 0) {
+    return [];
+  }
+
+  const pathIndex = new FileChangePathIndex(changeCount);
+  const merged: FileChange[] = [];
   for (const item of items) {
     for (const change of item.changes) {
-      const previous = byPath.get(change.path);
-      byPath.set(
-        change.path,
-        previous === undefined
-          ? change
-          : {
-              ...change,
-              diff: [previous.diff, change.diff].filter((diff) => diff.length > 0).join("\n"),
-              lineStats: mergeLineStats(previous.lineStats, change.lineStats),
-            },
-      );
+      const existingIndex = pathIndex.find(change.path, merged);
+      if (existingIndex === null) {
+        pathIndex.insert(change.path, merged.length);
+        merged.push(change);
+        continue;
+      }
+      const previous = merged[existingIndex];
+      if (previous === undefined) {
+        throw new Error("O índice de alterações perdeu seu arquivo de referência.");
+      }
+      merged[existingIndex] = {
+        ...change,
+        diff: [previous.diff, change.diff].filter((diff) => diff.length > 0).join("\n"),
+        lineStats: mergeLineStats(previous.lineStats, change.lineStats),
+      };
     }
   }
-  return [...byPath.values()];
+  return merged;
 }
 
 export function summarizeReviewChanges(changes: readonly FileChange[]): ReviewStats {
@@ -177,4 +183,58 @@ function sameFileChangeItems(
     fileChangeIndex += 1;
   }
   return fileChangeIndex === previous.length;
+}
+
+class FileChangePathIndex {
+  readonly #buckets: Int32Array;
+  readonly #mask: number;
+
+  constructor(capacity: number) {
+    let bucketCount = 1;
+    while (bucketCount < capacity * 2) {
+      bucketCount *= 2;
+    }
+    this.#buckets = new Int32Array(bucketCount);
+    this.#mask = bucketCount - 1;
+  }
+
+  find(path: string, changes: readonly FileChange[]): number | null {
+    let bucket = hashFilePath(path) & this.#mask;
+    while (true) {
+      const stored = this.#buckets[bucket] ?? 0;
+      if (stored === 0) {
+        return null;
+      }
+      const index = stored - 1;
+      if (changes[index]?.path === path) {
+        return index;
+      }
+      bucket = (bucket + 1) & this.#mask;
+    }
+  }
+
+  insert(path: string, index: number): void {
+    let bucket = hashFilePath(path) & this.#mask;
+    while ((this.#buckets[bucket] ?? 0) !== 0) {
+      bucket = (bucket + 1) & this.#mask;
+    }
+    this.#buckets[bucket] = index + 1;
+  }
+}
+
+function hashFilePath(path: string): number {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < path.length; index += 1) {
+    hash = Math.imul(hash ^ path.charCodeAt(index), 16_777_619);
+  }
+  return hash >>> 0;
+}
+
+function cacheParsedFileChangeStats(
+  cache: WeakMap<FileChange, DiffStats>,
+  change: FileChange,
+): DiffStats {
+  const stats = fileChangeLineStats(change);
+  cache.set(change, stats);
+  return stats;
 }

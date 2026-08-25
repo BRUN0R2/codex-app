@@ -1,5 +1,7 @@
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+
+import { listenRuntime as listen } from "./runtimeBridge";
 
 const MENU_NEW_THREAD_EVENT = "menu:new-thread";
 const MENU_SETTINGS_EVENT = "menu:settings";

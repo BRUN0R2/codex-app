@@ -1,10 +1,11 @@
 import type { IconName } from "./Icon";
 
-export type ToolCategory = "command" | "exploration" | "terminalRead" | "web";
+export type ToolCategory = "command" | "exploration" | "fileRead" | "terminalRead" | "web";
 
 const TOOL_CATEGORY_NAMES: Readonly<Record<ToolCategory, readonly string[]>> = {
   command: ["poll_command", "run_shell", "shell"],
-  exploration: ["code_search", "list_files", "read_file", "search_text"],
+  exploration: ["code_search", "list_files", "search_text"],
+  fileRead: ["read_file"],
   terminalRead: ["read_output", "read_thread_terminal"],
   web: [
     "browser_key",
@@ -27,6 +28,10 @@ export function isExplorationTool(name: string): boolean {
   return TOOL_CATEGORY_NAMES.exploration.includes(name.toLowerCase());
 }
 
+export function isFileReadTool(name: string): boolean {
+  return TOOL_CATEGORY_NAMES.fileRead.includes(name.toLowerCase());
+}
+
 export function isTerminalReadTool(name: string): boolean {
   return TOOL_CATEGORY_NAMES.terminalRead.includes(name.toLowerCase());
 }
@@ -38,7 +43,7 @@ export function isWebSearchTool(name: string): boolean {
 export function toolIconName(name: string): IconName {
   switch (name) {
     case "read_file":
-      return "file";
+      return "book";
     case "list_files":
       return "folder";
     case "search_text":

@@ -2,9 +2,11 @@ import type { VisibleThreadItem } from "../contracts/types";
 import {
   isCommandTool,
   isExplorationTool,
+  isFileReadTool,
   isTerminalReadTool,
   isWebSearchTool,
 } from "./activityLabels";
+import { fileReadActivityTitle } from "./timelinePresentation";
 
 export { isTerminalReadTool };
 
@@ -18,6 +20,7 @@ export type ImageViewItem = Extract<VisibleThreadItem, { readonly type: "toolExe
 export type AgentActivityKind =
   | "calledTools"
   | "fileChanges"
+  | "fileReads"
   | "exploration"
   | "commands"
   | "terminalRead"
@@ -156,14 +159,17 @@ export function summarizeAgentActivity(
   let calledTools = 0;
   let commands = 0;
   let exploration = 0;
+  let fileReads = 0;
   let terminalReads = 0;
   let webSearch = 0;
   let calledToolsRunning = false;
   let commandsRunning = false;
   let explorationRunning = false;
+  let fileReadsRunning = false;
   let terminalReadsRunning = false;
   let webSearchRunning = false;
-  const changedPaths = new Set<string>();
+  let changedPathCardinality: 0 | 1 | 2 = 0;
+  let firstChangedPath: string | null = null;
   let fileChangesRunning = false;
 
   for (const item of items) {
@@ -174,7 +180,12 @@ export function summarizeAgentActivity(
     }
     if (item.type === "fileChange") {
       for (const change of item.changes) {
-        changedPaths.add(change.path);
+        if (changedPathCardinality === 0) {
+          changedPathCardinality = 1;
+          firstChangedPath = change.path;
+        } else if (changedPathCardinality === 1 && change.path !== firstChangedPath) {
+          changedPathCardinality = 2;
+        }
       }
       fileChangesRunning ||= item.status === "inProgress";
       continue;
@@ -187,6 +198,9 @@ export function summarizeAgentActivity(
     } else if (isTerminalReadTool(name)) {
       terminalReads += 1;
       terminalReadsRunning ||= item.status === "inProgress";
+    } else if (isFileReadTool(name)) {
+      fileReads += 1;
+      fileReadsRunning ||= item.status === "inProgress";
     } else if (isExplorationTool(name)) {
       exploration += 1;
       explorationRunning ||= item.status === "inProgress";
@@ -207,15 +221,26 @@ export function summarizeAgentActivity(
       running: calledToolsRunning,
     });
   }
-  if (changedPaths.size > 0) {
+  if (changedPathCardinality > 0) {
     summaries.push({
       kind: "fileChanges",
-      label: changedPaths.size === 1 ? "Editou um arquivo" : "Editou arquivos",
+      label: changedPathCardinality === 1 ? "Editou um arquivo" : "Editou arquivos",
       running: fileChangesRunning,
     });
   }
+  if (fileReads > 0) {
+    summaries.push({
+      kind: "fileReads",
+      label: fileReadActivityTitle("completed", fileReads),
+      running: fileReadsRunning,
+    });
+  }
   if (exploration > 0) {
-    summaries.push({ kind: "exploration", label: "Leu arquivos", running: explorationRunning });
+    summaries.push({
+      kind: "exploration",
+      label: "Explorou arquivos",
+      running: explorationRunning,
+    });
   }
   if (commands > 0) {
     summaries.push({
@@ -247,6 +272,7 @@ export function agentActivitySummaryLabel(items: readonly AgentActivityItem[]): 
 export function activeAgentActivity(
   items: readonly AgentActivityItem[],
 ): ActiveAgentActivity | null {
+  const runningFileReads = countRunningFileReads(items);
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
     if (item === undefined || item.status !== "inProgress") {
@@ -266,8 +292,14 @@ export function activeAgentActivity(
     if (isTerminalReadTool(name)) {
       return { kind: "terminalRead", label: "Lendo terminal do chat" };
     }
+    if (isFileReadTool(name)) {
+      return {
+        kind: "fileReads",
+        label: fileReadActivityTitle("inProgress", runningFileReads),
+      };
+    }
     if (isExplorationTool(name)) {
-      return { kind: "exploration", label: "Lendo arquivos" };
+      return { kind: "exploration", label: "Explorando arquivos" };
     }
     if (isCommandTool(name)) {
       return { kind: "commands", label: "Executando comando" };
@@ -278,6 +310,20 @@ export function activeAgentActivity(
     };
   }
   return null;
+}
+
+function countRunningFileReads(items: readonly AgentActivityItem[]): number {
+  let count = 0;
+  for (const item of items) {
+    if (
+      item.type === "toolExecution" &&
+      item.status === "inProgress" &&
+      isFileReadTool(item.name)
+    ) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 export function webSearchActivityTitle(

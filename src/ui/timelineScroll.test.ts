@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   calculateTimelineScrollbar,
   findTimelineAnchorIndex,
+  hasReachedTimelineWheelHandoffTarget,
   isTimelineNearEnd,
   normalizeTimelineWheelDelta,
   resolveNestedTimelineWheelTransfer,
@@ -271,6 +272,30 @@ describe("timeline scroll metrics", () => {
         pendingTarget: 180,
       }),
     ).toBe(112);
+  });
+
+  it("ignores stale scrollend events until a wheel handoff reaches its destination", () => {
+    expect(
+      hasReachedTimelineWheelHandoffTarget({
+        currentScrollTop: 320,
+        maximumScroll: 1_000,
+        target: 260,
+      }),
+    ).toBe(false);
+    expect(
+      hasReachedTimelineWheelHandoffTarget({
+        currentScrollTop: 260.5,
+        maximumScroll: 1_000,
+        target: 260,
+      }),
+    ).toBe(true);
+    expect(
+      hasReachedTimelineWheelHandoffTarget({
+        currentScrollTop: 800,
+        maximumScroll: 800,
+        target: 900,
+      }),
+    ).toBe(true);
   });
 
   it("restores either the saved viewport or the exact end deterministically", () => {

@@ -1,5 +1,5 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { openExternalUrl } from "../infrastructure/codexClient";
 import { presentAssistantText } from "./contentReferenceMarkers";
 import { frontendFailureMessage, useFrontendFailureReporter } from "./frontendFailure";
 import { useImageViewer } from "./ImageViewer";
@@ -128,7 +128,7 @@ export function Markdown(props: MarkdownProps) {
     event.preventDefault();
     const url = safeExternalUrl(href);
     if (url !== null) {
-      void openUrl(url).catch((error: unknown) => {
+      void openExternalUrl(url).catch((error: unknown) => {
         reportFailure(frontendFailureMessage("Falha ao abrir o link externo", error));
       });
     }

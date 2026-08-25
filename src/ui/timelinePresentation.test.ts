@@ -7,6 +7,7 @@ import {
   commandPollActivityTitle,
   fileChangeActionLabel,
   fileChangeGroupTitle,
+  fileReadActivityTitle,
   formatCompactElapsedSeconds,
   formatElapsedSeconds,
   reasoningTitle,
@@ -76,6 +77,19 @@ describe("timeline presentation", () => {
     expect(terminalReadActivityTitle("inProgress")).toBe("Lendo terminal do chat");
     expect(terminalReadActivityTitle("completed")).toBe("Terminal do chat lido");
     expect(terminalReadActivityTitle("failed")).toBe("Falha ao ler o terminal do chat");
+  });
+
+  it("formats file reads from execution state and known cardinality", () => {
+    expect(fileReadActivityTitle("completed")).toBe("Executou leitura de arquivo");
+    expect(fileReadActivityTitle("completed", 1)).toBe("Executou leitura de um arquivo");
+    expect(fileReadActivityTitle("completed", 2)).toBe("Executou leitura de 2 arquivos");
+    expect(fileReadActivityTitle("inProgress")).toBe("Lendo arquivo");
+    expect(fileReadActivityTitle("inProgress", 1)).toBe("Lendo um arquivo");
+    expect(fileReadActivityTitle("inProgress", 2)).toBe("Lendo 2 arquivos");
+    expect(fileReadActivityTitle("failed", 2)).toBe("Falha ao ler 2 arquivos");
+    expect(fileReadActivityTitle("declined", 1)).toBe("Leitura de um arquivo recusada");
+    expect(() => fileReadActivityTitle("completed", 0)).toThrow(RangeError);
+    expect(() => fileReadActivityTitle("completed", 1.5)).toThrow(RangeError);
   });
 
   it("uses explicit command polling labels", () => {

@@ -334,8 +334,8 @@ conclui depois de duas geometrias quietas. A auditoria reproduz uma mensagem
 topo nos viewports menores e ao scroll máximo matematicamente possível no
 viewport de 1920 × 1080.
 
-O gate visual corrente cobre 27 cenários em três viewports, totalizando
-81 capturas. Além das regressões anteriores, valida saída ao vivo com auto-follow
+O gate visual corrente cobre 29 cenários em três viewports, totalizando
+87 capturas. Além das regressões anteriores, valida saída ao vivo com auto-follow
 de `0 px`, exclusão com `−288`, ausência do cabeçalho agrupado redundante e
 navegação por âncora após expansão. Uma expansão real de conteúdo de `320 px`
 acima da leitura produz compensação de `320 px` e drift visual `0` durante wheel
@@ -351,12 +351,10 @@ efetivamente montada na página e na sidebar, 364 células, cinco métricas, cin
 insights e zero overflow. O gate pausa a animação em seis pontos do ciclo e exige
 a sequência visível/oculta/visível/oculta/visível/oculta.
 
-O build corrente produz app principal de `431,20 KiB` (`128,62 KiB` gzip),
-entrada de `22,11 KiB` (`8,85 KiB` gzip), CSS de `132,94 KiB` (`24,36 KiB`
-gzip) e worker Markdown lazy de `63,48 KiB`. Os módulos iniciais compartilhados
-somam `5,42 KiB` (`2,56 KiB` gzip), levando o payload inicial agregado a
-`164,39 KiB` gzip: redução de `15,14 KiB` (`8,43%`) frente aos `179,53 KiB`
-anteriores. Configurações (`47,28 KiB`), Automações (`15,16 KiB`), Browser
+O build corrente produz app principal de `467,12 KiB` (`139,19 KiB` gzip),
+entrada de `22,11 KiB` (`8,85 KiB` gzip), CSS de `134,69 KiB` (`24,61 KiB`
+gzip) e worker Markdown lazy de `63,56 KiB`. Os módulos iniciais compartilhados
+somam `5,42 KiB` (`2,56 KiB` gzip). Configurações (`47,28 KiB`), Automações (`15,16 KiB`), Browser
 (`8,90 KiB`) e Revisão (`3,74 KiB`) agora são chunks acionados pela superfície,
 em vez de integrarem o caminho inicial. Nenhuma dependência, WASM ou worker de
 runtime adicional foi introduzido; o worker Markdown continua lazy.
@@ -443,30 +441,93 @@ adaptativa com um salto determinístico acima do limiar antes de medir FPS; a
 ativação deixou de depender da quantidade incidental de pixels por frame do
 compositor.
 
+#### Timeline de atividades e arquivos extremos — 25 de agosto de 2026
+
+A causa dos recarregamentos visuais era a combinação de identidade reciclada,
+estimativas integrais, correções de âncora concorrentes e leitura de layout logo
+depois de substituir o corpo visível de uma leitura ou diff. O caminho atual usa
+slots compatíveis e estáveis, estimativa-base com deltas esparsos, trie de
+disclosures e âncoras transacionais. Viewports internos conservam a posição
+observada pelos próprios eventos; quando já estão no início, trocar seu documento
+não lê `scrollTop` depois da escrita no DOM e não força um layout síncrono no
+callback externo. A auditoria de heap encontrou ainda duas fontes de variação de
+cauda: a projeção derivada criava objetos e índices para toda a lista, e o
+highlighter processava um hunk inteiro para exibir sua primeira janela. A fonte
+indexada agora deriva somente os itens visíveis, enquanto syntax é produzido
+incrementalmente com estado multiline preservado.
+
+O cenário `timeline-performance-stress` abre e visita 180 atividades reais,
+incluindo diffs e leituras com syntax highlighting, e executa scroll triangular
+rápido por 1,4 s. Uma execução integral nas três larguras produziu:
+
+| Viewport | P95 do app | P99 do app | Máximo do app |
+| --- | ---: | ---: | ---: |
+| 920 × 640 | 3,4 ms | 5,8 ms | 6,0 ms |
+| 1280 × 820 | 2,9 ms | 3,6 ms | 4,4 ms |
+| 1920 × 1080 | 3,3 ms | 4,4 ms | 9,5 ms |
+
+O P95 bruto de entrega permaneceu entre 12,4 e 16,7 ms e não houve long task.
+Todos os frames visíveis continham corpos reais: zero placeholders, zero corpos
+adiados no viewport, zero trocas de identidade para resumos ainda visíveis e
+drift de âncora igual a `0 px`. Após repouso ficaram apenas seis ou sete
+atividades montadas, com 20 linhas de leitura e 34 linhas de diff, em vez de o
+conteúdo integral da conversa. A execução ocorreu em um worktree limpo do commit,
+sem aproveitar alterações paralelas do diretório principal, e passou o teto
+permanente de 10 ms nos três viewports.
+
+O cenário independente `timeline-files-100k` percorre a altura inteira de
+100.000 arquivos recolhidos por 1,4 s, com saltos disjuntos e sem reduzir a
+cardinalidade. Três rodadas integrais nos três viewports passaram
+os mesmos gates e produziram os intervalos abaixo:
+
+| Viewport | P95 do app | P99 do app | Máximo do app |
+| --- | ---: | ---: | ---: |
+| 920 × 640 | 2,6–2,7 ms | 2,9–3,0 ms | 3,9 ms |
+| 1280 × 820 | 3,4–3,7 ms | 3,8–4,3 ms | 4,2–4,7 ms |
+| 1920 × 1080 | 4,8–5,0 ms | 5,3–5,8 ms | 5,5–6,0 ms |
+
+Foram montadas no máximo 18, 25 e 35 linhas, respectivamente, com 661–931 nós
+DOM. Nas nove capturas houve zero corpos adiados visíveis, placeholders,
+resumos ausentes, trocas de identidade, long tasks, overflow horizontal ou
+drift de âncora. A altura física permaneceu em 2.600.000 px e a projeção
+autoritativa confirmou os 100.000 itens; o resultado não depende de truncamento,
+paginação visual ou descarte de arquivos.
+
 O comando `pnpm measure:soak` cobre estruturas destinadas a sessões longas sem
-simular rede ou provider. Na revalidação de 18 de agosto de 2026, 100.000 turnos,
-10.000 medições de altura, 50.000 consultas de viewport e 5.000 blocos Markdown
-produziram:
+simular rede ou provider. Na revalidação de 25 de agosto de 2026, 100.000 turnos,
+100.000 arquivos recolhidos e expandidos, 10.000 medições de altura, 50.000
+consultas de viewport e 5.000 blocos Markdown produziram:
 
 | Operação sintética | Resultado |
 | --- | ---: |
-| construção do índice de 100.000 turnos | 58,366 ms |
-| 10.000 atualizações de altura | 5,113 ms |
-| 50.000 consultas de viewport | 37,513 ms |
+| construção do índice de 100.000 turnos | 34,547 ms |
+| 10.000 atualizações de altura | 5,746 ms |
+| 50.000 consultas de viewport | 36,247 ms |
 | maior conjunto montado por viewport | 8 turnos |
-| 50.000 trocas de sessão da timeline | 13,843 ms, mediana de cinco coletas |
-| 50.000 projeções do overlay sobre 100.000 turnos | 16,711 ms |
-| 5.000 atualizações incrementais Markdown | 84,905 ms, mediana de cinco coletas |
-| 20.000 projeções de atividade | 133,587 ms |
-| 20.000 projeções de turno em streaming | 158,085 ms |
+| construção da fonte recolhida de 100.000 arquivos | 0,821 ms; zero chaves derivadas |
+| 50.000 consultas recolhidas | 53,486 ms; máximo de 91 linhas |
+| ativação com 100.000 arquivos expandidos | 0,341 ms |
+| 50.000 consultas expandidas | 41,393 ms; máximo de 8 corpos |
+| altura lógica/física expandida | 40.000.000 / 8.000.000 px |
+| restauração integral para recolhido | 0,281 ms |
+| abrir 100.000 disclosures | 217,926 ms no total |
+| fechar uma folha / fechar a subárvore inteira | 0,069 / 0,062 ms |
+| 50.000 trocas de sessão da timeline | 13,370 ms |
+| 50.000 projeções do overlay sobre 100.000 turnos | 43,402 ms |
+| 5.000 atualizações incrementais Markdown | 88,513 ms |
+| 20.000 projeções de atividade | 124,052 ms |
+| 20.000 projeções de turno em streaming | 159,020 ms |
 
-A linha de base registrada antes destas duas otimizações era 644,2 ms para as
-trocas de sessão e 1.037,254 ms para Markdown. O resultado final representa cerca
-de 46,5× e 12,2× de aceleração, respectivamente, ou reduções de aproximadamente
-97,9% e 91,8%. A timeline reutiliza projeções imutáveis e o Markdown não compara
-mais todo o prefixo acumulado a cada bloco. Não foi introduzido hash
-probabilístico: a origem append-only é controlada pelo lifecycle de overlays e a
-conclusão continua integral e autoritativa.
+A construção recolhida anterior custava 62,137 ms e derivava todas as chaves; a
+fonte atual é aproximadamente 75 vezes mais rápida e prova explicitamente zero
+leituras de chave durante a ativação. A linha de base registrada antes das
+otimizações de sessão era 644,2 ms para as
+trocas e 1.037,254 ms para Markdown. A timeline continua reutilizando projeções
+imutáveis e o Markdown não compara todo o prefixo acumulado a cada bloco. O caso
+novo prova também que recolher o pai de 100 mil arquivos é proporcional somente
+à profundidade da chave, não à quantidade de descendentes. Não foi introduzido
+hash probabilístico, teto de conteúdo ou amostragem visual: a conclusão continua
+integral e autoritativa.
 
 O teste nativo também persiste e percorre 1.200 turnos — acima do antigo teto
 de 1.000 — por todas as páginas, validando cardinalidade e ordem sem um limite
@@ -477,20 +538,21 @@ de produção com heap, nós DOM e INP continua sendo a evidência necessária p
 caracterizar uma sessão real de muitas horas.
 
 O comando `pnpm measure:diff` mede separadamente parsing, projeção split,
-highlight e consultas de viewport sem limitar o conteúdo. Em três execuções de
-16 de agosto de 2026, cada uma com cinco amostras de um diff sintético com
+highlight e consultas de viewport sem limitar o conteúdo. Na revalidação de
+25 de agosto de 2026, cinco amostras de um diff sintético com
 150.001 linhas e 3.744.479 caracteres, os resultados foram:
 
 | Operação sintética | Resultado |
 | --- | ---: |
-| estatísticas sem materializar linhas | 30,312 ms |
-| documento unificado completo | 89,630 ms |
-| projeção split completa e lazy | 64,516 ms |
-| highlight de todo o documento | 623,162 ms |
-| highlight da janela visível | 0,440 ms |
-| linhas montadas no maior viewport | 73 |
-| 100.000 consultas de viewport | 11,959 ms |
-| redução de linhas montadas | 2.054,808 vezes |
+| estatísticas sem materializar linhas | 32,975 ms |
+| documento unificado completo | 93,305 ms |
+| projeção split completa e lazy | 69,431 ms |
+| highlight de todo o documento | 495,625 ms |
+| highlight stateless da janela visível | 0,276 ms |
+| primeira janela incremental / janela aquecida | 1,474 / 0,147 ms |
+| linhas montadas no maior viewport | 41 |
+| 100.000 consultas de viewport | 19,360 ms |
+| redução de linhas montadas | 3.658,561 vezes |
 
 A sequência inteira continua acessível do início ao fim; a redução ocorre apenas
 na quantidade de linhas simultaneamente montadas. O canvas físico é limitado
@@ -521,24 +583,24 @@ e sete válidas:
 
 | Operação | Mediana |
 | --- | ---: |
-| 18 linguagens × 500 iterações | 52,567 ms |
-| bloco Rust de 4.000 linhas | 16,407 ms |
-| 1.000 serializações HTML seguras | 13,736 ms |
-| cold path de 73 linhas de diff | 0,757 ms |
-| warm path das mesmas 73 linhas | 0,044 ms |
-| arquivo Rust criado com 256 linhas | 1,184 ms |
-| fallback de hunk acima do limite | 0,002 ms |
+| 18 linguagens × 500 iterações | 54,804 ms |
+| bloco Rust de 4.000 linhas | 18,304 ms |
+| 1.000 serializações HTML seguras | 14,932 ms |
+| cold path incremental de 41 linhas de diff | 0,046 ms |
+| warm path das mesmas 41 linhas | 0,050 ms |
+| arquivo Rust criado com 256 linhas | 0,200 ms |
+| fallback de hunk acima do limite | 0,003 ms |
 
-A revalidação de 24 de agosto de 2026 alinhou o limite do diff ao orçamento
+A revalidação de 25 de agosto de 2026 manteve o limite do diff no orçamento
 interativo de 32 KiB e 256 linhas. O caso de fronteira permanece colorido abaixo
-de 1,5 ms, enquanto 257 linhas acionam o fallback explícito em `0,002 ms`.
+de 0,3 ms, enquanto 257 linhas acionam o fallback explícito em `0,003 ms`.
 
 No corpus de diff completo, a série final permaneceu próxima do baseline no
-parse (`92,754 ms`), reduziu o highlight integral para `506,087 ms`, manteve o
-cold path abaixo de `1,3 ms` e o warm path abaixo de `0,2 ms`. A projeção split
-subiu para `67,571 ms` porque conserva índices compactos de origem em dois
-`Uint32Array`; o custo adicional de `3,98 ms` ocorre uma única vez em 100 mil
-rows e evita ampliar cada objeto visual ou perder estado sintático no modo split.
+parse (`93,305 ms`), reduziu o highlight integral para `495,625 ms`, manteve a
+primeira janela incremental em `1,474 ms` e a janela aquecida em `0,147 ms`. A
+projeção split em `69,431 ms` conserva índices compactos de origem em dois
+`Uint32Array`; esse custo ocorre uma única vez em 100 mil rows e evita ampliar
+cada objeto visual ou perder estado sintático no modo split.
 
 O checkpoint isolado do motor produziu:
 
@@ -593,8 +655,8 @@ removidos ou convertidos em limites de segurança configuráveis:
 - falhas transitórias de boot, transporte, timeout e HTTP 5xx usam backoff
   limitado e não possuem contador terminal enquanto o turno continuar ativo;
 - rate limits preservam o reset informado, aguardam e consultam novamente;
-- comandos usam uma hora por padrão, aceitam até sete dias por chamada e
-  continuam canceláveis;
+- comandos usam uma hora por padrão, aceitam até sete dias por chamada,
+  continuam canceláveis e nunca sobrevivem ao settlement do turno proprietário;
 - streams possuem 30 minutos de inatividade semântica antes de reiniciar o ciclo
   transitório, em vez de cinco minutos;
 - fechar a janela pelo `X` durante trabalho ativo a oculta para a bandeja; somente
@@ -647,9 +709,10 @@ da conversa:
 - reprodução do turno de referência, incluindo usuário, duração, três
   commentaries, comandos, leitura do terminal e resposta final, começando
   diretamente abaixo do titlebar sem título duplicado;
-- atividade em andamento com as camadas `activity-title-base`,
-  `activity-title-sweep` e `activity-title-highlight`, máscara luminosa e os
-  keyframes sincronizados `activity-reflection-*`;
+- atividade em andamento na variante de 21 de agosto com uma única faixa
+  mascarada, passagem em 48 degraus no primeiro quarto do ciclo de 2 s e pausa
+  de aproximadamente 1,5 s antes da repetição; o texto-base mantém o mesmo cinza
+  e peso das atividades concluídas para destacar somente o brilho;
 - alteração de um único arquivo renderizada diretamente e já expandida, sem o
   contêiner agregado reservado a mudanças com múltiplos arquivos.
 

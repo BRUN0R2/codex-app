@@ -12,6 +12,7 @@ const PREVIEW_PORT = 1420;
 const HOME_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1`;
 const CHAT_REFERENCE_PREVIEW_URL = `${HOME_PREVIEW_URL}&chatReference=1`;
 const TIMELINE_STRESS_PREVIEW_URL = `${HOME_PREVIEW_URL}&timelineStress=1`;
+const TIMELINE_EXTREME_PREVIEW_URL = `${TIMELINE_STRESS_PREVIEW_URL}&timelineFiles=100000`;
 const BROWSER_PANEL_PREVIEW_URL = `${TIMELINE_STRESS_PREVIEW_URL}&browser=1`;
 const BROWSER_DEBUG_PREVIEW_URL = `${BROWSER_PANEL_PREVIEW_URL}&browserMetrics=1`;
 const SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=general`;
@@ -110,75 +111,7 @@ const SCENARIOS = [
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
       (button) => button.textContent?.includes("Inspecionar janela de contexto"),
     )`,
-    prepareExpression: `(() => {
-      const threadButton = [...document.querySelectorAll(".thread-main")].find(
-        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
-      );
-      threadButton?.click();
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        const timeline = document.querySelector(".timeline");
-        if (!(timeline instanceof HTMLElement)) {
-          return;
-        }
-        timeline.scrollTop = 0;
-        requestAnimationFrame(() => {
-          const items = [...document.querySelectorAll(".timeline-virtual-item")];
-          const first = items[0];
-          const anchor = items[1];
-          if (!(first instanceof HTMLElement) || !(anchor instanceof HTMLElement)) {
-            return;
-          }
-          const timelineTop = timeline.getBoundingClientRect().top;
-          const anchorContentTop =
-            timeline.scrollTop + anchor.getBoundingClientRect().top - timelineTop;
-          timeline.scrollTop = Math.min(
-            timeline.scrollHeight - timeline.clientHeight,
-            Math.max(0, anchorContentTop + 200),
-          );
-          requestAnimationFrame(() => {
-            const target = Math.max(0, timeline.scrollTop - 80);
-            timeline.dispatchEvent(
-              new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -80 }),
-            );
-            timeline.scrollTop = target;
-            requestAnimationFrame(() => {
-              const mountedFirst = document.querySelector(
-                '.timeline-virtual-item[data-virtual-turn-id="' +
-                  first.getAttribute("data-virtual-turn-id") +
-                  '"]',
-              );
-              const mountedAnchor = document.querySelector(
-                '.timeline-virtual-item[data-virtual-turn-id="' +
-                  anchor.getAttribute("data-virtual-turn-id") +
-                  '"]',
-              );
-              if (
-                !(mountedFirst instanceof HTMLElement) ||
-                !(mountedAnchor instanceof HTMLElement)
-              ) {
-                return;
-              }
-              window.__previewManualScrollState = {
-                anchorId: mountedAnchor.getAttribute("data-virtual-turn-id"),
-                beforeAnchorGap:
-                  mountedAnchor.getBoundingClientRect().top -
-                  timeline.getBoundingClientRect().top,
-                beforeItemHeight: mountedFirst.getBoundingClientRect().height,
-                beforeScrollTop: timeline.scrollTop,
-                firstId: mountedFirst.getAttribute("data-virtual-turn-id"),
-              };
-              const growth = document.createElement("div");
-              growth.dataset.previewScrollGrowth = "";
-              growth.style.height = "320px";
-              mountedFirst.append(growth);
-              setTimeout(() => {
-                window.__previewManualScrollReady = true;
-              }, 300);
-            });
-          });
-        });
-      }));
-    })()`,
+    prepareExpression: manualScrollOwnershipPrepareExpression(),
     readyExpression: `window.__previewManualScrollReady === true`,
     auditExpression: manualScrollOwnershipVisualAuditExpression,
     validate: validateManualScrollOwnershipMetrics,
@@ -193,6 +126,18 @@ const SCENARIOS = [
     readyExpression: `window.__previewNestedScrollReady === true`,
     auditExpression: nestedScrollHandoffVisualAuditExpression,
     validate: validateNestedScrollHandoffMetrics,
+  },
+  {
+    id: "nested-scroll-wheel-ownership",
+    url: TIMELINE_STRESS_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de timeline expandida"),
+    )`,
+    prepareExpression: nestedScrollWheelOwnershipPrepareExpression(),
+    readyExpression: `window.__previewNestedWheelReady === true`,
+    interact: exerciseNestedScrollWheelOwnership,
+    auditExpression: nestedScrollWheelOwnershipAuditExpression,
+    validate: validateNestedScrollWheelOwnershipMetrics,
   },
   {
     id: "nested-scroll-following",
@@ -266,6 +211,7 @@ const SCENARIOS = [
       );
     })()`,
     auditExpression: singleFileChangeVisualAuditExpression,
+    interact: exerciseIntrinsicActivityInteraction,
     validate: validateSingleFileChangeMetrics,
   },
   {
@@ -318,6 +264,7 @@ const SCENARIOS = [
     prepareExpression: previewHighlightedToolOutputsPrepareExpression(),
     readyExpression: `window.__previewHighlightedToolMetrics !== undefined`,
     auditExpression: highlightedToolOutputVisualAuditExpression,
+    interact: exerciseHighlightedReadInteraction,
     validate: validateHighlightedToolOutputMetrics,
   },
   {
@@ -628,6 +575,18 @@ const SCENARIOS = [
     auditExpression: timelinePerformanceStressAuditExpression,
     validate: validateTimelinePerformanceStressMetrics,
   },
+  {
+    id: "timeline-files-100k",
+    url: TIMELINE_EXTREME_PREVIEW_URL,
+    readyTimeoutMs: 30_000,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de 100000 arquivos"),
+    )`,
+    prepareExpression: timelineExtremeFilesPrepareExpression(),
+    readyExpression: `window.__timelineExtremeFilesReady === true`,
+    auditExpression: timelineExtremeFilesAuditExpression,
+    validate: validateTimelineExtremeFilesMetrics,
+  },
 ];
 
 async function main() {
@@ -636,7 +595,16 @@ async function main() {
   const debugPort = await reservePort();
   const server = spawn(
     process.execPath,
-    [VITE_ENTRY, "--host", "127.0.0.1", "--port", String(PREVIEW_PORT), "--strictPort"],
+    [
+      VITE_ENTRY,
+      "--host",
+      "127.0.0.1",
+      "--mode",
+      "production",
+      "--port",
+      String(PREVIEW_PORT),
+      "--strictPort",
+    ],
     {
       cwd: PROJECT_ROOT,
       stdio: ["ignore", "pipe", "pipe"],
@@ -730,6 +698,10 @@ async function auditViewport(debugPort, viewport, scenario) {
   try {
     await client.send("Page.enable");
     await client.send("Runtime.enable");
+    await client.send("Storage.clearDataForOrigin", {
+      origin: new URL(scenario.url).origin,
+      storageTypes: "all",
+    });
     await client.send("Emulation.setDeviceMetricsOverride", {
       width: viewport.width,
       height: viewport.height,
@@ -753,6 +725,9 @@ async function auditViewport(debugPort, viewport, scenario) {
         scenario.readyTimeoutMs,
       );
     }
+    if (scenario.interact !== undefined) {
+      await scenario.interact(client);
+    }
     await client.evaluate(
       `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(async () => {
         await document.fonts.ready;
@@ -762,7 +737,15 @@ async function auditViewport(debugPort, viewport, scenario) {
     );
 
     const metrics = await client.evaluate(scenario.auditExpression(), false);
-    scenario.validate(metrics, viewport);
+    try {
+      scenario.validate(metrics, viewport);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Cenário ${scenario.id} inválido em ${viewport.width}x${viewport.height}: ${reason}. Métricas: ${JSON.stringify(metrics)}`,
+        { cause: error },
+      );
+    }
     const screenshot = await client.send("Page.captureScreenshot", {
       format: "png",
       fromSurface: true,
@@ -1170,7 +1153,13 @@ function previewHighlightedToolOutputsPrepareExpression() {
           if (source instanceof HTMLElement && search instanceof HTMLElement) {
             const sourceTokens = [...source.querySelectorAll(".syntax-token")];
             const searchTokens = [...search.querySelectorAll(".syntax-token")];
+            const sourceSummary = sourceCard.querySelector(":scope > summary");
             window.__previewHighlightedToolMetrics = {
+              readIconPaths: [
+                ...(sourceSummary?.querySelectorAll(".activity-icon svg path") ?? []),
+              ].map((path) => path.getAttribute("d")),
+              readTitle:
+                sourceSummary?.querySelector(".activity-title-base")?.textContent?.trim() ?? null,
               sourceLineNumbers: [...source.querySelectorAll(".tool-source-line-number")].map(
                 (element) => element.textContent?.trim() ?? "",
               ),
@@ -1228,6 +1217,125 @@ function imageViewGroupVisualAuditExpression() {
   })()`;
 }
 
+function manualScrollOwnershipPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      try {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const waitUntil = async (label, predicate) => {
+          const deadline = performance.now() + 3000;
+          while (!predicate()) {
+            if (performance.now() > deadline) {
+              throw new Error("Tempo esgotado preparando " + label + ".");
+            }
+            await frame();
+          }
+        };
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+        );
+        if (!(threadButton instanceof HTMLButtonElement)) {
+          throw new Error("O chat de referência do scroll manual está ausente.");
+        }
+        threadButton.click();
+        await waitUntil(
+          "o chat de referência",
+          () => document.getElementById("user-message-preview-image-user-message") !== null,
+        );
+        const timeline = document.querySelector(".timeline");
+        if (!(timeline instanceof HTMLElement)) {
+          throw new Error("A timeline do cenário de scroll manual está ausente.");
+        }
+        await waitUntil(
+          "dois turnos virtualizados",
+          () => document.querySelectorAll(".timeline-virtual-item").length >= 2,
+        );
+        const initialItems = [...document.querySelectorAll(".timeline-virtual-item")];
+        const initialFirst = initialItems[0];
+        const initialAnchor = initialItems[1];
+        const timelineInner = timeline.querySelector(":scope > .timeline-inner");
+        if (
+          !(initialFirst instanceof HTMLElement) ||
+          !(initialAnchor instanceof HTMLElement) ||
+          !(timelineInner instanceof HTMLElement)
+        ) {
+          throw new Error("Os itens de referência do scroll manual estão ausentes.");
+        }
+        const firstId = initialFirst.getAttribute("data-virtual-turn-id");
+        const anchorId = initialAnchor.getAttribute("data-virtual-turn-id");
+        if (firstId === null || anchorId === null) {
+          throw new Error("Os itens de referência perderam suas identidades virtuais.");
+        }
+        const setupSpacer = document.createElement("div");
+        setupSpacer.dataset.previewManualScrollSetup = "";
+        setupSpacer.style.height = Math.max(1200, window.innerHeight) + "px";
+        timelineInner.append(setupSpacer);
+        await frame();
+        await frame();
+        timeline.dispatchEvent(
+          new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -1 }),
+        );
+        timeline.scrollTop = 0;
+        await frame();
+        await frame();
+        const first = document.querySelector(
+          '.timeline-virtual-item[data-virtual-turn-id="' + firstId + '"]',
+        );
+        const anchor = document.querySelector(
+          '.timeline-virtual-item[data-virtual-turn-id="' + anchorId + '"]',
+        );
+        if (!(first instanceof HTMLElement) || !(anchor instanceof HTMLElement)) {
+          throw new Error("Os itens de referência foram desmontados durante a preparação.");
+        }
+        const timelineTop = timeline.getBoundingClientRect().top;
+        const anchorContentTop =
+          timeline.scrollTop + anchor.getBoundingClientRect().top - timelineTop;
+        timeline.scrollTop = Math.min(
+          timeline.scrollHeight - timeline.clientHeight,
+          Math.max(0, anchorContentTop + 200),
+        );
+        await frame();
+        const target = Math.max(0, timeline.scrollTop - 80);
+        timeline.dispatchEvent(
+          new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -80 }),
+        );
+        timeline.scrollTop = target;
+        await frame();
+        const mountedFirst = document.querySelector(
+          '.timeline-virtual-item[data-virtual-turn-id="' + firstId + '"]',
+        );
+        const mountedAnchor = document.querySelector(
+          '.timeline-virtual-item[data-virtual-turn-id="' + anchorId + '"]',
+        );
+        if (
+          !(mountedFirst instanceof HTMLElement) ||
+          !(mountedAnchor instanceof HTMLElement)
+        ) {
+          throw new Error("Os itens de referência foram desmontados antes da medição.");
+        }
+        window.__previewManualScrollState = {
+          anchorId,
+          beforeAnchorGap:
+            mountedAnchor.getBoundingClientRect().top - timeline.getBoundingClientRect().top,
+          beforeItemHeight: mountedFirst.getBoundingClientRect().height,
+          beforeScrollTop: timeline.scrollTop,
+          firstId,
+        };
+        const growth = document.createElement("div");
+        growth.dataset.previewScrollGrowth = "";
+        growth.style.height = "320px";
+        mountedFirst.append(growth);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      } catch (error) {
+        window.__previewManualScrollError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      } finally {
+        window.__previewManualScrollReady = true;
+      }
+    })();
+  })()`;
+}
+
 function nestedScrollHandoffPrepareExpression() {
   return `(() => {
     void (async () => {
@@ -1252,14 +1360,18 @@ function nestedScrollHandoffPrepareExpression() {
           const command = [...document.querySelectorAll(".command-activity-card")].find(
             (details) => details.querySelector(":scope > summary .activity-title.is-running") !== null,
           );
-          const source = [...document.querySelectorAll(".tool-activity-card")].find(
-            (details) => details.textContent?.includes("diffHighlighter.test.ts"),
-          );
+          const source = document
+            .querySelector('[data-virtual-activity-key*="preview-source-read"]')
+            ?.querySelector("details");
           const file = [...document.querySelectorAll(".file-change-diff .diff-file-identity code")].find(
             (element) => element.textContent?.trim() === "semantic.rs",
           );
           const diff = file?.closest(".file-change-diff");
-          if (command instanceof HTMLDetailsElement) {
+          if (
+            command instanceof HTMLDetailsElement &&
+            source instanceof HTMLDetailsElement &&
+            diff instanceof HTMLDetailsElement
+          ) {
             for (const details of [command, source, diff]) {
               if (!(details instanceof HTMLDetailsElement)) {
                 continue;
@@ -1272,14 +1384,8 @@ function nestedScrollHandoffPrepareExpression() {
             await frame();
             const timeline = document.querySelector(".timeline");
             const commandScroll = command.querySelector(".command-card-scroll");
-            const sourceScroll =
-              source instanceof HTMLDetailsElement
-                ? source.querySelector(".command-card-scroll")
-                : commandScroll;
-            const diffScroll =
-              diff instanceof HTMLDetailsElement
-                ? diff.querySelector(".diff-viewport")
-                : commandScroll;
+            const sourceScroll = source.querySelector(".tool-source-viewport");
+            const diffScroll = diff.querySelector(".diff-viewport");
             if (
               !(timeline instanceof HTMLElement) ||
               !(commandScroll instanceof HTMLElement) ||
@@ -1298,8 +1404,9 @@ function nestedScrollHandoffPrepareExpression() {
               styleReadCount += 1;
               return originalGetComputedStyle.apply(window, args);
             };
-            const run = (region, requestedTop, deltaY) => {
+            const run = async (region, requestedTop, deltaY) => {
               timeline.scrollTop = baseTimelineScroll;
+              await frame();
               region.scrollTop = requestedTop;
               const nestedStart = region.scrollTop;
               const maximumNestedScroll = Math.max(0, region.scrollHeight - region.clientHeight);
@@ -1315,22 +1422,48 @@ function nestedScrollHandoffPrepareExpression() {
                 deltaMode: 0,
                 deltaY,
               });
+              const timelineStart = timeline.scrollTop;
               region.dispatchEvent(wheel);
+              const targetTimelineScroll = timelineStart + expectedTimelineDelta;
+              const timelinePositions = [timeline.scrollTop];
+              const deadline = performance.now() + 1200;
+              while (
+                Math.abs(timeline.scrollTop - targetTimelineScroll) > 1 &&
+                performance.now() < deadline
+              ) {
+                await frame();
+                timelinePositions.push(timeline.scrollTop);
+              }
+              await frame();
+              timelinePositions.push(timeline.scrollTop);
+              const direction = Math.sign(expectedTimelineDelta);
+              const frameDeltas = timelinePositions.slice(1).map(
+                (position, index) => position - (timelinePositions[index] ?? position),
+              );
               return {
                 defaultPrevented: wheel.defaultPrevented,
+                distinctTimelinePositions: new Set(
+                  timelinePositions.map((position) => Math.round(position * 10)),
+                ).size,
                 expectedNestedScroll,
                 expectedTimelineDelta,
+                maximumFrameDelta: Math.max(0, ...frameDeltas.map((delta) => Math.abs(delta))),
+                monotonic:
+                  direction === 0 ||
+                  frameDeltas.every((delta) => direction * delta >= -0.5),
                 nestedScrollTop: region.scrollTop,
-                timelineDelta: timeline.scrollTop - baseTimelineScroll,
+                targetTimelineScroll,
+                timelineDelta: timeline.scrollTop - timelineStart,
+                timelineStart,
               };
             };
             try {
               const handoffStartedAt = performance.now();
               window.__previewNestedScrollMetrics = {
-                command: run(commandScroll, 40, -100),
-                diff: run(diffScroll, 0, -120),
+                command: await run(commandScroll, 40, -100),
+                diff: await run(diffScroll, 0, -120),
                 handoffDurationMs: performance.now() - handoffStartedAt,
-                source: run(sourceScroll, 0, -80),
+                source: await run(sourceScroll, 0, -80),
                 styleReadCount,
               };
             } finally {
@@ -1348,6 +1481,688 @@ function nestedScrollHandoffPrepareExpression() {
       }
     })();
   })()`;
+}
+
+function nestedScrollWheelOwnershipPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      try {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const waitUntil = async (label, predicate) => {
+          const deadline = performance.now() + 3000;
+          while (!predicate()) {
+            if (performance.now() > deadline) {
+              throw new Error("Tempo esgotado preparando " + label + ".");
+            }
+            await frame();
+          }
+        };
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Estresse de timeline expandida"),
+        );
+        if (!(threadButton instanceof HTMLButtonElement)) {
+          throw new Error("O chat de estresse da timeline está ausente.");
+        }
+        threadButton.click();
+        await waitUntil(
+          "o turno de estresse",
+          () =>
+            document.getElementById("user-message-timeline-stress-user-message") !== null,
+        );
+        document.querySelector('button[aria-label="Mostrar trabalho do agente"]')?.click();
+        await frame();
+        document.querySelector(".agent-activity-group:not([open]) > summary")?.click();
+        await waitUntil(
+          "a lista virtualizada de atividades",
+          () => document.querySelector(".agent-activity-virtual-list") !== null,
+        );
+        const timeline = document.querySelector(".timeline");
+        if (!(timeline instanceof HTMLElement)) {
+          throw new Error("A timeline do cenário de wheel nativo está ausente.");
+        }
+        timeline.dispatchEvent(
+          new WheelEvent("wheel", {
+            bubbles: true,
+            cancelable: true,
+            deltaMode: 0,
+            deltaY: -1,
+          }),
+        );
+        timeline.scrollTop = 0;
+        await new Promise((resolve) => setTimeout(resolve, 180));
+        await frame();
+        for (let index = 0; index < 24; index += 1) {
+          const sourceWrapper = document.querySelector(
+            '[data-virtual-activity-key^="13:toolExecution|22:timeline-stress-tool-2|"]',
+          );
+          const diffWrapper = document.querySelector(
+            '[data-virtual-activity-key^="10:fileChange|24:timeline-stress-change-3|"]',
+          );
+          const source = sourceWrapper?.querySelector("details");
+          const diff = diffWrapper?.querySelector("details");
+          for (const details of [source, diff]) {
+            if (details instanceof HTMLDetailsElement && !details.open) {
+              details.querySelector(":scope > summary")?.click();
+              await frame();
+            }
+          }
+          await frame();
+          const sourceScroll =
+            source instanceof HTMLDetailsElement
+              ? source.querySelector(".tool-source-viewport")
+              : null;
+          const diffScroll =
+            diff instanceof HTMLDetailsElement ? diff.querySelector(".diff-viewport") : null;
+          if (
+            sourceScroll instanceof HTMLElement &&
+            diffScroll instanceof HTMLElement &&
+            sourceScroll.scrollHeight - sourceScroll.clientHeight >= 160 &&
+            diffScroll.scrollHeight - diffScroll.clientHeight >= 160
+          ) {
+            sourceScroll.dataset.previewNestedWheelTarget = "source";
+            diffScroll.dataset.previewNestedWheelTarget = "diff";
+            return;
+          }
+          timeline.scrollTop = Math.min(
+            timeline.scrollHeight - timeline.clientHeight,
+            timeline.scrollTop + 120,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        const describeTarget = (activityKey, regionSelector) => {
+          const wrapper = document.querySelector(
+            '[data-virtual-activity-key^="' + activityKey + '"]',
+          );
+          const details = wrapper?.querySelector("details");
+          const region = details?.querySelector(regionSelector);
+          return {
+            mounted: wrapper !== null,
+            open: details instanceof HTMLDetailsElement ? details.open : null,
+            scrollRange:
+              region instanceof HTMLElement ? region.scrollHeight - region.clientHeight : null,
+          };
+        };
+        throw new Error(
+          "Os arquivos expandidos não materializaram regiões verticais suficientes: " +
+            JSON.stringify({
+              diff: describeTarget(
+                "10:fileChange|24:timeline-stress-change-3|",
+                ".diff-viewport",
+              ),
+              source: describeTarget(
+                "13:toolExecution|22:timeline-stress-tool-2|",
+                ".tool-source-viewport",
+              ),
+              timeline: {
+                clientHeight: timeline.clientHeight,
+                scrollHeight: timeline.scrollHeight,
+                scrollTop: timeline.scrollTop,
+              },
+              viewport: { height: window.innerHeight, width: window.innerWidth },
+            }),
+        );
+      } catch (error) {
+        window.__previewNestedWheelError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      } finally {
+        window.__previewNestedWheelReady = true;
+      }
+    })();
+  })()`;
+}
+
+async function exerciseNestedScrollWheelOwnership(client) {
+  const samples = {};
+  for (const label of ["diff", "source"]) {
+    const activityKey =
+      label === "diff"
+        ? "10:fileChange|24:timeline-stress-change-3|"
+        : "13:toolExecution|22:timeline-stress-tool-2|";
+    await client.evaluate(
+      `(() => {
+        const timeline = document.querySelector(".timeline");
+        if (!(timeline instanceof HTMLElement)) {
+          throw new Error("A timeline está ausente antes de localizar ${label}.");
+        }
+        timeline.scrollTop = 0;
+      })()`,
+      false,
+    );
+    await client.evaluate(
+      `new Promise((resolve) => setTimeout(
+        () => requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        140,
+      ))`,
+      true,
+    );
+    await client.evaluate(
+      `(() => {
+        if (window.__previewNestedWheelError !== undefined) {
+          throw new Error(window.__previewNestedWheelError);
+        }
+        const wrapper = document.querySelector(
+          '[data-virtual-activity-key^="${activityKey}"]',
+        );
+        const details = wrapper?.querySelector("details");
+        if (!(details instanceof HTMLDetailsElement)) {
+          throw new Error("Atividade aninhada ausente: ${label}");
+        }
+        details.querySelector(":scope > summary")?.scrollIntoView({
+          block: "center",
+          inline: "nearest",
+        });
+      })()`,
+      false,
+    );
+    await client.evaluate(
+      `new Promise((resolve) => setTimeout(
+        () => requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        140,
+      ))`,
+      true,
+    );
+    const pointer = await client.evaluate(
+      `(() => {
+        const timeline = document.querySelector(".timeline");
+        const wrapper = document.querySelector(
+          '[data-virtual-activity-key^="${activityKey}"]',
+        );
+        const details = wrapper?.querySelector("details");
+        const region =
+          "${label}" === "diff"
+            ? details?.querySelector(".diff-viewport")
+            : details?.querySelector(".tool-source-viewport");
+        if (!(timeline instanceof HTMLElement) || !(region instanceof HTMLElement)) {
+          throw new Error("Viewport de scroll ausente para ${label}.");
+        }
+        const eventCount = 4;
+        const eventDelta = 20;
+        const expectedNestedDelta = eventCount * eventDelta;
+        const maximumNestedScroll = region.scrollHeight - region.clientHeight;
+        const nestedStart = Math.round(maximumNestedScroll / 2);
+        region.scrollTop = nestedStart;
+        const maximumTimelineScroll = timeline.scrollHeight - timeline.clientHeight;
+        const direction =
+          maximumTimelineScroll - timeline.scrollTop >= expectedNestedDelta + 2 ? 1 : -1;
+        const timelineStart = timeline.scrollTop;
+        const bounds = region.getBoundingClientRect();
+        const timelineBounds = timeline.getBoundingClientRect();
+        const x = Math.min(bounds.right - 8, bounds.left + Math.max(8, bounds.width / 2));
+        const visibleTop = Math.max(bounds.top, timelineBounds.top);
+        const visibleBottom = Math.min(bounds.bottom, timelineBounds.bottom);
+        let y = null;
+        for (let candidate = visibleTop + 8; candidate <= visibleBottom - 8; candidate += 16) {
+          const hit = document.elementFromPoint(x, candidate);
+          if (hit instanceof Node && region.contains(hit)) {
+            y = candidate;
+            break;
+          }
+        }
+        if (y === null) {
+          throw new Error(
+            "Nenhum ponto visível pertence à região ${label}: " +
+              JSON.stringify({
+                activityKey: wrapper?.getAttribute("data-virtual-activity-key") ?? null,
+                bounds: bounds.toJSON(),
+                detailsOpen:
+                  details instanceof HTMLDetailsElement ? details.open : null,
+                disclosureExpanded:
+                  details?.querySelector(":scope > summary")?.getAttribute("aria-expanded") ??
+                  null,
+                disclosureKey:
+                  details
+                    ?.querySelector(":scope > summary")
+                    ?.getAttribute("data-timeline-disclosure") ?? null,
+                groupDisclosureKey:
+                  wrapper
+                    ?.closest(".agent-activity-group")
+                    ?.querySelector(":scope > summary")
+                    ?.getAttribute("data-timeline-disclosure") ?? null,
+                hits: document
+                  .elementsFromPoint(x, Math.max(0, Math.min(innerHeight - 1, visibleTop + 8)))
+                  .slice(0, 6)
+                  .map((element) => ({
+                    bounds: element.getBoundingClientRect().toJSON(),
+                    className:
+                      typeof element.className === "string" ? element.className : null,
+                    tagName: element.tagName,
+                    virtualKey:
+                      element
+                        .closest("[data-virtual-activity-key]")
+                        ?.getAttribute("data-virtual-activity-key") ?? null,
+                  })),
+                regionScroll: {
+                  clientHeight: region.clientHeight,
+                  scrollHeight: region.scrollHeight,
+                  scrollTop: region.scrollTop,
+                },
+                timelineBounds: timelineBounds.toJSON(),
+                timelineScroll: {
+                  clientHeight: timeline.clientHeight,
+                  scrollHeight: timeline.scrollHeight,
+                  scrollTop: timeline.scrollTop,
+                },
+                visibleBottom,
+                visibleTop,
+                wrapperBounds: wrapper?.getBoundingClientRect().toJSON() ?? null,
+                wrapperTop: wrapper instanceof HTMLElement ? wrapper.style.top : null,
+                x,
+              }),
+          );
+        }
+        const events = [];
+        const listener = (event) => {
+          if (event.target instanceof Node && region.contains(event.target)) {
+            events.push({
+              cancelable: event.cancelable,
+              defaultPrevented: event.defaultPrevented,
+              deltaY: event.deltaY,
+            });
+          }
+        };
+        timeline.addEventListener("wheel", listener);
+        window.__previewNestedWheelSample = {
+          events,
+          expectedNestedDelta: direction * expectedNestedDelta,
+          label: "${label}",
+          listener,
+          nestedStart,
+          region,
+          timeline,
+          timelineStart,
+        };
+        return {
+          deltaY: direction * eventDelta,
+          eventCount,
+          x,
+          y,
+        };
+      })()`,
+      false,
+    );
+    await client.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: pointer.x,
+      y: pointer.y,
+    });
+    for (let index = 0; index < pointer.eventCount; index += 1) {
+      await client.send("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        deltaX: 0,
+        deltaY: pointer.deltaY,
+        x: pointer.x,
+        y: pointer.y,
+      });
+    }
+    await client.evaluate(
+      `new Promise((resolve) => setTimeout(
+        () => requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        50,
+      ))`,
+      true,
+    );
+    const internal = await client.evaluate(
+      `(() => {
+        const sample = window.__previewNestedWheelSample;
+        if (
+          sample === undefined ||
+          sample.label !== "${label}" ||
+          !(sample.region instanceof HTMLElement) ||
+          !(sample.timeline instanceof HTMLElement)
+        ) {
+          throw new Error("A amostra de wheel ficou inconsistente para ${label}.");
+        }
+        sample.timeline.removeEventListener("wheel", sample.listener);
+        return {
+          events: sample.events,
+          expectedNestedDelta: sample.expectedNestedDelta,
+          nestedDelta: sample.region.scrollTop - sample.nestedStart,
+          timelineDelta: sample.timeline.scrollTop - sample.timelineStart,
+        };
+      })()`,
+      false,
+    );
+    const handoffPointer = await client.evaluate(
+      `(() => {
+        const sample = window.__previewNestedWheelSample;
+        if (
+          sample === undefined ||
+          sample.label !== "${label}" ||
+          !(sample.region instanceof HTMLElement) ||
+          !(sample.timeline instanceof HTMLElement)
+        ) {
+          throw new Error("A região de handoff ficou inconsistente para ${label}.");
+        }
+        const eventCount = 4;
+        const eventDelta = 20;
+        const expectedTimelineDistance = eventCount * eventDelta;
+        const maximumNestedScroll = sample.region.scrollHeight - sample.region.clientHeight;
+        const maximumTimelineScroll =
+          sample.timeline.scrollHeight - sample.timeline.clientHeight;
+        const direction =
+          maximumTimelineScroll - sample.timeline.scrollTop >= expectedTimelineDistance + 2
+            ? 1
+            : -1;
+        const targetTimelineScroll = Math.min(
+          maximumTimelineScroll,
+          Math.max(0, sample.timeline.scrollTop + direction * expectedTimelineDistance),
+        );
+        sample.region.scrollTop = direction > 0 ? maximumNestedScroll : 0;
+        const events = [];
+        const listener = (event) => {
+          if (event.target instanceof Node && sample.region.contains(event.target)) {
+            events.push({
+              cancelable: event.cancelable,
+              defaultPrevented: event.defaultPrevented,
+              deltaY: event.deltaY,
+            });
+          }
+        };
+        sample.timeline.addEventListener("wheel", listener);
+        window.__previewNestedWheelHandoffSample = {
+          events,
+          expectedTimelineDelta: targetTimelineScroll - sample.timeline.scrollTop,
+          label: "${label}",
+          listener,
+          nestedStart: sample.region.scrollTop,
+          region: sample.region,
+          targetTimelineScroll,
+          timeline: sample.timeline,
+          timelineStart: sample.timeline.scrollTop,
+        };
+        return {
+          deltaY: direction * eventDelta,
+          eventCount,
+          x: ${JSON.stringify(pointer.x)},
+          y: ${JSON.stringify(pointer.y)},
+        };
+      })()`,
+      false,
+    );
+    await client.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: handoffPointer.x,
+      y: handoffPointer.y,
+    });
+    for (let index = 0; index < handoffPointer.eventCount; index += 1) {
+      await client.send("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        deltaX: 0,
+        deltaY: handoffPointer.deltaY,
+        x: handoffPointer.x,
+        y: handoffPointer.y,
+      });
+    }
+    const handoff = await client.evaluate(
+      `new Promise((resolve, reject) => {
+        const sample = window.__previewNestedWheelHandoffSample;
+        if (
+          sample === undefined ||
+          sample.label !== "${label}" ||
+          !(sample.region instanceof HTMLElement) ||
+          !(sample.timeline instanceof HTMLElement)
+        ) {
+          reject(new Error("A amostra de handoff ficou inconsistente para ${label}."));
+          return;
+        }
+        const positions = [sample.timeline.scrollTop];
+        const deadline = performance.now() + 1200;
+        const measure = () => {
+          positions.push(sample.timeline.scrollTop);
+          if (
+            Math.abs(sample.timeline.scrollTop - sample.targetTimelineScroll) > 1 &&
+            performance.now() < deadline
+          ) {
+            requestAnimationFrame(measure);
+            return;
+          }
+          sample.timeline.removeEventListener("wheel", sample.listener);
+          const direction = Math.sign(sample.expectedTimelineDelta);
+          const frameDeltas = positions.slice(1).map(
+            (position, index) => position - (positions[index] ?? position),
+          );
+          resolve({
+            distinctTimelinePositions: new Set(
+              positions.map((position) => Math.round(position * 10)),
+            ).size,
+            events: sample.events,
+            expectedTimelineDelta: sample.expectedTimelineDelta,
+            maximumFrameDelta: Math.max(0, ...frameDeltas.map((delta) => Math.abs(delta))),
+            monotonic:
+              direction === 0 ||
+              frameDeltas.every((delta) => direction * delta >= -0.5),
+            nestedDelta: sample.region.scrollTop - sample.nestedStart,
+            timelineDelta: sample.timeline.scrollTop - sample.timelineStart,
+          });
+        };
+        requestAnimationFrame(measure);
+      })`,
+      true,
+    );
+    const reversalPointer = await client.evaluate(
+      `(() => {
+        const sample = window.__previewNestedWheelSample;
+        if (
+          sample === undefined ||
+          sample.label !== "${label}" ||
+          !(sample.region instanceof HTMLElement) ||
+          !(sample.timeline instanceof HTMLElement)
+        ) {
+          throw new Error("A região de reversão ficou inconsistente para ${label}.");
+        }
+        const handoffDelta = 80;
+        const reverseDelta = 20;
+        const maximumNestedScroll = sample.region.scrollHeight - sample.region.clientHeight;
+        const maximumTimelineScroll =
+          sample.timeline.scrollHeight - sample.timeline.clientHeight;
+        const direction =
+          maximumTimelineScroll - sample.timeline.scrollTop >= handoffDelta + 2 ? 1 : -1;
+        sample.region.scrollTop = direction > 0 ? maximumNestedScroll : 0;
+        const events = [];
+        const listener = (event) => {
+          if (event.target instanceof Node && sample.region.contains(event.target)) {
+            events.push({
+              cancelable: event.cancelable,
+              defaultPrevented: event.defaultPrevented,
+              deltaY: event.deltaY,
+            });
+          }
+        };
+        sample.timeline.addEventListener("wheel", listener);
+        window.__previewNestedWheelReversalSample = {
+          direction,
+          events,
+          expectedNestedDelta: -direction * reverseDelta,
+          handoffDelta: direction * handoffDelta,
+          label: "${label}",
+          listener,
+          nestedStart: sample.region.scrollTop,
+          region: sample.region,
+          timeline: sample.timeline,
+          timelineStart: sample.timeline.scrollTop,
+        };
+        return {
+          handoffDeltaY: direction * handoffDelta,
+          reverseDeltaY: -direction * reverseDelta,
+          x: ${JSON.stringify(pointer.x)},
+          y: ${JSON.stringify(pointer.y)},
+        };
+      })()`,
+      false,
+    );
+    await client.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: reversalPointer.x,
+      y: reversalPointer.y,
+    });
+    await client.send("Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      deltaX: 0,
+      deltaY: reversalPointer.handoffDeltaY,
+      x: reversalPointer.x,
+      y: reversalPointer.y,
+    });
+    await client.evaluate(`new Promise((resolve) => requestAnimationFrame(resolve))`, true);
+    await client.send("Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      deltaX: 0,
+      deltaY: reversalPointer.reverseDeltaY,
+      x: reversalPointer.x,
+      y: reversalPointer.y,
+    });
+    const reversal = await client.evaluate(
+      `new Promise((resolve, reject) => {
+        const sample = window.__previewNestedWheelReversalSample;
+        if (
+          sample === undefined ||
+          sample.label !== "${label}" ||
+          !(sample.region instanceof HTMLElement) ||
+          !(sample.timeline instanceof HTMLElement)
+        ) {
+          reject(new Error("A amostra de reversão ficou inconsistente para ${label}."));
+          return;
+        }
+        const positions = [];
+        let remainingFrames = 12;
+        const measure = () => {
+          positions.push(sample.timeline.scrollTop);
+          remainingFrames -= 1;
+          if (remainingFrames > 0) {
+            requestAnimationFrame(measure);
+            return;
+          }
+          sample.timeline.removeEventListener("wheel", sample.listener);
+          resolve({
+            events: sample.events,
+            expectedNestedDelta: sample.expectedNestedDelta,
+            handoffDelta: sample.handoffDelta,
+            nestedDelta: sample.region.scrollTop - sample.nestedStart,
+            postCancelRange:
+              positions.length === 0 ? 0 : Math.max(...positions) - Math.min(...positions),
+            timelineDelta: sample.timeline.scrollTop - sample.timelineStart,
+          });
+        };
+        requestAnimationFrame(measure);
+      })`,
+      true,
+    );
+    samples[label] = { handoff, internal, reversal };
+  }
+  await client.evaluate(
+    `window.__previewNestedWheelMetrics = ${JSON.stringify(samples)}`,
+    false,
+  );
+}
+
+async function exerciseIntrinsicActivityInteraction(client) {
+  await exerciseIntrinsicSummaryInteraction(client, {
+    actionSelector: ".file-change-action",
+    chevronSelector: ".diff-file-chevron",
+    identitySelector: ".diff-file-identity code",
+    stateProperty: "__previewIntrinsicActivityInteraction",
+    summaryExpression: `[...document.querySelectorAll(".file-change-diff .diff-file-identity code")]
+      .find((element) => element.textContent?.trim() === "engine.rs")?.closest("summary")`,
+  });
+}
+
+async function exerciseHighlightedReadInteraction(client) {
+  await exerciseIntrinsicSummaryInteraction(client, {
+    actionSelector: ".activity-title",
+    chevronSelector: ".activity-chevron",
+    identitySelector: ".activity-title",
+    stateProperty: "__previewReadActivityInteraction",
+    summaryExpression: `[...document.querySelectorAll(".tool-activity-card > summary")]
+      .find((element) => element.textContent?.includes("Executou leitura de arquivo"))`,
+  });
+}
+
+async function exerciseIntrinsicSummaryInteraction(
+  client,
+  { actionSelector, chevronSelector, identitySelector, stateProperty, summaryExpression },
+) {
+  const stateKey = JSON.stringify(stateProperty);
+  await client.evaluate(
+    `(() => {
+      const summary = ${summaryExpression};
+      if (!(summary instanceof HTMLElement)) {
+        throw new Error("A linha para posicionar a interação intrínseca está ausente.");
+      }
+      summary.scrollIntoView({ block: "center", inline: "nearest" });
+    })()`,
+    false,
+  );
+  await client.evaluate(
+    `new Promise((resolve) => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(resolve)), 180))`,
+    true,
+  );
+  const pointer = await client.evaluate(
+    `(() => {
+      const summary = ${summaryExpression};
+      const row = summary?.closest(".agent-activity-virtual-item") ?? summary?.parentElement;
+      const action = summary?.querySelector(${JSON.stringify(actionSelector)});
+      const identity = summary?.querySelector(${JSON.stringify(identitySelector)});
+      const icon = summary?.querySelector(".activity-icon");
+      const chevron = summary?.querySelector(${JSON.stringify(chevronSelector)});
+      if (
+        !(summary instanceof HTMLElement) ||
+        !(row instanceof HTMLElement) ||
+        !(action instanceof HTMLElement) ||
+        !(identity instanceof HTMLElement) ||
+        !(icon instanceof HTMLElement) ||
+        !(chevron instanceof HTMLElement)
+      ) {
+        throw new Error("A linha para validar interação intrínseca está ausente.");
+      }
+      window.__capturePreviewIntrinsicActivity = () => ({
+        actionColor: getComputedStyle(action).color,
+        chevronOpacity: Number.parseFloat(getComputedStyle(chevron).opacity),
+        hovered: summary.matches(":hover"),
+        iconColor: getComputedStyle(icon).color,
+        identityColor: getComputedStyle(identity).color,
+        rowWidth: row.getBoundingClientRect().width,
+        summaryWidth: summary.getBoundingClientRect().width,
+      });
+      const bounds = summary.getBoundingClientRect();
+      const farX = Math.min(innerWidth - 4, row.getBoundingClientRect().right - 8);
+      if (farX <= bounds.right + 16) {
+        throw new Error("A linha não possui área externa suficiente para validar o hover.");
+      }
+      window[${stateKey}] = { rest: window.__capturePreviewIntrinsicActivity() };
+      return {
+        farX,
+        hoverX: Math.max(bounds.left + 4, bounds.right - 8),
+        y: bounds.top + bounds.height / 2,
+      };
+    })()`,
+    false,
+  );
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: pointer.farX,
+    y: pointer.y,
+  });
+  await settleHoverTransition(client);
+  await client.evaluate(
+    `window[${stateKey}].far = window.__capturePreviewIntrinsicActivity()`,
+    false,
+  );
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: pointer.hoverX,
+    y: pointer.y,
+  });
+  await settleHoverTransition(client);
+  await client.evaluate(
+    `window[${stateKey}].hover = window.__capturePreviewIntrinsicActivity()`,
+    false,
+  );
+}
+
+async function settleHoverTransition(client) {
+  await client.evaluate(
+    `new Promise((resolve) => setTimeout(() => requestAnimationFrame(resolve), 160))`,
+    true,
+  );
 }
 
 function nestedScrollFollowingPrepareExpression() {
@@ -1392,9 +2207,26 @@ function nestedScrollFollowingPrepareExpression() {
         if (!(timeline instanceof HTMLElement) || !(region instanceof HTMLElement)) {
           throw new Error("A saída interna do comando ativo está ausente.");
         }
-        timeline.scrollTop = timeline.scrollHeight - timeline.clientHeight;
+        const maximumTimelineScroll = timeline.scrollHeight - timeline.clientHeight;
+        timeline.scrollTop = Math.max(0, maximumTimelineScroll - 160);
         await frame();
         await frame();
+        const scrollToEndButton = document.querySelector(
+          'button[aria-label="Ir para o fim da conversa"]',
+        );
+        if (!(scrollToEndButton instanceof HTMLButtonElement)) {
+          throw new Error("O controle para acompanhar o fim da timeline está ausente.");
+        }
+        scrollToEndButton.click();
+        const followDeadline = performance.now() + 1200;
+        while (
+          Math.abs(timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop) > 2
+        ) {
+          if (performance.now() > followDeadline) {
+            throw new Error("A timeline não concluiu a navegação para o fim.");
+          }
+          await frame();
+        }
         await frame();
         const maximumNestedScroll = Math.max(0, region.scrollHeight - region.clientHeight);
         const nestedStart = Math.round(maximumNestedScroll / 2);
@@ -1494,10 +2326,7 @@ function timelinePerformanceStressPrepareExpression() {
           timeline.scrollTop = 0;
           await new Promise((resolve) => setTimeout(resolve, 180));
           await frame();
-          if (
-            timeline.scrollTop <= 1 &&
-            document.querySelector(".agent-activity-scroll-placeholder") === null
-          ) {
+          if (timeline.scrollTop <= 1) {
             break;
           }
         }
@@ -1507,9 +2336,21 @@ function timelinePerformanceStressPrepareExpression() {
         const expansionStarted = performance.now();
         window.__timelineStressProgress = { phase: "expanding" };
         let iterations = 0;
-        let passes = 1;
-        while (visited.size < 3 && iterations < 24) {
-          let opened = false;
+        let stagnantIterations = 0;
+        let direction = 1;
+        let boundaryPasses = 0;
+        while (visited.size < 180 && iterations < 600 && stagnantIterations < 200) {
+          const maximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+          const step = Math.max(180, timeline.clientHeight * 0.72);
+          let target = Math.min(maximum, Math.max(0, timeline.scrollTop + direction * step));
+          if (Math.abs(target - timeline.scrollTop) <= 1) {
+            direction *= -1;
+            boundaryPasses += 1;
+            target = Math.min(maximum, Math.max(0, timeline.scrollTop + direction * step));
+          }
+          timeline.scrollTop = target;
+          await frame();
+          let opened = 0;
           for (const wrapper of document.querySelectorAll(".agent-activity-virtual-item")) {
             const key = wrapper.getAttribute("data-virtual-activity-key");
             if (key === null || visited.has(key)) {
@@ -1523,9 +2364,9 @@ function timelinePerformanceStressPrepareExpression() {
               details.querySelector(":scope > summary")?.click();
             }
             visited.add(key);
-            opened = true;
-            break;
+            opened += 1;
           }
+          stagnantIterations = opened === 0 ? stagnantIterations + 1 : 0;
           window.__timelineStressProgress = {
             iterations,
             phase: "expanding-visible-item",
@@ -1533,8 +2374,37 @@ function timelinePerformanceStressPrepareExpression() {
             scrollTop: timeline.scrollTop,
             visited: visited.size,
           };
-          await new Promise((resolve) => setTimeout(resolve, opened ? 16 : 100));
+          await new Promise((resolve) => setTimeout(resolve, 8));
           iterations += 1;
+        }
+        if (visited.size !== 180) {
+          const visitedOrdinals = new Set(
+            [...visited]
+              .map((key) =>
+                Number(
+                  key.match(/timeline-stress-(?:command|tool|change)-(\d+)/)?.[1] ?? Number.NaN,
+                ),
+              )
+              .filter(Number.isFinite),
+          );
+          const missingOrdinals = Array.from({ length: 180 }, (_, index) => index + 1).filter(
+            (ordinal) => !visitedOrdinals.has(ordinal),
+          );
+          throw new Error(
+            "A expansão percorreu " +
+              visited.size +
+              " de 180 atividades em " +
+              iterations +
+              " iterações. " +
+              JSON.stringify({
+                missingOrdinals,
+                mountedKeys: [...document.querySelectorAll(".agent-activity-virtual-item")].map(
+                  (element) => element.getAttribute("data-virtual-activity-key"),
+                ),
+                scrollMaximum: Math.max(0, timeline.scrollHeight - timeline.clientHeight),
+                scrollTop: timeline.scrollTop,
+              }),
+          );
         }
         await new Promise((resolve) => setTimeout(resolve, 140));
         const expansionMs = performance.now() - expansionStarted;
@@ -1544,19 +2414,48 @@ function timelinePerformanceStressPrepareExpression() {
           visited: visited.size,
         };
 
-        const adaptiveMaximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
-        const adaptiveJump = Math.max(200, timeline.clientHeight * 0.3);
-        const adaptiveTarget = timeline.scrollTop > adaptiveMaximum / 2
-          ? Math.max(0, timeline.scrollTop - adaptiveJump)
-          : Math.min(adaptiveMaximum, timeline.scrollTop + adaptiveJump);
-        timeline.scrollTop = adaptiveTarget;
-        timeline.dispatchEvent(new Event("scroll"));
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        const adaptiveDeferralObserved =
-          document.querySelector(".agent-activity-scroll-placeholder") !== null;
-        await new Promise((resolve) => setTimeout(resolve, 110));
-
         const frameIntervals = [];
+        const animationWorkByFrame = new Map();
+        const animationCallbackOutliers = [];
+        let auditAnimationCallback = null;
+        const nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+        window.requestAnimationFrame = (callback) =>
+          nativeRequestAnimationFrame((timestamp) => {
+            const started = performance.now();
+            try {
+              callback(timestamp);
+            } finally {
+              const duration = performance.now() - started;
+              let measurement = animationWorkByFrame.get(timestamp);
+              if (measurement === undefined) {
+                measurement = {
+                  applicationDuration: 0,
+                  auditDuration: 0,
+                  callbacks: 0,
+                  duration: 0,
+                  durations: [],
+                };
+                animationWorkByFrame.set(timestamp, measurement);
+              }
+              measurement.applicationDuration +=
+                callback === auditAnimationCallback ? 0 : duration;
+              measurement.auditDuration +=
+                callback === auditAnimationCallback ? duration : 0;
+              measurement.callbacks += 1;
+              measurement.duration += duration;
+              measurement.durations.push(duration);
+              if (callback !== auditAnimationCallback && duration > 8) {
+                animationCallbackOutliers.push({
+                  duration,
+                  elapsed: performance.now() - rapidStarted,
+                  name: callback.name,
+                  scrollTop: timeline.scrollTop,
+                  source: String(callback).slice(0, 240),
+                  timestamp,
+                });
+              }
+            }
+          });
         const longTasks = [];
         const observer = PerformanceObserver.supportedEntryTypes?.includes("longtask")
           ? new PerformanceObserver((list) => {
@@ -1566,32 +2465,106 @@ function timelinePerformanceStressPrepareExpression() {
         observer?.observe({ type: "longtask" });
         const rapidStarted = performance.now();
         let previousFrame = rapidStarted;
-        let placeholderFrames = 0;
+        let deferredBodyFrames = 0;
+        let visibleDeferredBodyFrames = 0;
+        let maximumVisibleDeferredBodies = 0;
+        let legacyPlaceholderFrames = 0;
+        let missingSummaryFrames = 0;
+        const rapidFrameOutliers = [];
+        let consecutiveSummaryComparisons = 0;
+        let summaryIdentityChanges = 0;
+        let previousSummariesByKey = new Map();
         await new Promise((resolve) => {
           const tick = (now) => {
-            frameIntervals.push(now - previousFrame);
+            const frameInterval = now - previousFrame;
+            frameIntervals.push(frameInterval);
             previousFrame = now;
             const maximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
             const phase = ((now - rapidStarted) % 700) / 700;
+            const mountedWrappers = document.querySelectorAll(".agent-activity-virtual-item");
+            const mountedItems = mountedWrappers.length;
+            let mountedSummaries = 0;
+            const currentSummariesByKey = new Map();
+            for (const wrapper of mountedWrappers) {
+              const key = wrapper.getAttribute("data-virtual-activity-key");
+              const summary = wrapper.querySelector("summary");
+              if (key === null || !(summary instanceof HTMLElement)) {
+                continue;
+              }
+              mountedSummaries += 1;
+              const previousSummary = previousSummariesByKey.get(key);
+              if (previousSummary !== undefined) {
+                consecutiveSummaryComparisons += 1;
+                summaryIdentityChanges += previousSummary === summary ? 0 : 1;
+              }
+              currentSummariesByKey.set(key, summary);
+            }
+            previousSummariesByKey = currentSummariesByKey;
+            const deferredBodyElements = document.querySelectorAll(
+              '[data-activity-content="deferred"]',
+            );
+            const deferredBodies = deferredBodyElements.length;
+            const timelineBounds = timeline.getBoundingClientRect();
+            const visibleDeferredBodies = [...deferredBodyElements].filter((element) => {
+              const bounds = element.getBoundingClientRect();
+              return bounds.bottom > timelineBounds.top && bounds.top < timelineBounds.bottom;
+            }).length;
+            deferredBodyFrames += deferredBodies === 0 ? 0 : 1;
+            visibleDeferredBodyFrames += visibleDeferredBodies === 0 ? 0 : 1;
+            maximumVisibleDeferredBodies = Math.max(
+              maximumVisibleDeferredBodies,
+              visibleDeferredBodies,
+            );
+            legacyPlaceholderFrames +=
+              document.querySelector(".agent-activity-scroll-placeholder") === null ? 0 : 1;
+            missingSummaryFrames += mountedSummaries < mountedItems ? 1 : 0;
+            if (frameInterval > 20 && rapidFrameOutliers.length < 20) {
+              rapidFrameOutliers.push({
+                deferredBodies,
+                diffRows: document.querySelectorAll(".diff-virtual-row").length,
+                visibleDeferredBodies,
+                frame: frameIntervals.length - 1,
+                intervalMs: frameInterval,
+                mountedItems,
+                phase,
+                sourceRows: document.querySelectorAll(".tool-source-line").length,
+              });
+            }
             timeline.scrollTop = phase <= 0.5
               ? maximum * phase * 2
               : maximum * (2 - phase * 2);
-            if (document.querySelector(".agent-activity-scroll-placeholder") !== null) {
-              placeholderFrames += 1;
-            }
             if (now - rapidStarted >= 1400) {
               resolve();
             } else {
               requestAnimationFrame(tick);
             }
           };
+          auditAnimationCallback = tick;
           requestAnimationFrame(tick);
         });
+        window.requestAnimationFrame = nativeRequestAnimationFrame;
         observer?.disconnect();
         const rapidElapsed = performance.now() - rapidStarted;
         const sortedFrames = frameIntervals.slice(1).sort((left, right) => left - right);
-        const percentile = (value) =>
-          sortedFrames[Math.min(sortedFrames.length - 1, Math.floor(sortedFrames.length * value))] ?? 0;
+        const sortedAnimationWork = [...animationWorkByFrame.values()]
+          .map((measurement) => measurement.duration)
+          .sort((left, right) => left - right);
+        const sortedApplicationAnimationWork = [...animationWorkByFrame.values()]
+          .map((measurement) => measurement.applicationDuration)
+          .sort((left, right) => left - right);
+        const sortedAuditAnimationWork = [...animationWorkByFrame.values()]
+          .map((measurement) => measurement.auditDuration)
+          .sort((left, right) => left - right);
+        const animationCallbackRanks = [0, 1, 2].map((rank) =>
+          [...animationWorkByFrame.values()]
+            .map(
+              (measurement) =>
+                measurement.durations.slice().sort((left, right) => right - left)[rank] ?? 0,
+            )
+            .sort((left, right) => left - right),
+        );
+        const percentile = (values, percentileValue) =>
+          values[Math.min(values.length - 1, Math.floor(values.length * percentileValue))] ?? 0;
         await new Promise((resolve) => setTimeout(resolve, 150));
         window.__timelineStressProgress = { phase: "rapid-scroll-complete" };
 
@@ -1641,10 +2614,7 @@ function timelinePerformanceStressPrepareExpression() {
           await new Promise((resolve) => setTimeout(resolve, 180));
           await frame();
           await frame();
-          if (
-            restoredTimeline.scrollTop <= 1 &&
-            document.querySelector(".agent-activity-scroll-placeholder") === null
-          ) {
+          if (restoredTimeline.scrollTop <= 1) {
             break;
           }
         }
@@ -1727,29 +2697,57 @@ function timelinePerformanceStressPrepareExpression() {
 
         window.__timelinePerformanceStressMetrics = {
           visitedItems: visited.size,
+          expansionBoundaryPasses: boundaryPasses,
           expansionIterations: iterations,
           expansionMs,
-          expansionPasses: passes,
           rapidFrames: sortedFrames.length,
           rapidElapsedMs: rapidElapsed,
           rapidAverageFps: sortedFrames.length / (rapidElapsed / 1000),
-          rapidMedianFrameMs: percentile(0.5),
-          rapidP95FrameMs: percentile(0.95),
-          rapidP99FrameMs: percentile(0.99),
+          rapidMedianFrameMs: percentile(sortedFrames, 0.5),
+          rapidP95FrameMs: percentile(sortedFrames, 0.95),
+          rapidP99FrameMs: percentile(sortedFrames, 0.99),
           rapidMaximumFrameMs: sortedFrames.at(-1) ?? 0,
+          rapidAnimationWorkFrames: sortedAnimationWork.length,
+          rapidAnimationCallbacks: [...animationWorkByFrame.values()].reduce(
+            (total, measurement) => total + measurement.callbacks,
+            0,
+          ),
+          rapidMedianAnimationWorkMs: percentile(sortedAnimationWork, 0.5),
+          rapidP95AnimationWorkMs: percentile(sortedAnimationWork, 0.95),
+          rapidP99AnimationWorkMs: percentile(sortedAnimationWork, 0.99),
+          rapidMaximumAnimationWorkMs: sortedAnimationWork.at(-1) ?? 0,
+          rapidP95ApplicationAnimationWorkMs: percentile(sortedApplicationAnimationWork, 0.95),
+          rapidP99ApplicationAnimationWorkMs: percentile(sortedApplicationAnimationWork, 0.99),
+          rapidMaximumApplicationAnimationWorkMs: sortedApplicationAnimationWork.at(-1) ?? 0,
+          rapidAnimationCallbackOutliers: animationCallbackOutliers,
+          rapidP95AuditAnimationWorkMs: percentile(sortedAuditAnimationWork, 0.95),
+          rapidP95AnimationCallbackRanksMs: animationCallbackRanks.map((durations) =>
+            percentile(durations, 0.95),
+          ),
           rapidFramesOver20Ms: sortedFrames.filter((value) => value > 20).length,
           rapidFramesOver34Ms: sortedFrames.filter((value) => value > 34).length,
           rapidLongTasks: longTasks.length,
           rapidLongTaskTotalMs: longTasks.reduce((total, value) => total + value, 0),
-          adaptiveDeferralObserved,
-          placeholderFrames,
+          rapidFrameOutliers,
+          deferredBodyFrames,
+          visibleDeferredBodyFrames,
+          maximumVisibleDeferredBodies,
+          legacyPlaceholderFrames,
+          missingSummaryFrames,
+          consecutiveSummaryComparisons,
+          summaryIdentityChanges,
           reopenMs,
           visualDriftPx,
           domNodes: document.getElementsByTagName("*").length,
           mountedActivityItems: document.querySelectorAll(".agent-activity-virtual-item").length,
           mountedSourceRows: document.querySelectorAll(".tool-source-line").length,
           mountedDiffRows: document.querySelectorAll(".diff-virtual-row").length,
-          settledPlaceholders: document.querySelectorAll(".agent-activity-scroll-placeholder").length,
+          settledDeferredBodies: document.querySelectorAll(
+            '[data-activity-content="deferred"]',
+          ).length,
+          settledLegacyPlaceholders: document.querySelectorAll(
+            ".agent-activity-scroll-placeholder",
+          ).length,
           horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
         };
       } catch (error) {
@@ -1944,6 +2942,9 @@ function userMessageNavigationVisualAuditExpression() {
 
 function manualScrollOwnershipVisualAuditExpression() {
   return `(() => {
+    if (window.__previewManualScrollError !== undefined) {
+      throw new Error(window.__previewManualScrollError);
+    }
     const timeline = document.querySelector(".timeline");
     const state = window.__previewManualScrollState;
     if (!(timeline instanceof HTMLElement) || state === undefined) {
@@ -1992,6 +2993,23 @@ function nestedScrollHandoffVisualAuditExpression() {
   })()`;
 }
 
+function nestedScrollWheelOwnershipAuditExpression() {
+  return `(() => {
+    if (window.__previewNestedWheelError !== undefined) {
+      throw new Error(window.__previewNestedWheelError);
+    }
+    const metrics = window.__previewNestedWheelMetrics;
+    if (metrics === undefined) {
+      throw new Error("Cenário de wheel nativo em arquivos expandidos não foi inicializado.");
+    }
+    return {
+      ...metrics,
+      viewport: { width: innerWidth, height: innerHeight },
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
 function nestedScrollFollowingVisualAuditExpression() {
   return `(() => {
     if (window.__previewNestedFollowError !== undefined) {
@@ -2005,6 +3023,287 @@ function nestedScrollFollowingVisualAuditExpression() {
       ...metrics,
       viewport: { width: innerWidth, height: innerHeight },
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function timelineExtremeFilesPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      try {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const waitUntil = async (label, predicate, timeoutMs) => {
+          const deadline = performance.now() + timeoutMs;
+          while (!predicate()) {
+            if (performance.now() > deadline) {
+              throw new Error("Tempo esgotado preparando " + label + ".");
+            }
+            await frame();
+          }
+        };
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Estresse de 100000 arquivos"),
+        );
+        threadButton?.click();
+        await waitUntil(
+          "o turno com 100 mil arquivos",
+          () => document.querySelector(".conversation-turn") !== null,
+          5000,
+        );
+        document.querySelector('button[aria-label="Mostrar trabalho do agente"]')?.click();
+        await frame();
+        document.querySelector(".agent-activity-group:not([open]) > summary")?.click();
+        await waitUntil(
+          "a lista virtual de 100 mil arquivos",
+          () =>
+            document.querySelector(".agent-activity-virtual-list")?.getAttribute(
+              "data-virtual-activity-total",
+            ) === "100000",
+          10_000,
+        );
+        await frame();
+        await frame();
+        const timeline = document.querySelector(".timeline");
+        if (!(timeline instanceof HTMLElement)) {
+          throw new Error("A timeline extrema está ausente.");
+        }
+
+        const frameIntervals = [];
+        const animationWorkByFrame = new Map();
+        const animationCallbackOutliers = [];
+        let auditAnimationCallback = null;
+        const nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+        window.requestAnimationFrame = (callback) =>
+          nativeRequestAnimationFrame((timestamp) => {
+            const started = performance.now();
+            try {
+              callback(timestamp);
+            } finally {
+              const duration = performance.now() - started;
+              let measurement = animationWorkByFrame.get(timestamp);
+              if (measurement === undefined) {
+                measurement = { applicationDuration: 0, duration: 0 };
+                animationWorkByFrame.set(timestamp, measurement);
+              }
+              measurement.applicationDuration +=
+                callback === auditAnimationCallback ? 0 : duration;
+              measurement.duration += duration;
+              if (callback !== auditAnimationCallback && duration > 8) {
+                animationCallbackOutliers.push({
+                  duration,
+                  elapsed: performance.now() - rapidStarted,
+                  name: callback.name,
+                  scrollTop: timeline.scrollTop,
+                  source: String(callback).slice(0, 240),
+                  timestamp,
+                });
+              }
+            }
+          });
+        const longTasks = [];
+        let deferredBodyFrames = 0;
+        let visibleDeferredBodyFrames = 0;
+        let maximumVisibleDeferredBodies = 0;
+        let legacyPlaceholderFrames = 0;
+        let maximumMountedItems = 0;
+        let missingSummaryFrames = 0;
+        let consecutiveSummaryComparisons = 0;
+        let summaryIdentityChanges = 0;
+        let previousSummariesByKey = new Map();
+        const observer = PerformanceObserver.supportedEntryTypes?.includes("longtask")
+          ? new PerformanceObserver((list) => {
+              longTasks.push(...list.getEntries().map((entry) => entry.duration));
+            })
+          : null;
+        observer?.observe({ type: "longtask" });
+        const rapidStarted = performance.now();
+        let previousFrame = rapidStarted;
+        await new Promise((resolve) => {
+          const tick = (now) => {
+            frameIntervals.push(now - previousFrame);
+            previousFrame = now;
+            if (now - rapidStarted >= 1400) {
+              resolve();
+              return;
+            }
+            const maximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+            const phase = ((now - rapidStarted) % 700) / 700;
+            timeline.scrollTop = phase <= 0.5
+              ? maximum * phase * 2
+              : maximum * (2 - phase * 2);
+            requestAnimationFrame(tick);
+          };
+          auditAnimationCallback = tick;
+          requestAnimationFrame(tick);
+        });
+        window.requestAnimationFrame = nativeRequestAnimationFrame;
+        observer?.disconnect();
+        const rapidElapsed = performance.now() - rapidStarted;
+        await frame();
+        await frame();
+
+        const correctnessStarted = performance.now();
+        await new Promise((resolve) => {
+          const inspectFrame = (now) => {
+            const mountedWrappers = document.querySelectorAll(".agent-activity-virtual-item");
+            const mountedItems = mountedWrappers.length;
+            const mountedSummaries = document.querySelectorAll(
+              ".agent-activity-virtual-item summary",
+            ).length;
+            const currentSummariesByKey = new Map();
+            for (const wrapper of mountedWrappers) {
+              const key = wrapper.getAttribute("data-virtual-activity-key");
+              const summary = wrapper.querySelector("summary");
+              if (key === null || !(summary instanceof HTMLElement)) {
+                continue;
+              }
+              const previousSummary = previousSummariesByKey.get(key);
+              if (previousSummary !== undefined) {
+                consecutiveSummaryComparisons += 1;
+                summaryIdentityChanges += previousSummary === summary ? 0 : 1;
+              }
+              currentSummariesByKey.set(key, summary);
+            }
+            previousSummariesByKey = currentSummariesByKey;
+            maximumMountedItems = Math.max(maximumMountedItems, mountedItems);
+            const deferredBodyElements = document.querySelectorAll(
+              '[data-activity-content="deferred"]',
+            );
+            const timelineBounds = timeline.getBoundingClientRect();
+            const visibleDeferredBodies = [...deferredBodyElements].filter((element) => {
+              const bounds = element.getBoundingClientRect();
+              return bounds.bottom > timelineBounds.top && bounds.top < timelineBounds.bottom;
+            }).length;
+            deferredBodyFrames += deferredBodyElements.length === 0 ? 0 : 1;
+            visibleDeferredBodyFrames += visibleDeferredBodies === 0 ? 0 : 1;
+            maximumVisibleDeferredBodies = Math.max(
+              maximumVisibleDeferredBodies,
+              visibleDeferredBodies,
+            );
+            legacyPlaceholderFrames +=
+              document.querySelector(".agent-activity-scroll-placeholder") === null ? 0 : 1;
+            missingSummaryFrames += mountedSummaries < mountedItems ? 1 : 0;
+            const maximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+            const phase = ((now - correctnessStarted) % 700) / 700;
+            timeline.scrollTop = phase <= 0.5
+              ? maximum * phase * 2
+              : maximum * (2 - phase * 2);
+            if (now - correctnessStarted >= 1400) {
+              resolve();
+            } else {
+              requestAnimationFrame(inspectFrame);
+            }
+          };
+          requestAnimationFrame(inspectFrame);
+        });
+        await frame();
+        await frame();
+        const timelineRect = timeline.getBoundingClientRect();
+        const anchor = [...document.querySelectorAll(".agent-activity-virtual-item")].find(
+          (element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.bottom >= timelineRect.top && rect.top <= timelineRect.bottom;
+          },
+        );
+        const anchorKey = anchor?.getAttribute("data-virtual-activity-key") ?? null;
+        const anchorOffset =
+          anchor instanceof HTMLElement
+            ? anchor.getBoundingClientRect().top - timelineRect.top
+            : null;
+        await new Promise((resolve) => setTimeout(resolve, 180));
+        await frame();
+        await frame();
+        const settledAnchor =
+          anchorKey === null
+            ? null
+            : [...document.querySelectorAll(".agent-activity-virtual-item")].find(
+                (element) =>
+                  element.getAttribute("data-virtual-activity-key") === anchorKey,
+              );
+        const visualDriftPx =
+          anchorOffset === null || !(settledAnchor instanceof HTMLElement)
+            ? null
+            : settledAnchor.getBoundingClientRect().top -
+              timeline.getBoundingClientRect().top -
+              anchorOffset;
+        const sortedFrames = frameIntervals.slice(1).sort((left, right) => left - right);
+        const sortedAnimationWork = [...animationWorkByFrame.values()]
+          .map((measurement) => measurement.duration)
+          .sort((left, right) => left - right);
+        const sortedApplicationAnimationWork = [...animationWorkByFrame.values()]
+          .map((measurement) => measurement.applicationDuration)
+          .sort((left, right) => left - right);
+        const percentile = (values, percentileValue) =>
+          values[Math.min(values.length - 1, Math.floor(values.length * percentileValue))] ?? 0;
+        const list = document.querySelector(".agent-activity-virtual-list");
+        window.__timelineExtremeFilesMetrics = {
+          totalActivities: Number(list?.getAttribute("data-virtual-activity-total") ?? 0),
+          physicalListHeight: list?.getBoundingClientRect().height ?? 0,
+          rapidFrames: sortedFrames.length,
+          rapidElapsedMs: rapidElapsed,
+          rapidAverageFps: sortedFrames.length / (rapidElapsed / 1000),
+          rapidMedianFrameMs: percentile(sortedFrames, 0.5),
+          rapidP95FrameMs: percentile(sortedFrames, 0.95),
+          rapidP99FrameMs: percentile(sortedFrames, 0.99),
+          rapidMaximumFrameMs: sortedFrames.at(-1) ?? 0,
+          rapidAnimationWorkFrames: sortedAnimationWork.length,
+          rapidP95AnimationWorkMs: percentile(sortedAnimationWork, 0.95),
+          rapidP99AnimationWorkMs: percentile(sortedAnimationWork, 0.99),
+          rapidP95ApplicationAnimationWorkMs: percentile(
+            sortedApplicationAnimationWork,
+            0.95,
+          ),
+          rapidP99ApplicationAnimationWorkMs: percentile(
+            sortedApplicationAnimationWork,
+            0.99,
+          ),
+          rapidMaximumApplicationAnimationWorkMs:
+            sortedApplicationAnimationWork.at(-1) ?? 0,
+          rapidAnimationCallbackOutliers: animationCallbackOutliers,
+          rapidLongTasks: longTasks.length,
+          rapidLongTaskTotalMs: longTasks.reduce((total, value) => total + value, 0),
+          deferredBodyFrames,
+          visibleDeferredBodyFrames,
+          maximumVisibleDeferredBodies,
+          legacyPlaceholderFrames,
+          maximumMountedItems,
+          missingSummaryFrames,
+          consecutiveSummaryComparisons,
+          summaryIdentityChanges,
+          settledDeferredBodies: document.querySelectorAll(
+            '[data-activity-content="deferred"]',
+          ).length,
+          settledLegacyPlaceholders: document.querySelectorAll(
+            ".agent-activity-scroll-placeholder",
+          ).length,
+          mountedItemsAfterSettle: document.querySelectorAll(
+            ".agent-activity-virtual-item",
+          ).length,
+          domNodes: document.getElementsByTagName("*").length,
+          visualDriftPx,
+          horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+        };
+      } catch (error) {
+        window.__timelineExtremeFilesError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      } finally {
+        window.__timelineExtremeFilesReady = true;
+      }
+    })();
+  })()`;
+}
+
+function timelineExtremeFilesAuditExpression() {
+  return `(() => {
+    if (window.__timelineExtremeFilesError !== undefined) {
+      throw new Error(window.__timelineExtremeFilesError);
+    }
+    if (window.__timelineExtremeFilesMetrics === undefined) {
+      throw new Error("As métricas de 100 mil arquivos estão ausentes.");
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      ...window.__timelineExtremeFilesMetrics,
     };
   })()`;
 }
@@ -2057,7 +3356,7 @@ function singleFileChangeVisualAuditExpression() {
     ].find((element) => element.textContent?.trim() === "setupBrowserPreview.ts");
     const groupedBlock = groupedFile?.closest(".file-change-diff");
     const groupedActivity = groupedBlock?.closest(".agent-activity-group");
-    const groupedSet = groupedBlock?.closest(".grouped-file-change-set");
+    const groupedList = groupedBlock?.closest(".agent-activity-virtual-list");
     const newFile = [
       ...document.querySelectorAll(".file-change-diff .diff-file-identity code"),
     ].find((element) => element.textContent?.trim() === "semantic.rs");
@@ -2070,7 +3369,7 @@ function singleFileChangeVisualAuditExpression() {
       !(groupedFile instanceof HTMLElement) ||
       !(groupedBlock instanceof HTMLDetailsElement) ||
       !(groupedActivity instanceof HTMLDetailsElement) ||
-      !(groupedSet instanceof HTMLElement) ||
+      !(groupedList instanceof HTMLElement) ||
       !(newFile instanceof HTMLElement) ||
       !(newFileBlock instanceof HTMLDetailsElement) ||
       !(deletedFile instanceof HTMLElement) ||
@@ -2093,10 +3392,10 @@ function singleFileChangeVisualAuditExpression() {
       groupedHasActivityIcon:
         groupedBlock.querySelector(".activity-icon") instanceof HTMLElement,
       groupedHasRedundantHeading:
-        groupedSet.querySelector(".grouped-file-change-heading") instanceof HTMLElement,
+        groupedActivity.querySelector(".grouped-file-change-heading") instanceof HTMLElement,
       groupedDirectFileCount:
-        groupedSet.querySelectorAll(":scope > .file-change-list > .file-change-diff").length,
-      groupedNestedCollectionCount: groupedSet.querySelectorAll(".file-change-card").length,
+        groupedList.querySelectorAll(".agent-activity-virtual-item .file-change-diff").length,
+      groupedNestedCollectionCount: groupedList.querySelectorAll(".file-change-card").length,
       newFileAction:
         newFileBlock.querySelector(".file-change-action")?.textContent?.trim() ?? null,
       newFileBadge: newFileBlock.querySelector(".change-kind")?.textContent?.trim() ?? null,
@@ -2116,6 +3415,7 @@ function singleFileChangeVisualAuditExpression() {
       aggregateContainerCount: document.querySelectorAll(".file-change-card").length,
       directDiffVisible:
         block.querySelector(".diff-viewport, .diff-empty-state") instanceof HTMLElement,
+      intrinsicInteraction: window.__previewIntrinsicActivityInteraction ?? null,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
@@ -2228,6 +3528,7 @@ function highlightedToolOutputVisualAuditExpression() {
       return {
         viewport: { width: innerWidth, height: innerHeight },
         ...window.__previewHighlightedToolMetrics,
+        readInteraction: window.__previewReadActivityInteraction ?? null,
       };
     }
     const source = document.querySelector(".tool-source-output");
@@ -2237,8 +3538,14 @@ function highlightedToolOutputVisualAuditExpression() {
     }
     const sourceTokens = [...source.querySelectorAll(".syntax-token")];
     const searchTokens = [...search.querySelectorAll(".syntax-token")];
+    const sourceSummary = source.closest(".tool-activity-card")?.querySelector(":scope > summary");
     return {
       viewport: { width: innerWidth, height: innerHeight },
+      readIconPaths: [
+        ...(sourceSummary?.querySelectorAll(".activity-icon svg path") ?? []),
+      ].map((path) => path.getAttribute("d")),
+      readTitle:
+        sourceSummary?.querySelector(".activity-title-base")?.textContent?.trim() ?? null,
       sourceLineNumbers: [...source.querySelectorAll(".tool-source-line-number")].map(
         (element) => element.textContent?.trim() ?? "",
       ),
@@ -2260,6 +3567,7 @@ function highlightedToolOutputVisualAuditExpression() {
       searchText: search.textContent ?? "",
       sourceHorizontalOverflow: source.scrollWidth - source.clientWidth,
       searchHorizontalOverflow: search.scrollWidth - search.clientWidth,
+      readInteraction: window.__previewReadActivityInteraction ?? null,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
@@ -3054,7 +4362,7 @@ function validateManualScrollOwnershipMetrics(metrics, viewport) {
   assert(metrics.horizontalOverflow <= tolerance, "o scroll manual criou overflow horizontal");
   assert(
     Math.abs(metrics.visualDrift) <= tolerance,
-    "uma medição virtual deslocou o conteúdo que o usuário estava lendo",
+    `uma medição virtual deslocou o conteúdo que o usuário estava lendo: ${JSON.stringify(metrics)}`,
   );
   assert(
     Math.abs(metrics.compensationError) <= tolerance,
@@ -3073,8 +4381,8 @@ function validateNestedScrollHandoffMetrics(metrics, viewport) {
   assert(metrics.horizontalOverflow <= tolerance, "o handoff de scroll criou overflow horizontal");
   assert(metrics.styleReadCount === 0, "o wheel voltou a forçar leitura síncrona de estilos");
   assert(
-    metrics.handoffDurationMs <= 16,
-    `três transferências de wheel excederam um frame: ${metrics.handoffDurationMs.toFixed(3)} ms`,
+    metrics.handoffDurationMs <= 2000,
+    `três handoffs suaves não estabilizaram a tempo: ${metrics.handoffDurationMs.toFixed(3)} ms`,
   );
   for (const [label, sample] of Object.entries({
     comando: metrics.command,
@@ -3089,6 +4397,111 @@ function validateNestedScrollHandoffMetrics(metrics, viewport) {
     assert(
       Math.abs(sample.timelineDelta - sample.expectedTimelineDelta) <= tolerance,
       `${label} não transferiu exatamente o delta excedente para a timeline`,
+    );
+    assert(sample.monotonic === true, `${label} inverteu a direção durante o handoff`);
+    assert(
+      sample.distinctTimelinePositions >= 3,
+      `${label} concluiu o handoff sem passos visuais intermediários`,
+    );
+    assert(
+      sample.maximumFrameDelta < Math.abs(sample.expectedTimelineDelta),
+      `${label} aplicou todo o handoff em um único salto`,
+    );
+  }
+}
+
+function validateNestedScrollWheelOwnershipMetrics(metrics, viewport) {
+  const tolerance = 2;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no wheel nativo em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o wheel nativo criou overflow horizontal");
+  for (const [label, sample] of Object.entries({
+    diff: metrics.diff,
+    leitura: metrics.source,
+  })) {
+    const { handoff, internal, reversal } = sample;
+    assert(
+      internal.events.length === 4,
+      `${label} não recebeu os quatro eventos reais de wheel interno`,
+    );
+    assert(
+      internal.events.every((event) => event.cancelable === true),
+      `${label} recebeu wheel não cancelável apesar do listener explícito`,
+    );
+    assert(
+      internal.events.every((event) => event.defaultPrevented === false),
+      `${label} perdeu o scroll nativo mesmo com faixa interna disponível`,
+    );
+    assert(
+      Math.abs(internal.nestedDelta - internal.expectedNestedDelta) <= tolerance,
+      `${label} consumiu ${internal.nestedDelta}px em vez de ${internal.expectedNestedDelta}px`,
+    );
+    assert(
+      Math.abs(internal.timelineDelta) <= tolerance,
+      `${label} também deslocou a timeline em ${internal.timelineDelta}px`,
+    );
+    assert(
+      handoff.events.length === 4,
+      `${label} não recebeu os quatro eventos reais de wheel no limite`,
+    );
+    assert(
+      handoff.events.every((event) => event.cancelable === true),
+      `${label} recebeu wheel não cancelável durante o handoff`,
+    );
+    assert(
+      handoff.events.every((event) => event.defaultPrevented === true),
+      `${label} não transferiu deterministicamente o wheel excedente à timeline`,
+    );
+    assert(
+      Math.abs(handoff.nestedDelta) <= tolerance,
+      `${label} saiu do limite interno em ${handoff.nestedDelta}px durante o handoff`,
+    );
+    assert(
+      Math.abs(handoff.timelineDelta - handoff.expectedTimelineDelta) <= tolerance,
+      `${label} transferiu ${handoff.timelineDelta}px à timeline em vez de ${handoff.expectedTimelineDelta}px`,
+    );
+    assert(handoff.monotonic, `${label} inverteu a direção durante o handoff`);
+    assert(
+      handoff.distinctTimelinePositions >= 3,
+      `${label} concluiu o handoff sem passos visuais intermediários`,
+    );
+    assert(
+      handoff.maximumFrameDelta < Math.abs(handoff.expectedTimelineDelta),
+      `${label} aplicou todo o handoff em um único salto`,
+    );
+    assert(
+      reversal.events.length === 2,
+      `${label} não recebeu o par real de wheel usado na reversão`,
+    );
+    assert(
+      reversal.events.every((event) => event.cancelable === true),
+      `${label} recebeu wheel não cancelável durante a reversão`,
+    );
+    assert(
+      reversal.events[0]?.defaultPrevented === true,
+      `${label} não iniciou o handoff antes da reversão`,
+    );
+    assert(
+      reversal.events[1]?.defaultPrevented === false,
+      `${label} não devolveu a direção inversa ao scroll nativo interno`,
+    );
+    assert(
+      Math.abs(reversal.nestedDelta - reversal.expectedNestedDelta) <= tolerance,
+      `${label} moveu ${reversal.nestedDelta}px internamente após reverter, esperado ${reversal.expectedNestedDelta}px`,
+    );
+    assert(
+      Math.sign(reversal.handoffDelta) * reversal.timelineDelta >= -tolerance,
+      `${label} inverteu indevidamente a timeline após devolver o wheel ao conteúdo interno`,
+    );
+    assert(
+      Math.abs(reversal.timelineDelta) < Math.abs(reversal.handoffDelta) - tolerance,
+      `${label} deixou a animação antiga alcançar o destino depois da reversão`,
+    );
+    assert(
+      reversal.postCancelRange <= tolerance,
+      `${label} continuou derivando ${reversal.postCancelRange}px depois de cancelar o handoff`,
     );
   }
 }
@@ -3216,6 +4629,47 @@ function validateSingleFileChangeMetrics(metrics, viewport) {
   assert(metrics.open === false, "a alteração única iniciou expandida");
   assert(metrics.aggregateContainerCount === 0, "a alteração única ainda criou um agrupador");
   assert(metrics.directDiffVisible === false, "o diff do arquivo único iniciou visível");
+  validateIntrinsicActivityInteraction(metrics.intrinsicInteraction, "alteração", tolerance);
+}
+
+function validateIntrinsicActivityInteraction(interaction, label, tolerance) {
+  assert(
+    interaction?.rest !== undefined &&
+      interaction.far !== undefined &&
+      interaction.hover !== undefined,
+    `a interação intrínseca da ${label} não foi capturada`,
+  );
+  assert(
+    interaction.rest.summaryWidth + 40 < interaction.rest.rowWidth,
+    `a área interativa da ${label} ainda ocupa a fileira inteira`,
+  );
+  assert(
+    interaction.rest.chevronOpacity === 0 && interaction.far.chevronOpacity === 0,
+    `a seta da ${label} ficou visível sem proximidade real`,
+  );
+  assert(
+    interaction.rest.hovered === false && interaction.far.hovered === false,
+    `uma posição distante ativou indevidamente o hover da ${label}`,
+  );
+  assert(
+    interaction.hover.hovered === true && interaction.hover.chevronOpacity === 1,
+    `a proximidade real da ${label} não revelou sua seta`,
+  );
+  assert(
+    interaction.rest.actionColor === interaction.rest.identityColor &&
+      interaction.rest.iconColor === interaction.rest.actionColor,
+    `a ${label} não usa uma cor discreta uniforme em repouso`,
+  );
+  assert(
+    interaction.hover.actionColor === interaction.hover.identityColor &&
+      interaction.hover.iconColor === interaction.hover.actionColor &&
+      interaction.hover.actionColor !== interaction.rest.actionColor,
+    `o hover não destacou semanticamente a ${label}`,
+  );
+  assert(
+    Math.abs(interaction.hover.summaryWidth - interaction.rest.summaryWidth) <= tolerance,
+    `a ${label} mudou de largura ao revelar sua seta`,
+  );
 }
 
 function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
@@ -3299,6 +4753,19 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
   assert(metrics.searchText.includes("src/ui/syntax/diffHighlighter.test.ts:20"), "a busca perdeu a localização");
   assert(metrics.sourceHorizontalOverflow >= 0, "a leitura perdeu sua largura rolável");
   assert(metrics.searchHorizontalOverflow >= 0, "a busca perdeu sua largura rolável");
+  assert(
+    metrics.readTitle === "Executou leitura de arquivo: diffHighlighter.test.ts",
+    `a leitura perdeu sua semântica de execução (${JSON.stringify(metrics.readTitle)})`,
+  );
+  assert(
+    JSON.stringify(metrics.readIconPaths) ===
+      JSON.stringify([
+        "M12 7v14",
+        "M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z",
+      ]),
+    "a leitura não usa fielmente o ícone oficial de livro aberto",
+  );
+  validateIntrinsicActivityInteraction(metrics.readInteraction, "leitura de arquivo", tolerance);
 }
 
 function validateProjectOpenWorkspaceMetrics(metrics, viewport) {
@@ -3675,17 +5142,62 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
     `viewport inesperado no estresse da timeline em ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.visitedItems === 3, "o estresse não abriu uma atividade de cada categoria");
+  assert(metrics.visitedItems === 180, "o estresse não abriu todas as 180 atividades");
   assert(metrics.expansionIterations < 1200, "a expansão virtualizada não convergiu");
   assert(metrics.expansionMs <= 20_000, "a expansão virtualizada ultrapassou 20 s");
   assert(metrics.rapidFrames >= 60, "o teste rápido coletou poucos frames");
   assert(
-    metrics.adaptiveDeferralObserved === true,
-    "o salto determinístico não ativou a materialização adaptativa",
+    metrics.visibleDeferredBodyFrames === 0 && metrics.maximumVisibleDeferredBodies === 0,
+    `o scroll rápido exibiu corpos vazios em ${metrics.visibleDeferredBodyFrames} frames (máximo ${metrics.maximumVisibleDeferredBodies})`,
   );
-  assert(metrics.rapidP95FrameMs <= 20, "o P95 do scroll rápido ultrapassou 20 ms");
-  assert(metrics.rapidP99FrameMs <= 34, "o P99 do scroll rápido ultrapassou 34 ms");
-  assert(metrics.rapidMaximumFrameMs <= 50, "o scroll rápido produziu um frame acima de 50 ms");
+  assert(
+    metrics.missingSummaryFrames === 0,
+    "o scroll rápido removeu resumos reais de atividades montadas",
+  );
+  assert(
+    metrics.consecutiveSummaryComparisons > 0,
+    "o teste rápido não comparou a identidade de nenhum resumo entre frames consecutivos",
+  );
+  assert(
+    metrics.summaryIdentityChanges === 0,
+    `o scroll rápido substituiu ${metrics.summaryIdentityChanges} resumos que continuavam visíveis`,
+  );
+  assert(
+    metrics.legacyPlaceholderFrames === 0,
+    "o scroll rápido recuperou placeholders de carregamento legados",
+  );
+  assert(
+    metrics.rapidAnimationWorkFrames >= metrics.rapidFrames,
+    "a instrumentação não cobriu todos os frames do scroll rápido",
+  );
+  assert(
+    metrics.rapidP95ApplicationAnimationWorkMs <= 10,
+    `o trabalho do app no P95 foi ${metrics.rapidP95ApplicationAnimationWorkMs.toFixed(2)} ms`,
+  );
+  assert(
+    metrics.rapidP99AnimationWorkMs <= 20,
+    `o trabalho total no P99 foi ${metrics.rapidP99AnimationWorkMs.toFixed(2)} ms`,
+  );
+  assert(
+    metrics.rapidP99ApplicationAnimationWorkMs <= 10,
+    `o trabalho do app no P99 foi ${metrics.rapidP99ApplicationAnimationWorkMs.toFixed(2)} ms`,
+  );
+  assert(
+    metrics.rapidMaximumApplicationAnimationWorkMs <= 10,
+    `o maior trabalho do app foi ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms`,
+  );
+  assert(
+    metrics.rapidP95FrameMs <= 20,
+    `o P95 do scroll rápido foi ${metrics.rapidP95FrameMs.toFixed(2)} ms`,
+  );
+  assert(
+    metrics.rapidP99FrameMs <= 34,
+    `o P99 do scroll rápido foi ${metrics.rapidP99FrameMs.toFixed(2)} ms em ${metrics.rapidFrames} frames (${metrics.rapidFramesOver34Ms} acima de 34 ms, ${metrics.rapidLongTasks} long tasks, máximo ${metrics.rapidMaximumFrameMs.toFixed(2)} ms)`,
+  );
+  assert(
+    metrics.rapidMaximumFrameMs <= 50,
+    `o máximo do scroll rápido foi ${metrics.rapidMaximumFrameMs.toFixed(2)} ms`,
+  );
   assert(
     metrics.rapidFramesOver34Ms <= 1,
     `o scroll rápido teve ${metrics.rapidFramesOver34Ms} frames acima de 34 ms (P95 ${metrics.rapidP95FrameMs.toFixed(2)} ms, P99 ${metrics.rapidP99FrameMs.toFixed(2)} ms, máximo ${metrics.rapidMaximumFrameMs.toFixed(2)} ms)`,
@@ -3701,8 +5213,88 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
   );
   assert(metrics.mountedSourceRows <= 800, "linhas demais de ferramentas permaneceram montadas");
   assert(metrics.mountedDiffRows <= 500, "linhas demais de diff permaneceram montadas");
-  assert(metrics.settledPlaceholders === 0, "placeholders permaneceram após o scroll estabilizar");
+  assert(
+    metrics.settledDeferredBodies === 0,
+    "corpos adiados permaneceram após o scroll estabilizar",
+  );
+  assert(
+    metrics.settledLegacyPlaceholders === 0,
+    "placeholders legados permaneceram após o scroll estabilizar",
+  );
   assert(metrics.horizontalOverflow <= tolerance, "o estresse criou overflow horizontal");
+}
+
+function validateTimelineExtremeFilesMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado em 100 mil arquivos: ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.totalActivities === 100_000, "a projeção extrema perdeu arquivos");
+  assert(
+    metrics.physicalListHeight > 2_000_000 && metrics.physicalListHeight <= 8_000_000,
+    `a altura física extrema ficou inválida (${metrics.physicalListHeight}px)`,
+  );
+  assert(metrics.rapidFrames >= 60, "o teste de 100 mil arquivos coletou poucos frames");
+  assert(
+    metrics.rapidAnimationWorkFrames >= metrics.rapidFrames,
+    "a instrumentação não cobriu os frames de 100 mil arquivos",
+  );
+  assert(
+    metrics.rapidP95ApplicationAnimationWorkMs <= 8,
+    `o trabalho do app em 100 mil arquivos foi ${metrics.rapidP95ApplicationAnimationWorkMs.toFixed(2)} ms no P95`,
+  );
+  assert(
+    metrics.rapidP99AnimationWorkMs <= 10,
+    `o trabalho total em 100 mil arquivos foi ${metrics.rapidP99AnimationWorkMs.toFixed(2)} ms no P99`,
+  );
+  assert(
+    metrics.rapidP99ApplicationAnimationWorkMs <= 8,
+    `o trabalho do app em 100 mil arquivos foi ${metrics.rapidP99ApplicationAnimationWorkMs.toFixed(2)} ms no P99`,
+  );
+  assert(
+    metrics.rapidMaximumApplicationAnimationWorkMs <= 10,
+    `o maior trabalho do app em 100 mil arquivos foi ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms`,
+  );
+  assert(metrics.rapidP95FrameMs <= 20, "o P95 de 100 mil arquivos ultrapassou 20 ms");
+  assert(metrics.rapidP99FrameMs <= 34, "o P99 de 100 mil arquivos ultrapassou 34 ms");
+  assert(metrics.rapidMaximumFrameMs <= 50, "o cenário extremo teve frame acima de 50 ms");
+  assert(metrics.rapidLongTasks === 0, "o scroll de 100 mil arquivos produziu long tasks");
+  assert(
+    metrics.visibleDeferredBodyFrames === 0 && metrics.maximumVisibleDeferredBodies === 0,
+    `o cenário extremo exibiu corpos vazios em ${metrics.visibleDeferredBodyFrames} frames (máximo ${metrics.maximumVisibleDeferredBodies})`,
+  );
+  assert(
+    metrics.missingSummaryFrames === 0,
+    "o cenário extremo removeu resumos reais durante o scroll",
+  );
+  assert(
+    metrics.summaryIdentityChanges === 0,
+    `o cenário extremo substituiu ${metrics.summaryIdentityChanges} resumos que continuavam visíveis`,
+  );
+  assert(
+    metrics.legacyPlaceholderFrames === 0,
+    "o cenário extremo recuperou placeholders legados",
+  );
+  assert(
+    metrics.maximumMountedItems <= 128,
+    `${metrics.maximumMountedItems} arquivos ficaram montados no cenário extremo`,
+  );
+  assert(metrics.domNodes <= 3_000, "o cenário extremo excedeu 3 mil nós DOM");
+  assert(
+    metrics.settledDeferredBodies === 0,
+    "o cenário extremo deixou corpos adiados após estabilizar",
+  );
+  assert(
+    metrics.settledLegacyPlaceholders === 0,
+    "o cenário extremo deixou placeholders legados após estabilizar",
+  );
+  assert(metrics.visualDriftPx !== null, "o cenário extremo não materializou sua âncora");
+  assert(
+    Math.abs(metrics.visualDriftPx) <= tolerance,
+    `a âncora de 100 mil arquivos derivou ${metrics.visualDriftPx}px`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "100 mil arquivos criaram overflow horizontal");
 }
 
 function validateChromeMetrics(metrics, viewport) {

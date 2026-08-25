@@ -166,6 +166,20 @@ export function terminalReadActivityTitle(status: ActivityStatus): string {
   }
 }
 
+export function fileReadActivityTitle(status: ActivityStatus, count?: number): string {
+  const target = fileReadTarget(count);
+  switch (status) {
+    case "completed":
+      return `Executou leitura de ${target}`;
+    case "declined":
+      return `Leitura de ${target} recusada`;
+    case "failed":
+      return `Falha ao ler ${target}`;
+    case "inProgress":
+      return `Lendo ${target}`;
+  }
+}
+
 export function fileChangeGroupTitle(changeCount: number): string {
   return changeCount === 1 ? "1 arquivo alterado" : `${changeCount} arquivos alterados`;
 }
@@ -266,6 +280,16 @@ function activityStateTitle(kind: "comando" | "ferramenta", status: ActivityStat
     case "inProgress":
       return feminine ? "Executando ferramenta" : "Executando comando";
   }
+}
+
+function fileReadTarget(count: number | undefined): string {
+  if (count === undefined) {
+    return "arquivo";
+  }
+  if (!Number.isSafeInteger(count) || count < 1) {
+    throw new RangeError(`A quantidade de arquivos lidos deve ser um inteiro positivo: ${count}.`);
+  }
+  return count === 1 ? "um arquivo" : `${count} arquivos`;
 }
 
 function activityFailureTitle(

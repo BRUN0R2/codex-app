@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import type { VisibleThreadItem } from "../contracts/types";
 import {
+  encodeTimelineIdentitySegment,
   timelineFileChangeIdentity,
+  timelineIdentityPrefixes,
   timelineItemIdentity,
   timelineItemRenderIdentity,
 } from "./timelineIdentity";
@@ -57,5 +59,14 @@ describe("timeline render identity", () => {
       timelineFileChangeIdentity(change, 0),
     );
     expect(timelineFileChangeIdentity(change, 1)).not.toBe(timelineFileChangeIdentity(change, 0));
+  });
+
+  it("derives structural prefixes without scanning unrelated disclosure keys", () => {
+    const thread = encodeTimelineIdentitySegment("thread");
+    const group = `${thread}${encodeTimelineIdentitySegment("group")}`;
+    const item = `${group}${encodeTimelineIdentitySegment("item")}`;
+
+    expect(timelineIdentityPrefixes(item)).toEqual([thread, group, item]);
+    expect(() => timelineIdentityPrefixes("4:bad|")).toThrow("incomplete segment");
   });
 });

@@ -63,6 +63,7 @@ export function AppShell(props: { readonly controller: AppController }) {
     setSettingsOpen(true);
   }
   const [draftRequest, setDraftRequest] = createSignal<ComposerDraftRequest | null>(null);
+  const [chatDockHeight, setChatDockHeight] = createSignal(0);
   let nextDraftRequestId = 0;
   let chatPageElement: HTMLElement | undefined;
   let chatDockElement: HTMLDivElement | undefined;
@@ -148,6 +149,7 @@ export function AppShell(props: { readonly controller: AppController }) {
       return;
     }
     const dockHeight = Math.ceil(chatDockElement.getBoundingClientRect().height);
+    setChatDockHeight((current) => (current === dockHeight ? current : dockHeight));
     chatPageElement.style.setProperty("--chat-dock-height", `${dockHeight}px`);
   }
 
@@ -257,7 +259,11 @@ export function AppShell(props: { readonly controller: AppController }) {
             hidden={activeSurface() !== "chat"}
             ref={chatPageElement}
           >
-            <Timeline controller={props.controller} onSelectSuggestion={requestDraft} />
+            <Timeline
+              bottomOcclusion={chatDockHeight()}
+              controller={props.controller}
+              onSelectSuggestion={requestDraft}
+            />
             <div class="chat-dock" ref={chatDockElement}>
               <Show when={shouldShowTurnProgress(props.controller.activePlan(), reviewChanges())}>
                 <TurnProgress

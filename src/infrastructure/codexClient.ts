@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
@@ -77,6 +77,11 @@ import type {
   UsageResetCreditsResponse,
   UsageResetRedemptionResponse,
 } from "../contracts/types";
+import {
+  hasBrowserPreviewRuntime,
+  invokeRuntime as invoke,
+  listenRuntime as listen,
+} from "./runtimeBridge";
 
 export { describeDiagnosticError, describeError } from "./errorDescription";
 
@@ -437,7 +442,42 @@ export function respondToServerRequest(
 }
 
 export function openExternalUrl(url: string): Promise<void> {
+  if (hasBrowserPreviewRuntime()) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return Promise.resolve();
+  }
   return openUrl(url);
+}
+
+export function openDesktopDialog(options: {
+  readonly directory: boolean;
+  readonly multiple: boolean;
+}): Promise<string | string[] | null> {
+  if (hasBrowserPreviewRuntime()) {
+    return invoke<string | string[] | null>("plugin:dialog|open", { options });
+  }
+  return open(options);
+}
+
+export async function confirmDesktopDialog(
+  message: string,
+  options: {
+    readonly cancelLabel: string;
+    readonly kind: "error" | "info" | "warning";
+    readonly okLabel: string;
+    readonly title: string;
+  },
+): Promise<boolean> {
+  if (!hasBrowserPreviewRuntime()) {
+    return confirm(message, options);
+  }
+  const result = await invoke<string>("plugin:dialog|message", {
+    buttons: { cancel: options.cancelLabel, ok: options.okLabel },
+    kind: options.kind,
+    message,
+    title: options.title,
+  });
+  return result === options.okLabel;
 }
 
 export function openWorkspaceDirectory(path: string): Promise<OperationAck> {

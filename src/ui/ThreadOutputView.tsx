@@ -27,6 +27,11 @@ export function ThreadOutputView(props: {
       return;
     }
     activeOutputId = output.id;
+    if (output.nextCursor === null) {
+      setFailure(null);
+      setLoading(false);
+      return;
+    }
     setChunks([output.preview]);
     setLoadedBytes(utf8ByteLength(output.preview));
     setNextCursor(output.nextCursor);
@@ -34,7 +39,13 @@ export function ThreadOutputView(props: {
     setLoading(false);
   });
 
-  const text = createMemo(() => props.format(chunks().join("")));
+  const text = createMemo(() =>
+    props.format(
+      props.output.nextCursor === null
+        ? props.output.preview
+        : (props.output.id === activeOutputId ? chunks() : [props.output.preview]).join(""),
+    ),
+  );
   async function loadNext(): Promise<void> {
     const cursor = nextCursor();
     if (cursor === null || loading()) {
@@ -70,6 +81,7 @@ export function ThreadOutputView(props: {
       <Show when={text()}>
         {(visible) => (
           <ToolOutputContent
+            output={props.output}
             presentation={props.presentation ?? PLAIN_TEXT_PRESENTATION}
             text={visible()}
           />

@@ -8,11 +8,20 @@ export interface TimelineActivityViewportSnapshot {
   readonly size: number;
 }
 
+export interface TimelineActivityVisualAnchor {
+  readonly element: HTMLElement;
+  readonly key: string;
+  readonly scrollTop: number;
+  readonly viewportOffset: number;
+}
+
 export interface TimelineActivityContextValue {
-  readonly adjustScrollBy: (delta: number) => void;
   readonly contentDeferred: () => boolean;
+  readonly layoutRevision: () => number;
   readonly layoutSignature: () => string | null;
+  readonly minimalOverscan: () => boolean;
   readonly notifyLayoutChange: () => void;
+  readonly preserveVisualAnchor: (anchor: TimelineActivityVisualAnchor) => void;
   readonly sessions: ActivityVirtualizerStore;
   readonly shouldPreserveAnchor: () => boolean;
   readonly viewport: () => TimelineActivityViewportSnapshot | null;

@@ -1,9 +1,20 @@
 import { performance } from "node:perf_hooks";
+import { createRoot } from "solid-js";
 
 import type { VisibleThreadItem } from "../src/contracts/types.ts";
 import { overlayVisibleTurn } from "../src/state/visibleTurnSequence.ts";
+import { ActivityVirtualizerStore } from "../src/ui/activityVirtualization.ts";
 import { AgentActivityProjectionStore } from "../src/ui/agentActivityPresentation.ts";
+import {
+  projectVirtualLogicalOffset,
+  resolveBoundedVirtualViewport,
+} from "../src/ui/boundedVirtualViewport.ts";
 import { createMarkdownStreamRenderer } from "../src/ui/markdownStreamRenderer.ts";
+import { createTimelineDisclosureStore } from "../src/ui/timelineDisclosure.ts";
+import {
+  timelineDisclosureChildKey,
+  timelineDisclosureStorageKey,
+} from "../src/ui/timelineDisclosureContext.ts";
 import { TimelineThreadSessionStore } from "../src/ui/timelineSession.ts";
 import { TurnPresentationStore } from "../src/ui/turnPresentation.ts";
 import { VariableSizeVirtualizer } from "../src/ui/variableSizeVirtualizer.ts";
@@ -19,6 +30,11 @@ const TIMELINE_SESSION_TURN_COUNT = 1_000;
 const PROJECTION_ACTIVITY_COUNT = 240;
 const PROJECTION_UPDATE_COUNT = 20_000;
 const ESTIMATED_TURN_HEIGHT = 498;
+const ACTIVITY_FILE_COUNT = 100_000;
+const ACTIVITY_RANGE_QUERY_COUNT = 50_000;
+const ACTIVITY_VIEWPORT_SIZE = 900;
+const COLLAPSED_ACTIVITY_HEIGHT = 30;
+const EXPANDED_ACTIVITY_HEIGHT = 400;
 
 const keys = Array.from({ length: TURN_COUNT }, (_, index) => `turn-${index}`);
 const virtualizer = new VariableSizeVirtualizer(ESTIMATED_TURN_HEIGHT);
@@ -43,6 +59,187 @@ const rangeQueryMilliseconds = duration(() => {
     rangeChecksum += range.start + range.end;
   }
 });
+
+let activityKeyReads = 0;
+const activitySource = {
+  count: ACTIVITY_FILE_COUNT,
+  estimatedOffsetOf: (index: number) => index * COLLAPSED_ACTIVITY_HEIGHT,
+  estimatedSizeAt: () => COLLAPSED_ACTIVITY_HEIGHT,
+  identity: {},
+  indexOf: (key: string) => {
+    const index = Number(key.slice("file-".length));
+    return Number.isInteger(index) && index >= 0 && index < ACTIVITY_FILE_COUNT ? index : null;
+  },
+  keyAt: (index: number) => {
+    activityKeyReads += 1;
+    return `file-${index}`;
+  },
+} as const;
+const activitySessions = new ActivityVirtualizerStore(COLLAPSED_ACTIVITY_HEIGHT, 2);
+let collapsedActivityVirtualizer: VariableSizeVirtualizer | undefined;
+const collapsedActivityBuildMilliseconds = duration(() => {
+  collapsedActivityVirtualizer = activitySessions.activateSource(
+    "thread:activity-files",
+    activitySource,
+    "1280:14:unified",
+    0,
+    COLLAPSED_ACTIVITY_HEIGHT,
+  ).virtualizer;
+});
+const collapsedActivityBuildKeyReads = activityKeyReads;
+if (collapsedActivityVirtualizer === undefined) {
+  throw new Error("Activity soak benchmark did not create its collapsed virtualizer.");
+}
+let maximumCollapsedActivities = 0;
+let collapsedActivityRangeChecksum = 0;
+const collapsedActivityQueryMilliseconds = duration(() => {
+  const logicalTotalSize = collapsedActivityVirtualizer.totalSize();
+  const geometry = resolveBoundedVirtualViewport({
+    logicalTotalSize,
+    physicalOffset: 0,
+    viewportSize: ACTIVITY_VIEWPORT_SIZE,
+  });
+  const maximumPhysicalOffset = Math.max(1, geometry.physicalTotalSize - ACTIVITY_VIEWPORT_SIZE);
+  for (let query = 0; query < ACTIVITY_RANGE_QUERY_COUNT; query += 1) {
+    const physicalOffset = (query * 104_729) % maximumPhysicalOffset;
+    const viewport = resolveBoundedVirtualViewport({
+      logicalTotalSize,
+      physicalOffset,
+      viewportSize: ACTIVITY_VIEWPORT_SIZE,
+    });
+    const range = collapsedActivityVirtualizer.range(
+      viewport.logicalOffset,
+      ACTIVITY_VIEWPORT_SIZE,
+      ACTIVITY_VIEWPORT_SIZE,
+    );
+    maximumCollapsedActivities = Math.max(
+      maximumCollapsedActivities,
+      range.end - range.start,
+    );
+    collapsedActivityRangeChecksum +=
+      range.start +
+      range.end +
+      Math.round(
+        projectVirtualLogicalOffset(
+          viewport,
+          collapsedActivityVirtualizer.offsetOf(range.start),
+        ),
+      );
+  }
+});
+
+let expandedActivityVirtualizer: VariableSizeVirtualizer | undefined;
+const expandedActivityBuildMilliseconds = duration(() => {
+  expandedActivityVirtualizer = activitySessions.activateSource(
+    "thread:activity-files",
+    activitySource,
+    "1280:14:unified",
+    1,
+    EXPANDED_ACTIVITY_HEIGHT,
+  ).virtualizer;
+});
+if (expandedActivityVirtualizer === undefined) {
+  throw new Error("Activity soak benchmark did not create its expanded virtualizer.");
+}
+const expandedLogicalTotalSize = expandedActivityVirtualizer.totalSize();
+const expandedGeometry = resolveBoundedVirtualViewport({
+  logicalTotalSize: expandedLogicalTotalSize,
+  physicalOffset: 0,
+  viewportSize: ACTIVITY_VIEWPORT_SIZE,
+});
+let maximumExpandedActivities = 0;
+let expandedActivityRangeChecksum = 0;
+const expandedActivityQueryMilliseconds = duration(() => {
+  const maximumPhysicalOffset = Math.max(
+    1,
+    expandedGeometry.physicalTotalSize - ACTIVITY_VIEWPORT_SIZE,
+  );
+  for (let query = 0; query < ACTIVITY_RANGE_QUERY_COUNT; query += 1) {
+    const physicalOffset = (query * 104_729) % maximumPhysicalOffset;
+    const viewport = resolveBoundedVirtualViewport({
+      logicalTotalSize: expandedLogicalTotalSize,
+      physicalOffset,
+      viewportSize: ACTIVITY_VIEWPORT_SIZE,
+    });
+    const range = expandedActivityVirtualizer.range(
+      viewport.logicalOffset,
+      ACTIVITY_VIEWPORT_SIZE,
+      ACTIVITY_VIEWPORT_SIZE,
+    );
+    maximumExpandedActivities = Math.max(maximumExpandedActivities, range.end - range.start);
+    expandedActivityRangeChecksum +=
+      range.start +
+      range.end +
+      Math.round(
+        projectVirtualLogicalOffset(
+          viewport,
+          expandedActivityVirtualizer.offsetOf(range.start),
+        ),
+      );
+  }
+});
+for (let index = 0; index < MEASUREMENT_COUNT; index += 1) {
+  expandedActivityVirtualizer.measure(`file-${index}`, EXPANDED_ACTIVITY_HEIGHT + (index % 11));
+}
+let collapsedActivityRestoreTotalSize = Number.NaN;
+const collapsedActivityRestoreMilliseconds = duration(() => {
+  const activation = activitySessions.activateSource(
+    "thread:activity-files",
+    activitySource,
+    "1280:14:unified",
+    2,
+    COLLAPSED_ACTIVITY_HEIGHT,
+  );
+  if (!activation.measurementsReset) {
+    throw new Error("Collapsing the activity subtree retained expanded file measurements.");
+  }
+  collapsedActivityRestoreTotalSize = activation.virtualizer.totalSize();
+});
+
+interface DisclosureSoakMetrics {
+  readonly closeParentMilliseconds: number;
+  readonly closeSingleLeafMilliseconds: number;
+  readonly countAfterLeafClose: number;
+  readonly countBeforeClose: number;
+  readonly openMilliseconds: number;
+  readonly removedChildUsesFallback: boolean;
+  readonly subtreeRevision: number;
+}
+
+let disclosureSoakMetrics: DisclosureSoakMetrics | undefined;
+createRoot((dispose) => {
+  const disclosures = createTimelineDisclosureStore();
+  const parent = timelineDisclosureStorageKey("thread:soak", "activity:files");
+  const children = Array.from({ length: ACTIVITY_FILE_COUNT }, (_, index) =>
+    timelineDisclosureChildKey(parent, `change:${index}`),
+  );
+  const openMilliseconds = duration(() => {
+    for (const child of children) {
+      disclosures.setOpen(child, true);
+    }
+  });
+  const countBeforeClose = disclosures.countOpenDescendants(parent);
+  const selectedChild = children[Math.floor(children.length / 2)];
+  if (selectedChild === undefined) {
+    throw new Error("Disclosure soak benchmark did not create its selected child.");
+  }
+  const closeSingleLeafMilliseconds = duration(() => disclosures.setOpen(selectedChild, false));
+  const countAfterLeafClose = disclosures.countOpenDescendants(parent);
+  const closeParentMilliseconds = duration(() => disclosures.setOpen(parent, false));
+  disclosureSoakMetrics = {
+    closeParentMilliseconds,
+    closeSingleLeafMilliseconds,
+    countAfterLeafClose,
+    countBeforeClose,
+    openMilliseconds,
+    removedChildUsesFallback: disclosures.read(selectedChild, true),
+    subtreeRevision: disclosures.subtreeRevision(parent),
+  };
+  dispose();
+});
+if (disclosureSoakMetrics === undefined) {
+  throw new Error("Disclosure soak benchmark did not produce metrics.");
+}
 
 const timelineSessions = new TimelineThreadSessionStore(
   () => new VariableSizeVirtualizer(ESTIMATED_TURN_HEIGHT),
@@ -202,7 +399,19 @@ const turnProjectionMilliseconds = duration(() => {
 
 if (
   maximumRenderedTurns > 16 ||
+  maximumCollapsedActivities > 128 ||
+  maximumExpandedActivities > 16 ||
   rangeChecksum <= 0 ||
+  collapsedActivityRangeChecksum <= 0 ||
+  expandedActivityRangeChecksum <= 0 ||
+  expandedLogicalTotalSize !== ACTIVITY_FILE_COUNT * EXPANDED_ACTIVITY_HEIGHT ||
+  expandedGeometry.physicalTotalSize >= expandedLogicalTotalSize ||
+  collapsedActivityBuildKeyReads !== 0 ||
+  collapsedActivityRestoreTotalSize !== ACTIVITY_FILE_COUNT * COLLAPSED_ACTIVITY_HEIGHT ||
+  disclosureSoakMetrics.countBeforeClose !== ACTIVITY_FILE_COUNT ||
+  disclosureSoakMetrics.countAfterLeafClose !== ACTIVITY_FILE_COUNT - 1 ||
+  disclosureSoakMetrics.subtreeRevision !== 1 ||
+  !disclosureSoakMetrics.removedChildUsesFallback ||
   timelineSessionChecksum <= 0 ||
   overlayChecksum !== OVERLAY_PROJECTION_COUNT * 8 ||
   committedCharacters <= 0 ||
@@ -222,6 +431,22 @@ process.stdout.write(
       virtualizerBuildMs: roundMilliseconds(buildMilliseconds),
       virtualizerMeasurementsMs: roundMilliseconds(measurementMilliseconds),
       virtualizerQueriesMs: roundMilliseconds(rangeQueryMilliseconds),
+      activityFileCount: ACTIVITY_FILE_COUNT,
+      collapsedActivityBuildKeyReads,
+      collapsedActivityBuildMs: roundMilliseconds(collapsedActivityBuildMilliseconds),
+      collapsedActivityQueryMs: roundMilliseconds(collapsedActivityQueryMilliseconds),
+      maximumCollapsedActivities,
+      expandedActivityBuildMs: roundMilliseconds(expandedActivityBuildMilliseconds),
+      expandedActivityQueryMs: roundMilliseconds(expandedActivityQueryMilliseconds),
+      maximumExpandedActivities,
+      expandedActivityLogicalHeight: expandedLogicalTotalSize,
+      expandedActivityPhysicalHeight: expandedGeometry.physicalTotalSize,
+      collapsedActivityRestoreMs: roundMilliseconds(collapsedActivityRestoreMilliseconds),
+      disclosureOpenMs: roundMilliseconds(disclosureSoakMetrics.openMilliseconds),
+      disclosureSingleLeafCloseMs: roundMilliseconds(
+        disclosureSoakMetrics.closeSingleLeafMilliseconds,
+      ),
+      disclosureParentCloseMs: roundMilliseconds(disclosureSoakMetrics.closeParentMilliseconds),
       timelineSessionSwitches: TIMELINE_SESSION_SWITCH_COUNT,
       timelineSessionSwitchMs: roundMilliseconds(timelineSessionSwitchMilliseconds),
       overlayProjections: OVERLAY_PROJECTION_COUNT,

@@ -1,4 +1,4 @@
-import { createContext, useContext } from "solid-js";
+import { createContext, createMemo, useContext } from "solid-js";
 
 import type { TimelineDisclosureKey, TimelineDisclosureStore } from "./timelineDisclosure";
 import { encodeTimelineIdentitySegment } from "./timelineIdentity";
@@ -9,6 +9,7 @@ export interface TimelineDisclosureBinding {
   readonly openDescendantCount: () => number;
   readonly setOpen: (open: boolean) => void;
   readonly storageKey: () => TimelineDisclosureKey;
+  readonly subtreeRevision: () => number;
   readonly toggle: () => void;
 }
 
@@ -47,8 +48,8 @@ export function useTimelineDisclosure(
     throw new Error("O estado visual da timeline não foi inicializado.");
   }
 
-  const storageKey = () => timelineDisclosureChildKey(context.keyPrefix(), key());
-  const isOpen = () => context.store.read(storageKey(), initialOpen());
+  const storageKey = createMemo(() => timelineDisclosureChildKey(context.keyPrefix(), key()));
+  const isOpen = createMemo(() => context.store.read(storageKey(), initialOpen()));
   const setOpen = (open: boolean) => {
     if (isOpen() === open) {
       return;
@@ -67,13 +68,7 @@ export function useTimelineDisclosure(
     openDescendantCount: () => context.store.countOpenDescendants(storageKey()),
     setOpen,
     storageKey,
+    subtreeRevision: () => context.store.subtreeRevision(storageKey()),
     toggle: () => setOpen(!isOpen()),
   };
-}
-
-export function handleTimelineDetailsToggle(
-  event: ToggleEvent & { readonly currentTarget: HTMLDetailsElement },
-  disclosure: TimelineDisclosureBinding,
-): void {
-  disclosure.setOpen(event.currentTarget.open);
 }

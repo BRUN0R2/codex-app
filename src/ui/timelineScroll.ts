@@ -230,6 +230,27 @@ export function resolveTimelineWheelHandoffTarget(input: {
   return Math.min(input.maximumScroll, Math.max(0, origin + input.delta));
 }
 
+export function hasReachedTimelineWheelHandoffTarget(input: {
+  readonly currentScrollTop: number;
+  readonly maximumScroll: number;
+  readonly target: number;
+  readonly tolerance?: number | undefined;
+}): boolean {
+  if (
+    !Number.isFinite(input.currentScrollTop) ||
+    input.currentScrollTop < 0 ||
+    !Number.isFinite(input.maximumScroll) ||
+    input.maximumScroll < 0 ||
+    !Number.isFinite(input.target) ||
+    input.target < 0 ||
+    (input.tolerance !== undefined && (!Number.isFinite(input.tolerance) || input.tolerance < 0))
+  ) {
+    throw new Error("Timeline wheel handoff completion requires finite non-negative metrics.");
+  }
+  const reachableTarget = Math.min(input.maximumScroll, input.target);
+  return Math.abs(input.currentScrollTop - reachableTarget) <= (input.tolerance ?? 1);
+}
+
 export function resolveTimelineRestorationTop(input: {
   readonly followingLatest: boolean;
   readonly maximumScroll: number;

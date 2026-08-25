@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   calculateDiffVirtualRange,
+  DIFF_OVERSCAN_ROWS,
   DIFF_ROW_HEIGHT_PX,
   MAX_DIFF_CANVAS_HEIGHT_PX,
 } from "./diffViewport";
@@ -46,6 +47,17 @@ describe("diff viewport", () => {
         viewportHeight: 220,
       }).end,
     ).toBe(100);
+  });
+
+  it("mounts exactly the visible diff rows while scrolling", () => {
+    const range = calculateDiffVirtualRange({
+      rowCount: 100,
+      scrollTop: 10 * DIFF_ROW_HEIGHT_PX,
+      viewportHeight: 10 * DIFF_ROW_HEIGHT_PX,
+    });
+
+    expect(DIFF_OVERSCAN_ROWS).toBe(0);
+    expect(range).toMatchObject({ start: 10, end: 20 });
   });
 
   it("rejects invalid structural inputs instead of inventing fallback state", () => {

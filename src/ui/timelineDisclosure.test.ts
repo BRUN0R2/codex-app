@@ -56,7 +56,32 @@ describe("timeline disclosure state", () => {
 
       expect(disclosures.read(parentKey)).toBe(false);
       expect(disclosures.read(childKey)).toBe(false);
+      expect(disclosures.read(childKey, true)).toBe(true);
       expect(disclosures.read(unrelatedKey)).toBe(true);
+      dispose();
+    });
+  });
+
+  it("updates a leaf without disturbing a large sibling index", () => {
+    createRoot((dispose) => {
+      const disclosures = createTimelineDisclosureStore();
+      const parent = timelineDisclosureStorageKey("thread:wide", "activity:1");
+      const childKeys = Array.from({ length: 10_000 }, (_, index) =>
+        timelineDisclosureChildKey(parent, `change:${index}`),
+      );
+      for (const child of childKeys) {
+        disclosures.setOpen(child, true);
+      }
+
+      const selected = childKeys[5_000];
+      if (selected === undefined) {
+        throw new Error("The disclosure fixture did not create its selected child.");
+      }
+      disclosures.setOpen(selected, false);
+
+      expect(disclosures.read(selected, true)).toBe(false);
+      expect(disclosures.countOpenDescendants(parent)).toBe(9_999);
+      expect(disclosures.subtreeRevision(parent)).toBe(0);
       dispose();
     });
   });
@@ -77,6 +102,28 @@ describe("timeline disclosure state", () => {
       expect(disclosures.countOpenDescendants(parentKey)).toBe(2);
       disclosures.setOpen(parentKey, false);
       expect(disclosures.countOpenDescendants(parentKey)).toBe(0);
+      expect(disclosures.subtreeRevision(parentKey)).toBe(1);
+      dispose();
+    });
+  });
+
+  it("indexes large disclosure subtrees and revises them only when descendants are cleared", () => {
+    createRoot((dispose) => {
+      const disclosures = createTimelineDisclosureStore();
+      const parent = timelineDisclosureStorageKey("thread:large", "activity:1");
+      const childKeys = Array.from({ length: 1_000 }, (_, index) =>
+        timelineDisclosureChildKey(parent, `change:${index}`),
+      );
+      for (const child of childKeys) {
+        disclosures.setOpen(child, true);
+      }
+
+      expect(disclosures.countOpenDescendants(parent)).toBe(1_000);
+      expect(disclosures.subtreeRevision(parent)).toBe(0);
+      disclosures.setOpen(parent, false);
+      expect(disclosures.countOpenDescendants(parent)).toBe(0);
+      expect(disclosures.subtreeRevision(parent)).toBe(1);
+      expect(disclosures.read(childKeys[500] ?? parent)).toBe(false);
       dispose();
     });
   });

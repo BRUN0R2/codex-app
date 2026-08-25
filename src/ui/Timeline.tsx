@@ -1,4 +1,5 @@
 import {
+  batch,
   createEffect,
   createMemo,
   createSignal,
@@ -32,8 +33,21 @@ type TimelineController = Pick<
 
 import { projectName } from "../state/projects";
 import type { VisibleThreadTurn } from "../state/visibleTurnSequence";
-import { fileName, toolIconName, toolLabel } from "./activityLabels";
-import { ActivityVirtualizerStore, shouldDeferActivityContent } from "./activityVirtualization";
+import { activityContentProjectionCache } from "./activityContentProjectionCache";
+import { fileName, isFileReadTool, toolIconName, toolLabel } from "./activityLabels";
+import {
+  type ActivityListEntry,
+  activityListEntryDisclosureKey,
+  COLLAPSED_ACTIVITY_ITEM_ESTIMATE_PX,
+  createActivityListProjection,
+  EXPANDED_DIFF_ACTIVITY_ITEM_ESTIMATE_PX,
+  estimateActivityListEntrySize,
+} from "./activityListProjection";
+import {
+  ActivityVirtualizerStore,
+  shouldDeferActivityContent,
+  shouldMinimizeActivityOverscan,
+} from "./activityVirtualization";
 import {
   type AgentActivityItem,
   type AgentActivityKind,
@@ -48,10 +62,14 @@ import {
   summarizeAgentActivity,
   webSearchActivityTitle,
 } from "./agentActivityPresentation";
+import {
+  projectVirtualLogicalOffset,
+  resolveBoundedVirtualViewport,
+  virtualLogicalToPhysicalOffset,
+} from "./boundedVirtualViewport";
 import { CodexGlyph } from "./CodexGlyph";
 import { presentAssistantText } from "./contentReferenceMarkers";
 import { DiffView } from "./DiffView";
-import { createDiffDocument } from "./diffDocument";
 import { observeElementResize } from "./elementResize";
 import { fileChangeLineStats } from "./fileChangeStats";
 import { FrontendFailureContext, useFrontendFailureReporter } from "./frontendFailure";
@@ -75,21 +93,18 @@ import {
 import {
   TimelineActivityContext,
   type TimelineActivityContextValue,
+  type TimelineActivityVisualAnchor,
 } from "./timelineActivityContext";
-import { createTimelineDisclosureStore } from "./timelineDisclosure";
+import { createTimelineDisclosureStore, type TimelineDisclosureKey } from "./timelineDisclosure";
 import {
-  handleTimelineDetailsToggle,
   type TimelineDisclosureBinding,
   TimelineDisclosureContext,
   type TimelineDisclosureContextValue,
+  timelineDisclosureChildKey,
   timelineDisclosureNamespacePrefix,
   useTimelineDisclosure,
 } from "./timelineDisclosureContext";
-import {
-  timelineFileChangeIdentity,
-  timelineItemIdentity,
-  timelineItemRenderIdentity,
-} from "./timelineIdentity";
+import { timelineFileChangeIdentity, timelineItemRenderIdentity } from "./timelineIdentity";
 import {
   commandActivityTitle,
   commandLiveOutputText,
@@ -97,6 +112,7 @@ import {
   commandPollActivityTitle,
   fileChangeActionLabel,
   fileChangeGroupTitle,
+  fileReadActivityTitle,
   formatCompactElapsedSeconds,
   formatElapsedSeconds,
   reasoningTitle,
@@ -111,6 +127,7 @@ import {
 import {
   calculateTimelineScrollbar,
   findTimelineAnchorIndex,
+  hasReachedTimelineWheelHandoffTarget,
   isTimelineNearEnd,
   normalizeTimelineWheelDelta,
   resolveNestedTimelineWheelTransfer,
@@ -137,6 +154,16 @@ import {
 import { type UserMessageEntry, UserMessageNavigator } from "./UserMessageNavigator";
 import { VirtualizedActivityList } from "./VirtualizedActivityList";
 import { VariableSizeVirtualizer } from "./variableSizeVirtualizer";
+import { findViewportVisualAnchorIndex } from "./viewportAnchor";
+
+const controlledTimelineDisclosureKeys = new WeakMap<HTMLElement, () => TimelineDisclosureKey>();
+
+function bindControlledTimelineDisclosure(
+  element: HTMLElement,
+  disclosure: TimelineDisclosureBinding,
+): void {
+  controlledTimelineDisclosureKeys.set(element, disclosure.storageKey);
+}
 
 interface StarterSuggestion {
   readonly icon: IconName;
@@ -176,7 +203,6 @@ const TIMELINE_MINIMUM_VIRTUAL_OVERSCAN_PX = 900;
 const TIMELINE_VIRTUAL_OVERSCAN_VIEWPORTS = 1.5;
 const TIMELINE_HISTORY_LOAD_THRESHOLD_PX = 640;
 const TIMELINE_SESSION_CACHE_CAPACITY: number = 16;
-const ACTIVITY_ESTIMATED_ITEM_HEIGHT = 30;
 const ACTIVITY_SESSION_CACHE_CAPACITY = 256;
 const ACTIVITY_ITEM_VIRTUALIZATION_THRESHOLD = 48;
 const ACTIVITY_OPEN_DISCLOSURE_VIRTUALIZATION_THRESHOLD = 4;
@@ -187,6 +213,7 @@ const USER_MESSAGE_NAVIGATOR_TITLE_PREVIEW_CHARACTERS: number = 180;
 const USER_MESSAGE_NAVIGATOR_DETAIL_PREVIEW_CHARACTERS: number = 320;
 const ACTIVE_MESSAGE_VIEWPORT_INSET_PX: number = 112;
 const LIVE_OUTPUT_FOLLOW_EPSILON_PX: number = 24;
+const ACTIVITY_CONTENT_SETTLE_DELAY_MS = 90;
 const TIMELINE_SCROLL_REGION_SELECTOR = "[data-timeline-scroll-region]";
 const TIMELINE_WHEEL_LISTENER_OPTIONS = {
   capture: true,
@@ -214,7 +241,15 @@ interface PendingHistoryLayout {
   readonly threadId: string;
 }
 
+interface TimelineLayoutSnapshot {
+  readonly clientHeight: number;
+  readonly listOffset: number;
+  readonly scrollHeight: number;
+  readonly trackHeight: number;
+}
+
 export function Timeline(props: {
+  readonly bottomOcclusion: number;
   readonly controller: TimelineController;
   readonly onSelectSuggestion: (prompt: string) => void;
 }) {
@@ -230,12 +265,16 @@ export function Timeline(props: {
   let pendingUnownedScrollMeasurement = false;
   let timelineRestorationFrame: number | undefined;
   let activityContentResumeTimer: number | undefined;
+  let activityContentResumeDeadline = 0;
   let previousActivityScrollTop = 0;
+  let nestedWheelTimelineRegion: HTMLElement | undefined;
   let nestedWheelTimelineTarget: number | undefined;
   let userMessageNavigationFrame: number | undefined;
   let pendingUserMessageNavigation: PendingUserMessageNavigation | undefined;
   let pendingHistoryLayout: PendingHistoryLayout | undefined;
   let pendingVirtualAnchorCorrection: CapturedTimelineViewportAnchor | undefined;
+  let pendingActivityVisualAnchor: TimelineActivityVisualAnchor | undefined;
+  let timelineLayoutSnapshot: TimelineLayoutSnapshot | undefined;
   let virtualMeasurementGeneration = 0;
   let virtualMeasurementScheduledGeneration: number | undefined;
   let activeTimelineThreadId: string | null = null;
@@ -251,6 +290,8 @@ export function Timeline(props: {
   const [showScrollToEnd, setShowScrollToEnd] = createSignal(false);
   const [activeUserMessageIndex, setActiveUserMessageIndex] = createSignal(0);
   const [activityContentDeferred, setActivityContentDeferred] = createSignal(false);
+  const [activityMinimalOverscan, setActivityMinimalOverscan] = createSignal(false);
+  const [activityLayoutRevision, setActivityLayoutRevision] = createSignal(0);
   const [clock, setClock] = createSignal(Date.now());
   const [timelineLayoutWidth, setTimelineLayoutWidth] = createSignal(0);
   const timelineSessions = new TimelineThreadSessionStore(
@@ -258,13 +299,17 @@ export function Timeline(props: {
     TIMELINE_SESSION_CACHE_CAPACITY,
   );
   const activitySessions = new ActivityVirtualizerStore(
-    ACTIVITY_ESTIMATED_ITEM_HEIGHT,
+    COLLAPSED_ACTIVITY_ITEM_ESTIMATE_PX,
     ACTIVITY_SESSION_CACHE_CAPACITY,
   );
   const programmaticScroll = new TimelineProgrammaticScrollTracker();
   let virtualizer = new VariableSizeVirtualizer(TIMELINE_ESTIMATED_TURN_HEIGHT);
   const [virtualRevision, setVirtualRevision] = createSignal(0);
-  const [virtualViewport, setVirtualViewport] = createSignal({ offset: 0, size: 1 });
+  const [virtualViewport, setVirtualViewport] = createSignal({
+    offset: 0,
+    scrollTop: 0,
+    size: 1,
+  });
   const [scrollbar, setScrollbar] = createSignal<ScrollbarMetrics>({
     maximumScroll: 0,
     scrollable: false,
@@ -290,39 +335,57 @@ export function Timeline(props: {
     const preferences = props.controller.config()?.config.desktop;
     return [width, preferences?.uiFontSize ?? 14, preferences?.diffDisplay ?? "unified"].join(":");
   });
+  const activityViewportGeometry = createMemo(() => {
+    virtualRevision();
+    const viewport = virtualViewport();
+    return {
+      scrollTop: viewport.scrollTop,
+      size: Math.max(1, viewport.size - props.bottomOcclusion),
+    };
+  });
   const activityContext: TimelineActivityContextValue = {
-    adjustScrollBy: (delta) => {
-      if (scrollElement === undefined || !Number.isFinite(delta) || delta === 0) {
+    preserveVisualAnchor: (anchor) => {
+      if (scrollElement === undefined || pendingActivityVisualAnchor !== undefined) {
         return;
       }
-      scrollTimelineTo(scrollElement.scrollTop + delta);
+      pendingActivityVisualAnchor = anchor;
+      scheduleTimelineFrame(false, true);
     },
     contentDeferred: activityContentDeferred,
+    layoutRevision: activityLayoutRevision,
     layoutSignature: timelineLayoutSignature,
+    minimalOverscan: activityMinimalOverscan,
     notifyLayoutChange: disclosureContext.onLayoutChange,
     sessions: activitySessions,
     shouldPreserveAnchor: () => !followingLatest() && !programmaticTimelineNavigationActive(),
     viewport: () => {
-      virtualRevision();
-      const viewport = virtualViewport();
+      const viewport = activityViewportGeometry();
       return scrollElement === undefined
         ? null
         : {
             element: scrollElement,
-            scrollTop: scrollElement.scrollTop,
+            scrollTop: viewport.scrollTop,
             size: viewport.size,
           };
     },
   };
-  const virtualRange = createMemo(() => {
+  const virtualGeometry = createMemo(() => {
     virtualRevision();
     const viewport = virtualViewport();
+    return resolveBoundedVirtualViewport({
+      logicalTotalSize: virtualizer.totalSize(),
+      physicalOffset: viewport.offset,
+      viewportSize: viewport.size,
+    });
+  });
+  const virtualRange = createMemo(() => {
+    const viewport = virtualGeometry();
     return virtualizer.range(
-      viewport.offset,
-      viewport.size,
+      viewport.logicalOffset,
+      viewport.viewportSize,
       Math.max(
         TIMELINE_MINIMUM_VIRTUAL_OVERSCAN_PX,
-        viewport.size * TIMELINE_VIRTUAL_OVERSCAN_VIEWPORTS,
+        viewport.viewportSize * TIMELINE_VIRTUAL_OVERSCAN_VIEWPORTS,
       ),
     );
   });
@@ -335,8 +398,7 @@ export function Timeline(props: {
     () => new Map(virtualTurns().map((turn) => [turn.id, turn] as const)),
   );
   const virtualTotalSize = createMemo(() => {
-    virtualRevision();
-    return virtualizer.totalSize();
+    return virtualGeometry().physicalTotalSize;
   });
   const userMessages = createMemo<readonly TimelineUserMessageEntry[]>(() =>
     props.controller.persistedTurns().flatMap((turn, turnIndex) => {
@@ -389,6 +451,7 @@ export function Timeline(props: {
 
   function recordTimelineLayoutChange(): void {
     timelineLayoutRevision += 1;
+    setActivityLayoutRevision(timelineLayoutRevision);
     const pending = pendingUserMessageNavigation;
     if (pending === undefined) {
       return;
@@ -408,25 +471,80 @@ export function Timeline(props: {
   ): number {
     return resolveTimelineMessageOffset(
       readMountedUserMessageOffset(message.id, virtualListTop),
-      virtualizer.offsetOf(message.turnIndex),
+      virtualOffset(message.turnIndex),
     );
   }
 
   function captureTimelineViewportAnchor(
     threadId = activeTimelineThreadId ?? props.controller.currentThread()?.id ?? null,
     listOffsetOverride: number | null = null,
+    excludedAnchorKeys: readonly string[] = [],
   ): CapturedTimelineViewportAnchor | null {
     if (threadId === null || scrollElement === undefined || virtualListElement === undefined) {
       return null;
     }
+    const viewportBounds = scrollElement.getBoundingClientRect();
+    const mountedTurns = [
+      ...virtualListElement.querySelectorAll<HTMLElement>(
+        ":scope > .timeline-virtual-item[data-virtual-turn-id]",
+      ),
+    ].map((element) => {
+      const turnId = element.getAttribute("data-virtual-turn-id");
+      return {
+        bounds: element.getBoundingClientRect(),
+        element,
+        key: turnId === null ? null : `${threadId}\u0000${turnId}`,
+      };
+    });
+    const mountedAnchorIndex = findViewportVisualAnchorIndex({
+      isAnchorCandidate: (index) => {
+        const key = mountedTurns[index]?.key ?? null;
+        return key !== null && !excludedAnchorKeys.includes(key);
+      },
+      itemCount: mountedTurns.length,
+      readItemBounds: (index) => mountedTurns[index]?.bounds ?? { bottom: 0, top: 0 },
+      viewportBottom: viewportBounds.bottom,
+      viewportTop: viewportBounds.top,
+    });
+    const mountedAnchor =
+      mountedAnchorIndex === null ? undefined : mountedTurns[mountedAnchorIndex];
+    const mountedAnchorKey = mountedAnchor?.key ?? null;
+    if (mountedAnchor !== undefined && mountedAnchorKey !== null) {
+      const key = mountedAnchorKey;
+      const virtualIndex = virtualizer.indexOf(key);
+      if (virtualIndex !== null) {
+        const startsInsideViewport = mountedAnchor.bounds.top >= viewportBounds.top;
+        const viewportOffset = startsInsideViewport
+          ? mountedAnchor.bounds.top - viewportBounds.top
+          : 0;
+        return {
+          anchor: {
+            key,
+            offsetWithinItem: startsInsideViewport
+              ? 0
+              : Math.min(
+                  virtualizer.sizeOf(virtualIndex),
+                  viewportBounds.top - mountedAnchor.bounds.top,
+                ),
+          },
+          contentOffset: scrollElement.scrollTop + viewportOffset,
+          threadId,
+          viewportOffset,
+        };
+      }
+    }
     const listOffset = listOffsetOverride ?? virtualListElement.offsetTop;
-    const virtualOffset = Math.max(0, scrollElement.scrollTop - listOffset);
-    const anchor = virtualizer.anchorAt(virtualOffset);
+    const viewport = resolveBoundedVirtualViewport({
+      logicalTotalSize: virtualizer.totalSize(),
+      physicalOffset: Math.max(0, scrollElement.scrollTop - listOffset),
+      viewportSize: Math.max(1, scrollElement.clientHeight),
+    });
+    const anchor = virtualizer.anchorAt(viewport.logicalOffset);
     const anchorOffset = anchor === null ? null : virtualizer.resolveAnchorOffset(anchor);
     if (anchor === null || anchorOffset === null) {
       return null;
     }
-    const contentOffset = listOffset + anchorOffset;
+    const contentOffset = listOffset + projectVirtualLogicalOffset(viewport, anchorOffset);
     return {
       anchor,
       contentOffset,
@@ -440,14 +558,17 @@ export function Timeline(props: {
       return null;
     }
     const virtualOffset = virtualizer.resolveAnchorOffset(captured.anchor);
-    return virtualOffset === null ? null : virtualListElement.offsetTop + virtualOffset;
+    return virtualOffset === null
+      ? null
+      : virtualListElement.offsetTop +
+          projectVirtualLogicalOffset(virtualGeometry(), virtualOffset);
   }
 
   function readActiveUserMessageIndex(input: {
     readonly clientHeight: number;
+    readonly listOffset: number;
     readonly scrollHeight: number;
     readonly scrollTop: number;
-    readonly virtualListTop: number;
   }): number {
     const messages = userMessages();
     const list = virtualListElement;
@@ -465,15 +586,13 @@ export function Timeline(props: {
     }
     const viewportTop = Math.max(
       0,
-      input.scrollTop - list.offsetTop + ACTIVE_MESSAGE_VIEWPORT_INSET_PX,
+      input.scrollTop - input.listOffset + ACTIVE_MESSAGE_VIEWPORT_INSET_PX,
     );
     return findTimelineAnchorIndex(
       messages.length,
       (index) => {
         const message = messages[index];
-        return message === undefined
-          ? Number.MAX_SAFE_INTEGER
-          : readUserMessageOffset(message, input.virtualListTop);
+        return message === undefined ? Number.MAX_SAFE_INTEGER : virtualOffset(message.turnIndex);
       },
       viewportTop,
     );
@@ -515,21 +634,33 @@ export function Timeline(props: {
     }
     const nextViewport = {
       offset: Math.max(0, scrollElement.scrollTop - virtualListElement.offsetTop),
+      scrollTop: Math.max(0, scrollElement.scrollTop),
       size: Math.max(1, scrollElement.clientHeight),
     };
     setVirtualViewport((current) => {
-      return current.offset === nextViewport.offset && current.size === nextViewport.size
+      return current.offset === nextViewport.offset &&
+        current.scrollTop === nextViewport.scrollTop &&
+        current.size === nextViewport.size
         ? current
         : nextViewport;
     });
   }
 
-  function scrollTimelineTo(top: number, behavior: ScrollBehavior = "auto"): void {
+  function scrollTimelineTo(
+    top: number,
+    behavior: ScrollBehavior = "auto",
+    synchronizedLayout?: TimelineLayoutSnapshot | undefined,
+  ): void {
     cancelTimelineWheelHandoff();
     if (scrollElement === undefined) {
       return;
     }
-    const maximumScroll = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+    const maximumScroll = Math.max(
+      0,
+      synchronizedLayout === undefined
+        ? scrollElement.scrollHeight - scrollElement.clientHeight
+        : synchronizedLayout.scrollHeight - synchronizedLayout.clientHeight,
+    );
     const target = Math.min(maximumScroll, Math.max(0, top));
     if (Math.abs(scrollElement.scrollTop - target) <= 1) {
       programmaticScroll.cancel();
@@ -579,7 +710,38 @@ export function Timeline(props: {
       window.clearTimeout(activityContentResumeTimer);
       activityContentResumeTimer = undefined;
     }
-    setActivityContentDeferred(false);
+    activityContentResumeDeadline = 0;
+    batch(() => {
+      setActivityContentDeferred(false);
+      setActivityMinimalOverscan(false);
+    });
+  }
+
+  function resumeActivityContentAfterSettle(): void {
+    activityContentResumeTimer = undefined;
+    const remainingDelay = activityContentResumeDeadline - performance.now();
+    if (remainingDelay > 0) {
+      activityContentResumeTimer = window.setTimeout(
+        resumeActivityContentAfterSettle,
+        Math.ceil(remainingDelay),
+      );
+      return;
+    }
+    activityContentResumeDeadline = 0;
+    batch(() => {
+      setActivityContentDeferred(false);
+      setActivityMinimalOverscan(false);
+    });
+  }
+
+  function scheduleActivityContentResume(): void {
+    activityContentResumeDeadline = performance.now() + ACTIVITY_CONTENT_SETTLE_DELAY_MS;
+    if (activityContentResumeTimer === undefined) {
+      activityContentResumeTimer = window.setTimeout(
+        resumeActivityContentAfterSettle,
+        ACTIVITY_CONTENT_SETTLE_DELAY_MS,
+      );
+    }
   }
 
   function updateActivityContentDeferral(scrollTop: number, viewportSize: number): void {
@@ -590,19 +752,16 @@ export function Timeline(props: {
       return;
     }
     const largeJump = shouldDeferActivityContent(scrollDelta, viewportSize);
+    if (shouldMinimizeActivityOverscan(scrollDelta, viewportSize)) {
+      setActivityMinimalOverscan(true);
+    }
     if (!largeJump && !activityContentDeferred()) {
       return;
     }
     if (largeJump) {
       setActivityContentDeferred(true);
     }
-    if (activityContentResumeTimer !== undefined) {
-      window.clearTimeout(activityContentResumeTimer);
-    }
-    activityContentResumeTimer = window.setTimeout(() => {
-      activityContentResumeTimer = undefined;
-      setActivityContentDeferred(false);
-    }, 90);
+    scheduleActivityContentResume();
   }
 
   function cancelUserMessageNavigationFrame(): void {
@@ -635,6 +794,8 @@ export function Timeline(props: {
     pendingLayoutSynchronization = false;
     pendingUnownedScrollMeasurement = false;
     pendingVirtualMeasurements.clear();
+    pendingActivityVisualAnchor = undefined;
+    timelineLayoutSnapshot = undefined;
     pendingHistoryLayout = undefined;
     pendingVirtualAnchorCorrection = undefined;
     cancelActivityContentDeferral();
@@ -679,16 +840,30 @@ export function Timeline(props: {
     const savedAnchor = session?.anchor ?? null;
     const savedAnchorOffset =
       savedAnchor === null ? null : virtualizer.resolveAnchorOffset(savedAnchor.anchor);
+    const physicalTotalSize = resolveBoundedVirtualViewport({
+      logicalTotalSize: virtualizer.totalSize(),
+      physicalOffset: 0,
+      viewportSize,
+    }).physicalTotalSize;
+    const anchoredVirtualOffset =
+      savedAnchor === null || savedAnchorOffset === null
+        ? null
+        : virtualLogicalToPhysicalOffset(
+            Math.max(0, savedAnchorOffset - savedAnchor.viewportOffset),
+            virtualizer.totalSize(),
+            viewportSize,
+          );
     const initialVirtualOffset = resolveTimelineRestorationTop({
       followingLatest: following,
-      maximumScroll: Math.max(0, virtualizer.totalSize() - viewportSize),
-      savedScrollTop:
-        savedAnchor === null || savedAnchorOffset === null
-          ? savedScrollTop
-          : Math.max(0, savedAnchorOffset - savedAnchor.viewportOffset),
+      maximumScroll: Math.max(0, physicalTotalSize - viewportSize),
+      savedScrollTop: anchoredVirtualOffset ?? savedScrollTop,
     });
     setFollowingLatest(following);
-    setVirtualViewport({ offset: initialVirtualOffset, size: viewportSize });
+    setVirtualViewport({
+      offset: initialVirtualOffset,
+      scrollTop: initialVirtualOffset,
+      size: viewportSize,
+    });
     setVirtualRevision((revision) => revision + 1);
 
     timelineRestorationFrame = requestAnimationFrame(() => {
@@ -725,8 +900,7 @@ export function Timeline(props: {
   }
 
   function virtualOffset(index: number): number {
-    virtualRevision();
-    return virtualizer.offsetOf(index);
+    return projectVirtualLogicalOffset(virtualGeometry(), virtualizer.offsetOf(index));
   }
 
   function virtualTurnKey(turnId: string): string {
@@ -743,10 +917,11 @@ export function Timeline(props: {
   }
 
   function commitVirtualizerChange(anchor: CapturedTimelineViewportAnchor | null): void {
+    const programmaticNavigationActive = programmaticTimelineNavigationActive();
     const preserveAnchor =
       anchor !== null &&
       !followingLatest() &&
-      !programmaticTimelineNavigationActive() &&
+      !programmaticNavigationActive &&
       virtualizer.resolveAnchorOffset(anchor.anchor) !== null;
     if (preserveAnchor) {
       pendingVirtualAnchorCorrection ??= anchor;
@@ -754,14 +929,25 @@ export function Timeline(props: {
       if (nextAnchorOffset !== null) {
         const viewport = virtualViewport();
         setVirtualViewport({
-          offset: Math.max(0, nextAnchorOffset - anchor.viewportOffset),
+          offset: virtualLogicalToPhysicalOffset(
+            Math.max(0, nextAnchorOffset - anchor.viewportOffset),
+            virtualizer.totalSize(),
+            viewport.size,
+          ),
+          scrollTop: viewport.scrollTop,
           size: viewport.size,
         });
       }
     } else if (followingLatest()) {
       const viewport = virtualViewport();
+      const physicalTotalSize = resolveBoundedVirtualViewport({
+        logicalTotalSize: virtualizer.totalSize(),
+        physicalOffset: 0,
+        viewportSize: viewport.size,
+      }).physicalTotalSize;
       setVirtualViewport({
-        offset: Math.max(0, virtualizer.totalSize() - viewport.size),
+        offset: Math.max(0, physicalTotalSize - viewport.size),
+        scrollTop: viewport.scrollTop,
         size: viewport.size,
       });
     }
@@ -800,7 +986,39 @@ export function Timeline(props: {
         nextAnchorOffset,
         previousAnchorOffset: pending.contentOffset,
       }),
+      "auto",
+      timelineLayoutSnapshot,
     );
+    if (dragState !== undefined) {
+      dragState = {
+        ...dragState,
+        startScrollTop: dragState.startScrollTop + scrollElement.scrollTop - previousScrollTop,
+      };
+    }
+  }
+
+  function applyPendingActivityVisualAnchor(): void {
+    const anchor = pendingActivityVisualAnchor;
+    pendingActivityVisualAnchor = undefined;
+    if (
+      anchor === undefined ||
+      scrollElement === undefined ||
+      followingLatest() ||
+      programmaticTimelineNavigationActive() ||
+      Math.abs(scrollElement.scrollTop - anchor.scrollTop) > 0.5 ||
+      !anchor.element.isConnected ||
+      anchor.element.getAttribute("data-virtual-activity-key") !== anchor.key
+    ) {
+      return;
+    }
+    const viewportOffset =
+      anchor.element.getBoundingClientRect().top - scrollElement.getBoundingClientRect().top;
+    const correction = viewportOffset - anchor.viewportOffset;
+    if (!Number.isFinite(correction) || correction === 0) {
+      return;
+    }
+    const previousScrollTop = scrollElement.scrollTop;
+    scrollTimelineTo(previousScrollTop + correction, "auto", timelineLayoutSnapshot);
     if (dragState !== undefined) {
       dragState = {
         ...dragState,
@@ -843,7 +1061,12 @@ export function Timeline(props: {
         }),
       );
       pendingVirtualMeasurements.clear();
-      const anchor = captureTimelineViewportAnchor();
+      const changedMeasurementKeys = measurements.flatMap((measurement) => {
+        const index = virtualizer.indexOf(measurement.key);
+        const nextSize = Math.max(1, Math.round(measurement.size));
+        return index !== null && virtualizer.sizeOf(index) !== nextSize ? [measurement.key] : [];
+      });
+      const anchor = captureTimelineViewportAnchor(undefined, null, changedMeasurementKeys);
       const batch = virtualizer.measureBatch(measurements);
       if (!batch.changed) {
         measuredTimelineLayoutRevision = timelineLayoutRevision;
@@ -855,18 +1078,36 @@ export function Timeline(props: {
     });
   }
 
-  function measureScroll(userInitiated: boolean): void {
+  function readTimelineLayoutSnapshot(): TimelineLayoutSnapshot | null {
+    if (scrollElement === undefined || virtualListElement === undefined) {
+      return null;
+    }
+    const snapshot = {
+      clientHeight: scrollElement.clientHeight,
+      listOffset: virtualListElement.offsetTop,
+      scrollHeight: scrollElement.scrollHeight,
+      trackHeight: scrollbarTrackElement?.clientHeight ?? 0,
+    } satisfies TimelineLayoutSnapshot;
+    timelineLayoutSnapshot = snapshot;
+    return snapshot;
+  }
+
+  function measureScroll(
+    userInitiated: boolean,
+    synchronizedLayout: TimelineLayoutSnapshot | null = null,
+  ): void {
     if (scrollElement === undefined || virtualListElement === undefined) {
       return;
     }
-    const clientHeight = scrollElement.clientHeight;
-    const scrollHeight = scrollElement.scrollHeight;
+    const layout = synchronizedLayout ?? timelineLayoutSnapshot ?? readTimelineLayoutSnapshot();
+    if (layout === null) {
+      return;
+    }
+    const { clientHeight, listOffset, scrollHeight, trackHeight } = layout;
     const scrollTop = scrollElement.scrollTop;
-    updateActivityContentDeferral(scrollTop, clientHeight);
-    const trackHeight = scrollbarTrackElement?.clientHeight ?? 0;
-    const virtualListTop = virtualListElement.getBoundingClientRect().top;
     const nextViewport = {
-      offset: Math.max(0, scrollTop - virtualListElement.offsetTop),
+      offset: Math.max(0, scrollTop - listOffset),
+      scrollTop: Math.max(0, scrollTop),
       size: Math.max(1, clientHeight),
     };
     const nextScrollbar = calculateTimelineScrollbar({
@@ -887,22 +1128,26 @@ export function Timeline(props: {
     });
     const nextActiveUserMessageIndex = readActiveUserMessageIndex({
       clientHeight,
+      listOffset,
       scrollHeight,
       scrollTop,
-      virtualListTop,
     });
-
-    setScrollbar((current) =>
-      sameScrollbarMetrics(current, nextScrollbar) ? current : nextScrollbar,
-    );
-    setShowScrollToEnd(!isNearEnd);
-    setActiveTimelineFollowing(nextFollowingLatest);
-    setActiveUserMessageIndex(nextActiveUserMessageIndex);
-    setVirtualViewport((current) =>
-      current.offset === nextViewport.offset && current.size === nextViewport.size
-        ? current
-        : nextViewport,
-    );
+    batch(() => {
+      updateActivityContentDeferral(scrollTop, clientHeight);
+      setScrollbar((current) =>
+        sameScrollbarMetrics(current, nextScrollbar) ? current : nextScrollbar,
+      );
+      setShowScrollToEnd(!isNearEnd);
+      setActiveTimelineFollowing(nextFollowingLatest);
+      setActiveUserMessageIndex(nextActiveUserMessageIndex);
+      setVirtualViewport((current) =>
+        current.offset === nextViewport.offset &&
+        current.scrollTop === nextViewport.scrollTop &&
+        current.size === nextViewport.size
+          ? current
+          : nextViewport,
+      );
+    });
     if (
       userInitiated &&
       scrollTop <= TIMELINE_HISTORY_LOAD_THRESHOLD_PX &&
@@ -914,10 +1159,12 @@ export function Timeline(props: {
   }
 
   function cancelTimelineWheelHandoff(): void {
-    if (nestedWheelTimelineTarget === undefined) {
+    const handoffActive = nestedWheelTimelineTarget !== undefined;
+    nestedWheelTimelineRegion = undefined;
+    nestedWheelTimelineTarget = undefined;
+    if (!handoffActive) {
       return;
     }
-    nestedWheelTimelineTarget = undefined;
     if (scrollElement !== undefined) {
       scrollElement.scrollTo({ behavior: "auto", top: scrollElement.scrollTop });
     }
@@ -925,7 +1172,13 @@ export function Timeline(props: {
 
   function claimTimelineScrollOwnership(preserveWheelHandoff = false): void {
     cancelPendingUserMessageNavigation();
+    const programmaticSmoothActive = programmaticScroll.smoothActive();
     programmaticScroll.cancel();
+    if (programmaticSmoothActive && scrollElement !== undefined) {
+      scrollElement.scrollTo({ behavior: "auto", top: scrollElement.scrollTop });
+    }
+    pendingActivityVisualAnchor = undefined;
+    pendingVirtualAnchorCorrection = undefined;
     if (!preserveWheelHandoff) {
       cancelTimelineWheelHandoff();
     }
@@ -980,6 +1233,9 @@ export function Timeline(props: {
       scheduleTimelineFrame(true, false);
       return;
     }
+    if (nestedWheelTimelineRegion !== undefined && nestedWheelTimelineRegion !== nestedRegion) {
+      cancelTimelineWheelHandoff();
+    }
     if (scrollElement === undefined || !event.cancelable) {
       cancelTimelineWheelHandoff();
       scheduleTimelineFrame(true, false);
@@ -1008,9 +1264,11 @@ export function Timeline(props: {
       pendingTarget: nestedWheelTimelineTarget ?? null,
     });
     if (Math.abs(scrollElement.scrollTop - target) <= 1) {
+      nestedWheelTimelineRegion = undefined;
       nestedWheelTimelineTarget = undefined;
       return;
     }
+    nestedWheelTimelineRegion = nestedRegion;
     nestedWheelTimelineTarget = target;
     scrollElement.scrollTo({ behavior: "smooth", top: target });
     scheduleTimelineFrame(true, false);
@@ -1018,10 +1276,26 @@ export function Timeline(props: {
 
   function handleTimelineClick(event: MouseEvent): void {
     const target = event.target instanceof Element ? event.target : null;
-    if (target?.closest("[data-timeline-disclosure]")) {
-      claimTimelineScrollOwnership();
-      setActiveTimelineFollowing(false);
+    const summary = target?.closest<HTMLElement>("[data-timeline-disclosure]");
+    if (summary === null || summary === undefined) {
+      return;
     }
+    const details = summary.parentElement;
+    const storageKey =
+      controlledTimelineDisclosureKeys.get(summary)?.() ??
+      summary.getAttribute("data-timeline-disclosure");
+    if (
+      !(details instanceof HTMLDetailsElement) ||
+      storageKey === null ||
+      storageKey.length === 0
+    ) {
+      return;
+    }
+    event.preventDefault();
+    claimTimelineScrollOwnership();
+    setActiveTimelineFollowing(false);
+    disclosures.setOpen(storageKey as TimelineDisclosureKey, !details.open);
+    disclosureContext.onLayoutChange();
   }
 
   function scheduleTimelineFrame(userInitiated: boolean, synchronizeLayout: boolean): void {
@@ -1044,9 +1318,11 @@ export function Timeline(props: {
       if (scrollElement === undefined) {
         return;
       }
+      const synchronizedLayout = shouldSynchronizeLayout ? readTimelineLayoutSnapshot() : null;
       applyPendingVirtualAnchorCorrection();
+      applyPendingActivityVisualAnchor();
       if (shouldMeasureAsUserScroll) {
-        measureScroll(true);
+        measureScroll(true, synchronizedLayout);
       }
       if (
         shouldSynchronizeTimelineToEnd({
@@ -1054,12 +1330,16 @@ export function Timeline(props: {
           layoutRequested: shouldSynchronizeLayout,
         })
       ) {
-        scrollTimelineTo(scrollElement.scrollHeight);
-        measureScroll(false);
+        scrollTimelineTo(
+          synchronizedLayout?.scrollHeight ?? scrollElement.scrollHeight,
+          "auto",
+          synchronizedLayout ?? undefined,
+        );
+        measureScroll(false, synchronizedLayout);
         return;
       }
       if (!shouldMeasureAsUserScroll) {
-        measureScroll(false);
+        measureScroll(false, synchronizedLayout);
       }
     });
   }
@@ -1375,20 +1655,24 @@ export function Timeline(props: {
       return;
     }
     const handleScroll = () => {
-      if (
-        scrollElement !== undefined &&
-        nestedWheelTimelineTarget !== undefined &&
-        Math.abs(scrollElement.scrollTop - nestedWheelTimelineTarget) <= 1
-      ) {
-        nestedWheelTimelineTarget = undefined;
-      }
       if (!consumeProgrammaticScroll()) {
         pendingUnownedScrollMeasurement = true;
       }
       scheduleTimelineFrame(false, false);
     };
     const handleScrollEnd = () => {
-      nestedWheelTimelineTarget = undefined;
+      if (
+        scrollElement !== undefined &&
+        nestedWheelTimelineTarget !== undefined &&
+        hasReachedTimelineWheelHandoffTarget({
+          currentScrollTop: scrollElement.scrollTop,
+          maximumScroll: Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight),
+          target: nestedWheelTimelineTarget,
+        })
+      ) {
+        nestedWheelTimelineRegion = undefined;
+        nestedWheelTimelineTarget = undefined;
+      }
       programmaticScroll.finish();
     };
     const handleResize = () => {
@@ -1432,8 +1716,11 @@ export function Timeline(props: {
     virtualMeasurementGeneration += 1;
     virtualMeasurementScheduledGeneration = undefined;
     pendingVirtualMeasurements.clear();
+    pendingActivityVisualAnchor = undefined;
+    timelineLayoutSnapshot = undefined;
     pendingHistoryLayout = undefined;
     pendingVirtualAnchorCorrection = undefined;
+    nestedWheelTimelineRegion = undefined;
     nestedWheelTimelineTarget = undefined;
     cancelActivityContentDeferral();
     programmaticScroll.cancel();
@@ -2019,12 +2306,12 @@ function ImageViewGroup(props: {
     props.items.length === 1 ? "Visualizou uma imagem" : `Visualizou ${props.items.length} imagens`;
 
   return (
-    <details
-      class="activity-card image-view-group"
-      onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
-      open={disclosure.isOpen()}
-    >
-      <summary class="activity-summary" data-timeline-disclosure="">
+    <details class="activity-card image-view-group" open={disclosure.isOpen()}>
+      <summary
+        class="activity-summary"
+        data-timeline-disclosure=""
+        ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
+      >
         <span class="activity-icon">
           <Icon name="image" size={13} />
         </span>
@@ -2066,12 +2353,11 @@ function AgentActivityGroup(props: {
   readonly reasoningHeading: string | null;
 }) {
   const disclosure = useTimelineDisclosure(() => props.disclosureKey);
-  const itemIdentities = createMemo(() => props.items.map(timelineItemIdentity));
-  const itemsByIdentity = createMemo(() =>
-    indexTimelineValues(props.items, timelineItemIdentity, "itens do grupo de atividade"),
-  );
+  const listProjection = createMemo(() => createActivityListProjection(props.items));
   const summaries = createMemo(() => summarizeAgentActivity(props.items));
   const activeActivity = createMemo(() => activeAgentActivity(props.items));
+  const estimateStorageKeys = new Map<string, TimelineDisclosureKey>();
+  let estimateStorageKeyPrefix: TimelineDisclosureKey | null = null;
   const iconKind = createMemo(() =>
     props.isCurrent ? activeActivity()?.kind : summaries()[0]?.kind,
   );
@@ -2097,6 +2383,46 @@ function AgentActivityGroup(props: {
       ? runningCommandHeadline(activeCommandDuration(), fallback)
       : fallback;
   });
+  const estimateListEntrySize = (entryKey: string, entryIndex: number): number => {
+    const entry = listProjection().entryAt(entryIndex, entryKey);
+    const prefix = disclosure.storageKey();
+    if (estimateStorageKeyPrefix !== prefix) {
+      estimateStorageKeys.clear();
+      estimateStorageKeyPrefix = prefix;
+    }
+    let storageKey = estimateStorageKeys.get(entryKey);
+    if (storageKey === undefined) {
+      storageKey = timelineDisclosureChildKey(prefix, activityListEntryDisclosureKey(entry));
+      estimateStorageKeys.set(entryKey, storageKey);
+      if (estimateStorageKeys.size > 512) {
+        const oldestKey = estimateStorageKeys.keys().next().value;
+        if (oldestKey !== undefined) {
+          estimateStorageKeys.delete(oldestKey);
+        }
+      }
+    }
+    return estimateActivityListEntrySize(
+      entry,
+      disclosure.descendantContext.store.read(storageKey),
+    );
+  };
+  const usesUniformCollapsedFileEstimates = createMemo(
+    () =>
+      disclosure.openDescendantCount() === 0 &&
+      props.items.every((item) => item.type === "fileChange"),
+  );
+  const uniformListEntryEstimate = createMemo<number | undefined>(() => {
+    if (!props.items.every((item) => item.type === "fileChange")) {
+      return undefined;
+    }
+    const openCount = disclosure.openDescendantCount();
+    if (openCount === 0) {
+      return COLLAPSED_ACTIVITY_ITEM_ESTIMATE_PX;
+    }
+    return openCount === listProjection().count
+      ? EXPANDED_DIFF_ACTIVITY_ITEM_ESTIMATE_PX
+      : undefined;
+  });
 
   return (
     <Show
@@ -2109,12 +2435,12 @@ function AgentActivityGroup(props: {
         </Show>
       }
     >
-      <details
-        class="activity-card agent-activity-group"
-        onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
-        open={disclosure.isOpen()}
-      >
-        <summary class="activity-summary agent-activity-summary" data-timeline-disclosure="">
+      <details class="activity-card agent-activity-group" open={disclosure.isOpen()}>
+        <summary
+          class="activity-summary agent-activity-summary"
+          data-timeline-disclosure=""
+          ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
+        >
           <Show when={iconKind()}>
             {(kind) => (
               <span class="activity-icon">
@@ -2131,22 +2457,27 @@ function AgentActivityGroup(props: {
           <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
             <div class="agent-activity-viewport">
               <VirtualizedActivityList
+                contentRevision={disclosure.subtreeRevision()}
+                estimateItemSize={
+                  usesUniformCollapsedFileEstimates() ? undefined : estimateListEntrySize
+                }
+                estimateRevision={disclosure.openDescendantCount()}
                 groupKey={disclosure.storageKey()}
-                itemKeys={itemIdentities()}
-                renderItem={(itemIdentity) => (
-                  <TimelineItem
+                itemSource={listProjection()}
+                renderItem={(entryKey, entryIndex, materializeBody) => (
+                  <ActivityListEntryView
                     clock={props.clock}
                     diffDisplay={props.diffDisplay}
-                    item={readTimelineValue(
-                      itemsByIdentity(),
-                      itemIdentity,
-                      "item do grupo de atividade",
-                    )}
-                    variant="grouped"
+                    entry={listProjection().entryAt(entryIndex(), entryKey())}
+                    materializeBody={materializeBody}
                   />
                 )}
+                reuseGroupForKey={(_entryKey, entryIndex) =>
+                  listProjection().reuseGroupAt(entryIndex)
+                }
+                uniformEstimate={uniformListEntryEstimate()}
                 virtualize={
-                  itemIdentities().length > ACTIVITY_ITEM_VIRTUALIZATION_THRESHOLD ||
+                  listProjection().count > ACTIVITY_ITEM_VIRTUALIZATION_THRESHOLD ||
                   disclosure.openDescendantCount() >
                     ACTIVITY_OPEN_DISCLOSURE_VIRTUALIZATION_THRESHOLD
                 }
@@ -2159,10 +2490,60 @@ function AgentActivityGroup(props: {
   );
 }
 
+function ActivityListEntryView(props: {
+  readonly clock: number;
+  readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly entry: ActivityListEntry;
+  readonly materializeBody: () => boolean;
+}) {
+  const entry = createMemo(() => props.entry);
+  return (
+    <Switch>
+      <Match when={entry().kind === "fileChange"}>
+        <Change
+          change={readFileChangeActivityEntry(entry()).change}
+          diffDisplay={props.diffDisplay}
+          disclosureKey={activityListEntryDisclosureKey(entry())}
+          materializeBody={props.materializeBody}
+        />
+      </Match>
+      <Match when={entry().kind === "item"}>
+        <TimelineItem
+          clock={props.clock}
+          diffDisplay={props.diffDisplay}
+          item={readItemActivityEntry(entry()).item}
+          materializeBody={props.materializeBody}
+          variant="grouped"
+        />
+      </Match>
+    </Switch>
+  );
+}
+
+function readFileChangeActivityEntry(
+  entry: ActivityListEntry,
+): Extract<ActivityListEntry, { readonly kind: "fileChange" }> {
+  if (entry.kind !== "fileChange") {
+    throw new Error("A entrada virtualizada não contém uma alteração de arquivo.");
+  }
+  return entry;
+}
+
+function readItemActivityEntry(
+  entry: ActivityListEntry,
+): Extract<ActivityListEntry, { readonly kind: "item" }> {
+  if (entry.kind !== "item") {
+    throw new Error("A entrada virtualizada não contém uma atividade executável.");
+  }
+  return entry;
+}
+
 function agentActivityIcon(kind: AgentActivityKind | undefined): IconName {
   switch (kind) {
     case "fileChanges":
       return "edit";
+    case "fileReads":
+      return "book";
     case "exploration":
       return "file";
     case "commands":
@@ -2224,19 +2605,24 @@ interface TimelineItemProps {
   readonly clock?: number | undefined;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly item: VisibleThreadItem;
+  readonly materializeBody?: (() => boolean) | undefined;
   readonly streaming?: boolean | undefined;
   readonly variant?: "default" | "grouped" | undefined;
 }
 
 function TimelineItem(props: TimelineItemProps) {
   return (
-    <Show keyed when={timelineItemRenderIdentity(props.item)}>
+    <Show
+      keyed
+      when={props.variant === "grouped" ? props.item.type : timelineItemRenderIdentity(props.item)}
+    >
       {(_identity) => (
         <TimelineItemContent
           active={props.active}
           clock={props.clock}
           diffDisplay={props.diffDisplay}
           item={props.item}
+          materializeBody={props.materializeBody}
           streaming={props.streaming}
           variant={props.variant}
         />
@@ -2263,14 +2649,29 @@ function TimelineItemContent(props: TimelineItemProps) {
       return null;
     case "commandExecution":
       return (
-        <CommandItem clock={props.clock ?? Date.now()} item={props.item} variant={props.variant} />
+        <CommandItem
+          clock={props.clock ?? Date.now()}
+          item={props.item}
+          materializeBody={props.materializeBody}
+          variant={props.variant}
+        />
       );
     case "fileChange":
       return (
-        <FileChangeItem diffDisplay={props.diffDisplay} item={props.item} variant={props.variant} />
+        <FileChangeItem
+          diffDisplay={props.diffDisplay}
+          item={props.item}
+          materializeBody={props.materializeBody}
+        />
       );
     case "toolExecution":
-      return <ToolItem item={props.item} variant={props.variant} />;
+      return (
+        <ToolItem
+          item={props.item}
+          materializeBody={props.materializeBody}
+          variant={props.variant}
+        />
+      );
   }
 }
 
@@ -2315,10 +2716,12 @@ function ActivityHeadline(props: {
 function CommandItem(props: {
   readonly clock: number;
   readonly item: Extract<ThreadItem, { type: "commandExecution" }>;
+  readonly materializeBody?: (() => boolean) | undefined;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
   let outputScrollElement: HTMLDivElement | undefined;
   let followLiveOutput = true;
+  let activeItemId = props.item.id;
   const disclosure = useTimelineDisclosure(() => `command:${props.item.id}`);
   const output = () => props.item.aggregatedOutput;
   const liveOutput = () => commandLiveOutputText(props.item.liveOutput);
@@ -2336,6 +2739,19 @@ function CommandItem(props: {
     );
     return backgroundRunning() ? runningCommandHeadline(duration(), fallback) : fallback;
   };
+
+  createEffect(() => {
+    const itemId = props.item.id;
+    if (itemId === activeItemId) {
+      return;
+    }
+    activeItemId = itemId;
+    followLiveOutput = true;
+    if (outputScrollElement !== undefined) {
+      outputScrollElement.scrollTop = 0;
+      outputScrollElement.scrollLeft = 0;
+    }
+  });
 
   createEffect(() => {
     liveOutput();
@@ -2364,10 +2780,13 @@ function CommandItem(props: {
     <details
       class="activity-card command-activity-card"
       classList={{ "grouped-activity-item": props.variant === "grouped" }}
-      onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
       open={disclosure.isOpen()}
     >
-      <summary class="activity-summary" data-timeline-disclosure="">
+      <summary
+        class="activity-summary"
+        data-timeline-disclosure=""
+        ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
+      >
         <span class="activity-icon">
           <Icon name="terminal" size={13} />
         </span>
@@ -2379,7 +2798,7 @@ function CommandItem(props: {
           <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
         </span>
       </summary>
-      <Show when={disclosure.isOpen()}>
+      <Show when={disclosure.isOpen() && (props.materializeBody?.() ?? true)}>
         <div class="command-card-inner">
           <div class="command-card-header">Shell</div>
           <div
@@ -2432,24 +2851,53 @@ function commandDurationLabel(
 
 function ToolItem(props: {
   readonly item: Extract<ThreadItem, { type: "toolExecution" }>;
+  readonly materializeBody?: (() => boolean) | undefined;
   readonly variant?: "default" | "grouped" | undefined;
 }) {
   const disclosure = useTimelineDisclosure(() => `tool:${props.item.id}`);
   const description = () => props.item.description || toolLabel(props.item.name);
   const isWebSearch = () => props.item.name === "web_search" || props.item.name === "web_fetch";
   const isCommandPoll = () => props.item.name === "poll_command";
+  const isFileRead = () => isFileReadTool(props.item.name);
   const isTerminalRead = () => isTerminalReadTool(props.item.name);
   const output = () => props.item.output;
   const hasDetails = () =>
     output() !== null || props.item.status === "failed" || props.item.status === "declined";
+  const fileReadTitle = () => {
+    const base = fileReadActivityTitle(props.item.status);
+    return props.item.outputPresentation.type === "sourceFile"
+      ? `${base}: ${fileName(props.item.outputPresentation.path)}`
+      : base;
+  };
   const title = () =>
     isCommandPoll()
       ? commandPollActivityTitle(props.item.status)
       : isTerminalRead()
         ? terminalReadActivityTitle(props.item.status)
-        : isWebSearch()
-          ? webSearchActivityTitle(description(), props.item.status)
-          : toolActivityTitle(description(), props.item.status, disclosure.isOpen());
+        : isFileRead()
+          ? fileReadTitle()
+          : isWebSearch()
+            ? webSearchActivityTitle(description(), props.item.status)
+            : toolActivityTitle(description(), props.item.status, disclosure.isOpen());
+
+  createEffect(() => {
+    if (!disclosure.isOpen()) {
+      return;
+    }
+    const item = props.item;
+    const currentOutput = item.output;
+    if (currentOutput === null || item.outputPresentation.type !== "sourceFile") {
+      return;
+    }
+    const text = toolOutputText(currentOutput.preview);
+    if (text !== null) {
+      activityContentProjectionCache.sourceProjection(
+        currentOutput,
+        text,
+        item.outputPresentation.path,
+      );
+    }
+  });
 
   const headline = () => (
     <>
@@ -2475,16 +2923,19 @@ function ToolItem(props: {
       <details
         class="activity-card tool-activity-card"
         classList={{ "grouped-activity-item": props.variant === "grouped" }}
-        onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
         open={disclosure.isOpen()}
       >
-        <summary class="activity-summary" data-timeline-disclosure="">
+        <summary
+          class="activity-summary"
+          data-timeline-disclosure=""
+          ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
+        >
           {headline()}
           <span class="activity-chevron">
             <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
           </span>
         </summary>
-        <Show when={disclosure.isOpen()}>
+        <Show when={disclosure.isOpen() && (props.materializeBody?.() ?? true)}>
           <div class="command-card-inner">
             <div class="command-card-header">{toolLabel(props.item.name)}</div>
             <Show when={output()}>
@@ -2516,7 +2967,7 @@ function ToolItem(props: {
 function FileChangeItem(props: {
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly item: Extract<ThreadItem, { type: "fileChange" }>;
-  readonly variant?: "default" | "grouped" | undefined;
+  readonly materializeBody?: (() => boolean) | undefined;
 }) {
   const singleChange = () => (props.item.changes.length === 1 ? props.item.changes[0] : undefined);
 
@@ -2527,7 +2978,7 @@ function FileChangeItem(props: {
         <FileChangeGroup
           diffDisplay={props.diffDisplay}
           item={props.item}
-          variant={props.variant}
+          materializeBody={props.materializeBody}
         />
       }
     >
@@ -2536,7 +2987,7 @@ function FileChangeItem(props: {
           change={change()}
           diffDisplay={props.diffDisplay}
           disclosureKey={`change:${props.item.id}:${timelineFileChangeIdentity(change(), 0)}`}
-          variant={props.variant}
+          materializeBody={props.materializeBody}
         />
       )}
     </Show>
@@ -2546,7 +2997,7 @@ function FileChangeItem(props: {
 function FileChangeGroup(props: {
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly item: Extract<ThreadItem, { type: "fileChange" }>;
-  readonly variant?: "default" | "grouped" | undefined;
+  readonly materializeBody?: (() => boolean) | undefined;
 }) {
   const disclosure = useTimelineDisclosure(() => `file-change:${props.item.id}`);
   const title = () => fileChangeGroupTitle(props.item.changes.length);
@@ -2563,7 +3014,7 @@ function FileChangeGroup(props: {
             change={readTimelineValue(changesByIdentity(), changeIdentity, "alteração de arquivo")}
             diffDisplay={props.diffDisplay}
             disclosureKey={`change:${props.item.id}:${changeIdentity}`}
-            variant={props.variant}
+            materializeBody={props.materializeBody}
           />
         )}
       </For>
@@ -2571,33 +3022,26 @@ function FileChangeGroup(props: {
   );
 
   return (
-    <Show
-      when={props.variant === "grouped"}
-      fallback={
-        <details
-          class="activity-card file-change-card"
-          onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
-          open={disclosure.isOpen()}
-        >
-          <summary class="activity-summary" data-timeline-disclosure="">
-            <span class="activity-icon">
-              <Icon name="edit" size={13} />
-            </span>
-            <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
-            <span class="activity-chevron">
-              <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
-            </span>
-          </summary>
-          <Show when={disclosure.isOpen()}>
-            <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
-              {changeList()}
-            </TimelineDisclosureContext.Provider>
-          </Show>
-        </details>
-      }
-    >
-      <div class="grouped-file-change-set">{changeList()}</div>
-    </Show>
+    <details class="activity-card file-change-card" open={disclosure.isOpen()}>
+      <summary
+        class="activity-summary"
+        data-timeline-disclosure=""
+        ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
+      >
+        <span class="activity-icon">
+          <Icon name="edit" size={13} />
+        </span>
+        <ActivityHeadline active={props.item.status === "inProgress"} text={title()} />
+        <span class="activity-chevron">
+          <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
+        </span>
+      </summary>
+      <Show when={disclosure.isOpen() && (props.materializeBody?.() ?? true)}>
+        <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
+          {changeList()}
+        </TimelineDisclosureContext.Provider>
+      </Show>
+    </details>
   );
 }
 
@@ -2605,22 +3049,33 @@ function Change(props: {
   readonly change: FileChange;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly disclosureKey: string;
-  readonly variant?: "default" | "grouped" | undefined;
+  readonly materializeBody?: (() => boolean) | undefined;
 }) {
   const disclosure = useTimelineDisclosure(() => props.disclosureKey);
-  const diff = createMemo(() => props.change.diff);
   const kind = createMemo(() => props.change.kind.type);
   const path = createMemo(() => props.change.path);
   const stats = createMemo(() => fileChangeLineStats(props.change));
+  const additions = createMemo(() => stats().additions);
+  const deletions = createMemo(() => stats().deletions);
+  const canMaterializeBody = () => props.materializeBody?.() ?? true;
+  const bodyChange = createMemo(() =>
+    disclosure.isOpen() && canMaterializeBody() ? props.change : null,
+  );
+
+  createEffect(() => {
+    if (!disclosure.isOpen()) {
+      return;
+    }
+    const currentChange = props.change;
+    activityContentProjectionCache.diffDocument(currentChange);
+  });
 
   return (
-    <details
-      class="diff-block file-change-diff"
-      data-kind={kind()}
-      onToggle={(event) => handleTimelineDetailsToggle(event, disclosure)}
-      open={disclosure.isOpen()}
-    >
-      <summary data-timeline-disclosure="">
+    <details class="diff-block file-change-diff" data-kind={kind()} open={disclosure.isOpen()}>
+      <summary
+        data-timeline-disclosure=""
+        ref={(element) => bindControlledTimelineDisclosure(element, disclosure)}
+      >
         <span class="activity-icon">
           <Icon name="edit" size={13} />
         </span>
@@ -2631,39 +3086,40 @@ function Change(props: {
         <Show when={kind() !== "update"}>
           <span class={`change-kind kind-${kind()}`}>{kind() === "add" ? "NOVO" : "EXCLUÍDO"}</span>
         </Show>
-        <Show when={stats().additions > 0}>
-          <span class="diff-stat additions" title={`${stats().additions} linhas adicionadas`}>
-            +{stats().additions}
+        <Show when={additions() > 0}>
+          <span class="diff-stat additions" title={`${additions()} linhas adicionadas`}>
+            +{additions()}
           </span>
         </Show>
-        <Show when={stats().deletions > 0}>
-          <span class="diff-stat deletions" title={`${stats().deletions} linhas removidas`}>
-            −{stats().deletions}
+        <Show when={deletions() > 0}>
+          <span class="diff-stat deletions" title={`${deletions()} linhas removidas`}>
+            −{deletions()}
           </span>
         </Show>
         <span aria-hidden="true" class="diff-file-chevron">
           <Icon name={disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
         </span>
       </summary>
-      <Show when={disclosure.isOpen()}>
-        <Show
-          when={diff().trim().length > 0}
-          fallback={<div class="diff-empty-state">Nenhuma diferença textual disponível.</div>}
-        >
-          <ExpandedChangeDiff diff={diff()} mode={props.diffDisplay ?? "unified"} path={path()} />
-        </Show>
+      <Show when={bodyChange()}>
+        {(bodyChange) => (
+          <Show
+            when={bodyChange().diff.trim().length > 0}
+            fallback={<div class="diff-empty-state">Nenhuma diferença textual disponível.</div>}
+          >
+            <ExpandedChangeDiff change={bodyChange()} mode={props.diffDisplay ?? "unified"} />
+          </Show>
+        )}
       </Show>
     </details>
   );
 }
 
 function ExpandedChangeDiff(props: {
-  readonly diff: string;
+  readonly change: FileChange;
   readonly mode: "split" | "unified";
-  readonly path: string;
 }) {
-  const document = createMemo(() => createDiffDocument(props.diff));
-  return <DiffView document={document()} mode={props.mode} path={props.path} />;
+  const document = createMemo(() => activityContentProjectionCache.diffDocument(props.change));
+  return <DiffView document={document()} mode={props.mode} path={props.change.path} />;
 }
 
 function createTimelineFileChangeEntries(
@@ -2678,22 +3134,6 @@ function createTimelineFileChangeEntries(
       identity: timelineFileChangeIdentity(change, occurrence),
     };
   });
-}
-
-function indexTimelineValues<T>(
-  values: readonly T[],
-  identity: (value: T) => string,
-  description: string,
-): ReadonlyMap<string, T> {
-  const indexed = new Map<string, T>();
-  for (const value of values) {
-    const key = identity(value);
-    if (indexed.has(key)) {
-      throw new Error(`${description} contêm a identidade duplicada ${JSON.stringify(key)}.`);
-    }
-    indexed.set(key, value);
-  }
-  return indexed;
 }
 
 function readTimelineValue<T>(

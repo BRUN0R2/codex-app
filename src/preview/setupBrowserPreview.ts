@@ -1,6 +1,3 @@
-import { emit } from "@tauri-apps/api/event";
-import { mockIPC } from "@tauri-apps/api/mocks";
-
 import type {
   AccountProfileResponse,
   AccountRateLimitsResponse,
@@ -26,6 +23,10 @@ import type {
   UsageResetCreditsResponse,
   VisibleThreadItem,
 } from "../contracts/types";
+import {
+  emitBrowserPreviewRuntimeEvent,
+  installBrowserPreviewRuntime,
+} from "../infrastructure/runtimeBridge";
 import { saveProjects } from "../state/projects";
 import { utf8ByteLength } from "../utf8";
 
@@ -54,7 +55,7 @@ function previewCreatedRustDiff(): string {
     "",
     "#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]",
     "enum RoutineLineKind {",
-    "    BuildProgress,",
+    "    BuildProgress = 1,",
     "    JavaScriptTestSuccess,",
     "    PackageProgress,",
     "    RustTestSuccess,",
@@ -876,6 +877,8 @@ const PREVIEW_CHAT_REFERENCE_THREAD = {
 } as const satisfies CodexThread;
 
 const PREVIEW_TIMELINE_STRESS_ACTIVITY_COUNT = 180;
+const PREVIEW_TIMELINE_FILE_CHANGE_CHUNK_SIZE = 1_000;
+const PREVIEW_TIMELINE_MAX_FILE_COUNT = 100_000;
 
 function previewTimelineStressSource(index: number): string {
   return Array.from(
@@ -957,6 +960,28 @@ function previewTimelineStressActivities(): readonly VisibleThreadItem[] {
   });
 }
 
+function previewTimelineFileStressActivities(fileCount: number): readonly VisibleThreadItem[] {
+  const activities: VisibleThreadItem[] = [];
+  for (let offset = 0; offset < fileCount; offset += PREVIEW_TIMELINE_FILE_CHANGE_CHUNK_SIZE) {
+    const chunkSize = Math.min(PREVIEW_TIMELINE_FILE_CHANGE_CHUNK_SIZE, fileCount - offset);
+    activities.push({
+      type: "fileChange",
+      id: `timeline-file-stress-change-${offset / PREVIEW_TIMELINE_FILE_CHANGE_CHUNK_SIZE}`,
+      status: "completed",
+      changes: Array.from({ length: chunkSize }, (_, chunkIndex) => {
+        const index = offset + chunkIndex;
+        return {
+          path: `src/stress/generated/module-${index}.ts`,
+          kind: { type: "update", movePath: null },
+          lineStats: { additions: 1, deletions: 1 },
+          diff: `@@ -1 +1 @@\n-export const value = ${index};\n+export const value = ${index + 1};`,
+        };
+      }),
+    });
+  }
+  return activities;
+}
+
 const PREVIEW_TIMELINE_STRESS_THREAD = {
   id: "preview-timeline-stress-thread",
   mode: "codex",
@@ -1004,6 +1029,51 @@ const PREVIEW_TIMELINE_STRESS_THREAD = {
   ],
 } as const satisfies CodexThread;
 
+function previewTimelineStressThread(fileCount: number): CodexThread {
+  if (fileCount === 0) {
+    return PREVIEW_TIMELINE_STRESS_THREAD;
+  }
+  return {
+    ...PREVIEW_TIMELINE_STRESS_THREAD,
+    preview: `Estresse de ${fileCount} arquivos`,
+    name: `Estresse de ${fileCount} arquivos`,
+    turns: [
+      {
+        id: "preview-timeline-file-stress-turn",
+        status: "completed",
+        error: null,
+        createdAt: PREVIEW_NOW_SECONDS - 900,
+        updatedAt: PREVIEW_NOW_SECONDS - 30,
+        items: [
+          {
+            type: "userMessage",
+            id: "timeline-file-stress-user-message",
+            content: [
+              {
+                type: "text",
+                text: `Valide a timeline com ${fileCount} arquivos alterados sem perder fluidez.`,
+              },
+            ],
+          },
+          {
+            type: "agentMessage",
+            id: "timeline-file-stress-commentary",
+            text: "Processando um volume extremo de alterações de arquivo.",
+            phase: "commentary",
+          },
+          ...previewTimelineFileStressActivities(fileCount),
+          {
+            type: "agentMessage",
+            id: "timeline-file-stress-final-answer",
+            text: "Cenário extremo de arquivos concluído.",
+            phase: "finalAnswer",
+          },
+        ],
+      },
+    ],
+  } satisfies CodexThread;
+}
+
 const PREVIEW_TIMELINE_LIGHT_THREAD = {
   id: "preview-timeline-light-thread",
   mode: "codex",
@@ -1038,19 +1108,6 @@ const PREVIEW_TIMELINE_LIGHT_THREAD = {
     },
   ],
 } as const satisfies CodexThread;
-
-const PREVIEW_TIMELINE_STRESS_THREADS = {
-  data: [
-    previewThreadSummary(PREVIEW_TIMELINE_STRESS_THREAD),
-    previewThreadSummary(PREVIEW_TIMELINE_LIGHT_THREAD),
-  ],
-  nextCursor: null,
-} as const satisfies ThreadListResponse;
-
-const PREVIEW_TIMELINE_STRESS_THREADS_BY_ID = new Map<string, CodexThread>([
-  [PREVIEW_TIMELINE_STRESS_THREAD.id, PREVIEW_TIMELINE_STRESS_THREAD],
-  [PREVIEW_TIMELINE_LIGHT_THREAD.id, PREVIEW_TIMELINE_LIGHT_THREAD],
-]);
 
 const PREVIEW_THREADS = {
   data: [previewThreadSummary(PREVIEW_CONTEXT_THREAD)],
@@ -1187,13 +1244,28 @@ export function setupBrowserPreview(): void {
   const previewParameters = new URLSearchParams(window.location.search);
   const preferenceUpdateDelay = previewDelay(previewParameters.get("preferenceDelay"));
   const timelineStressPreview = previewParameters.get("timelineStress") === "1";
+  const timelineFileCount = timelineStressPreview
+    ? previewTimelineFileCount(previewParameters.get("timelineFiles"))
+    : 0;
+  const timelineStressThread = previewTimelineStressThread(timelineFileCount);
+  const timelineStressThreads = {
+    data: [
+      previewThreadSummary(timelineStressThread),
+      previewThreadSummary(PREVIEW_TIMELINE_LIGHT_THREAD),
+    ],
+    nextCursor: null,
+  } satisfies ThreadListResponse;
+  const timelineStressThreadsById = new Map<string, CodexThread>([
+    [timelineStressThread.id, timelineStressThread],
+    [PREVIEW_TIMELINE_LIGHT_THREAD.id, PREVIEW_TIMELINE_LIGHT_THREAD],
+  ]);
   const previewThread = timelineStressPreview
-    ? PREVIEW_TIMELINE_STRESS_THREAD
+    ? timelineStressThread
     : previewParameters.get("chatReference") === "1"
       ? PREVIEW_CHAT_REFERENCE_THREAD
       : PREVIEW_CONTEXT_THREAD;
   const previewThreads = timelineStressPreview
-    ? PREVIEW_TIMELINE_STRESS_THREADS
+    ? timelineStressThreads
     : previewThread === PREVIEW_CONTEXT_THREAD
       ? PREVIEW_THREADS
       : ({
@@ -1208,294 +1280,313 @@ export function setupBrowserPreview(): void {
   saveProjects(PREVIEW_PROJECTS);
   const previewBrowserTabs = new Map<string, BrowserTabSnapshot>();
 
-  mockIPC(
-    (command, args) => {
-      switch (command) {
-        case "browser_tab_create": {
-          const browserTabId = readPreviewRequestString(args, "browserTabId");
-          const existing = previewBrowserTabs.get(browserTabId);
-          if (existing !== undefined) {
-            return existing;
-          }
-          const snapshot = {
-            browserTabId,
-            conversationId: readPreviewRequestString(args, "conversationId"),
-            url: readPreviewRequestString(args, "url"),
-            title: null,
-            canGoBack: false,
-            canGoForward: false,
-            isLoading: false,
-          } satisfies BrowserTabSnapshot;
-          previewBrowserTabs.set(browserTabId, snapshot);
-          return snapshot;
+  installBrowserPreviewRuntime((command, args) => {
+    switch (command) {
+      case "browser_tab_create": {
+        const browserTabId = readPreviewRequestString(args, "browserTabId");
+        const existing = previewBrowserTabs.get(browserTabId);
+        if (existing !== undefined) {
+          return existing;
         }
-        case "browser_tab_navigate": {
-          const browserTabId = readPreviewRequestString(args, "browserTabId");
-          const current = previewBrowserTabs.get(browserTabId);
-          if (current === undefined) {
-            throw new Error("A aba solicitada não existe na prévia do navegador.");
-          }
-          const snapshot = {
-            ...current,
-            url: readPreviewRequestString(args, "url"),
-            title: "Página de prévia",
-            canGoBack: current.url !== "about:blank",
-            isLoading: false,
-          } satisfies BrowserTabSnapshot;
-          previewBrowserTabs.set(browserTabId, snapshot);
-          return snapshot;
-        }
-        case "browser_tab_back":
-        case "browser_tab_forward":
-        case "browser_tab_reload": {
-          const browserTabId = readPreviewRequestString(args, "browserTabId");
-          const snapshot = previewBrowserTabs.get(browserTabId);
-          if (snapshot === undefined) {
-            throw new Error("A aba solicitada não existe na prévia do navegador.");
-          }
-          return snapshot;
-        }
-        case "browser_tab_close":
-          previewBrowserTabs.delete(readPreviewRequestString(args, "browserTabId"));
-          return { applied: true };
-        case "browser_surface_sync":
-          return { applied: true };
-        case "engine_start": {
-          return PREVIEW_ENGINE;
-        }
-        case "engine_runtime_diagnostic_report":
-          return { applied: true };
-        case "engine_account_read":
-          return PREVIEW_ACCOUNT;
-        case "engine_account_profile_read":
-          return PREVIEW_ACCOUNT_PROFILE;
-        case "engine_model_list":
-          return PREVIEW_MODEL_CATALOG;
-        case "engine_chat_model_list":
-          return PREVIEW_CHAT_MODEL_CATALOG;
-        case "engine_thread_list":
-          return previewThreads;
-        case "engine_automation_list":
-          return {
-            data: previewAutomations,
-            runs: previewAutomationRuns,
-          } satisfies AutomationListResponse;
-        case "engine_automation_create": {
-          const request = readPreviewAutomationRequest(args);
-          const now = Math.floor(Date.now() / 1_000);
-          const automation: Automation = {
-            id: `preview-automation-${Date.now()}`,
-            ...request,
-            nextRunAt: request.enabled ? now + request.intervalMinutes * 60 : null,
-            lastRunAt: null,
-            version: 1,
-            createdAt: now,
-            updatedAt: now,
-          };
-          previewAutomations = [automation, ...previewAutomations];
-          return automation;
-        }
-        case "engine_automation_update": {
-          const request = readPreviewAutomationRequest(args);
-          const automationId = readPreviewRequestString(args, "id");
-          const expectedVersion = readPreviewRequestNumber(args, "expectedVersion");
-          const current = previewAutomations.find((automation) => automation.id === automationId);
-          if (current === undefined || current.version !== expectedVersion) {
-            throw new Error("A automação de prévia foi alterada por outra operação.");
-          }
-          const now = Math.floor(Date.now() / 1_000);
-          const automation: Automation = {
-            ...current,
-            ...request,
-            nextRunAt: request.enabled ? now + request.intervalMinutes * 60 : null,
-            version: current.version + 1,
-            updatedAt: now,
-          };
-          previewAutomations = previewAutomations.map((entry) =>
-            entry.id === automationId ? automation : entry,
-          );
-          return automation;
-        }
-        case "engine_automation_delete": {
-          const automationId = readPreviewRequestString(args, "automationId");
-          previewAutomations = previewAutomations.filter(
-            (automation) => automation.id !== automationId,
-          );
-          previewAutomationRuns = previewAutomationRuns.filter(
-            (run) => run.automationId !== automationId,
-          );
-          return { applied: true };
-        }
-        case "engine_automation_run_now": {
-          const automationId = readPreviewRequestString(args, "automationId");
-          const automation = previewAutomations.find((entry) => entry.id === automationId);
-          if (automation === undefined) {
-            throw new Error("A automação de prévia não existe.");
-          }
-          const now = Math.floor(Date.now() / 1_000);
-          const run: AutomationRun = {
-            id: `preview-automation-run-${Date.now()}`,
-            automationId,
-            trigger: "manual",
-            status: "completed",
-            threadId: PREVIEW_CONTEXT_THREAD.id,
-            turnId: PREVIEW_CONTEXT_THREAD.turns.at(-1)?.id ?? null,
-            error: null,
-            reviewed: false,
-            createdAt: now,
-            startedAt: now,
-            completedAt: now,
-          };
-          previewAutomationRuns = [run, ...previewAutomationRuns];
-          return run;
-        }
-        case "engine_automation_run_mark_reviewed": {
-          const runId = readPreviewRequestString(args, "runId");
-          previewAutomationRuns = previewAutomationRuns.map((run) =>
-            run.id === runId ? { ...run, reviewed: true } : run,
-          );
-          return { applied: true };
-        }
-        case "engine_thread_resume": {
-          const resumedThread = timelineStressPreview
-            ? PREVIEW_TIMELINE_STRESS_THREADS_BY_ID.get(readPreviewRequestString(args, "threadId"))
-            : previewThread;
-          if (resumedThread === undefined) {
-            throw new Error("A tarefa solicitada não existe na prévia de estresse.");
-          }
-          return {
-            thread: resumedThread,
-            cwd: resumedThread.cwd,
-            nextCursor: null,
-          };
-        }
-        case "engine_account_rate_limits_read":
-          return PREVIEW_RATE_LIMITS;
-        case "engine_account_usage_resets_read":
-          return previewUsageResets;
-        case "engine_account_usage_reset_redeem": {
-          const request = (args as { request?: { creditId?: string | null } }).request;
-          const redeemedId = request?.creditId ?? previewUsageResets.credits[0]?.id ?? null;
-          previewUsageResets = {
-            ...previewUsageResets,
-            availableCount: Math.max(0, previewUsageResets.availableCount - 1),
-            credits: previewUsageResets.credits.filter((credit) => credit.id !== redeemedId),
-          };
-          return { code: "reset", creditId: redeemedId };
-        }
-        case "engine_account_auto_top_up_read":
-          return previewAutoTopUpSettings;
-        case "engine_account_auto_top_up_enable":
-        case "engine_account_auto_top_up_update": {
-          const request = (
-            args as {
-              request?: {
-                rechargeMonthlyLimit?: string | null;
-                rechargeTarget?: string;
-                rechargeThreshold?: string;
-              };
-            }
-          ).request;
-          previewAutoTopUpSettings = {
-            ...previewAutoTopUpSettings,
-            isEnabled: true,
-            rechargeMonthlyLimit: request?.rechargeMonthlyLimit ?? null,
-            rechargeTarget: request?.rechargeTarget ?? "250",
-            rechargeThreshold: request?.rechargeThreshold ?? "125",
-          };
-          return previewAutoTopUpSettings;
-        }
-        case "engine_account_auto_top_up_disable":
-          previewAutoTopUpSettings = {
-            ...previewAutoTopUpSettings,
-            isEnabled: false,
-          };
-          return previewAutoTopUpSettings;
-        case "application_preferences_read":
-          return previewApplicationPreferences;
-        case "application_preferences_update": {
-          const preferences = (args as { preferences?: ApplicationPreferences }).preferences;
-          if (preferences === undefined) {
-            throw new Error("A atualização de preferências não recebeu um valor.");
-          }
-          const applyPreferences = () => {
-            previewApplicationPreferences = preferences;
-            return previewApplicationPreferences;
-          };
-          return preferenceUpdateDelay === 0
-            ? applyPreferences()
-            : new Promise<ApplicationPreferences>((resolve) => {
-                window.setTimeout(() => resolve(applyPreferences()), preferenceUpdateDelay);
-              });
-        }
-        case "application_workspace_open": {
-          const request = (args as { request?: { path?: string } }).request;
-          (
-            window as Window & {
-              __previewOpenedWorkspace?: string;
-            }
-          ).__previewOpenedWorkspace = request?.path ?? "";
-          return { applied: true };
-        }
-        case "engine_turn_interrupt":
-          return { applied: true };
-        case "engine_turn_steer":
-          return { applied: true };
-        case "engine_turn_start": {
-          const now = Math.floor(Date.now() / 1_000);
-          return {
-            turn: {
-              id: `preview-turn-${Date.now()}`,
-              status: "inProgress",
-              createdAt: now,
-              updatedAt: now,
-            },
-          };
-        }
-        case "plugin:dialog|open": {
-          const options = (args as { options?: { directory?: boolean } }).options;
-          return options?.directory === true
-            ? PREVIEW_WORKSPACE
-            : [PREVIEW_IMAGE_ONE, PREVIEW_IMAGE_TWO];
-        }
-        case "attachment_inspect": {
-          const paths = (args as { request?: { paths?: readonly string[] } }).request?.paths ?? [];
-          return paths.map((path, index) => ({
-            id: `preview-attachment-${index}`,
-            name: index === 0 ? "paisagem.png" : "interface.png",
-            path,
-            kind: "image",
-            size: 128_000 + index * 16_000,
-            mediaType: "image/png",
-          }));
-        }
-        case "attachment_read_image": {
-          const request = (args as { request?: { path?: string } }).request;
-          return { dataUrl: request?.path ?? PREVIEW_IMAGE_ONE };
-        }
-        case "attachment_save_pasted_image":
-          return {
-            id: "preview-pasted-image",
-            name: "imagem-colada.png",
-            path: PREVIEW_IMAGE_ONE,
-            kind: "image",
-            size: 128_000,
-            mediaType: "image/png",
-          };
-        default:
-          throw new Error(
-            `O modo de visualização não executa o comando nativo ${JSON.stringify(command)}.`,
-          );
+        const snapshot = {
+          browserTabId,
+          conversationId: readPreviewRequestString(args, "conversationId"),
+          url: readPreviewRequestString(args, "url"),
+          title: null,
+          canGoBack: false,
+          canGoForward: false,
+          isLoading: false,
+        } satisfies BrowserTabSnapshot;
+        previewBrowserTabs.set(browserTabId, snapshot);
+        return snapshot;
       }
-    },
-    { shouldMockEvents: true },
-  );
+      case "browser_tab_navigate": {
+        const browserTabId = readPreviewRequestString(args, "browserTabId");
+        const current = previewBrowserTabs.get(browserTabId);
+        if (current === undefined) {
+          throw new Error("A aba solicitada não existe na prévia do navegador.");
+        }
+        const snapshot = {
+          ...current,
+          url: readPreviewRequestString(args, "url"),
+          title: "Página de prévia",
+          canGoBack: current.url !== "about:blank",
+          isLoading: false,
+        } satisfies BrowserTabSnapshot;
+        previewBrowserTabs.set(browserTabId, snapshot);
+        return snapshot;
+      }
+      case "browser_tab_back":
+      case "browser_tab_forward":
+      case "browser_tab_reload": {
+        const browserTabId = readPreviewRequestString(args, "browserTabId");
+        const snapshot = previewBrowserTabs.get(browserTabId);
+        if (snapshot === undefined) {
+          throw new Error("A aba solicitada não existe na prévia do navegador.");
+        }
+        return snapshot;
+      }
+      case "browser_tab_close":
+        previewBrowserTabs.delete(readPreviewRequestString(args, "browserTabId"));
+        return { applied: true };
+      case "browser_surface_sync":
+        return { applied: true };
+      case "engine_start": {
+        return PREVIEW_ENGINE;
+      }
+      case "engine_runtime_diagnostic_report":
+        return { applied: true };
+      case "engine_account_read":
+        return PREVIEW_ACCOUNT;
+      case "engine_account_profile_read":
+        return PREVIEW_ACCOUNT_PROFILE;
+      case "engine_model_list":
+        return PREVIEW_MODEL_CATALOG;
+      case "engine_chat_model_list":
+        return PREVIEW_CHAT_MODEL_CATALOG;
+      case "engine_thread_list":
+        return previewThreads;
+      case "engine_automation_list":
+        return {
+          data: previewAutomations,
+          runs: previewAutomationRuns,
+        } satisfies AutomationListResponse;
+      case "engine_automation_create": {
+        const request = readPreviewAutomationRequest(args);
+        const now = Math.floor(Date.now() / 1_000);
+        const automation: Automation = {
+          id: `preview-automation-${Date.now()}`,
+          ...request,
+          nextRunAt: request.enabled ? now + request.intervalMinutes * 60 : null,
+          lastRunAt: null,
+          version: 1,
+          createdAt: now,
+          updatedAt: now,
+        };
+        previewAutomations = [automation, ...previewAutomations];
+        return automation;
+      }
+      case "engine_automation_update": {
+        const request = readPreviewAutomationRequest(args);
+        const automationId = readPreviewRequestString(args, "id");
+        const expectedVersion = readPreviewRequestNumber(args, "expectedVersion");
+        const current = previewAutomations.find((automation) => automation.id === automationId);
+        if (current === undefined || current.version !== expectedVersion) {
+          throw new Error("A automação de prévia foi alterada por outra operação.");
+        }
+        const now = Math.floor(Date.now() / 1_000);
+        const automation: Automation = {
+          ...current,
+          ...request,
+          nextRunAt: request.enabled ? now + request.intervalMinutes * 60 : null,
+          version: current.version + 1,
+          updatedAt: now,
+        };
+        previewAutomations = previewAutomations.map((entry) =>
+          entry.id === automationId ? automation : entry,
+        );
+        return automation;
+      }
+      case "engine_automation_delete": {
+        const automationId = readPreviewRequestString(args, "automationId");
+        previewAutomations = previewAutomations.filter(
+          (automation) => automation.id !== automationId,
+        );
+        previewAutomationRuns = previewAutomationRuns.filter(
+          (run) => run.automationId !== automationId,
+        );
+        return { applied: true };
+      }
+      case "engine_automation_run_now": {
+        const automationId = readPreviewRequestString(args, "automationId");
+        const automation = previewAutomations.find((entry) => entry.id === automationId);
+        if (automation === undefined) {
+          throw new Error("A automação de prévia não existe.");
+        }
+        const now = Math.floor(Date.now() / 1_000);
+        const run: AutomationRun = {
+          id: `preview-automation-run-${Date.now()}`,
+          automationId,
+          trigger: "manual",
+          status: "completed",
+          threadId: PREVIEW_CONTEXT_THREAD.id,
+          turnId: PREVIEW_CONTEXT_THREAD.turns.at(-1)?.id ?? null,
+          error: null,
+          reviewed: false,
+          createdAt: now,
+          startedAt: now,
+          completedAt: now,
+        };
+        previewAutomationRuns = [run, ...previewAutomationRuns];
+        return run;
+      }
+      case "engine_automation_run_mark_reviewed": {
+        const runId = readPreviewRequestString(args, "runId");
+        previewAutomationRuns = previewAutomationRuns.map((run) =>
+          run.id === runId ? { ...run, reviewed: true } : run,
+        );
+        return { applied: true };
+      }
+      case "engine_thread_resume": {
+        const resumedThread = timelineStressPreview
+          ? timelineStressThreadsById.get(readPreviewRequestString(args, "threadId"))
+          : previewThread;
+        if (resumedThread === undefined) {
+          throw new Error("A tarefa solicitada não existe na prévia de estresse.");
+        }
+        return {
+          thread: resumedThread,
+          cwd: resumedThread.cwd,
+          nextCursor: null,
+        };
+      }
+      case "engine_account_rate_limits_read":
+        return PREVIEW_RATE_LIMITS;
+      case "engine_account_usage_resets_read":
+        return previewUsageResets;
+      case "engine_account_usage_reset_redeem": {
+        const request = (args as { request?: { creditId?: string | null } }).request;
+        const redeemedId = request?.creditId ?? previewUsageResets.credits[0]?.id ?? null;
+        previewUsageResets = {
+          ...previewUsageResets,
+          availableCount: Math.max(0, previewUsageResets.availableCount - 1),
+          credits: previewUsageResets.credits.filter((credit) => credit.id !== redeemedId),
+        };
+        return { code: "reset", creditId: redeemedId };
+      }
+      case "engine_account_auto_top_up_read":
+        return previewAutoTopUpSettings;
+      case "engine_account_auto_top_up_enable":
+      case "engine_account_auto_top_up_update": {
+        const request = (
+          args as {
+            request?: {
+              rechargeMonthlyLimit?: string | null;
+              rechargeTarget?: string;
+              rechargeThreshold?: string;
+            };
+          }
+        ).request;
+        previewAutoTopUpSettings = {
+          ...previewAutoTopUpSettings,
+          isEnabled: true,
+          rechargeMonthlyLimit: request?.rechargeMonthlyLimit ?? null,
+          rechargeTarget: request?.rechargeTarget ?? "250",
+          rechargeThreshold: request?.rechargeThreshold ?? "125",
+        };
+        return previewAutoTopUpSettings;
+      }
+      case "engine_account_auto_top_up_disable":
+        previewAutoTopUpSettings = {
+          ...previewAutoTopUpSettings,
+          isEnabled: false,
+        };
+        return previewAutoTopUpSettings;
+      case "application_preferences_read":
+        return previewApplicationPreferences;
+      case "application_preferences_update": {
+        const preferences = (args as { preferences?: ApplicationPreferences }).preferences;
+        if (preferences === undefined) {
+          throw new Error("A atualização de preferências não recebeu um valor.");
+        }
+        const applyPreferences = () => {
+          previewApplicationPreferences = preferences;
+          return previewApplicationPreferences;
+        };
+        return preferenceUpdateDelay === 0
+          ? applyPreferences()
+          : new Promise<ApplicationPreferences>((resolve) => {
+              window.setTimeout(() => resolve(applyPreferences()), preferenceUpdateDelay);
+            });
+      }
+      case "application_workspace_open": {
+        const request = (args as { request?: { path?: string } }).request;
+        (
+          window as Window & {
+            __previewOpenedWorkspace?: string;
+          }
+        ).__previewOpenedWorkspace = request?.path ?? "";
+        return { applied: true };
+      }
+      case "engine_turn_interrupt":
+        return { applied: true };
+      case "engine_turn_steer":
+        return { applied: true };
+      case "engine_turn_start": {
+        const now = Math.floor(Date.now() / 1_000);
+        return {
+          turn: {
+            id: `preview-turn-${Date.now()}`,
+            status: "inProgress",
+            createdAt: now,
+            updatedAt: now,
+          },
+        };
+      }
+      case "plugin:dialog|open": {
+        const options = (args as { options?: { directory?: boolean } }).options;
+        return options?.directory === true
+          ? PREVIEW_WORKSPACE
+          : [PREVIEW_IMAGE_ONE, PREVIEW_IMAGE_TWO];
+      }
+      case "plugin:dialog|message": {
+        const request = args as {
+          buttons?: { cancel?: string; ok?: string } | string;
+          message?: string;
+        };
+        const confirmed = window.confirm(request.message ?? "Confirmar operação?");
+        if (typeof request.buttons === "object") {
+          return confirmed ? (request.buttons.ok ?? "Ok") : (request.buttons.cancel ?? "Cancel");
+        }
+        return confirmed ? "Ok" : "Cancel";
+      }
+      case "attachment_inspect": {
+        const paths = (args as { request?: { paths?: readonly string[] } }).request?.paths ?? [];
+        return paths.map((path, index) => ({
+          id: `preview-attachment-${index}`,
+          name: index === 0 ? "paisagem.png" : "interface.png",
+          path,
+          kind: "image",
+          size: 128_000 + index * 16_000,
+          mediaType: "image/png",
+        }));
+      }
+      case "attachment_read_image": {
+        const request = (args as { request?: { path?: string } }).request;
+        return { dataUrl: request?.path ?? PREVIEW_IMAGE_ONE };
+      }
+      case "attachment_save_pasted_image":
+        return {
+          id: "preview-pasted-image",
+          name: "imagem-colada.png",
+          path: PREVIEW_IMAGE_ONE,
+          kind: "image",
+          size: 128_000,
+          mediaType: "image/png",
+        };
+      default:
+        throw new Error(
+          `O modo de visualização não executa o comando nativo ${JSON.stringify(command)}.`,
+        );
+    }
+  });
 
   if (previewParameters.get("browserMetrics") === "1") {
     const metrics = previewBrowserMetrics(previewThread.id);
-    window.setTimeout(() => {
-      void Promise.all(metrics.map((metric) => emit("browser://metric", metric)));
-    }, 150);
+    const publishMetrics = () => {
+      const firstMetric = metrics[0];
+      if (
+        firstMetric !== undefined &&
+        !emitBrowserPreviewRuntimeEvent("browser://metric", firstMetric)
+      ) {
+        requestAnimationFrame(publishMetrics);
+        return;
+      }
+      for (const metric of metrics.slice(1)) {
+        emitBrowserPreviewRuntimeEvent("browser://metric", metric);
+      }
+    };
+    requestAnimationFrame(publishMetrics);
   }
 }
 
@@ -1652,6 +1743,23 @@ function readPreviewRequestNumber(args: unknown, key: string): number {
     throw new Error(`O campo ${key} do request de prévia é inválido.`);
   }
   return value;
+}
+
+function previewTimelineFileCount(value: string | null): number {
+  if (value === null) {
+    return 0;
+  }
+  const fileCount = Number(value);
+  if (
+    !Number.isInteger(fileCount) ||
+    fileCount < 1 ||
+    fileCount > PREVIEW_TIMELINE_MAX_FILE_COUNT
+  ) {
+    throw new Error(
+      `A prévia extrema aceita entre 1 e ${PREVIEW_TIMELINE_MAX_FILE_COUNT} arquivos.`,
+    );
+  }
+  return fileCount;
 }
 
 function previewDelay(value: string | null): number {

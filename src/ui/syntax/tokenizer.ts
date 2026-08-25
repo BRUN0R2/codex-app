@@ -17,6 +17,13 @@ export const MARKDOWN_SYNTAX_LIMITS: SyntaxLimits = {
   maximumLines: 10_000,
 };
 
+export type SyntaxLineTokenizationPlan =
+  | Extract<SyntaxTokenizationResult, { readonly kind: "plain" }>
+  | {
+      readonly kind: "highlighted";
+      readonly tokenizer: SyntaxLineTokenizer;
+    };
+
 export function tokenizeSyntaxBlock(
   code: string,
   language: SyntaxLanguage,
@@ -30,17 +37,29 @@ export function tokenizeSyntaxLines(
   language: SyntaxLanguage,
   limits: SyntaxLimits,
 ): SyntaxTokenizationResult {
-  const fallback = validateSyntaxInput(lines, language, limits);
-  if (fallback !== null) {
-    return fallback;
+  const plan = prepareSyntaxLineTokenization(lines, language, limits);
+  if (plan.kind === "plain") {
+    return plan;
   }
 
-  const tokenizer = new SyntaxLineTokenizer(language);
   const highlighted: SyntaxLine[] = [];
   for (const line of lines) {
-    highlighted.push(tokenizer.tokenize(line));
+    highlighted.push(plan.tokenizer.tokenize(line));
   }
   return { kind: "highlighted", lines: highlighted };
+}
+
+export function prepareSyntaxLineTokenization(
+  lines: readonly string[],
+  language: SyntaxLanguage,
+  limits: SyntaxLimits,
+): SyntaxLineTokenizationPlan {
+  return (
+    validateSyntaxInput(lines, language, limits) ?? {
+      kind: "highlighted",
+      tokenizer: new SyntaxLineTokenizer(language),
+    }
+  );
 }
 
 export class SyntaxLineTokenizer {

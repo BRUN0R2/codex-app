@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   createDiffDocument,
-  monospaceColumnCount,
   parseSplitDiff,
   parseUnifiedDiff,
   summarizeDiff,
@@ -82,10 +81,6 @@ describe("diff document", () => {
     expect(document.unifiedRows.map((line) => line.type)).toEqual(["hunk", "deletion", "addition"]);
     expect(document.oldLineNumberDigits).toBe(3);
     expect(document.newLineNumberDigits).toBe(5);
-  });
-
-  it("measures tab-expanded monospace columns deterministically", () => {
-    expect(monospaceColumnCount("a\tb")).toBe(5);
   });
 
   it("parses a large diff without dropping any visible line", () => {

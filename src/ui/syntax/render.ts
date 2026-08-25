@@ -21,7 +21,7 @@ function syntaxBlockToHtml(block: SyntaxBlock): string {
   return block.map(syntaxLineToHtml).join("\n");
 }
 
-function syntaxLineToHtml(line: SyntaxLine): string {
+export function syntaxLineToHtml(line: SyntaxLine): string {
   let html = "";
   for (const token of line) {
     const escaped = escapeHtml(token.text);

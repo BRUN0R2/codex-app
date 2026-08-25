@@ -22,3 +22,26 @@ export function timelineFileChangeIdentity(change: FileChange, occurrence: numbe
 export function encodeTimelineIdentitySegment(value: string): string {
   return `${value.length}:${value}|`;
 }
+
+export function timelineIdentityPrefixes(identity: string): readonly string[] {
+  const prefixes: string[] = [];
+  let cursor = 0;
+  while (cursor < identity.length) {
+    const separator = identity.indexOf(":", cursor);
+    if (separator < 0) {
+      throw new Error("Timeline identity is missing a segment length separator.");
+    }
+    const lengthText = identity.slice(cursor, separator);
+    if (!/^\d+$/u.test(lengthText)) {
+      throw new Error("Timeline identity contains an invalid segment length.");
+    }
+    const segmentLength = Number(lengthText);
+    const segmentEnd = separator + 1 + segmentLength;
+    if (!Number.isSafeInteger(segmentLength) || identity[segmentEnd] !== "|") {
+      throw new Error("Timeline identity contains an incomplete segment.");
+    }
+    cursor = segmentEnd + 1;
+    prefixes.push(identity.slice(0, cursor));
+  }
+  return prefixes;
+}

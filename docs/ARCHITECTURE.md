@@ -186,6 +186,12 @@ usa uma cache LRU de páginas com oito entradas. A página inicial contém até 
 itens de transcript e 4 MiB; páginas anteriores contêm até 256 itens e 4 MiB.
 Fragmentos do mesmo turno na fronteira são reunidos por identidade, sem perder
 ordem ou duplicar conteúdo. Conversas arquivadas só são consultadas quando a
+O preview de desenvolvimento usa `infrastructure/runtimeBridge.ts` em vez de
+reescrever `window.__TAURI_INTERNALS__`. A mesma infraestrutura frontend chama o
+runtime Tauri em produção e um backend determinístico em memória no navegador.
+Isso mantém o app totalmente interativo em navegadores anexados que protegem os
+internals próprios e evita transformar a validação visual em capturas estáticas.
+
 página correspondente das configurações é realmente aberta.
 
 `ProfileView.tsx` renderiza o conteúdo de Perfil dentro de
@@ -277,6 +283,10 @@ comando, leitura e diff, declaram explicitamente
 `data-timeline-scroll-region`; não existe descoberta heurística com
 `getComputedStyle` durante wheel. Enquanto houver faixa interna elas consomem o
 movimento. Ao alcançar um limite, somente o excedente exato é transferido para a
+geométricos estáveis (`clientHeight`, `scrollHeight`, offset da lista e altura da
+pista) formam um snapshot renovado somente quando o layout muda; frames de
+scroll ordinário atualizam a posição contra esse snapshot, sem consultar layout
+depois da reciclagem reativa. Itens
 timeline no mesmo evento. Um wheel totalmente interno não altera a política de
 acompanhamento da conversa. O eixo vertical mantém chaining nativo para touch e
 o eixo horizontal do diff permanece contido.
@@ -285,12 +295,61 @@ Grupos de trabalho longos possuem uma segunda janela virtual por atividade. A
 virtualização entra quando há mais de 48 unidades ou mais de quatro disclosures
 descendentes abertos; grupos pequenos continuam integralmente semânticos para
 busca e acessibilidade. Alturas ficam em uma LRU por grupo/conversa e são
-invalidadas pela mesma assinatura de layout da timeline. Um overscan de um
-viewport evita montagem excessiva. Saltos acima do limiar de velocidade montam
-placeholders leves e retomam o conteúdo 90 ms depois do último movimento; scroll
-deliberado e navegação programática mantêm o conteúdo real. O hub de
-`ResizeObserver` reúne todas as entradas e entrega um único lote no frame
-seguinte, eliminando loops de observação e correções repetidas.
+invalidadas pela mesma assinatura de layout da timeline. A projeção da lista é
+segmentada pelos itens de protocolo: construir uma atividade com 100 mil arquivos
+percorre apenas os lotes superiores e não cria 100 mil view-models, strings de
+identidade ou entradas de `Map`. `count`, geometria prefixada e busca binária ficam
+disponíveis imediatamente; chave e entrada são derivadas somente para a janela
+visível e mantidas em uma cache associativa fixa de 256 posições. Identidades
+repetidas continuam exatas pela combinação item, caminho e ocorrência, sem hash
+probabilístico.
+
+O virtualizador aceita essa fonte indexada diretamente. Uma estimativa uniforme
+usa Fenwick em `O(log n)`; uma base segmentada combina busca binária com deltas
+esparsos medidos. Coleções de até 4.096 entradas materializam o pequeno índice para
+recalcular todas as alturas não uniformes; acima disso, apenas as exceções
+visitadas são armazenadas. O limiar escolhe a representação, não limita nem
+descarta conteúdo. Quando todos os arquivos chegam ao mesmo estado, a base muda
+transacionalmente entre 26 e 398 px e elimina os overrides. O estado dos
+disclosures usa uma trie hierárquica com contagem agregada; fechar um grupo inteiro
+descarta a subárvore em `O(profundidade)`, sem percorrer seus descendentes.
+
+Durante movimento rápido o overscan cai para zero; após 90 ms de repouso volta a
+dois itens por lado. Todo item que intersecta o viewport monta sempre o conteúdo
+real: somente corpos do overscan, ainda fora da área visível, podem ser adiados.
+Geometria física e cardinalidade da faixa são sinais separados; mover alguns
+pixels sem cruzar uma fronteira preserva a mesma faixa por referência e não
+recalcula chaves, slots ou corpos. A janela comum, limitada a 64 slots, usa scans
+diretos sem `Map`, `Set` ou filas transitórias; a rota geral mantém índices e
+filas lineares. Ambas conservam o mesmo resumo quando ele continua visível e uma
+única observação de tamanho enquanto o slot é reciclado. Faixas disjuntas de uma
+categoria uniforme reutilizam o pool na mesma ordem.
+Disclosures controlados guardam a chave atual em um registro fraco associado ao
+resumo; o DOM recebe apenas um marcador estável e o listener delegado não regrava
+chaves hierárquicas longas a cada scroll.
+
+Medições válidas são reunidas em uma microtask e versionadas por conteúdo e
+layout. A âncora visual registra também o `scrollTop` da captura: a compensação só
+é aplicada se o usuário não moveu a viewport nesse intervalo. Uma âncora antiga
+nunca une faixas virtuais disjuntas. Assim, expansão legítima continua com drift
+zero, enquanto wheel rápido não produz skeleton, quadro vazio, remount completo,
+salto concorrente ou faixa temporariamente gigantesca.
+
+Leituras e diffs expandidos possuem uma janela adicional de linhas com geometria
+fixa e canvas físico limitado. A projeção pesada é aquecida quando o disclosure
+abre; janelas seguras de `tbody` são cacheadas por documento e reutilizadas por
+um pool limitado. Trocar a faixa visível substitui uma seção pronta, sem montar
+milhares de componentes, observar novamente a viewport interna ou repetir linhas
+já tokenizadas. Cada viewport interno mantém sua última posição a partir do
+evento de scroll; trocar a identidade com a posição já zerada não lê `scrollTop`
+depois da mutação do DOM e, portanto, não força layout síncrono no frame da
+timeline. O viewport efetivo também desconta a área ocupada pelo composer uma
+única vez, portanto nenhuma linha é considerada visível atrás do dock.
+
+O syntax highlighter de diff valida os limites do hunk uma vez, mas tokeniza
+somente até a última linha solicitada. O tokenizer e as linhas já produzidas
+permanecem associados ao documento, preservando estado léxico multilinha e
+continuando exatamente do ponto anterior quando o viewport interno avança.
 
 Cada conversa possui uma sessão visual própria e limitada por LRU, contendo
 posição numérica, âncora identificável, política de acompanhamento do fim e o

@@ -15,14 +15,26 @@ export function overlayVisibleTurn(
   overlayIndex: number,
   overlay: VisibleThreadTurn,
 ): VisibleTurnSequence {
-  if (!Number.isInteger(overlayIndex) || overlayIndex < 0 || overlayIndex > persisted.length) {
-    throw new Error("The visible turn overlay index is outside the persisted sequence.");
+  return overlayVisibleTurns(persisted, new Map([[overlayIndex, overlay]]));
+}
+
+export function overlayVisibleTurns(
+  persisted: readonly VisibleThreadTurn[],
+  overlays: ReadonlyMap<number, VisibleThreadTurn>,
+): VisibleTurnSequence {
+  if (overlays.size === 0) {
+    return persisted;
   }
-  const persistedTurn = persisted[overlayIndex];
-  if (persistedTurn !== undefined && persistedTurn.id !== overlay.id) {
-    throw new Error("The visible turn overlay does not match its persisted turn.");
+  for (const [overlayIndex, overlay] of overlays) {
+    if (!Number.isInteger(overlayIndex) || overlayIndex < 0 || overlayIndex > persisted.length) {
+      throw new Error("The visible turn overlay index is outside the persisted sequence.");
+    }
+    const persistedTurn = persisted[overlayIndex];
+    if (persistedTurn !== undefined && persistedTurn.id !== overlay.id) {
+      throw new Error("The visible turn overlay does not match its persisted turn.");
+    }
   }
-  return new OverlayTurnSequence(persisted, overlayIndex, overlay);
+  return new OverlayTurnSequence(persisted, overlays);
 }
 
 export function findVisibleTurn(
@@ -44,19 +56,16 @@ export function findVisibleTurn(
 
 class OverlayTurnSequence implements VisibleTurnSequence {
   readonly length: number;
-  readonly #overlay: VisibleThreadTurn;
-  readonly #overlayIndex: number;
+  readonly #overlays: ReadonlyMap<number, VisibleThreadTurn>;
   readonly #persisted: readonly VisibleThreadTurn[];
 
   constructor(
     persisted: readonly VisibleThreadTurn[],
-    overlayIndex: number,
-    overlay: VisibleThreadTurn,
+    overlays: ReadonlyMap<number, VisibleThreadTurn>,
   ) {
     this.#persisted = persisted;
-    this.#overlayIndex = overlayIndex;
-    this.#overlay = overlay;
-    this.length = Math.max(persisted.length, overlayIndex + 1);
+    this.#overlays = overlays;
+    this.length = Math.max(persisted.length, Math.max(...overlays.keys()) + 1);
   }
 
   at(index: number): VisibleThreadTurn | undefined {
@@ -64,7 +73,7 @@ class OverlayTurnSequence implements VisibleTurnSequence {
     if (normalized === null) {
       return undefined;
     }
-    return normalized === this.#overlayIndex ? this.#overlay : this.#persisted[normalized];
+    return this.#overlays.get(normalized) ?? this.#persisted[normalized];
   }
 
   slice(start?: number, end?: number): readonly VisibleThreadTurn[] {

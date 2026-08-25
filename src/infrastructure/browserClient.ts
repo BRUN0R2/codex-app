@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import {
   decodeBrowserActionMetric,
@@ -16,6 +15,7 @@ import type {
   BrowserTabSnapshot,
   OperationAck,
 } from "../contracts/types";
+import { invokeRuntime as invoke, listenRuntime as listen } from "./runtimeBridge";
 
 const BROWSER_STATE_EVENT = "browser://state";
 const BROWSER_NEW_WINDOW_EVENT = "browser://new-window";

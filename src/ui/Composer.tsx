@@ -1,4 +1,3 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import {
   createEffect,
   createMemo,
@@ -17,6 +16,7 @@ import type {
   PermissionProfile,
   ReasoningEffort,
 } from "../contracts/types";
+import { openDesktopDialog as open } from "../infrastructure/codexClient";
 import type { AppController } from "../state/appController";
 import {
   type ComposerDraftState,

@@ -1,5 +1,6 @@
 import { utf8ByteLength } from "../utf8";
 import { SAFE_IMAGE_DATA_MIME_PATTERN } from "./imageSource";
+import { monospaceColumnCount } from "./monospace";
 import type { SyntaxLine } from "./syntax/contracts";
 import { syntaxLanguageFromPath } from "./syntax/languages";
 import { SyntaxLineTokenizer } from "./syntax/tokenizer";
@@ -18,6 +19,12 @@ export interface SourceOutputLine {
   readonly tokens: SyntaxLine | null;
 }
 
+export interface SourceOutputProjection {
+  readonly lineNumberDigits: number;
+  readonly lines: readonly SourceOutputLine[];
+  readonly maximumColumns: number;
+}
+
 export type SearchOutputLine =
   | {
       readonly content: string;
@@ -28,10 +35,7 @@ export type SearchOutputLine =
     }
   | { readonly content: string; readonly type: "text" };
 
-export function projectSourceOutput(
-  text: string,
-  path: string,
-): readonly SourceOutputLine[] | null {
+export function projectSourceOutput(text: string, path: string): SourceOutputProjection | null {
   const parsed = splitOutputLines(text).map((line) => {
     const match = /^(\d+): (.*)$/u.exec(line);
     if (match === null) {
@@ -51,10 +55,14 @@ export function projectSourceOutput(
   const tokenizer = language === "plainText" ? null : new SyntaxLineTokenizer(language);
   let highlightedBytes = 0;
   let highlighting = tokenizer !== null;
-  return parsed.map((line) => {
+  let lineNumberDigits = 1;
+  let maximumColumns = 1;
+  const lines = parsed.map((line) => {
     if (line === null) {
       throw new Error("A saída de leitura mudou depois de ser validada.");
     }
+    lineNumberDigits = Math.max(lineNumberDigits, String(line.number).length);
+    maximumColumns = Math.max(maximumColumns, monospaceColumnCount(line.content));
     const lineBytes = utf8ByteLength(line.content) + 1;
     highlighting =
       highlighting &&
@@ -64,6 +72,7 @@ export function projectSourceOutput(
     highlightedBytes += lineBytes;
     return { ...line, tokens };
   });
+  return { lineNumberDigits, lines, maximumColumns };
 }
 
 export function projectSearchOutput(text: string): readonly SearchOutputLine[] {
