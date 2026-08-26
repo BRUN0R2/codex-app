@@ -27,15 +27,25 @@ import { Sidebar } from "./Sidebar";
 import { Timeline } from "./Timeline";
 import { TurnProgress } from "./TurnProgress";
 import { shouldShowTurnProgress } from "./turnProgressVisibility";
+import {
+  activeWorkspaceTab,
+  browserWorkspaceTabId,
+  closeWorkspaceTab,
+  emptyWorkspaceTabsState,
+  hideWorkspaceTabs,
+  reconcileBrowserWorkspaceTabs,
+  removeReviewWorkspaceTab,
+  showBrowserWorkspaceTab,
+  showReviewWorkspaceTab,
+  showWorkspaceTab,
+  type WorkspaceTab,
+} from "./workspaceTabs";
 
 const AutomationsView = lazy(async () => ({
   default: (await import("./AutomationsView")).AutomationsView,
 }));
-const BrowserPanel = lazy(async () => ({
-  default: (await import("./BrowserPanel")).BrowserPanel,
-}));
-const ReviewPanel = lazy(async () => ({
-  default: (await import("./ReviewPanel")).ReviewPanel,
+const WorkspacePanel = lazy(async () => ({
+  default: (await import("./WorkspacePanel")).WorkspacePanel,
 }));
 const SettingsDialog = lazy(async () => ({
   default: (await import("./SettingsDialog")).SettingsDialog,
@@ -47,18 +57,22 @@ export function AppShell(props: { readonly controller: AppController }) {
   const [settingsOpen, setSettingsOpen] = createSignal(previewSettingsPage !== null);
   const [settingsPage, setSettingsPage] = createSignal<SettingsPage | null>(previewSettingsPage);
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
-  const [reviewOpen, setReviewOpen] = createSignal(false);
-  const [browserOpen, setBrowserOpen] = createSignal(readPreviewBrowserOpen());
   const [activeSurface, setActiveSurface] = createSignal<"automations" | "chat">(previewSurface);
   const reviewChangeStore = new LatestTurnFileChangeStore();
   const browserController = createBrowserController(props.controller.reportError);
+  const [workspaceTabs, setWorkspaceTabs] = createSignal(emptyWorkspaceTabsState());
+  let previewBrowserPending = readPreviewBrowserOpen();
   let observedBrowserAgentActivity: BrowserAgentActivityNotification | null = null;
   const reviewChanges = createMemo(() =>
     reviewChangeStore.project(props.controller.turns(), props.controller.activeTurnId()),
   );
+  const activeWorkspaceSurface = createMemo(() => activeWorkspaceTab(workspaceTabs()));
+  const reviewOpen = createMemo(
+    () => workspaceTabs().visible && activeWorkspaceSurface()?.kind === "review",
+  );
 
   function openSettings(page?: SettingsPage): void {
-    setBrowserOpen(false);
+    setWorkspaceTabs(hideWorkspaceTabs);
     setSettingsPage(page ?? null);
     setSettingsOpen(true);
   }
@@ -73,21 +87,20 @@ export function AppShell(props: { readonly controller: AppController }) {
   const eventUnlisteners: Array<() => void> = [];
 
   function handleKeyboardShortcut(event: KeyboardEvent): void {
-    if (event.key === "Escape" && reviewOpen()) {
+    if (event.key === "Escape" && workspaceTabs().visible) {
       event.preventDefault();
-      setReviewOpen(false);
-      return;
-    }
-    if (event.key === "Escape" && browserOpen()) {
-      event.preventDefault();
-      setBrowserOpen(false);
+      setWorkspaceTabs(hideWorkspaceTabs);
       return;
     }
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "b") {
       event.preventDefault();
-      if (props.controller.currentThread() !== null) {
-        setReviewOpen(false);
-        setBrowserOpen((value) => !value);
+      const conversationId = props.controller.currentThread()?.id;
+      if (conversationId !== undefined) {
+        if (workspaceTabs().visible && activeWorkspaceSurface()?.kind === "browser") {
+          setWorkspaceTabs(hideWorkspaceTabs);
+        } else {
+          void openBrowserWorkspace(conversationId);
+        }
       }
       return;
     }
@@ -100,8 +113,36 @@ export function AppShell(props: { readonly controller: AppController }) {
 
   createEffect(() => {
     if (reviewChanges().length === 0) {
-      setReviewOpen(false);
+      setWorkspaceTabs(removeReviewWorkspaceTab);
     }
+  });
+
+  createEffect(() => {
+    const conversationId = props.controller.currentThread()?.id ?? null;
+    const tabs = conversationId === null ? [] : browserController.tabs(conversationId);
+    const activeBrowserTabId =
+      conversationId === null
+        ? null
+        : (browserController.activeTab(conversationId)?.browserTabId ?? null);
+    setWorkspaceTabs((current) =>
+      reconcileBrowserWorkspaceTabs(current, {
+        activeBrowserTabId,
+        browserTabIds: tabs.map(({ browserTabId }) => browserTabId),
+        conversationId,
+      }),
+    );
+  });
+
+  createEffect(() => {
+    if (!previewBrowserPending) {
+      return;
+    }
+    const conversationId = props.controller.currentThread()?.id;
+    if (conversationId === undefined) {
+      return;
+    }
+    previewBrowserPending = false;
+    void openBrowserWorkspace(conversationId);
   });
 
   createEffect(() => {
@@ -121,15 +162,122 @@ export function AppShell(props: { readonly controller: AppController }) {
       return;
     }
     if (activity.panel === "close") {
-      setBrowserOpen(false);
+      setWorkspaceTabs(hideWorkspaceTabs);
       return;
     }
     setSettingsPage(null);
     setSettingsOpen(false);
-    setReviewOpen(false);
     setActiveSurface("chat");
-    setBrowserOpen(true);
+    const browserTabId = activity.activeBrowserTabId;
+    if (browserTabId !== null) {
+      setWorkspaceTabs((current) =>
+        showBrowserWorkspaceTab(
+          reconcileBrowserWorkspaceTabs(current, {
+            activeBrowserTabId: browserTabId,
+            browserTabIds: activity.tabs.map((tab) => tab.browserTabId),
+            conversationId: activity.conversationId,
+          }),
+          browserTabId,
+        ),
+      );
+    }
   });
+
+  async function openBrowserWorkspace(
+    conversationId: string,
+    requestedBrowserTabId?: string,
+  ): Promise<void> {
+    setSettingsPage(null);
+    setSettingsOpen(false);
+    setActiveSurface("chat");
+    if (!(await browserController.ensureConversation(conversationId))) {
+      return;
+    }
+    const browserTabId =
+      requestedBrowserTabId ?? browserController.activeTab(conversationId)?.browserTabId;
+    if (browserTabId === undefined) {
+      props.controller.reportError(new Error("O navegador interno não possui uma aba ativa."));
+      return;
+    }
+    setWorkspaceTabs((current) =>
+      showBrowserWorkspaceTab(
+        reconcileBrowserWorkspaceTabs(current, {
+          activeBrowserTabId: browserTabId,
+          browserTabIds: browserController.tabs(conversationId).map((tab) => tab.browserTabId),
+          conversationId,
+        }),
+        browserTabId,
+      ),
+    );
+  }
+
+  function activateWorkspaceSurface(tab: WorkspaceTab): void {
+    if (tab.kind === "review") {
+      setWorkspaceTabs((current) => showWorkspaceTab(current, tab.id));
+      return;
+    }
+    const conversationId = props.controller.currentThread()?.id;
+    if (conversationId === undefined) {
+      return;
+    }
+    void browserController.selectTab(conversationId, tab.browserTabId).then((selected) => {
+      if (selected) {
+        setWorkspaceTabs((current) => showWorkspaceTab(current, tab.id));
+      }
+    });
+  }
+
+  function closeWorkspaceSurface(tab: WorkspaceTab): void {
+    if (tab.kind === "review") {
+      setWorkspaceTabs((current) => closeWorkspaceTab(current, tab.id));
+      return;
+    }
+    const conversationId = props.controller.currentThread()?.id;
+    if (conversationId === undefined) {
+      return;
+    }
+    const wasActive = workspaceTabs().activeTabId === tab.id && workspaceTabs().visible;
+    setWorkspaceTabs((current) => closeWorkspaceTab(current, tab.id));
+    void browserController.closeTab(conversationId, tab.browserTabId).then((closed) => {
+      if (!closed) {
+        setWorkspaceTabs((current) => {
+          const reconciled = reconcileBrowserWorkspaceTabs(current, {
+            activeBrowserTabId: browserController.activeTab(conversationId)?.browserTabId ?? null,
+            browserTabIds: browserController
+              .tabs(conversationId)
+              .map(({ browserTabId }) => browserTabId),
+            conversationId,
+          });
+          return wasActive ? showBrowserWorkspaceTab(reconciled, tab.browserTabId) : reconciled;
+        });
+      }
+    });
+  }
+
+  function openNewBrowserTab(): void {
+    const conversationId = props.controller.currentThread()?.id;
+    if (conversationId === undefined) {
+      return;
+    }
+    void browserController.newTab(conversationId).then((created) => {
+      if (!created) {
+        return;
+      }
+      const browserTabId = browserController.activeTab(conversationId)?.browserTabId;
+      if (browserTabId !== undefined) {
+        setWorkspaceTabs((current) =>
+          showWorkspaceTab(
+            reconcileBrowserWorkspaceTabs(current, {
+              activeBrowserTabId: browserTabId,
+              browserTabIds: browserController.tabs(conversationId).map((tab) => tab.browserTabId),
+              conversationId,
+            }),
+            browserWorkspaceTabId(browserTabId),
+          ),
+        );
+      }
+    });
+  }
 
   function requestDraft(text: string): void {
     nextDraftRequestId += 1;
@@ -211,13 +359,15 @@ export function AppShell(props: { readonly controller: AppController }) {
         controller={props.controller}
         inert={settingsOpen()}
         onOpenAutomations={() => {
-          setBrowserOpen(false);
-          setReviewOpen(false);
+          setWorkspaceTabs(hideWorkspaceTabs);
           setActiveSurface("automations");
         }}
         onOpenWorkspace={(path) => void openWorkspace(path)}
         onOpenSettings={openSettings}
-        onShowChat={() => setActiveSurface("chat")}
+        onShowChat={() => {
+          setWorkspaceTabs(hideWorkspaceTabs);
+          setActiveSurface("chat");
+        }}
       />
       <main class="main-panel" inert={settingsOpen()}>
         <Show when={activeSurface() === "chat" && props.controller.product() === "chatgpt"}>
@@ -230,7 +380,7 @@ export function AppShell(props: { readonly controller: AppController }) {
           <Show
             when={
               activeSurface() === "chat" &&
-              !browserOpen() &&
+              !workspaceTabs().visible &&
               props.controller.currentThread() !== null
             }
           >
@@ -238,8 +388,10 @@ export function AppShell(props: { readonly controller: AppController }) {
               aria-label="Abrir navegador interno"
               class="browser-panel-toggle"
               onClick={() => {
-                setReviewOpen(false);
-                setBrowserOpen(true);
+                const conversationId = props.controller.currentThread()?.id;
+                if (conversationId !== undefined) {
+                  void openBrowserWorkspace(conversationId);
+                }
               }}
               title="Abrir navegador interno (Ctrl+Shift+B)"
               type="button"
@@ -256,7 +408,7 @@ export function AppShell(props: { readonly controller: AppController }) {
                 props.controller.currentThread() === null,
               "work-surface": props.controller.conversationMode() === "work",
             }}
-            hidden={activeSurface() !== "chat"}
+            hidden={activeSurface() !== "chat" || workspaceTabs().visible}
             ref={chatPageElement}
           >
             <Timeline
@@ -269,8 +421,9 @@ export function AppShell(props: { readonly controller: AppController }) {
                 <TurnProgress
                   changes={reviewChanges()}
                   onToggleReview={() => {
-                    setBrowserOpen(false);
-                    setReviewOpen((current) => !current);
+                    setWorkspaceTabs((current) =>
+                      reviewOpen() ? hideWorkspaceTabs(current) : showReviewWorkspaceTab(current),
+                    );
                   }}
                   plan={props.controller.activePlan()}
                   reviewOpen={reviewOpen()}
@@ -294,17 +447,23 @@ export function AppShell(props: { readonly controller: AppController }) {
           <Show
             keyed
             when={
-              activeSurface() === "chat" && browserOpen()
+              activeSurface() === "chat" && workspaceTabs().visible
                 ? props.controller.currentThread()?.id
                 : null
             }
           >
             {(conversationId) => (
               <Suspense fallback={null}>
-                <BrowserPanel
-                  controller={browserController}
+                <WorkspacePanel
+                  browserController={browserController}
+                  changes={reviewChanges()}
                   conversationId={conversationId}
-                  onClose={() => setBrowserOpen(false)}
+                  mode={props.controller.config()?.config.desktop.diffDisplay ?? "unified"}
+                  onActivate={activateWorkspaceSurface}
+                  onClose={closeWorkspaceSurface}
+                  onHide={() => setWorkspaceTabs(hideWorkspaceTabs)}
+                  onNewBrowserTab={openNewBrowserTab}
+                  state={workspaceTabs()}
                 />
               </Suspense>
             )}
@@ -315,15 +474,6 @@ export function AppShell(props: { readonly controller: AppController }) {
                 controller={props.controller}
                 onOpenSettings={() => openSettings("general")}
                 onShowChat={() => setActiveSurface("chat")}
-              />
-            </Suspense>
-          </Show>
-          <Show when={activeSurface() === "chat" && reviewOpen() && reviewChanges().length > 0}>
-            <Suspense fallback={null}>
-              <ReviewPanel
-                changes={reviewChanges()}
-                mode={props.controller.config()?.config.desktop.diffDisplay ?? "unified"}
-                onClose={() => setReviewOpen(false)}
               />
             </Suspense>
           </Show>

@@ -62,10 +62,10 @@ modular:
 - `browser/agent.rs`: locks assíncronos por conversa, aba ativa, topologia,
   espera de carregamento, política de origem e ciclo do painel;
 - `browser/automation.rs`: única região que nomeia WebView2/COM; scripts com
-  retorno, métodos CDP fechados, snapshot renderizado, screenshot JPEG limitado
-  e entrada confiável de mouse/teclado;
+  retorno, métodos CDP fechados, viewport responsivo real, snapshot renderizado,
+  screenshot JPEG limitado e entrada confiável de mouse/teclado;
 - `browser/metrics.rs`: eventos tipados, janela recente e JSONL rotativo;
-- `engine/native/tools/browser.rs`: sete ferramentas fechadas, validação dos
+- `engine/native/tools/browser.rs`: nove ferramentas fechadas, validação dos
   argumentos, aprovação cancelável e projeção para provider/timeline.
 
 O modelo nunca recebe um endpoint CDP genérico. Referências de elemento são
@@ -164,15 +164,28 @@ salva e restaura somente o rascunho correspondente, incluindo anexos.
 turno concluído. O gatilho de revisão existe sempre que essa projeção possui
 arquivos, independentemente de o agente ter publicado um plano ou de o turno já
 ter terminado. `AppShell` mantém timeline e composer no caminho inicial e
-carrega Configurações, Automações, Browser e Revisão por `import()` somente
-quando a superfície correspondente é aberta.
+carrega Configurações, Automações e a área de trabalho por `import()` somente
+quando a superfície correspondente é aberta. `workspaceTabs.ts` é a máquina de
+estado pura e fechada que reconcilia a topologia nativa do navegador com abas de
+aplicação como Revisão. Troca de conversa, seleção, fechamento e sucessor são
+determinísticos; novos visualizadores entram como outra variante dessa união,
+sem criar um novo painel paralelo no `AppShell`.
 
 O navegador interno também possui estado isolado por conversa. O controller
 frontend restaura abas lazy a partir de um schema local fechado, adota o webview
 nativo existente de forma idempotente e coalesce sincronizações de bounds pela
-assinatura conversa/aba/retângulo. O painel implementa abas, endereço,
-voltar/avançar, recarregar e abertura externa sem iframe; fechar ou ocultar a
-superfície esconde o child webview no mesmo ciclo de vida.
+assinatura conversa/aba/retângulo. A área de trabalho ocupa a região principal e
+compõe navegador e revisão na mesma barra de abas. O navegador implementa
+endereço, voltar/avançar, recarregar, abertura externa e viewport CDP ajustável
+de 320×240 a 7680×4320 sem iframe; fechar ou ocultar a superfície esconde o
+child webview no mesmo ciclo de vida.
+
+`browser_snapshot` coleta DOM renderizado, acessibilidade, texto, referências e
+diagnósticos como saída textual; não produz imagem. `browser_screenshot` é o
+único caminho que captura JPEG e cria contexto visual. Clique, digitação, tecla,
+espera e navegação retornam somente o estado conciso da aba. Essa separação
+evita serializar e persistir screenshots depois de toda interação e mantém a
+captura visual explícita quando a decisão realmente depende de pixels.
 
 Eventos `browser://agent-activity` substituem a topologia da conversa de forma
 autoritativa e abrem/fecham o painel somente quando a tarefa correspondente está

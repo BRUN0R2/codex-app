@@ -548,6 +548,7 @@ const SCENARIOS = [
   {
     id: "browser-panel",
     url: BROWSER_PANEL_PREVIEW_URL,
+    viewports: FILE_VIEWER_VIEWPORTS,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
       (button) => button.textContent?.includes("Estresse de timeline expandida"),
     )`,
@@ -559,9 +560,50 @@ const SCENARIOS = [
     })()`,
     readyExpression: `document.querySelector(".browser-panel") !== null &&
       document.querySelector(".browser-native-surface") !== null &&
-      document.querySelector(".browser-tab[role='presentation']") !== null`,
+      document.querySelector(".workspace-tab[data-kind='browser']") !== null`,
     auditExpression: browserPanelVisualAuditExpression,
     validate: validateBrowserPanelMetrics,
+  },
+  {
+    id: "browser-responsive-viewport",
+    url: BROWSER_PANEL_PREVIEW_URL,
+    viewports: FILE_VIEWER_VIEWPORTS,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de timeline expandida"),
+    )`,
+    prepareExpression: `(() => {
+      void (async () => {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Estresse de timeline expandida"),
+        );
+        threadButton?.click();
+        for (let index = 0; index < 30; index += 1) {
+          const toggle = document.querySelector('[aria-label="Alternar viewport responsivo"]');
+          if (toggle instanceof HTMLButtonElement) {
+            toggle.click();
+            break;
+          }
+          await frame();
+        }
+        await frame();
+        const preset = document.querySelector('select[aria-label="Resolução padrão"]');
+        const scale = document.querySelector('select[aria-label="Escala do viewport"]');
+        if (!(preset instanceof HTMLSelectElement) || !(scale instanceof HTMLSelectElement)) {
+          throw new Error("Os controles responsivos não foram montados.");
+        }
+        preset.value = "7680x4320";
+        preset.dispatchEvent(new Event("change", { bubbles: true }));
+        scale.value = "0.25";
+        scale.dispatchEvent(new Event("change", { bubbles: true }));
+        await frame();
+        await frame();
+      })();
+    })()`,
+    readyExpression: `document.querySelector(".browser-responsive-toolbar") !== null &&
+      document.querySelector('.browser-preview-page small')?.textContent?.includes("7680 × 4320 · 25%") === true`,
+    auditExpression: browserResponsiveVisualAuditExpression,
+    validate: validateBrowserResponsiveMetrics,
   },
   {
     id: "browser-debug-panel",
@@ -606,7 +648,7 @@ const SCENARIOS = [
           let closeButton;
           for (let index = 0; index < 30; index += 1) {
             await frame();
-            closeButton = document.querySelector('[aria-label="Fechar navegador"]');
+            closeButton = document.querySelector('[aria-label="Fechar área de trabalho"]');
             if (closeButton !== null) break;
           }
           if (!(closeButton instanceof HTMLButtonElement)) {
@@ -887,12 +929,14 @@ async function waitForPreview(client, readyExpression, scenarioId, timeoutMs = 1
 
 function browserPanelVisualAuditExpression() {
   return `(() => {
+    const workspace = document.querySelector(".workspace-panel");
     const panel = document.querySelector(".browser-panel");
-    const tabs = document.querySelector(".browser-tab-strip");
+    const tabs = document.querySelector(".workspace-tab-bar");
     const toolbar = document.querySelector(".browser-toolbar");
     const address = document.querySelector(".browser-address");
     const surface = document.querySelector(".browser-native-surface");
     if (
+      !(workspace instanceof HTMLElement) ||
       !(panel instanceof HTMLElement) ||
       !(tabs instanceof HTMLElement) ||
       !(toolbar instanceof HTMLElement) ||
@@ -914,17 +958,66 @@ function browserPanelVisualAuditExpression() {
     };
     return {
       viewport: { width: innerWidth, height: innerHeight },
+      workspace: rectangle(workspace),
       panel: rectangle(panel),
       tabs: rectangle(tabs),
       toolbar: rectangle(toolbar),
       address: rectangle(address),
       surface: rectangle(surface),
-      tabCount: panel.querySelectorAll('[role="tab"]').length,
-      selectedTabs: panel.querySelectorAll('[role="tab"][aria-selected="true"]').length,
+      tabCount: workspace.querySelectorAll('[role="tab"]').length,
+      selectedTabs: workspace.querySelectorAll('[role="tab"][aria-selected="true"]').length,
       navigationButtons: panel.querySelectorAll(".browser-toolbar > .browser-toolbar-button").length,
       addressInputs: panel.querySelectorAll('.browser-address input[aria-label="Pesquisar ou digitar endereço"]').length,
       previewPages: panel.querySelectorAll(".browser-preview-page").length,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function browserResponsiveVisualAuditExpression() {
+  return `(() => {
+    const workspace = document.querySelector(".workspace-panel");
+    const toolbar = document.querySelector(".browser-responsive-toolbar");
+    const surface = document.querySelector(".browser-native-surface");
+    const width = document.querySelector('input[aria-label="Largura do viewport"]');
+    const height = document.querySelector('input[aria-label="Altura do viewport"]');
+    const scale = document.querySelector('select[aria-label="Escala do viewport"]');
+    const reset = document.querySelector('[aria-label="Redefinir viewport responsivo"]');
+    if (
+      !(workspace instanceof HTMLElement) ||
+      !(toolbar instanceof HTMLElement) ||
+      !(surface instanceof HTMLElement) ||
+      !(width instanceof HTMLInputElement) ||
+      !(height instanceof HTMLInputElement) ||
+      !(scale instanceof HTMLSelectElement) ||
+      !(reset instanceof HTMLButtonElement)
+    ) {
+      throw new Error("O viewport responsivo está incompleto.");
+    }
+    const rectangle = (element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      workspace: rectangle(workspace),
+      toolbar: rectangle(toolbar),
+      surface: rectangle(surface),
+      width: width.value,
+      height: height.value,
+      scale: scale.value,
+      preview: document.querySelector(".browser-preview-page small")?.textContent?.trim() ?? null,
+      selectedTabs: workspace.querySelectorAll('[role="tab"][aria-selected="true"]').length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      toolbarOverflow: toolbar.scrollWidth - toolbar.clientWidth,
+      resetLabel: reset.getAttribute("aria-label"),
     };
   })()`;
 }
@@ -979,7 +1072,7 @@ function browserPanelLifecycleVisualAuditExpression() {
       failureCount: document.querySelectorAll(
         ".bootstrap-failure, .render-failure, .frontend-failure, [role='alert']",
       ).length,
-      chatVisible: document.querySelector(".chat-page") !== null,
+      chatVisible: document.querySelector(".chat-page:not([hidden])") !== null,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
@@ -6605,7 +6698,12 @@ function validateAutomationEditorMetrics(metrics, viewport) {
 function validateBrowserPanelMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(metrics.horizontalOverflow <= tolerance, "o navegador criou overflow horizontal global");
-  assert(metrics.panel.top >= 34 - tolerance, "o navegador invadiu o chrome da janela");
+  assert(metrics.workspace.top >= 34 - tolerance, "a área de trabalho invadiu o chrome da janela");
+  assert(
+    metrics.workspace.right <= viewport.width + tolerance &&
+      metrics.workspace.bottom <= viewport.height + tolerance,
+    "a área de trabalho ultrapassou o viewport",
+  );
   assert(metrics.panel.right <= viewport.width + tolerance, "o navegador ultrapassou a borda direita");
   assert(metrics.panel.bottom <= viewport.height + tolerance, "o navegador ultrapassou a altura útil");
   assert(metrics.panel.width >= 420, "o navegador ficou estreito demais");
@@ -6621,9 +6719,35 @@ function validateBrowserPanelMetrics(metrics, viewport) {
   assert(metrics.address.width >= 180, "a barra de endereço ficou estreita demais");
   assert(metrics.tabCount >= 1, "o navegador não criou a aba inicial");
   assert(metrics.selectedTabs === 1, "o navegador não possui uma única aba ativa");
-  assert(metrics.navigationButtons === 5, "faltam controles de navegação/diagnóstico na barra");
+  assert(metrics.navigationButtons === 6, "faltam controles de navegação/viewport na barra");
   assert(metrics.addressInputs === 1, "a barra de endereço não possui um único campo");
   assert(metrics.previewPages === 1, "a prévia não expõe a superfície substituta do webview nativo");
+}
+
+function validateBrowserResponsiveMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport externo inesperado no modo responsivo em ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "o modo responsivo criou overflow global");
+  assert(metrics.toolbarOverflow <= tolerance, "os controles responsivos não cabem na barra");
+  assert(metrics.width === "7680", "a largura 8K não foi aplicada");
+  assert(metrics.height === "4320", "a altura 8K não foi aplicada");
+  assert(metrics.scale === "0.25", "a escala de 25% não foi aplicada");
+  assert(metrics.preview === "7680 × 4320 · 25%", "a superfície não refletiu o viewport 8K");
+  assert(metrics.selectedTabs === 1, "o modo responsivo perdeu a aba ativa");
+  assert(
+    metrics.toolbar.left >= metrics.workspace.left - tolerance &&
+      metrics.toolbar.right <= metrics.workspace.right + tolerance,
+    "a barra responsiva saiu da área de trabalho",
+  );
+  assert(metrics.toolbar.bottom <= metrics.surface.top + tolerance, "a barra responsiva sobrepõe o conteúdo");
+  assert(metrics.surface.height > 0, "o modo responsivo eliminou a superfície do navegador");
+  assert(
+    metrics.resetLabel === "Redefinir viewport responsivo",
+    "o reset responsivo não possui nome acessível",
+  );
 }
 
 function validateBrowserDebugMetrics(metrics, viewport) {

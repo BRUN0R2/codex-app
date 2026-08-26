@@ -2594,6 +2594,7 @@ function agentActivityIcon(kind: AgentActivityKind | undefined): IconName {
     case "commands":
     case "terminalRead":
       return "terminal";
+    case "browser":
     case "webSearch":
       return "globe";
     default:

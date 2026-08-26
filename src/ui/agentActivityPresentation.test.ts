@@ -34,6 +34,25 @@ describe("agent activity presentation", () => {
     expect(agentActivitySummaryLabel(items)).toBe("Executou comandos e pesquisou na web");
   });
 
+  it("presents browser use as its own official activity instead of a web search", () => {
+    const items = [
+      command("command-1"),
+      tool("browser-1", "browser_manage", "Abrir navegador"),
+      tool("browser-2", "browser_snapshot", "Inspecionar navegador"),
+    ];
+
+    expect(agentActivitySummaryLabel(items)).toBe("Usou o navegador e executou um comando");
+    expect(summarizeAgentActivity(items).map(({ kind }) => kind)).toEqual(["browser", "commands"]);
+    expect(
+      activeAgentActivity([
+        {
+          ...tool("browser-3", "browser_snapshot", "Inspecionar navegador"),
+          status: "inProgress",
+        },
+      ]),
+    ).toEqual({ kind: "browser", label: "Usando o navegador" });
+  });
+
   it("classifies command polling as command activity", () => {
     const items = [tool("poll-1", "poll_command", "Poll command session-1")];
 

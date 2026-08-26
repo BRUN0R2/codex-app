@@ -1,24 +1,35 @@
 import type { IconName } from "./Icon";
 
-export type ToolCategory = "command" | "exploration" | "fileRead" | "terminalRead" | "web";
+export type ToolCategory =
+  | "browser"
+  | "command"
+  | "exploration"
+  | "fileRead"
+  | "terminalRead"
+  | "web";
 
 const TOOL_CATEGORY_NAMES: Readonly<Record<ToolCategory, readonly string[]>> = {
-  command: ["poll_command", "run_shell", "shell"],
-  exploration: ["code_search", "list_files", "search_text"],
-  fileRead: ["read_file"],
-  terminalRead: ["read_output", "read_thread_terminal"],
-  web: [
+  browser: [
     "browser_key",
     "browser_manage",
     "browser_metrics",
     "browser_pointer",
+    "browser_screenshot",
     "browser_snapshot",
     "browser_type",
+    "browser_viewport",
     "browser_wait",
-    "web_fetch",
-    "web_search",
   ],
+  command: ["poll_command", "run_shell", "shell"],
+  exploration: ["code_search", "list_files", "search_text"],
+  fileRead: ["read_file"],
+  terminalRead: ["read_output", "read_thread_terminal"],
+  web: ["web_fetch", "web_search"],
 };
+
+export function isBrowserTool(name: string): boolean {
+  return TOOL_CATEGORY_NAMES.browser.includes(name.toLowerCase());
+}
 
 export function isCommandTool(name: string): boolean {
   return TOOL_CATEGORY_NAMES.command.includes(name.toLowerCase());
@@ -55,8 +66,10 @@ export function toolIconName(name: string): IconName {
     case "browser_manage":
     case "browser_metrics":
     case "browser_pointer":
+    case "browser_screenshot":
     case "browser_snapshot":
     case "browser_type":
+    case "browser_viewport":
     case "browser_wait":
       return "globe";
     case "shell":
@@ -89,10 +102,14 @@ export function toolLabel(name: string): string {
       return "Controle do navegador";
     case "browser_snapshot":
       return "Inspeção do navegador";
+    case "browser_screenshot":
+      return "Captura visual do navegador";
     case "browser_pointer":
       return "Mouse do navegador";
     case "browser_type":
       return "Digitação no navegador";
+    case "browser_viewport":
+      return "Viewport do navegador";
     case "browser_key":
       return "Teclado do navegador";
     case "browser_wait":

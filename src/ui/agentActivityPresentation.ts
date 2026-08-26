@@ -1,5 +1,6 @@
 import type { VisibleThreadItem } from "../contracts/types";
 import {
+  isBrowserTool,
   isCommandTool,
   isExplorationTool,
   isFileReadTool,
@@ -22,6 +23,7 @@ export type AgentActivityKind =
   | "fileChanges"
   | "fileReads"
   | "exploration"
+  | "browser"
   | "commands"
   | "terminalRead"
   | "webSearch";
@@ -157,12 +159,14 @@ export function summarizeAgentActivity(
   items: readonly AgentActivityItem[],
 ): readonly AgentActivitySummary[] {
   let calledTools = 0;
+  let browser = 0;
   let commands = 0;
   let exploration = 0;
   let fileReads = 0;
   let terminalReads = 0;
   let webSearch = 0;
   let calledToolsRunning = false;
+  let browserRunning = false;
   let commandsRunning = false;
   let explorationRunning = false;
   let fileReadsRunning = false;
@@ -192,7 +196,10 @@ export function summarizeAgentActivity(
     }
 
     const name = item.name.toLowerCase();
-    if (isWebSearchTool(name)) {
+    if (isBrowserTool(name)) {
+      browser += 1;
+      browserRunning ||= item.status === "inProgress";
+    } else if (isWebSearchTool(name)) {
       webSearch += 1;
       webSearchRunning ||= item.status === "inProgress";
     } else if (isTerminalReadTool(name)) {
@@ -242,6 +249,9 @@ export function summarizeAgentActivity(
       running: explorationRunning,
     });
   }
+  if (browser > 0) {
+    summaries.push({ kind: "browser", label: "Usou o navegador", running: browserRunning });
+  }
   if (commands > 0) {
     summaries.push({
       kind: "commands",
@@ -286,6 +296,9 @@ export function activeAgentActivity(
     }
 
     const name = item.name.toLowerCase();
+    if (isBrowserTool(name)) {
+      return { kind: "browser", label: "Usando o navegador" };
+    }
     if (isWebSearchTool(name)) {
       return { kind: "webSearch", label: webSearchActivityTitle(item.description, item.status) };
     }

@@ -560,6 +560,7 @@ export function decodeBrowserTabSnapshot(value: unknown): BrowserTabSnapshot {
     "isLoading",
     "title",
     "url",
+    "viewport",
   ]);
   return {
     browserTabId: identifier(object.browserTabId, "$.browserTabId"),
@@ -569,6 +570,16 @@ export function decodeBrowserTabSnapshot(value: unknown): BrowserTabSnapshot {
     canGoBack: booleanValue(object.canGoBack, "$.canGoBack"),
     canGoForward: booleanValue(object.canGoForward, "$.canGoForward"),
     isLoading: booleanValue(object.isLoading, "$.isLoading"),
+    viewport: object.viewport === null ? null : decodeBrowserViewport(object.viewport),
+  };
+}
+
+function decodeBrowserViewport(value: unknown): BrowserTabSnapshot["viewport"] {
+  const object = exactRecord(value, "$.viewport", ["height", "scale", "width"]);
+  return {
+    width: integer(object.width, "$.viewport.width", 320, 7_680),
+    height: integer(object.height, "$.viewport.height", 240, 4_320),
+    scale: finiteNumber(object.scale, "$.viewport.scale", 0.25, 2),
   };
 }
 

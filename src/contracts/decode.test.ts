@@ -84,6 +84,7 @@ describe("decodificação dos contratos nativos", () => {
       canGoBack: true,
       canGoForward: false,
       isLoading: false,
+      viewport: null,
     };
 
     expect(decodeBrowserTabSnapshot(snapshot)).toEqual(snapshot);
@@ -102,6 +103,18 @@ describe("decodificação dos contratos nativos", () => {
       "browser URL is not allowed",
     );
     expect(() => decodeBrowserTabSnapshot({ ...snapshot, future: true })).toThrow("expected keys");
+    expect(
+      decodeBrowserTabSnapshot({
+        ...snapshot,
+        viewport: { width: 7_680, height: 4_320, scale: 0.5 },
+      }).viewport,
+    ).toEqual({ width: 7_680, height: 4_320, scale: 0.5 });
+    expect(() =>
+      decodeBrowserTabSnapshot({
+        ...snapshot,
+        viewport: { width: 7_681, height: 4_320, scale: 1 },
+      }),
+    ).toThrow("between 320 and 7680");
 
     const activity = {
       conversationId: snapshot.conversationId,

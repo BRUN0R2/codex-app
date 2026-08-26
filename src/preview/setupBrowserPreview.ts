@@ -1396,6 +1396,7 @@ export function setupBrowserPreview(): void {
           canGoBack: false,
           canGoForward: false,
           isLoading: false,
+          viewport: null,
         } satisfies BrowserTabSnapshot;
         previewBrowserTabs.set(browserTabId, snapshot);
         return snapshot;
@@ -1429,6 +1430,17 @@ export function setupBrowserPreview(): void {
       case "browser_tab_close":
         previewBrowserTabs.delete(readPreviewRequestString(args, "browserTabId"));
         return { applied: true };
+      case "browser_viewport_set": {
+        const browserTabId = readPreviewRequestString(args, "browserTabId");
+        const current = previewBrowserTabs.get(browserTabId);
+        if (current === undefined) {
+          throw new Error("A aba solicitada não existe na prévia do navegador.");
+        }
+        const viewport = readPreviewBrowserViewport(args);
+        const snapshot = { ...current, viewport } satisfies BrowserTabSnapshot;
+        previewBrowserTabs.set(browserTabId, snapshot);
+        return snapshot;
+      }
       case "browser_surface_sync":
         return { applied: true };
       case "engine_start": {
@@ -1987,6 +1999,12 @@ interface PreviewAutomationRequestRecord extends Record<string, unknown> {
   readonly projectPath?: unknown;
 }
 
+interface PreviewBrowserViewportRecord {
+  readonly height?: unknown;
+  readonly scale?: unknown;
+  readonly width?: unknown;
+}
+
 function readPreviewRequestString(args: unknown, key: string): string {
   const value = (args as { request?: Record<string, unknown> }).request?.[key];
   if (typeof value !== "string") {
@@ -2001,6 +2019,37 @@ function readPreviewRequestNumber(args: unknown, key: string): number {
     throw new Error(`O campo ${key} do request de prévia é inválido.`);
   }
   return value;
+}
+
+function readPreviewBrowserViewport(args: unknown): BrowserTabSnapshot["viewport"] {
+  const value = (args as { request?: { readonly viewport?: unknown } }).request?.viewport;
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("O viewport do navegador de prévia é inválido.");
+  }
+  const record = value as PreviewBrowserViewportRecord;
+  const width = record.width;
+  const height = record.height;
+  const scale = record.scale;
+  if (
+    typeof width !== "number" ||
+    !Number.isSafeInteger(width) ||
+    width < 320 ||
+    width > 7_680 ||
+    typeof height !== "number" ||
+    !Number.isSafeInteger(height) ||
+    height < 240 ||
+    height > 4_320 ||
+    typeof scale !== "number" ||
+    !Number.isFinite(scale) ||
+    scale < 0.25 ||
+    scale > 2
+  ) {
+    throw new Error("O viewport do navegador de prévia é inválido.");
+  }
+  return { width, height, scale };
 }
 
 function previewTimelineFileCount(value: string | null): number {

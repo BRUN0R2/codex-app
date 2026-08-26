@@ -117,7 +117,9 @@ async fn run_smoke(app: &AppHandle) -> Result<serde_json::Value, AppError> {
     )?;
 
     let result = async {
-        let initial = manager.capture_active(app, SMOKE_CONVERSATION_ID).await?;
+        let initial = manager
+            .screenshot_active(app, SMOKE_CONVERSATION_ID)
+            .await?;
         ensure_capture(&initial, "Browser Smoke")?;
         let button = element_ref(&initial, "Incrementar")?;
         manager
@@ -129,7 +131,9 @@ async fn run_smoke(app: &AppHandle) -> Result<serde_json::Value, AppError> {
                 1,
             )
             .await?;
-        let clicked = manager.capture_active(app, SMOKE_CONVERSATION_ID).await?;
+        let clicked = manager
+            .screenshot_active(app, SMOKE_CONVERSATION_ID)
+            .await?;
         if !clicked.automation.snapshot.text.contains("Contagem: 1") {
             return Err(AppError::State(
                 "browser smoke click did not update rendered page state".into(),
@@ -147,7 +151,9 @@ async fn run_smoke(app: &AppHandle) -> Result<serde_json::Value, AppError> {
                 false,
             )
             .await?;
-        let typed = manager.capture_active(app, SMOKE_CONVERSATION_ID).await?;
+        let typed = manager
+            .screenshot_active(app, SMOKE_CONVERSATION_ID)
+            .await?;
         if !typed
             .automation
             .snapshot
@@ -170,7 +176,9 @@ async fn run_smoke(app: &AppHandle) -> Result<serde_json::Value, AppError> {
                 1,
             )
             .await?;
-        let navigated = manager.capture_active(app, SMOKE_CONVERSATION_ID).await?;
+        let navigated = manager
+            .screenshot_active(app, SMOKE_CONVERSATION_ID)
+            .await?;
         if navigated.automation.snapshot.title.as_deref() != Some("Browser Smoke Next") {
             return Err(AppError::State(
                 "browser smoke navigation did not reach the next page".into(),
@@ -211,7 +219,9 @@ async fn run_smoke(app: &AppHandle) -> Result<serde_json::Value, AppError> {
                 "browser smoke external page requested an unexpected transition".into(),
             ));
         }
-        let external = manager.capture_active(app, SMOKE_CONVERSATION_ID).await?;
+        let external = manager
+            .screenshot_active(app, SMOKE_CONVERSATION_ID)
+            .await?;
         if external.automation.snapshot.title.as_deref() != Some("Browser Smoke External") {
             return Err(AppError::State(
                 "browser smoke did not resume the approved redirect".into(),
@@ -373,7 +383,11 @@ fn ensure_capture(
     expected_title: &str,
 ) -> Result<(), AppError> {
     if capture.automation.snapshot.title.as_deref() != Some(expected_title)
-        || capture.automation.screenshot_bytes < 1_024
+        || capture
+            .automation
+            .screenshot
+            .as_ref()
+            .is_none_or(|screenshot| screenshot.bytes < 1_024)
         || capture.automation.snapshot.viewport.width < 700
         || capture.automation.snapshot.viewport.height < 500
     {
@@ -391,8 +405,8 @@ fn smoke_capture_metric(capture: &super::BrowserAgentCapture) -> serde_json::Val
         "loadMs": capture.load_ms,
         "loadTimedOut": capture.load_timed_out,
         "snapshotMs": capture.automation.snapshot_ms,
-        "screenshotMs": capture.automation.screenshot_ms,
-        "screenshotBytes": capture.automation.screenshot_bytes,
+        "screenshotMs": capture.automation.screenshot.as_ref().map(|capture| capture.duration_ms),
+        "screenshotBytes": capture.automation.screenshot.as_ref().map(|capture| capture.bytes),
         "elements": capture.automation.snapshot.elements.len(),
         "viewport": {
             "width": capture.automation.snapshot.viewport.width,

@@ -1441,8 +1441,9 @@ fn compose_instructions(
         .unwrap_or_default();
     let browser_guidance = "The built-in browser tools control the visible browser attached to this conversation. \
         For interface QA, open or navigate with browser_manage, inspect with browser_snapshot before using element refs, \
-        treat refs as stale after page changes, and use browser_metrics to verify latency and runtime findings. \
-        Browser actions return a fresh viewport screenshot to your next reasoning round.";
+        treat refs as stale after page changes, use browser_viewport for explicit breakpoint QA, and use browser_metrics \
+        to verify latency and runtime findings. Browser actions return concise state; use browser_screenshot only when \
+        visual judgment is required, and reset temporary viewport overrides before finishing.";
     let work_execution_protocol = WORK_EXECUTION_PROTOCOL;
     let runtime = match mode {
         ConversationMode::Chat => format!(

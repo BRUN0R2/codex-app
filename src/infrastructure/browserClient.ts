@@ -13,6 +13,7 @@ import type {
   BrowserNewWindowNotification,
   BrowserSurfaceBounds,
   BrowserTabSnapshot,
+  BrowserViewport,
   OperationAck,
 } from "../contracts/types";
 import { invokeRuntime as invoke, listenRuntime as listen } from "./runtimeBridge";
@@ -59,6 +60,15 @@ export function reloadBrowserTab(identity: BrowserTabIdentity): Promise<BrowserT
 
 export function closeBrowserTab(identity: BrowserTabIdentity): Promise<OperationAck> {
   return invokeDecoded("browser_tab_close", decodeOperationAck, { request: identity });
+}
+
+export function setBrowserViewport(
+  identity: BrowserTabIdentity,
+  viewport: BrowserViewport | null,
+): Promise<BrowserTabSnapshot> {
+  return invokeDecoded("browser_viewport_set", decodeBrowserTabSnapshot, {
+    request: { ...identity, viewport },
+  });
 }
 
 export function synchronizeBrowserSurface(input: {

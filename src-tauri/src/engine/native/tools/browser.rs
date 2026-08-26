@@ -12,7 +12,7 @@ use super::{ToolExecutionContext, decode_arguments, function_tool};
 use crate::browser::{
     BrowserActionMetric, BrowserActionStatus, BrowserAgentCapture, BrowserManager,
     BrowserMouseButton, BrowserPageMetricSummary, BrowserPageSnapshot, BrowserPanelDirective,
-    BrowserPendingTransition, BrowserTargetSelector, browser_origin,
+    BrowserPendingTransition, BrowserTargetSelector, BrowserViewport, browser_origin,
 };
 use crate::engine::{
     ActivityStatus, ApprovalDecision, ApprovalPolicy, BrowserOriginApprovalRequest,
@@ -32,6 +32,8 @@ const MAX_BROWSER_TRANSITIONS: usize = 8;
 pub(super) enum BrowserToolOperation {
     Manage(BrowserManageOperation),
     Snapshot,
+    Screenshot,
+    Viewport(Option<BrowserViewport>),
     Pointer(BrowserPointerOperation),
     Type(BrowserTypeOperation),
     Key(BrowserKeyArgs),
@@ -41,18 +43,15 @@ pub(super) enum BrowserToolOperation {
 
 impl BrowserToolOperation {
     pub(super) fn presents_image(&self) -> bool {
-        !matches!(
-            self,
-            Self::Manage(
-                BrowserManageOperation::ListTabs | BrowserManageOperation::CloseBrowser { .. }
-            ) | Self::Metrics { .. }
-        )
+        matches!(self, Self::Screenshot)
     }
 
     pub(super) fn action_name(&self) -> &'static str {
         match self {
             Self::Manage(operation) => operation.action_name(),
             Self::Snapshot => "snapshot",
+            Self::Screenshot => "screenshot",
+            Self::Viewport(_) => "viewport",
             Self::Pointer(operation) => operation.action_name(),
             Self::Type(_) => "type",
             Self::Key(_) => "key",
@@ -235,6 +234,22 @@ struct BrowserWaitArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct BrowserViewportArgs {
+    action: BrowserViewportAction,
+    width: Option<u32>,
+    height: Option<u32>,
+    scale: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BrowserViewportAction {
+    Set,
+    Reset,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BrowserMetricsArgs {
     limit: u16,
 }
@@ -270,11 +285,36 @@ pub(super) fn definitions() -> Vec<Value> {
         ),
         function_tool(
             "browser_snapshot",
-            "Inspect the active built-in browser tab. Returns a compact rendered-page snapshot with stable element refs, accessibility information, visible text, console/page/resource errors, Web Vitals, and a viewport screenshot.",
+            "Inspect the active built-in browser tab without capturing an image. Returns a compact rendered-page snapshot with stable element refs, accessibility information, visible text, console/page/resource errors, Web Vitals, and viewport state.",
             json!({
                 "type": "object",
                 "properties": {},
                 "required": [],
+                "additionalProperties": false
+            }),
+        ),
+        function_tool(
+            "browser_screenshot",
+            "Capture the active built-in browser viewport when visual judgment is required. Returns an image plus the same structured page state as browser_snapshot. Prefer browser_snapshot for routine navigation and interaction.",
+            json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
+        ),
+        function_tool(
+            "browser_viewport",
+            "Set or reset an explicit responsive viewport in the active built-in browser tab. Supports standard desktop resolutions from 1280x720 through 7680x4320 and a visual scale from 25% to 200%. Reset it after QA unless the user asked to keep it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["set", "reset"] },
+                    "width": { "type": ["integer", "null"], "minimum": 320, "maximum": 7680 },
+                    "height": { "type": ["integer", "null"], "minimum": 240, "maximum": 4320 },
+                    "scale": { "type": ["number", "null"], "minimum": 0.25, "maximum": 2.0 }
+                },
+                "required": ["action", "width", "height", "scale"],
                 "additionalProperties": false
             }),
         ),
@@ -336,7 +376,7 @@ pub(super) fn definitions() -> Vec<Value> {
         ),
         function_tool(
             "browser_wait",
-            "Wait for a bounded interval in the active built-in browser, then return a fresh rendered snapshot and screenshot. The wait is cancelable with the turn.",
+            "Wait for a bounded interval in the active built-in browser. The wait is cancelable with the turn; call browser_snapshot afterward only when updated page state is needed.",
             json!({
                 "type": "object",
                 "properties": {
@@ -348,7 +388,7 @@ pub(super) fn definitions() -> Vec<Value> {
         ),
         function_tool(
             "browser_metrics",
-            "Read recent structured browser-action metrics for the current conversation, including queue/action/load/snapshot/screenshot latency, page errors, Web Vitals, overflow, accessibility findings, and screenshot size.",
+            "Read recent structured browser-action metrics for the current conversation, including queue/action latency and, when explicitly captured, snapshot/screenshot latency, page errors, Web Vitals, overflow, accessibility findings, and screenshot size.",
             json!({
                 "type": "object",
                 "properties": {
@@ -395,6 +435,41 @@ pub(super) fn prepare(
                     BrowserToolOperation::Snapshot,
                 ))
             }
+        }
+        "browser_screenshot" => {
+            let empty: serde_json::Map<String, Value> = match decode_arguments(name, arguments) {
+                Ok(empty) => empty,
+                Err(error) => return Some(Err(error)),
+            };
+            if !empty.is_empty() {
+                Err(AppError::Tool(
+                    "browser_screenshot does not accept arguments".into(),
+                ))
+            } else {
+                Ok((
+                    "browser_screenshot",
+                    "Capture browser screenshot".into(),
+                    BrowserToolOperation::Screenshot,
+                ))
+            }
+        }
+        "browser_viewport" => {
+            let args: BrowserViewportArgs = match decode_arguments(name, arguments) {
+                Ok(args) => args,
+                Err(error) => return Some(Err(error)),
+            };
+            normalize_viewport(args).map(|viewport| {
+                (
+                    "browser_viewport",
+                    if viewport.is_some() {
+                        "Set browser viewport"
+                    } else {
+                        "Reset browser viewport"
+                    }
+                    .into(),
+                    BrowserToolOperation::Viewport(viewport),
+                )
+            })
         }
         "browser_pointer" => {
             let args: BrowserPointerArgs = match decode_arguments(name, arguments) {
@@ -497,8 +572,9 @@ pub(super) async fn execute(
     let total_ms = elapsed_millis(started_at)?;
     match result {
         Ok(outcome) => {
-            let metric =
-                metric_from_outcome(operation, item_id, context, queue_ms, total_ms, &outcome)?;
+            let metric = metric_from_outcome(
+                operation, item_id, context, queue_ms, total_ms, &outcome, &manager,
+            )?;
             manager.record_metric(context.app, metric);
             Ok(outcome.execution)
         }
@@ -544,11 +620,43 @@ async fn execute_locked(
                 "snapshot",
                 BrowserPanelDirective::Open,
             );
-            captured_outcome(
+            snapshot_outcome(
                 manager
-                    .capture_active(context.app, context.thread_id)
+                    .inspect_active(context.app, context.thread_id)
                     .await?,
             )
+        }
+        BrowserToolOperation::Screenshot => {
+            manager.ensure_active_tab(context.app, context.thread_id)?;
+            manager.announce_agent_activity(
+                context.app,
+                context.thread_id,
+                "screenshot",
+                BrowserPanelDirective::Open,
+            );
+            screenshot_outcome(
+                manager
+                    .screenshot_active(context.app, context.thread_id)
+                    .await?,
+            )
+        }
+        BrowserToolOperation::Viewport(viewport) => {
+            let tab = manager.ensure_active_tab(context.app, context.thread_id)?;
+            manager
+                .set_viewport(
+                    context.app,
+                    context.thread_id,
+                    &tab.browser_tab_id,
+                    *viewport,
+                )
+                .await?;
+            manager.announce_agent_activity(
+                context.app,
+                context.thread_id,
+                "viewport",
+                BrowserPanelDirective::Open,
+            );
+            Ok(action_outcome(manager, context, "viewport"))
         }
         BrowserToolOperation::Pointer(operation) => {
             let transition = match operation {
@@ -607,7 +715,11 @@ async fn execute_locked(
                 authorize_and_apply_transition(manager, transition, item_id, context, cancellation)
                     .await?;
             if matches!(transition_result, TransitionResult::Declined) {
-                return declined_capture(manager, context, operation.action_name()).await;
+                return Ok(declined_action_outcome(
+                    manager,
+                    context,
+                    operation.action_name(),
+                ));
             }
             manager.announce_agent_activity(
                 context.app,
@@ -615,11 +727,7 @@ async fn execute_locked(
                 operation.action_name(),
                 BrowserPanelDirective::Open,
             );
-            captured_outcome(
-                manager
-                    .capture_active(context.app, context.thread_id)
-                    .await?,
-            )
+            Ok(action_outcome(manager, context, operation.action_name()))
         }
         BrowserToolOperation::Type(operation) => {
             let (_, transition) = manager
@@ -636,7 +744,7 @@ async fn execute_locked(
                 authorize_and_apply_transition(manager, transition, item_id, context, cancellation)
                     .await?;
             if matches!(transition_result, TransitionResult::Declined) {
-                return declined_capture(manager, context, "type").await;
+                return Ok(declined_action_outcome(manager, context, "type"));
             }
             manager.announce_agent_activity(
                 context.app,
@@ -644,11 +752,7 @@ async fn execute_locked(
                 "type",
                 BrowserPanelDirective::Open,
             );
-            captured_outcome(
-                manager
-                    .capture_active(context.app, context.thread_id)
-                    .await?,
-            )
+            Ok(action_outcome(manager, context, "type"))
         }
         BrowserToolOperation::Key(args) => {
             let transition = manager
@@ -658,7 +762,7 @@ async fn execute_locked(
                 authorize_and_apply_transition(manager, transition, item_id, context, cancellation)
                     .await?;
             if matches!(transition_result, TransitionResult::Declined) {
-                return declined_capture(manager, context, "key").await;
+                return Ok(declined_action_outcome(manager, context, "key"));
             }
             manager.announce_agent_activity(
                 context.app,
@@ -666,11 +770,7 @@ async fn execute_locked(
                 "key",
                 BrowserPanelDirective::Open,
             );
-            captured_outcome(
-                manager
-                    .capture_active(context.app, context.thread_id)
-                    .await?,
-            )
+            Ok(action_outcome(manager, context, "key"))
         }
         BrowserToolOperation::Wait(duration) => {
             let wait = sleep(*duration);
@@ -703,19 +803,15 @@ async fn execute_locked(
                 "wait",
                 BrowserPanelDirective::Open,
             );
-            captured_outcome(
-                manager
-                    .capture_active(context.app, context.thread_id)
-                    .await?,
-            )
+            Ok(action_outcome(manager, context, "wait"))
         }
         BrowserToolOperation::Metrics { limit } => {
             let metrics = manager.recent_metrics(context.thread_id);
             let output = render_metrics(metrics.into_iter().rev().take(*limit).collect());
             Ok(BrowserOutcome {
                 execution: BrowserToolExecution {
-                    provider_output: output,
-                    display_output: None,
+                    provider_output: output.clone(),
+                    display_output: Some(output),
                     visual_image_url: None,
                     visual_description: None,
                     status: ActivityStatus::Completed,
@@ -755,7 +851,11 @@ async fn execute_manage(
                 if transition_was_declined(manager, transition, item_id, context, cancellation)
                     .await?
                 {
-                    return declined_capture(manager, context, operation.action_name()).await;
+                    return Ok(declined_action_outcome(
+                        manager,
+                        context,
+                        operation.action_name(),
+                    ));
                 }
             }
         }
@@ -776,7 +876,11 @@ async fn execute_manage(
                 .navigate_active(context.app, context.thread_id, url.clone())
                 .await?;
             if transition_was_declined(manager, transition, item_id, context, cancellation).await? {
-                return declined_capture(manager, context, operation.action_name()).await;
+                return Ok(declined_action_outcome(
+                    manager,
+                    context,
+                    operation.action_name(),
+                ));
             }
         }
         BrowserManageOperation::NewTab { url } => {
@@ -796,7 +900,11 @@ async fn execute_manage(
                 .new_agent_tab(context.app, context.thread_id, url.clone())
                 .await?;
             if transition_was_declined(manager, transition, item_id, context, cancellation).await? {
-                return declined_capture(manager, context, operation.action_name()).await;
+                return Ok(declined_action_outcome(
+                    manager,
+                    context,
+                    operation.action_name(),
+                ));
             }
         }
         BrowserManageOperation::SelectTab { browser_tab_id } => {
@@ -852,7 +960,11 @@ async fn execute_manage(
                 .history_active(context.app, context.thread_id, false)
                 .await?;
             if transition_was_declined(manager, transition, item_id, context, cancellation).await? {
-                return declined_capture(manager, context, operation.action_name()).await;
+                return Ok(declined_action_outcome(
+                    manager,
+                    context,
+                    operation.action_name(),
+                ));
             }
         }
         BrowserManageOperation::Forward => {
@@ -860,7 +972,11 @@ async fn execute_manage(
                 .history_active(context.app, context.thread_id, true)
                 .await?;
             if transition_was_declined(manager, transition, item_id, context, cancellation).await? {
-                return declined_capture(manager, context, operation.action_name()).await;
+                return Ok(declined_action_outcome(
+                    manager,
+                    context,
+                    operation.action_name(),
+                ));
             }
         }
         BrowserManageOperation::Reload => {
@@ -868,14 +984,19 @@ async fn execute_manage(
                 .reload_active(context.app, context.thread_id)
                 .await?;
             if transition_was_declined(manager, transition, item_id, context, cancellation).await? {
-                return declined_capture(manager, context, operation.action_name()).await;
+                return Ok(declined_action_outcome(
+                    manager,
+                    context,
+                    operation.action_name(),
+                ));
             }
         }
         BrowserManageOperation::ListTabs => {
+            let output = render_tabs(manager, context.thread_id);
             return Ok(BrowserOutcome {
                 execution: BrowserToolExecution {
-                    provider_output: render_tabs(manager, context.thread_id),
-                    display_output: None,
+                    provider_output: output.clone(),
+                    display_output: Some(output),
                     visual_image_url: None,
                     visual_description: None,
                     status: ActivityStatus::Completed,
@@ -890,11 +1011,7 @@ async fn execute_manage(
         operation.action_name(),
         BrowserPanelDirective::Open,
     );
-    captured_outcome(
-        manager
-            .capture_active(context.app, context.thread_id)
-            .await?,
-    )
+    Ok(action_outcome(manager, context, operation.action_name()))
 }
 
 async fn transition_was_declined(
@@ -1001,16 +1118,33 @@ async fn authorize_origin(
     }
 }
 
-fn captured_outcome(capture: BrowserAgentCapture) -> Result<BrowserOutcome, AppError> {
+fn snapshot_outcome(capture: BrowserAgentCapture) -> Result<BrowserOutcome, AppError> {
     let provider_output = render_capture(&capture);
-    let image_url = capture.automation.image_url.clone();
+    Ok(BrowserOutcome {
+        execution: BrowserToolExecution {
+            provider_output: provider_output.clone(),
+            display_output: Some(provider_output),
+            visual_image_url: None,
+            visual_description: None,
+            status: ActivityStatus::Completed,
+        },
+        capture: Some(capture),
+    })
+}
+
+fn screenshot_outcome(capture: BrowserAgentCapture) -> Result<BrowserOutcome, AppError> {
+    let provider_output = render_capture(&capture);
+    let screenshot = capture.automation.screenshot.as_ref().ok_or_else(|| {
+        AppError::State("browser screenshot operation completed without an image".into())
+    })?;
+    let image_url = screenshot.image_url.clone();
     let display_output = serde_json::to_string(&json!({ "image_url": image_url }))
         .map_err(|error| AppError::State(format!("browser image output is invalid: {error}")))?;
     Ok(BrowserOutcome {
         execution: BrowserToolExecution {
             provider_output,
             display_output: Some(display_output),
-            visual_image_url: Some(capture.automation.image_url.clone()),
+            visual_image_url: Some(screenshot.image_url.clone()),
             visual_description: Some(format!(
                 "Viewport screenshot for browser tab {} at {}.",
                 capture.tab.browser_tab_id, capture.tab.url
@@ -1021,27 +1155,41 @@ fn captured_outcome(capture: BrowserAgentCapture) -> Result<BrowserOutcome, AppE
     })
 }
 
-async fn declined_capture(
+fn action_outcome(
     manager: &BrowserManager,
     context: &ToolExecutionContext<'_>,
     action: &str,
-) -> Result<BrowserOutcome, AppError> {
+) -> BrowserOutcome {
+    BrowserOutcome {
+        execution: BrowserToolExecution {
+            provider_output: render_action_state(manager, context.thread_id, action),
+            display_output: None,
+            visual_image_url: None,
+            visual_description: None,
+            status: ActivityStatus::Completed,
+        },
+        capture: None,
+    }
+}
+
+fn declined_action_outcome(
+    manager: &BrowserManager,
+    context: &ToolExecutionContext<'_>,
+    action: &str,
+) -> BrowserOutcome {
     manager.announce_agent_activity(
         context.app,
         context.thread_id,
         action,
         BrowserPanelDirective::Open,
     );
-    let capture = manager
-        .capture_active(context.app, context.thread_id)
-        .await?;
-    let mut outcome = captured_outcome(capture)?;
+    let mut outcome = action_outcome(manager, context, action);
     outcome.execution.status = ActivityStatus::Declined;
     outcome.execution.provider_output = format!(
-        "The user declined browser origin access.\n\n{}",
+        "The user declined browser origin access.\n{}",
         outcome.execution.provider_output
     );
-    Ok(outcome)
+    outcome
 }
 
 fn declined_without_capture(message: &str) -> Result<BrowserOutcome, AppError> {
@@ -1064,17 +1212,29 @@ fn metric_from_outcome(
     queue_ms: u64,
     total_ms: u64,
     outcome: &BrowserOutcome,
+    manager: &BrowserManager,
 ) -> Result<BrowserActionMetric, AppError> {
     let capture = outcome.capture.as_ref();
+    let screenshot = capture.and_then(|capture| capture.automation.screenshot.as_ref());
+    let tab = capture.map(|capture| capture.tab.clone()).or_else(|| {
+        let topology = manager.topology(context.thread_id);
+        let active_browser_tab_id = topology.active_browser_tab_id?;
+        topology
+            .tabs
+            .into_iter()
+            .find(|tab| tab.browser_tab_id == active_browser_tab_id)
+    });
     let snapshot_ms = capture.map_or(0, |capture| capture.automation.snapshot_ms);
-    let screenshot_ms = capture.map_or(0, |capture| capture.automation.screenshot_ms);
+    let screenshot_ms = screenshot.map_or(0, |screenshot| screenshot.duration_ms);
     let load_ms = capture.map_or(0, |capture| capture.load_ms);
     let page = capture.map(|capture| page_metric_summary(&capture.automation.snapshot));
-    let url = capture
-        .map(|capture| sanitize_metric_url(&capture.tab.url))
+    let url = tab
+        .as_ref()
+        .map(|tab| sanitize_metric_url(&tab.url))
         .transpose()?;
-    let origin = capture
-        .and_then(|capture| Url::parse(&capture.tab.url).ok())
+    let origin = tab
+        .as_ref()
+        .and_then(|tab| Url::parse(&tab.url).ok())
         .and_then(|url| browser_origin(&url));
     Ok(BrowserActionMetric {
         id: uuid::Uuid::now_v7().to_string(),
@@ -1083,7 +1243,7 @@ fn metric_from_outcome(
         conversation_id: context.thread_id.into(),
         turn_id: context.turn_id.into(),
         item_id: item_id.into(),
-        browser_tab_id: capture.map(|capture| capture.tab.browser_tab_id.clone()),
+        browser_tab_id: tab.map(|tab| tab.browser_tab_id),
         action: operation.action_name().into(),
         status: match outcome.execution.status {
             ActivityStatus::Completed => BrowserActionStatus::Completed,
@@ -1102,8 +1262,8 @@ fn metric_from_outcome(
         snapshot_ms,
         screenshot_ms,
         total_ms,
-        screenshot_bytes: capture
-            .map(|capture| u64::try_from(capture.automation.screenshot_bytes))
+        screenshot_bytes: screenshot
+            .map(|screenshot| u64::try_from(screenshot.bytes))
             .transpose()
             .map_err(|_| AppError::State("browser screenshot size exceeded u64".into()))?,
         page,
@@ -1154,6 +1314,14 @@ fn page_metric_summary(snapshot: &BrowserPageSnapshot) -> BrowserPageMetricSumma
 fn render_capture(capture: &BrowserAgentCapture) -> String {
     let snapshot = &capture.automation.snapshot;
     let diagnostics = &snapshot.diagnostics;
+    let screenshot_ms = capture.automation.screenshot.as_ref().map_or_else(
+        || "not_captured".into(),
+        |screenshot| screenshot.duration_ms.to_string(),
+    );
+    let screenshot_bytes = capture.automation.screenshot.as_ref().map_or_else(
+        || "not_captured".into(),
+        |screenshot| screenshot.bytes.to_string(),
+    );
     let mut output = format!(
         "browser_tab_id: {}\nurl: {}\ntitle: {}\nready_state: {}\nviewport: {}x{} @ {:.2}x\nscroll: ({:.1}, {:.1}) of ({:.1}, {:.1})\nload_wait_ms: {}\nload_timed_out: {}\nsnapshot_ms: {}\nscreenshot_ms: {}\nscreenshot_bytes: {}\n",
         capture.tab.browser_tab_id,
@@ -1170,8 +1338,8 @@ fn render_capture(capture: &BrowserAgentCapture) -> String {
         capture.load_ms,
         capture.load_timed_out,
         capture.automation.snapshot_ms,
-        capture.automation.screenshot_ms,
-        capture.automation.screenshot_bytes,
+        screenshot_ms,
+        screenshot_bytes,
     );
     output.push_str(&format!(
         "diagnostics: console_errors={} page_errors={} resource_failures={} resources={} transfer_bytes={} cls={:.4} lcp_ms={} long_tasks={} long_task_ms={:.1} horizontal_overflow_px={:.1} unlabeled_controls={} missing_alt_images={} duplicate_ids={}\n",
@@ -1240,6 +1408,29 @@ fn render_capture(capture: &BrowserAgentCapture) -> String {
     output.push_str("\nvisible_text:\n");
     output.push_str(&snapshot.text);
     output
+}
+
+fn render_action_state(manager: &BrowserManager, conversation_id: &str, action: &str) -> String {
+    let topology = manager.topology(conversation_id);
+    let Some(active_browser_tab_id) = topology.active_browser_tab_id else {
+        return format!("browser_action: {action}\nbrowser_open: false");
+    };
+    let Some(tab) = topology
+        .tabs
+        .iter()
+        .find(|tab| tab.browser_tab_id == active_browser_tab_id)
+    else {
+        return format!(
+            "browser_action: {action}\nactive_browser_tab_id: {active_browser_tab_id}\nstate: unavailable"
+        );
+    };
+    format!(
+        "browser_action: {action}\nbrowser_tab_id: {}\nurl: {}\ntitle: {}\nloading: {}",
+        tab.browser_tab_id,
+        tab.url,
+        tab.title.as_deref().unwrap_or("null"),
+        tab.is_loading,
+    )
 }
 
 fn append_diagnostic_lines(output: &mut String, label: &str, entries: &[String]) {
@@ -1386,6 +1577,40 @@ fn normalize_manage(args: BrowserManageArgs) -> Result<BrowserManageOperation, A
                 BrowserManageAction::ListTabs => BrowserManageOperation::ListTabs,
                 _ => unreachable!("covered browser management action"),
             })
+        }
+    }
+}
+
+fn normalize_viewport(args: BrowserViewportArgs) -> Result<Option<BrowserViewport>, AppError> {
+    match args.action {
+        BrowserViewportAction::Set => {
+            let viewport = BrowserViewport {
+                width: args
+                    .width
+                    .ok_or_else(|| AppError::Tool("viewport set requires width".into()))?,
+                height: args
+                    .height
+                    .ok_or_else(|| AppError::Tool("viewport set requires height".into()))?,
+                scale: args
+                    .scale
+                    .ok_or_else(|| AppError::Tool("viewport set requires scale".into()))?,
+            };
+            if !(320..=7_680).contains(&viewport.width)
+                || !(240..=4_320).contains(&viewport.height)
+                || !viewport.scale.is_finite()
+                || !(0.25..=2.0).contains(&viewport.scale)
+            {
+                return Err(AppError::Tool(
+                    "browser viewport is outside the supported responsive range".into(),
+                ));
+            }
+            Ok(Some(viewport))
+        }
+        BrowserViewportAction::Reset => {
+            require_none("width", &args.width)?;
+            require_none("height", &args.height)?;
+            require_none("scale", &args.scale)?;
+            Ok(None)
         }
     }
 }
@@ -1596,8 +1821,70 @@ fn elapsed_millis(started_at: Instant) -> Result<u64, AppError> {
 mod tests {
     use super::{
         BrowserManageArgs, BrowserManageOperation, BrowserPointerArgs, BrowserPointerOperation,
-        normalize_manage, normalize_pointer,
+        BrowserToolOperation, BrowserViewportAction, BrowserViewportArgs, definitions,
+        normalize_manage, normalize_pointer, normalize_viewport, prepare,
     };
+
+    #[test]
+    fn explicit_screenshot_is_the_only_image_presenting_browser_operation() {
+        let snapshot = prepare("browser_snapshot", "{}")
+            .expect("browser snapshot should be registered")
+            .expect("browser snapshot should prepare")
+            .2;
+        let screenshot = prepare("browser_screenshot", "{}")
+            .expect("browser screenshot should be registered")
+            .expect("browser screenshot should prepare")
+            .2;
+        let metrics = prepare("browser_metrics", r#"{"limit":1}"#)
+            .expect("browser metrics should be registered")
+            .expect("browser metrics should prepare")
+            .2;
+
+        assert!(!snapshot.presents_image());
+        assert!(screenshot.presents_image());
+        assert!(!metrics.presents_image());
+        assert!(matches!(screenshot, BrowserToolOperation::Screenshot));
+        assert!(
+            definitions()
+                .iter()
+                .any(|definition| definition["name"] == "browser_screenshot")
+        );
+    }
+
+    #[test]
+    fn browser_viewport_contract_is_bounded_and_reset_is_explicit() {
+        let viewport = normalize_viewport(BrowserViewportArgs {
+            action: BrowserViewportAction::Set,
+            width: Some(7_680),
+            height: Some(4_320),
+            scale: Some(0.5),
+        })
+        .expect("8K viewport should be accepted")
+        .expect("set should produce a viewport");
+        assert_eq!(viewport.width, 7_680);
+        assert_eq!(viewport.height, 4_320);
+        assert_eq!(viewport.scale, 0.5);
+
+        assert_eq!(
+            normalize_viewport(BrowserViewportArgs {
+                action: BrowserViewportAction::Reset,
+                width: None,
+                height: None,
+                scale: None,
+            })
+            .expect("explicit reset should be accepted"),
+            None
+        );
+        assert!(
+            normalize_viewport(BrowserViewportArgs {
+                action: BrowserViewportAction::Set,
+                width: Some(7_681),
+                height: Some(4_320),
+                scale: Some(1.0),
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn browser_manage_contract_rejects_irrelevant_fields() {

@@ -3,12 +3,22 @@ import type { BrowserActionMetric } from "../contracts/types";
 import { openExternalUrl } from "../infrastructure/codexClient";
 import { isBrowserPreview } from "../platform/desktopRuntime";
 import type { BrowserController } from "../state/browserController";
+import {
+  BROWSER_VIEWPORT_SCALES,
+  browserViewportPreset,
+  initialBrowserViewport,
+  MAX_BROWSER_VIEWPORT_HEIGHT,
+  MAX_BROWSER_VIEWPORT_WIDTH,
+  MIN_BROWSER_VIEWPORT_HEIGHT,
+  MIN_BROWSER_VIEWPORT_WIDTH,
+  parseBrowserViewport,
+  STANDARD_BROWSER_VIEWPORTS,
+} from "./browserViewport";
 import { Icon } from "./Icon";
 
 export function BrowserPanel(props: {
   readonly controller: BrowserController;
   readonly conversationId: string;
-  readonly onClose: () => void;
 }) {
   let surfaceElement: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
@@ -18,14 +28,23 @@ export function BrowserPanel(props: {
   let disposed = false;
   const [address, setAddress] = createSignal("");
   const [debugOpen, setDebugOpen] = createSignal(false);
+  const [viewportWidth, setViewportWidth] = createSignal("");
+  const [viewportHeight, setViewportHeight] = createSignal("");
+  const [viewportScale, setViewportScale] = createSignal(1);
+  const [viewportError, setViewportError] = createSignal<string | null>(null);
   const activeTab = createMemo(() => props.controller.activeTab(props.conversationId));
-  const tabs = createMemo(() => props.controller.tabs(props.conversationId));
+  const responsiveViewport = createMemo(() => activeTab()?.viewport ?? null);
   const metrics = createMemo(() => props.controller.metrics(props.conversationId));
 
   createEffect(() => {
     const current = activeTab();
     if (!addressFocused) {
       setAddress(current?.url === "about:blank" ? "" : (current?.url ?? ""));
+    }
+    if (current?.viewport !== null && current?.viewport !== undefined) {
+      setViewportWidth(String(current.viewport.width));
+      setViewportHeight(String(current.viewport.height));
+      setViewportScale(current.viewport.scale);
     }
     scheduleSurfaceSynchronization();
   });
@@ -91,6 +110,35 @@ export function BrowserPanel(props: {
     void props.controller.navigate(props.conversationId, address());
   }
 
+  function applyViewport(width: string, height: string, scale: number): void {
+    const result = parseBrowserViewport(width, height, scale);
+    if (!result.ok) {
+      setViewportError(result.message);
+      return;
+    }
+    setViewportWidth(String(result.viewport.width));
+    setViewportHeight(String(result.viewport.height));
+    setViewportScale(result.viewport.scale);
+    setViewportError(null);
+    void props.controller.setViewport(props.conversationId, result.viewport);
+  }
+
+  function submitViewport(event: SubmitEvent): void {
+    event.preventDefault();
+    applyViewport(viewportWidth(), viewportHeight(), viewportScale());
+  }
+
+  function toggleResponsiveViewport(): void {
+    if (responsiveViewport() !== null) {
+      setViewportError(null);
+      void props.controller.setViewport(props.conversationId, null);
+      return;
+    }
+    const bounds = surfaceElement?.getBoundingClientRect();
+    const viewport = initialBrowserViewport(bounds?.width ?? 1_280, bounds?.height ?? 720);
+    applyViewport(String(viewport.width), String(viewport.height), viewport.scale);
+  }
+
   onMount(() => {
     if (surfaceElement !== undefined) {
       resizeObserver = new ResizeObserver(scheduleSurfaceSynchronization);
@@ -113,60 +161,7 @@ export function BrowserPanel(props: {
   });
 
   return (
-    <aside aria-label="Navegador interno" class="browser-panel">
-      <div aria-label="Abas do navegador" class="browser-tab-strip" role="tablist">
-        <div class="browser-tabs-scroll">
-          <For each={tabs()}>
-            {(tab) => (
-              <div
-                class="browser-tab"
-                classList={{ active: activeTab()?.browserTabId === tab.browserTabId }}
-                role="presentation"
-              >
-                <button
-                  aria-selected={activeTab()?.browserTabId === tab.browserTabId}
-                  class="browser-tab-select"
-                  onClick={() =>
-                    void props.controller.selectTab(props.conversationId, tab.browserTabId)
-                  }
-                  role="tab"
-                  title={tab.title ?? tab.url}
-                  type="button"
-                >
-                  <Icon name="globe" size={12} />
-                  <span>{browserTabLabel(tab.title, tab.url)}</span>
-                </button>
-                <button
-                  aria-label={`Fechar ${browserTabLabel(tab.title, tab.url)}`}
-                  class="browser-tab-close"
-                  onClick={() =>
-                    void props.controller.closeTab(props.conversationId, tab.browserTabId)
-                  }
-                  type="button"
-                >
-                  <Icon name="close" size={11} />
-                </button>
-              </div>
-            )}
-          </For>
-        </div>
-        <button
-          aria-label="Nova aba"
-          class="browser-toolbar-button"
-          onClick={() => void props.controller.newTab(props.conversationId)}
-          type="button"
-        >
-          <Icon name="plus" size={14} />
-        </button>
-        <button
-          aria-label="Fechar navegador"
-          class="browser-toolbar-button"
-          onClick={props.onClose}
-          type="button"
-        >
-          <Icon name="close" size={14} />
-        </button>
-      </div>
+    <section aria-label="Navegador interno" class="browser-panel">
       <div class="browser-toolbar">
         <button
           aria-label="Voltar"
@@ -214,6 +209,17 @@ export function BrowserPanel(props: {
           </Show>
         </form>
         <button
+          aria-label="Alternar viewport responsivo"
+          aria-pressed={responsiveViewport() !== null}
+          class="browser-toolbar-button"
+          classList={{ active: responsiveViewport() !== null }}
+          onClick={toggleResponsiveViewport}
+          title="Viewport responsivo"
+          type="button"
+        >
+          <Icon name="monitor" size={14} />
+        </button>
+        <button
           aria-pressed={debugOpen()}
           aria-label="Alternar diagnóstico do navegador"
           class="browser-toolbar-button"
@@ -239,6 +245,89 @@ export function BrowserPanel(props: {
           <Icon name="externalLink" size={14} />
         </button>
       </div>
+      <Show when={responsiveViewport() !== null}>
+        <form
+          aria-label="Configuração do viewport responsivo"
+          class="browser-responsive-toolbar"
+          onSubmit={submitViewport}
+        >
+          <strong>Dimensões:</strong>
+          <select
+            aria-label="Resolução padrão"
+            onChange={(event) => {
+              const preset = browserViewportPreset(event.currentTarget.value);
+              if (preset !== null) {
+                applyViewport(String(preset.width), String(preset.height), viewportScale());
+                event.currentTarget.value = "";
+              }
+            }}
+            value=""
+          >
+            <option value="">Responsivo</option>
+            <For each={STANDARD_BROWSER_VIEWPORTS}>
+              {(preset) => <option value={preset.id}>{preset.label}</option>}
+            </For>
+          </select>
+          <input
+            aria-label="Largura do viewport"
+            inputmode="numeric"
+            max={MAX_BROWSER_VIEWPORT_WIDTH}
+            min={MIN_BROWSER_VIEWPORT_WIDTH}
+            onChange={() => applyViewport(viewportWidth(), viewportHeight(), viewportScale())}
+            onInput={(event) => setViewportWidth(event.currentTarget.value)}
+            type="number"
+            value={viewportWidth()}
+          />
+          <span aria-hidden="true">×</span>
+          <input
+            aria-label="Altura do viewport"
+            inputmode="numeric"
+            max={MAX_BROWSER_VIEWPORT_HEIGHT}
+            min={MIN_BROWSER_VIEWPORT_HEIGHT}
+            onChange={() => applyViewport(viewportWidth(), viewportHeight(), viewportScale())}
+            onInput={(event) => setViewportHeight(event.currentTarget.value)}
+            type="number"
+            value={viewportHeight()}
+          />
+          <button
+            aria-label="Inverter largura e altura"
+            class="browser-responsive-button"
+            onClick={() => applyViewport(viewportHeight(), viewportWidth(), viewportScale())}
+            title="Girar viewport"
+            type="button"
+          >
+            <Icon name="reset" size={14} />
+          </button>
+          <select
+            aria-label="Escala do viewport"
+            onChange={(event) =>
+              applyViewport(viewportWidth(), viewportHeight(), Number(event.currentTarget.value))
+            }
+            value={viewportScale()}
+          >
+            <For each={BROWSER_VIEWPORT_SCALES}>
+              {(scale) => <option value={scale}>{Math.round(scale * 100)}%</option>}
+            </For>
+          </select>
+          <Show when={viewportError()}>
+            {(message) => (
+              <span class="browser-responsive-error" role="alert">
+                {message()}
+              </span>
+            )}
+          </Show>
+          <span aria-hidden="true" class="browser-responsive-spacer" />
+          <button
+            aria-label="Redefinir viewport responsivo"
+            class="browser-responsive-button"
+            onClick={toggleResponsiveViewport}
+            title="Usar viewport da janela"
+            type="button"
+          >
+            <Icon name="close" size={14} />
+          </button>
+        </form>
+      </Show>
       <Show when={debugOpen()}>
         <BrowserDebugPanel metrics={metrics()} />
       </Show>
@@ -252,10 +341,17 @@ export function BrowserPanel(props: {
             <Icon name="globeStand" size={34} />
             <strong>Navegador interno</strong>
             <span>{activeTab()?.url === "about:blank" ? "Nova aba" : activeTab()?.url}</span>
+            <Show when={responsiveViewport()}>
+              {(viewport) => (
+                <small>
+                  {viewport().width} × {viewport().height} · {Math.round(viewport().scale * 100)}%
+                </small>
+              )}
+            </Show>
           </div>
         </Show>
       </section>
-    </aside>
+    </section>
   );
 }
 
@@ -382,18 +478,4 @@ function formatBytes(value: number | null): string {
     return `${value} B`;
   }
   return `${(value / 1_024).toFixed(value < 10_240 ? 1 : 0)} KiB`;
-}
-
-function browserTabLabel(title: string | null, url: string): string {
-  if (title !== null && title.trim().length > 0) {
-    return title;
-  }
-  if (url === "about:blank") {
-    return "Nova aba";
-  }
-  try {
-    return new URL(url).hostname || url;
-  } catch {
-    return url;
-  }
 }

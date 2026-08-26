@@ -5,6 +5,7 @@ import type {
   BrowserAgentActivityNotification,
   BrowserSurfaceBounds,
   BrowserTabSnapshot,
+  BrowserViewport,
 } from "../contracts/types";
 import {
   closeBrowserTab,
@@ -17,6 +18,7 @@ import {
   listenBrowserState,
   navigateBrowserTab,
   reloadBrowserTab,
+  setBrowserViewport,
   synchronizeBrowserSurface,
 } from "../infrastructure/browserClient";
 import {
@@ -47,6 +49,10 @@ export interface BrowserController {
   readonly newTab: (conversationId: string, url?: string) => Promise<boolean>;
   readonly reload: (conversationId: string) => Promise<boolean>;
   readonly selectTab: (conversationId: string, browserTabId: string) => Promise<boolean>;
+  readonly setViewport: (
+    conversationId: string,
+    viewport: BrowserViewport | null,
+  ) => Promise<boolean>;
   readonly start: () => void;
   readonly synchronizeSurface: (input: {
     readonly bounds: BrowserSurfaceBounds | null;
@@ -351,6 +357,12 @@ export function createBrowserController(reportError: (reason: unknown) => void):
     );
   }
 
+  function setViewport(conversationId: string, viewport: BrowserViewport | null): Promise<boolean> {
+    return withActiveTab(conversationId, (tab) =>
+      setBrowserViewport({ browserTabId: tab.browserTabId, conversationId }, viewport),
+    );
+  }
+
   async function navigate(conversationId: string, input: string): Promise<boolean> {
     let url: string;
     try {
@@ -436,6 +448,7 @@ export function createBrowserController(reportError: (reason: unknown) => void):
     newTab,
     reload,
     selectTab,
+    setViewport,
     start,
     synchronizeSurface,
     tabs,
@@ -492,6 +505,7 @@ function placeholderSnapshot(
     canGoBack: false,
     canGoForward: false,
     isLoading: true,
+    viewport: null,
   };
 }
 

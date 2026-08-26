@@ -440,6 +440,13 @@ export interface BrowserTabSnapshot {
   readonly canGoBack: boolean;
   readonly canGoForward: boolean;
   readonly isLoading: boolean;
+  readonly viewport: BrowserViewport | null;
+}
+
+export interface BrowserViewport {
+  readonly width: number;
+  readonly height: number;
+  readonly scale: number;
 }
 
 export interface BrowserNewWindowNotification {

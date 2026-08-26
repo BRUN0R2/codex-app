@@ -192,6 +192,7 @@ pub fn run() {
             browser::browser_tab_forward,
             browser::browser_tab_reload,
             browser::browser_tab_close,
+            browser::browser_viewport_set,
             browser::browser_surface_sync,
             desktop_integration::preferences::application_preferences_read,
             desktop_integration::preferences::application_preferences_update,

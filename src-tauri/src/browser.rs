@@ -23,8 +23,8 @@ mod smoke;
 
 pub(crate) use self::agent::BrowserAgentCapture;
 pub(crate) use self::automation::{
-    BrowserAutomationCapture, BrowserMouseButton, BrowserPageSnapshot, BrowserResolvedTarget,
-    BrowserTargetSelector,
+    BrowserAutomationCapture, BrowserCaptureMode, BrowserMouseButton, BrowserPageSnapshot,
+    BrowserResolvedTarget, BrowserTargetSelector,
 };
 pub(crate) use self::metrics::{
     BrowserActionMetric, BrowserActionStatus, BrowserPageMetricSummary,
@@ -44,6 +44,12 @@ const MAX_BROWSER_TITLE_CHARS: usize = 512;
 const MIN_BROWSER_WIDTH: f64 = 280.0;
 const MIN_BROWSER_HEIGHT: f64 = 180.0;
 const MAX_BROWSER_SURFACE_DIMENSION: f64 = 16_384.0;
+const MIN_BROWSER_VIEWPORT_WIDTH: u32 = 320;
+const MAX_BROWSER_VIEWPORT_WIDTH: u32 = 7_680;
+const MIN_BROWSER_VIEWPORT_HEIGHT: u32 = 240;
+const MAX_BROWSER_VIEWPORT_HEIGHT: u32 = 4_320;
+const MIN_BROWSER_VIEWPORT_SCALE: f64 = 0.25;
+const MAX_BROWSER_VIEWPORT_SCALE: f64 = 2.0;
 const PARKED_WEBVIEW_POSITION_X: f64 = -10_000.0;
 const PARKED_WEBVIEW_POSITION_Y: f64 = -10_000.0;
 const PARKED_WEBVIEW_WIDTH: f64 = 1.0;
@@ -59,6 +65,15 @@ pub struct BrowserTabSnapshot {
     pub(crate) can_go_back: bool,
     pub(crate) can_go_forward: bool,
     pub(crate) is_loading: bool,
+    pub(crate) viewport: Option<BrowserViewport>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserViewport {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) scale: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,6 +122,14 @@ pub struct BrowserTabNavigateRequest {
     browser_tab_id: String,
     conversation_id: String,
     url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserViewportRequest {
+    browser_tab_id: String,
+    conversation_id: String,
+    viewport: Option<BrowserViewport>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -216,6 +239,7 @@ pub(super) struct BrowserTabRecord {
     is_loading: bool,
     title: Option<String>,
     visible_url: Url,
+    viewport: Option<BrowserViewport>,
     webview: Webview,
 }
 
@@ -229,6 +253,7 @@ impl BrowserTabRecord {
             can_go_back: self.history.can_go_back(),
             can_go_forward: self.history.can_go_forward(),
             is_loading: self.is_loading,
+            viewport: self.viewport,
         }
     }
 }
@@ -441,6 +466,7 @@ impl BrowserManager {
                 is_loading: true,
                 title: None,
                 visible_url: url,
+                viewport: None,
                 webview,
             };
             let snapshot = record.snapshot(&browser_tab_id);
@@ -544,6 +570,41 @@ impl BrowserManager {
             )));
         }
         self.snapshot(conversation_id, browser_tab_id)
+    }
+
+    pub(crate) async fn set_viewport(
+        &self,
+        app: &AppHandle,
+        conversation_id: &str,
+        browser_tab_id: &str,
+        viewport: Option<BrowserViewport>,
+    ) -> Result<BrowserTabSnapshot, AppError> {
+        if let Some(viewport) = viewport {
+            validate_browser_viewport(viewport)?;
+        }
+        let webview = {
+            let runtime = self.runtime.lock();
+            owned_tab(&runtime, conversation_id, browser_tab_id)?
+                .webview
+                .clone()
+        };
+        automation::set_viewport_override(&webview, viewport).await?;
+        let snapshot = {
+            let mut runtime = self.runtime.lock();
+            let tab = runtime.tabs.get_mut(browser_tab_id).ok_or_else(|| {
+                AppError::State("browser tab disappeared while setting its viewport".into())
+            })?;
+            if tab.conversation_id != conversation_id {
+                return Err(AppError::State(
+                    "browser tab does not belong to the requested conversation".into(),
+                ));
+            }
+            tab.viewport = viewport;
+            tab.snapshot(browser_tab_id)
+        };
+        emit_or_report(app, BROWSER_STATE_EVENT, snapshot.clone());
+        self.state_notify.notify_waiters();
+        Ok(snapshot)
     }
 
     fn close(&self, conversation_id: &str, browser_tab_id: &str) -> Result<OperationAck, AppError> {
@@ -909,6 +970,19 @@ fn validate_browser_bounds(bounds: BrowserSurfaceBounds) -> Result<(), AppError>
     Ok(())
 }
 
+fn validate_browser_viewport(viewport: BrowserViewport) -> Result<(), AppError> {
+    if !(MIN_BROWSER_VIEWPORT_WIDTH..=MAX_BROWSER_VIEWPORT_WIDTH).contains(&viewport.width)
+        || !(MIN_BROWSER_VIEWPORT_HEIGHT..=MAX_BROWSER_VIEWPORT_HEIGHT).contains(&viewport.height)
+        || !viewport.scale.is_finite()
+        || !(MIN_BROWSER_VIEWPORT_SCALE..=MAX_BROWSER_VIEWPORT_SCALE).contains(&viewport.scale)
+    {
+        return Err(AppError::Protocol(
+            "in-app browser viewport is outside the supported responsive range".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn browser_surface_error(error: tauri::Error) -> AppError {
     AppError::State(format!(
         "could not synchronize in-app browser surface: {error}"
@@ -990,6 +1064,24 @@ pub async fn browser_tab_close(
 }
 
 #[tauri::command]
+pub async fn browser_viewport_set(
+    app: AppHandle,
+    browser: State<'_, BrowserManager>,
+    request: BrowserViewportRequest,
+) -> CommandResult<BrowserTabSnapshot> {
+    validate_browser_request_ids(&request.conversation_id, &request.browser_tab_id)?;
+    browser
+        .set_viewport(
+            &app,
+            &request.conversation_id,
+            &request.browser_tab_id,
+            request.viewport,
+        )
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn browser_surface_sync(
     browser: State<'_, BrowserManager>,
     request: BrowserSurfaceSyncRequest,
@@ -1013,10 +1105,9 @@ pub async fn browser_surface_sync(
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserHistory, BrowserSurfaceBounds, normalize_browser_title, parse_browser_url,
-        validate_browser_bounds,
+        BrowserHistory, BrowserSurfaceBounds, BrowserViewport, normalize_browser_title,
+        parse_browser_url, validate_browser_bounds, validate_browser_viewport,
     };
-
     #[test]
     fn browser_history_discards_forward_entries_after_new_navigation() {
         let mut history =
@@ -1035,6 +1126,32 @@ mod tests {
 
         assert!(!history.can_go_forward());
         assert_eq!(history.current().as_str(), "https://example.com/four");
+    }
+
+    #[test]
+    fn responsive_viewport_accepts_standard_resolutions_through_8k() {
+        for (width, height) in [
+            (1_280, 720),
+            (1_920, 1_080),
+            (2_560, 1_440),
+            (3_840, 2_160),
+            (7_680, 4_320),
+        ] {
+            validate_browser_viewport(BrowserViewport {
+                width,
+                height,
+                scale: 1.0,
+            })
+            .expect("standard viewport should be supported");
+        }
+        assert!(
+            validate_browser_viewport(BrowserViewport {
+                width: 7_681,
+                height: 4_320,
+                scale: 1.0,
+            })
+            .is_err()
+        );
     }
 
     #[test]

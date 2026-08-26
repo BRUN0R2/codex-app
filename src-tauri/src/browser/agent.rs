@@ -10,9 +10,9 @@ use uuid::Uuid;
 use super::automation;
 use super::{
     BROWSER_AGENT_ACTIVITY_EVENT, BrowserAgentActivityNotification, BrowserAutomationCapture,
-    BrowserManager, BrowserMouseButton, BrowserPanelDirective, BrowserPendingTransition,
-    BrowserResolvedTarget, BrowserTabSnapshot, BrowserTargetSelector, approve_origin,
-    emit_or_report, origin_is_approved, parse_browser_url,
+    BrowserCaptureMode, BrowserManager, BrowserMouseButton, BrowserPanelDirective,
+    BrowserPendingTransition, BrowserResolvedTarget, BrowserTabSnapshot, BrowserTargetSelector,
+    approve_origin, emit_or_report, origin_is_approved, parse_browser_url,
 };
 use crate::engine::OperationAck;
 use crate::error::AppError;
@@ -232,10 +232,33 @@ impl BrowserManager {
         .await
     }
 
-    pub(crate) async fn capture_active(
+    pub(crate) async fn inspect_active(
         &self,
         app: &AppHandle,
         conversation_id: &str,
+    ) -> Result<BrowserAgentCapture, AppError> {
+        self.capture_active(app, conversation_id, BrowserCaptureMode::Snapshot)
+            .await
+    }
+
+    pub(crate) async fn screenshot_active(
+        &self,
+        app: &AppHandle,
+        conversation_id: &str,
+    ) -> Result<BrowserAgentCapture, AppError> {
+        self.capture_active(
+            app,
+            conversation_id,
+            BrowserCaptureMode::SnapshotAndScreenshot,
+        )
+        .await
+    }
+
+    async fn capture_active(
+        &self,
+        app: &AppHandle,
+        conversation_id: &str,
+        mode: BrowserCaptureMode,
     ) -> Result<BrowserAgentCapture, AppError> {
         let tab = self.ensure_active_tab(app, conversation_id)?;
         let load_started = Instant::now();
@@ -245,7 +268,7 @@ impl BrowserManager {
         let load_ms = elapsed_millis(load_started)?;
         sleep(PAGE_STABILITY_DELAY).await;
         let webview = self.webview(conversation_id, &tab.browser_tab_id)?;
-        let automation = automation::capture(&webview).await?;
+        let automation = automation::capture(&webview, mode).await?;
         let tab = self.snapshot(conversation_id, &tab.browser_tab_id)?;
         Ok(BrowserAgentCapture {
             tab,

@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use tauri::webview::Webview;
 use tokio::time::{sleep, timeout};
 
+use super::BrowserViewport;
 use crate::error::AppError;
 
 const WEBVIEW_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -604,10 +605,21 @@ pub(crate) struct BrowserResolvedTarget {
 #[derive(Debug, Clone)]
 pub(crate) struct BrowserAutomationCapture {
     pub snapshot: BrowserPageSnapshot,
-    pub image_url: String,
-    pub screenshot_bytes: usize,
     pub snapshot_ms: u64,
-    pub screenshot_ms: u64,
+    pub screenshot: Option<BrowserScreenshotCapture>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BrowserScreenshotCapture {
+    pub image_url: String,
+    pub bytes: usize,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrowserCaptureMode {
+    Snapshot,
+    SnapshotAndScreenshot,
 }
 
 #[derive(Debug, Deserialize)]
@@ -623,23 +635,60 @@ struct ResolvedTargetPayload {
     label: Option<String>,
 }
 
-pub(crate) async fn capture(webview: &Webview) -> Result<BrowserAutomationCapture, AppError> {
+pub(crate) async fn capture(
+    webview: &Webview,
+    mode: BrowserCaptureMode,
+) -> Result<BrowserAutomationCapture, AppError> {
     let snapshot_started = Instant::now();
     let snapshot = evaluate_json(webview, PAGE_SNAPSHOT_SCRIPT).await?;
     let snapshot_ms = elapsed_millis(snapshot_started)?;
 
-    let screenshot_started = Instant::now();
-    let image_url = capture_screenshot(webview).await?;
-    let screenshot_ms = elapsed_millis(screenshot_started)?;
-    let screenshot_bytes = image_url.len();
+    let screenshot = match mode {
+        BrowserCaptureMode::Snapshot => None,
+        BrowserCaptureMode::SnapshotAndScreenshot => {
+            let screenshot_started = Instant::now();
+            let image_url = capture_screenshot(webview).await?;
+            Some(BrowserScreenshotCapture {
+                bytes: image_url.len(),
+                duration_ms: elapsed_millis(screenshot_started)?,
+                image_url,
+            })
+        }
+    };
 
     Ok(BrowserAutomationCapture {
         snapshot,
-        image_url,
-        screenshot_bytes,
         snapshot_ms,
-        screenshot_ms,
+        screenshot,
     })
+}
+
+pub(crate) async fn set_viewport_override(
+    webview: &Webview,
+    viewport: Option<BrowserViewport>,
+) -> Result<(), AppError> {
+    match viewport {
+        Some(viewport) => {
+            call_cdp(
+                webview,
+                "Emulation.setDeviceMetricsOverride",
+                json!({
+                    "width": viewport.width,
+                    "height": viewport.height,
+                    "deviceScaleFactor": 1,
+                    "mobile": false,
+                    "scale": viewport.scale,
+                    "screenWidth": viewport.width,
+                    "screenHeight": viewport.height,
+                }),
+            )
+            .await?;
+        }
+        None => {
+            call_cdp(webview, "Emulation.clearDeviceMetricsOverride", json!({})).await?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn resolve_target(

@@ -3,7 +3,6 @@ import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { FileChange } from "../contracts/types";
 
 import { type DiffDisplayMode, DiffView } from "./DiffView";
-import { Icon } from "./Icon";
 import {
   ReviewDocumentStore,
   type ReviewFileDocument,
@@ -15,7 +14,6 @@ const FILE_BADGE_EXTENSION_LIMIT: number = 3;
 interface ReviewPanelProps {
   readonly changes: readonly FileChange[];
   readonly mode: DiffDisplayMode;
-  readonly onClose: () => void;
 }
 
 export function ReviewPanel(props: ReviewPanelProps) {
@@ -36,17 +34,11 @@ export function ReviewPanel(props: ReviewPanelProps) {
   });
 
   return (
-    <aside aria-label="Revisão dos arquivos alterados" class="review-panel" id="turn-review-panel">
-      <header class="review-panel-titlebar">
-        <div>
-          <Icon name="file" size={14} />
-          <strong>Revisão</strong>
-        </div>
-        <button aria-label="Fechar revisão" onClick={props.onClose} title="Fechar" type="button">
-          <Icon name="close" size={14} />
-        </button>
-      </header>
-
+    <section
+      aria-label="Revisão dos arquivos alterados"
+      class="review-panel"
+      id="turn-review-panel"
+    >
       <div class="review-panel-toolbar">
         <div class="review-panel-summary">
           <strong>Último turno</strong>
@@ -127,7 +119,7 @@ export function ReviewPanel(props: ReviewPanelProps) {
           </Show>
         </section>
       </div>
-    </aside>
+    </section>
   );
 }
 
