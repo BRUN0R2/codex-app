@@ -69,6 +69,9 @@ const MAX_COMMAND_YIELD_MILLISECONDS: u64 = 30_000;
 const MAX_COMMAND_POLL_WAIT_SECONDS: u16 = 30;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+#[cfg(test)]
+static EXCLUSIVE_COMMAND_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug, Default)]
 pub struct ToolRegistry;
 

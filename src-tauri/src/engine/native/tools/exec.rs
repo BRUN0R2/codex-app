@@ -391,6 +391,7 @@ mod tests {
 
     use super::CommandTermination;
     use super::execute_command;
+    use crate::engine::native::tools::EXCLUSIVE_COMMAND_TEST_LOCK;
     use crate::engine::native::tools::ExecCommandArgs;
     use crate::engine::native::tools::Ripgrep;
     use crate::engine::native::tools::command_output_stream::CommandOutputEmitter;
@@ -398,6 +399,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn timeout_terminates_the_tree_and_preserves_captured_output() {
+        let _exclusive_command = EXCLUSIVE_COMMAND_TEST_LOCK.lock().await;
         let workspace = TempDir::new().expect("workspace should exist");
         let canonical_workspace = tokio::fs::canonicalize(workspace.path())
             .await
@@ -437,6 +439,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancellation_terminates_the_tree_and_preserves_captured_output() {
+        let _exclusive_command = EXCLUSIVE_COMMAND_TEST_LOCK.lock().await;
         let workspace = TempDir::new().expect("workspace should exist");
         let canonical_workspace = tokio::fs::canonicalize(workspace.path())
             .await

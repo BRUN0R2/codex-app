@@ -43,7 +43,9 @@ const DELIVERY_BACKGROUND: u8 = 1;
 const DELIVERY_CONSUMED: u8 = 2;
 const MAX_COMMAND_SESSIONS: usize = 32;
 const MAX_POLL_PREVIEW_BYTES: usize = 32 * 1_024;
-const SESSION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+// Windows tree termination can spend five seconds invoking taskkill and another five
+// reaping the direct child. The owner deadline must strictly dominate that nested budget.
+const SESSION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
 pub(in crate::engine::native) struct CommandSessionManager {
@@ -887,6 +889,7 @@ mod tests {
     use crate::engine::ThreadOutput;
     use crate::engine::native::NativeEngineInner;
     use crate::engine::native::terminal_output::TerminalOperation;
+    use crate::engine::native::tools::EXCLUSIVE_COMMAND_TEST_LOCK;
     use crate::engine::native::tools::ExecCommandArgs;
     use crate::engine::native::tools::Ripgrep;
     use crate::engine::native::tools::command_output_stream::CommandTranscript;
@@ -1251,6 +1254,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn long_command_yields_and_remains_pollable() {
+        let _exclusive_command = EXCLUSIVE_COMMAND_TEST_LOCK.lock().await;
         let manager = CommandSessionManager::default();
         let workspace = TempDir::new().expect("workspace should exist");
         let workspace = tokio::fs::canonicalize(workspace.path())
@@ -1309,6 +1313,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn turn_settlement_terminates_a_yielded_process_and_releases_its_session()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _exclusive_command = EXCLUSIVE_COMMAND_TEST_LOCK.lock().await;
         let manager = CommandSessionManager::default();
         let workspace = TempDir::new()?;
         let workspace = tokio::fs::canonicalize(workspace.path()).await?;
