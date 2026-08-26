@@ -343,14 +343,19 @@ salto concorrente ou faixa temporariamente gigantesca.
 
 Leituras e diffs expandidos possuem uma janela adicional de linhas com geometria
 fixa e canvas físico limitado. A projeção pesada é aquecida quando o disclosure
-abre; janelas seguras de `tbody` são cacheadas por documento e reutilizadas por
-um pool limitado. Trocar a faixa visível substitui uma seção pronta, sem montar
-milhares de componentes, observar novamente a viewport interna ou repetir linhas
-já tokenizadas. Cada viewport interno mantém sua última posição a partir do
-evento de scroll; trocar a identidade com a posição já zerada não lê `scrollTop`
-depois da mutação do DOM e, portanto, não força layout síncrono no frame da
-timeline. O viewport efetivo também desconta a área ocupada pelo composer uma
-única vez, portanto nenhuma linha é considerada visível atrás do dock.
+abre; janelas semânticas `rowgroup`/`row` são cacheadas por documento e
+reutilizadas por um pool limitado. A grade usa papéis ARIA explícitos e blocos
+com posicionamento previsível, sem depender do modelo de formatação nativo de
+tabelas para virtualizar linhas. Trocar a faixa visível substitui uma seção
+pronta, sem montar milhares de componentes, observar novamente a viewport
+interna ou repetir linhas já tokenizadas. Cada viewport interno mantém sua última
+posição a partir do evento de scroll; trocar a identidade com a posição já
+zerada não lê `scrollTop` depois da mutação do DOM e, portanto, não força layout
+síncrono no frame da timeline. Em superfícies de altura intrínseca o próprio diff
+declara seu limite; em painéis, o contêiner é o único dono da altura e o
+`ResizeObserver` apenas informa esse espaço ao virtualizador. O viewport efetivo
+também desconta a área ocupada pelo composer uma única vez, portanto nenhuma
+linha é considerada visível atrás do dock.
 
 O syntax highlighter de diff valida os limites do hunk uma vez, mas tokeniza
 somente até a última linha solicitada. O tokenizer e as linhas já produzidas

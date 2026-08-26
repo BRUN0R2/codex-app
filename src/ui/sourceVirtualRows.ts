@@ -1,7 +1,7 @@
 import type { FixedRowVirtualRange } from "./fixedRowVirtualization";
 import { escapeHtml, syntaxLineToHtml } from "./syntax/render";
 import type { SourceOutputProjection } from "./toolOutputProjection";
-import { VirtualRowsWindow } from "./virtualRowsWindow";
+import { type VirtualRowsCanvas, VirtualRowsWindow } from "./virtualRowsWindow";
 
 const MAXIMUM_WINDOWS_PER_PROJECTION = 16;
 const rowsByProjection = new WeakMap<SourceOutputProjection, Map<string, VirtualRowsWindow>>();
@@ -28,7 +28,7 @@ export function readSourceVirtualRows(
     const top = range.offset + (rowIndex - range.start) * rowHeight;
     const tokens = projection.tokensAt(rowIndex);
     const content = tokens === null ? escapeHtml(line.content) : syntaxLineToHtml(tokens);
-    markup += `<tr aria-rowindex="${rowIndex + 1}" class="tool-source-line" style="top:${Math.round(top)}px"><th class="tool-source-line-number" scope="row">${line.number}</th><td><code>${content}</code></td></tr>`;
+    markup += `<div aria-rowindex="${rowIndex + 1}" class="tool-source-line" role="row" style="top:${Math.round(top)}px"><div class="tool-source-line-number" role="rowheader">${line.number}</div><div class="tool-source-code-cell" role="cell"><code>${content}</code></div></div>`;
   }
   const rows = new VirtualRowsWindow({
     owner: projection,
@@ -55,12 +55,12 @@ function readProjectionCache(projection: SourceOutputProjection): Map<string, Vi
   return cache;
 }
 
-function parseRows(markup: string, totalHeight: number): HTMLTableSectionElement {
+function parseRows(markup: string, totalHeight: number): VirtualRowsCanvas {
   const template = document.createElement("template");
-  template.innerHTML = `<table><tbody class="tool-source-virtual-canvas" style="height:${totalHeight}px">${markup}</tbody></table>`;
-  const body = template.content.querySelector("tbody");
-  if (body === null) {
+  template.innerHTML = `<div class="tool-source-virtual-canvas" role="rowgroup" style="height:${totalHeight}px">${markup}</div>`;
+  const canvas = template.content.firstElementChild;
+  if (!(canvas instanceof HTMLDivElement) || canvas.nextElementSibling !== null) {
     throw new Error("O navegador não materializou as linhas virtuais da leitura.");
   }
-  return body;
+  return canvas;
 }

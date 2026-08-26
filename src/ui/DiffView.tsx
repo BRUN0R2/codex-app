@@ -9,7 +9,11 @@ import {
 } from "./diffViewport";
 import { readDiffVirtualRows } from "./diffVirtualRows";
 import { observeElementResize, readResizeObserverBorderBoxHeight } from "./elementResize";
-import { releaseVirtualRowsCanvas, type VirtualRowsWindow } from "./virtualRowsWindow";
+import {
+  releaseVirtualRowsCanvas,
+  type VirtualRowsCanvas,
+  type VirtualRowsWindow,
+} from "./virtualRowsWindow";
 
 export type DiffDisplayMode = "split" | "unified";
 export type DiffViewportSizing = "container" | "intrinsic";
@@ -21,7 +25,7 @@ export function DiffView(props: {
   readonly viewportSizing: DiffViewportSizing;
 }) {
   let viewportElement: HTMLDivElement | undefined;
-  let canvasElement: HTMLTableSectionElement | undefined;
+  let canvasElement: VirtualRowsCanvas | undefined;
   let releaseResizeObservation: (() => void) | undefined;
   let rowsWindow: VirtualRowsWindow | undefined;
   let observedDocument: DiffDocument | undefined;
@@ -106,10 +110,6 @@ export function DiffView(props: {
   });
   if (viewportMeasurement !== undefined) {
     const [, setObservedViewportHeight] = viewportMeasurement;
-    createEffect(() => {
-      intrinsicViewportHeight();
-      setObservedViewportHeight(null);
-    });
     onMount(() => {
       if (viewportElement === undefined) {
         return;
@@ -136,17 +136,23 @@ export function DiffView(props: {
     <div
       class={`diff-viewport is-${props.mode}`}
       data-timeline-scroll-region=""
+      data-viewport-sizing={props.viewportSizing}
       hidden={props.hidden}
       onScroll={updateViewportScroll}
       ref={viewportElement}
-      style={{ height: `${intrinsicViewportHeight()}px` }}
+      style={{
+        height: usesContainerSizing ? undefined : `${intrinsicViewportHeight()}px`,
+      }}
       // biome-ignore lint/a11y/noNoninteractiveTabindex: the virtual diff viewport must remain keyboard-scrollable without mounting the full document.
       tabIndex={0}
     >
-      <table
+      {/* biome-ignore lint/a11y/useSemanticElements: native table formatting is not interoperable with absolutely positioned virtual rows in supported WebViews. */}
+      <div
         aria-label={`Diferenças em ${props.path}`}
+        aria-colcount={props.mode === "split" ? 4 : 2}
         aria-rowcount={rowCount()}
         class="diff-virtual-table"
+        role="table"
         style={{
           "--diff-new-line-number-content-width": `${props.document.newLineNumberDigits}ch`,
           "--diff-new-line-number-width": `calc(${props.document.newLineNumberDigits}ch + var(--diff-line-number-inline-padding))`,
@@ -163,8 +169,10 @@ export function DiffView(props: {
           width: canvasWidth(),
         }}
       >
-        <tbody
+        {/* biome-ignore lint/a11y/useSemanticElements: the virtual rowgroup must remain a block canvas outside native table layout. */}
+        <div
           class="diff-virtual-canvas"
+          role="rowgroup"
           ref={(element) => {
             canvasElement = element;
             queueMicrotask(() => {
@@ -178,7 +186,7 @@ export function DiffView(props: {
             });
           }}
         />
-      </table>
+      </div>
     </div>
   );
 }

@@ -29,10 +29,14 @@ const VIEWPORTS = [
   { width: 1280, height: 820 },
   { width: 1920, height: 1080 },
 ];
-const REVIEW_VIEWPORTS = [
-  { width: 775, height: 407 },
-  { width: 920, height: 640 },
-  { width: 1280, height: 820 },
+const FILE_VIEWER_VIEWPORTS = [
+  { width: 789, height: 422 },
+  { width: 881, height: 1030 },
+  { width: 1280, height: 720 },
+  { width: 1920, height: 1080 },
+  { width: 2560, height: 1440 },
+  { width: 3840, height: 2160 },
+  { width: 7680, height: 4320 },
 ];
 const REQUESTED_SCENARIOS = new Set(
   (process.env.CODEX_VISUAL_SCENARIOS ?? "")
@@ -257,7 +261,7 @@ const SCENARIOS = [
   {
     id: "review-file-layout",
     url: TIMELINE_STRESS_PREVIEW_URL,
-    viewports: REVIEW_VIEWPORTS,
+    viewports: FILE_VIEWER_VIEWPORTS,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
       (button) => button.textContent?.includes("Estresse de timeline expandida"),
     )`,
@@ -317,6 +321,7 @@ const SCENARIOS = [
   {
     id: "highlighted-tool-output",
     url: HOME_PREVIEW_URL,
+    viewports: FILE_VIEWER_VIEWPORTS,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
       (button) => button.textContent?.includes("Inspecionar janela de contexto"),
     )`,
@@ -1247,9 +1252,46 @@ function previewHighlightedToolOutputsPrepareExpression() {
           await new Promise((resolve) => setTimeout(resolve, 120));
           const source = document.querySelector(".tool-source-output");
           const search = document.querySelector(".tool-search-output");
-          if (source instanceof HTMLElement && search instanceof HTMLElement) {
+          const sourceCanvas = source?.querySelector(".tool-source-virtual-canvas");
+          const sourceViewport = source?.closest(".tool-source-viewport");
+          if (
+            source instanceof HTMLElement &&
+            search instanceof HTMLElement &&
+            sourceCanvas instanceof HTMLElement &&
+            sourceViewport instanceof HTMLElement
+          ) {
             const sourceTokens = [...source.querySelectorAll(".syntax-token")];
             const searchTokens = [...search.querySelectorAll(".syntax-token")];
+            const sourceRows = [...source.querySelectorAll(".tool-source-line")];
+            const sourceViewportBounds = sourceViewport.getBoundingClientRect();
+            const sourceRowTopOffsets = sourceRows.map(
+              (row) => row.getBoundingClientRect().top - sourceViewportBounds.top,
+            );
+            const sourceInlineOverlapCount = sourceRows.reduce((total, row) => {
+              const code = row.querySelector("code");
+              if (!(code instanceof HTMLElement)) {
+                return total + 1;
+              }
+              const fragments = [...code.childNodes]
+                .map((node) => {
+                  const range = document.createRange();
+                  range.selectNodeContents(node);
+                  const bounds = range.getBoundingClientRect();
+                  return { left: bounds.left, right: bounds.right, top: bounds.top, width: bounds.width };
+                })
+                .filter((bounds) => bounds.width > 0);
+              return (
+                total +
+                fragments.slice(1).filter((fragment, index) => {
+                  const previous = fragments[index];
+                  return (
+                    previous === undefined ||
+                    fragment.left < previous.right - 0.5 ||
+                    Math.abs(fragment.top - previous.top) > 1
+                  );
+                }).length
+              );
+            }, 0);
             const sourceSummary = sourceCard.querySelector(":scope > summary");
             const readIcon = sourceSummary?.querySelector(".activity-icon svg");
             const readChevron = sourceSummary?.querySelector(".activity-chevron");
@@ -1288,6 +1330,22 @@ function previewHighlightedToolOutputsPrepareExpression() {
               sourceLineNumbers: [...source.querySelectorAll(".tool-source-line-number")].map(
                 (element) => element.textContent?.trim() ?? "",
               ),
+              sourceTableRole: source.getAttribute("role"),
+              sourceRowGroupRole: sourceCanvas.getAttribute("role"),
+              sourceRowRoles: sourceRows.map((row) => row.getAttribute("role")),
+              sourceCellRoles: sourceRows.map((row) =>
+                [...row.children].map((cell) => cell.getAttribute("role")),
+              ),
+              sourceMountedRowIndexes: sourceRows.map((row) =>
+                Number.parseInt(row.getAttribute("aria-rowindex") ?? "0", 10),
+              ),
+              sourceRowGaps: sourceRowTopOffsets.slice(1).map(
+                (top, index) => top - (sourceRowTopOffsets[index] ?? top),
+              ),
+              sourceInlineOverlapCount,
+              sourceCanvasHeight: sourceCanvas.getBoundingClientRect().height,
+              sourceViewportClientHeight: sourceViewport.clientHeight,
+              sourceViewportScrollHeight: sourceViewport.scrollHeight,
               sourceTokenKinds: [
                 ...new Set(
                   sourceTokens.flatMap((token) =>
@@ -4388,8 +4446,8 @@ function reviewFileLayoutVisualAuditExpression() {
       !(stage instanceof HTMLElement) ||
       !(header instanceof HTMLElement) ||
       !(diffViewport instanceof HTMLElement) ||
-      !(table instanceof HTMLTableElement) ||
-      !(canvas instanceof HTMLTableSectionElement) ||
+      !(table instanceof HTMLElement) ||
+      !(canvas instanceof HTMLElement) ||
       !(selectedFile instanceof HTMLElement)
     ) {
       throw new Error("A estrutura completa da revisão está ausente.");
@@ -4404,23 +4462,34 @@ function reviewFileLayoutVisualAuditExpression() {
       panelHeight: panel.getBoundingClientRect().height,
       contentHeight: content.getBoundingClientRect().height,
       contentDisplay: getComputedStyle(content).display,
-      contentGridTemplateRows: getComputedStyle(content).gridTemplateRows,
+      contentContainerType: getComputedStyle(content).containerType,
+      contentFlexDirection: getComputedStyle(content).flexDirection,
       fileListHeight: fileList.getBoundingClientRect().height,
       fileListMaxHeight: getComputedStyle(fileList).maxHeight,
+      fileListFlexGrow: getComputedStyle(fileList).flexGrow,
+      fileListFlexShrink: getComputedStyle(fileList).flexShrink,
       fileListScrollHeight: fileList.scrollHeight,
       fileListScrollable: fileList.scrollHeight > fileList.clientHeight,
       fileCount: fileList.querySelectorAll(".review-file-option").length,
       selectedFile: selectedFile.textContent?.trim() ?? null,
       stageHeight: stage.getBoundingClientRect().height,
+      stageFlexGrow: getComputedStyle(stage).flexGrow,
       headerHeight: header.getBoundingClientRect().height,
       diffViewportHeight: viewportBounds.height,
       diffViewportClientHeight: diffViewport.clientHeight,
       diffViewportInlineHeight: diffViewport.style.height,
+      diffViewportSizing: diffViewport.dataset.viewportSizing ?? null,
       diffViewportScrollHeight: diffViewport.scrollHeight,
       declaredRows: Number.parseInt(table.getAttribute("aria-rowcount") ?? "0", 10),
       mountedRows: rows.length,
       mountedRowIndexes: rows.map((row) =>
         Number.parseInt(row.getAttribute("aria-rowindex") ?? "0", 10),
+      ),
+      tableRole: table.getAttribute("role"),
+      rowGroupRole: canvas.getAttribute("role"),
+      rowRoles: rows.map((row) => row.getAttribute("role")),
+      rowCellRoles: rows.map((row) =>
+        [...row.children].map((cell) => cell.getAttribute("role")),
       ),
       rowTopOffsets,
       rowGaps: rowTopOffsets.slice(1).map(
@@ -5792,8 +5861,13 @@ function validateReviewFileLayoutMetrics(metrics, viewport) {
   assert(metrics.fileCount === 60, "a revisão não reuniu os sessenta arquivos alterados do turno");
   assert(metrics.fileListScrollable, "a lista extensa da revisão não preservou sua própria rolagem");
   assert(
-    metrics.contentDisplay === "grid" && metrics.fileListMaxHeight === "none",
-    "a revisão não usa trilhas determinísticas para dividir lista e diff",
+    metrics.contentDisplay === "flex" &&
+      metrics.contentFlexDirection === "column" &&
+      metrics.contentContainerType === "size" &&
+      metrics.fileListFlexGrow === "0" &&
+      metrics.fileListFlexShrink === "1" &&
+      metrics.stageFlexGrow === "1",
+    "a revisão perdeu o ownership explícito entre a lista limitada e o estágio flexível",
   );
   assert(
     metrics.selectedFile?.endsWith("module-15.ts"),
@@ -5812,18 +5886,30 @@ function validateReviewFileLayoutMetrics(metrics, viewport) {
     "o diff não preenche a área restante abaixo do cabeçalho do arquivo",
   );
   assert(
+    metrics.diffViewportSizing === "container" && metrics.diffViewportInlineHeight === "",
+    "o diff da revisão voltou a disputar altura inline com o contêiner",
+  );
+  assert(
     metrics.diffViewportHeight >= Math.min(120, metrics.contentHeight * 0.4),
     `a viewport do diff ficou comprimida a ${metrics.diffViewportHeight.toFixed(1)} px`,
   );
   assert(
-    metrics.declaredRows > expectedMountedRows &&
-      metrics.mountedRows === expectedMountedRows &&
+    metrics.mountedRows === expectedMountedRows &&
       metrics.mountedRowIndexes[0] === 1,
     `a janela virtual montou ${metrics.mountedRows} linhas para ${metrics.diffViewportClientHeight.toFixed(1)} px (${metrics.declaredRows} declaradas)`,
   );
   assert(
     metrics.rowGaps.every((gap) => Math.abs(gap - 20) <= tolerance),
     "as linhas montadas na revisão perderam o passo virtual de 20 px",
+  );
+  assert(
+    metrics.tableRole === "table" &&
+      metrics.rowGroupRole === "rowgroup" &&
+      metrics.rowRoles.every((role) => role === "row") &&
+      metrics.rowCellRoles.every(
+        (roles) => JSON.stringify(roles) === JSON.stringify(["rowheader", "cell"]),
+      ),
+    "o diff unificado perdeu sua grade semântica independente de tabelas nativas",
   );
   assert(
     metrics.canvasHeight >= metrics.diffViewportScrollHeight - tolerance,
@@ -6043,6 +6129,35 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
   assert(metrics.searchText.includes("src/ui/syntax/diffHighlighter.test.ts:20"), "a busca perdeu a localização");
   assert(metrics.sourceHorizontalOverflow >= 0, "a leitura perdeu sua largura rolável");
   assert(metrics.searchHorizontalOverflow >= 0, "a busca perdeu sua largura rolável");
+  assert(
+    metrics.sourceTableRole === "table" &&
+      metrics.sourceRowGroupRole === "rowgroup" &&
+      metrics.sourceRowRoles.every((role) => role === "row") &&
+      metrics.sourceCellRoles.every(
+        (roles) => JSON.stringify(roles) === JSON.stringify(["rowheader", "cell"]),
+      ),
+    "a leitura perdeu sua grade semântica independente de tabelas nativas",
+  );
+  assert(
+    metrics.sourceMountedRowIndexes.length === 8 &&
+      metrics.sourceMountedRowIndexes[0] === 1 &&
+      metrics.sourceMountedRowIndexes.at(-1) === 8,
+    "a leitura não materializou exatamente a janela visível esperada",
+  );
+  assert(
+    metrics.sourceRowGaps.length === 7 &&
+      metrics.sourceRowGaps.every((gap) => Math.abs(gap - 22) <= tolerance),
+    "as linhas da leitura se sobrepõem ou perderam o passo virtual de 22 px",
+  );
+  assert(
+    metrics.sourceInlineOverlapCount === 0,
+    "os fragmentos sintáticos da leitura se sobrepõem na mesma linha",
+  );
+  assert(
+    metrics.sourceCanvasHeight >= metrics.sourceViewportScrollHeight - tolerance &&
+      metrics.sourceViewportClientHeight === 8 * 22,
+    "o canvas da leitura não representa integralmente sua faixa virtual",
+  );
   assert(
     metrics.readTitle === "Executou leitura de arquivo: diffHighlighter.test.ts",
     `a leitura perdeu sua semântica de execução (${JSON.stringify(metrics.readTitle)})`,

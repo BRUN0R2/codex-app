@@ -3988,8 +3988,6 @@ pre {
   display: block;
   min-width: 100%;
   overflow: visible;
-  border-collapse: separate;
-  border-spacing: 0;
 }
 
 .tool-source-virtual-canvas {
@@ -4003,10 +4001,9 @@ pre {
   left: 0;
   display: flex;
   width: 100%;
-  contain: strict;
 }
 
-.tool-source-virtual-table .tool-source-line > td {
+.tool-source-code-cell {
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -4017,8 +4014,8 @@ pre {
   height: 22px;
 }
 
-.tool-source-line > th,
-.tool-source-line > td,
+.tool-source-line-number,
+.tool-source-code-cell,
 .tool-search-result-line > th,
 .tool-search-result-line > td,
 .tool-search-text-line > td {
@@ -4044,7 +4041,7 @@ pre {
   user-select: none;
 }
 
-.tool-source-line > td > code,
+.tool-source-code-cell > code,
 .tool-search-result-line > td > code,
 .tool-search-text-line > td > code {
   display: block;
@@ -5451,17 +5448,19 @@ pre {
 }
 
 .review-panel-content {
-  display: grid;
+  container-type: size;
+  display: flex;
   min-height: 0;
   flex: 1;
-  grid-template-rows: fit-content(min(220px, 32%)) minmax(0, 1fr);
+  flex-direction: column;
   overflow: hidden;
 }
 
 .review-file-list {
   display: flex;
   min-width: 0;
-  max-height: none;
+  max-height: min(220px, 32cqh);
+  flex: 0 1 auto;
   flex-direction: column;
   gap: var(--interactive-list-gap);
   overflow-y: auto;
@@ -5538,6 +5537,7 @@ pre {
   display: flex;
   min-width: 0;
   min-height: 0;
+  flex: 1;
   flex-direction: column;
   overflow: hidden;
   background: var(--diff-surface);
@@ -5559,7 +5559,7 @@ pre {
   color: var(--color-token-text-primary);
 }
 
-.review-file-stage > .diff-viewport {
+.review-file-stage > .diff-viewport[data-viewport-sizing="container"] {
   min-height: 0;
   max-height: none;
   flex: 1;
@@ -8010,9 +8010,6 @@ pre {
   position: relative;
   display: block;
   min-width: 100%;
-  border: 0;
-  border-collapse: separate;
-  border-spacing: 0;
   color: var(--color-token-text-secondary);
   font-family: var(--font-mono-default);
   font-size: var(--codex-chat-code-font-size);
@@ -8032,7 +8029,6 @@ pre {
   width: 100%;
   height: 20px;
   align-items: stretch;
-  contain: strict;
 }
 
 .diff-viewport.is-unified .diff-virtual-row {
@@ -8059,8 +8055,9 @@ pre {
   flex: 1 1 0;
 }
 
-.diff-virtual-row > td,
-.diff-virtual-row > th {
+.diff-line-number,
+.unified-diff-code,
+.split-diff-cell {
   display: block;
   min-width: 0;
   height: 20px;

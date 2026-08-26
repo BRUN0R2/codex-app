@@ -2,31 +2,40 @@ interface VirtualRowsCanvasState {
   readonly window: VirtualRowsWindow;
 }
 
+export type VirtualRowsCanvas = HTMLDivElement;
+
+type VirtualRowsMount = HTMLDivElement;
+type VirtualRowsRow = HTMLDivElement;
+
+const VIRTUAL_ROWS_MOUNT_ROLE = "table";
+const VIRTUAL_ROWS_CANVAS_ROLE = "rowgroup";
+const VIRTUAL_ROW_ROLE = "row";
+
 export interface VirtualRowsRenderResult {
   readonly added: number;
-  readonly canvas: HTMLTableSectionElement;
+  readonly canvas: VirtualRowsCanvas;
   readonly removed: number;
   readonly retained: number;
 }
 
-const canvasStates = new WeakMap<HTMLTableSectionElement, VirtualRowsCanvasState>();
-const activityRootByCanvas = new WeakMap<HTMLTableSectionElement, HTMLElement>();
-const canvasesByActivityRoot = new WeakMap<HTMLElement, Set<HTMLTableSectionElement>>();
-const suspendedMountByCanvas = new WeakMap<HTMLTableSectionElement, HTMLTableElement>();
+const canvasStates = new WeakMap<VirtualRowsCanvas, VirtualRowsCanvasState>();
+const activityRootByCanvas = new WeakMap<VirtualRowsCanvas, HTMLElement>();
+const canvasesByActivityRoot = new WeakMap<HTMLElement, Set<VirtualRowsCanvas>>();
+const suspendedMountByCanvas = new WeakMap<VirtualRowsCanvas, VirtualRowsMount>();
 
 export class VirtualRowsWindow {
-  readonly #activeCanvases = new Set<HTMLTableSectionElement>();
+  readonly #activeCanvases = new Set<VirtualRowsCanvas>();
   readonly #className: string;
   readonly #owner: object;
-  readonly #presentations: HTMLTableSectionElement[];
-  readonly #rowBlueprints: ReadonlyMap<string, HTMLTableRowElement>;
+  readonly #presentations: VirtualRowsCanvas[];
+  readonly #rowBlueprints: ReadonlyMap<string, VirtualRowsRow>;
   readonly #rowKeys: readonly string[];
   readonly #style: string | null;
   readonly #variant: string;
 
   constructor(input: {
     readonly owner: object;
-    readonly template: HTMLTableSectionElement;
+    readonly template: VirtualRowsCanvas;
     readonly variant: string;
   }) {
     if (input.variant.length === 0) {
@@ -41,7 +50,7 @@ export class VirtualRowsWindow {
     this.#variant = input.variant;
   }
 
-  renderInto(canvas: HTMLTableSectionElement): VirtualRowsRenderResult {
+  renderInto(canvas: VirtualRowsCanvas): VirtualRowsRenderResult {
     const previousState = canvasStates.get(canvas);
     if (previousState?.window === this) {
       return { added: 0, canvas, removed: 0, retained: canvas.childElementCount };
@@ -86,7 +95,7 @@ export class VirtualRowsWindow {
     return { ...result, canvas: incomingPresentation };
   }
 
-  releaseCanvas(canvas: HTMLTableSectionElement): void {
+  releaseCanvas(canvas: VirtualRowsCanvas): void {
     const state = canvasStates.get(canvas);
     if (state?.window !== this) {
       return;
@@ -98,7 +107,7 @@ export class VirtualRowsWindow {
     this.#activeCanvases.delete(canvas);
   }
 
-  #reconcileRows(canvas: HTMLTableSectionElement): Omit<VirtualRowsRenderResult, "canvas"> {
+  #reconcileRows(canvas: VirtualRowsCanvas): Omit<VirtualRowsRenderResult, "canvas"> {
     const currentRows = readRowsByKey(canvas, "canvas");
     let removed = 0;
     let retained = 0;
@@ -141,8 +150,8 @@ export class VirtualRowsWindow {
     return { added, removed, retained };
   }
 
-  #createPresentation(): HTMLTableSectionElement {
-    const presentation = document.createElement("tbody");
+  #createPresentation(): VirtualRowsCanvas {
+    const presentation = document.createElement("div");
     this.#synchronizeCanvasPresentation(presentation);
     const fragment = document.createDocumentFragment();
     for (const key of this.#rowKeys) {
@@ -156,7 +165,7 @@ export class VirtualRowsWindow {
     return presentation;
   }
 
-  #releasePresentation(presentation: HTMLTableSectionElement): void {
+  #releasePresentation(presentation: VirtualRowsCanvas): void {
     this.#activeCanvases.delete(presentation);
     if (this.#presentations.length === 0) {
       this.#presentations.push(presentation);
@@ -165,9 +174,12 @@ export class VirtualRowsWindow {
     presentation.remove();
   }
 
-  #synchronizeCanvasPresentation(canvas: HTMLTableSectionElement): void {
+  #synchronizeCanvasPresentation(canvas: VirtualRowsCanvas): void {
     if (canvas.className !== this.#className) {
       canvas.className = this.#className;
+    }
+    if (canvas.getAttribute("role") !== VIRTUAL_ROWS_CANVAS_ROLE) {
+      canvas.setAttribute("role", VIRTUAL_ROWS_CANVAS_ROLE);
     }
     if (this.#style === null) {
       canvas.removeAttribute("style");
@@ -176,12 +188,12 @@ export class VirtualRowsWindow {
     }
   }
 
-  #takePresentation(): HTMLTableSectionElement {
+  #takePresentation(): VirtualRowsCanvas {
     return this.#presentations.pop() ?? this.#createPresentation();
   }
 }
 
-export function releaseVirtualRowsCanvas(canvas: HTMLTableSectionElement): void {
+export function releaseVirtualRowsCanvas(canvas: VirtualRowsCanvas): void {
   canvasStates.get(canvas)?.window.releaseCanvas(canvas);
 }
 
@@ -202,8 +214,11 @@ export function suspendVirtualRowsCanvases(root: HTMLElement): void {
       continue;
     }
     const mount = canvas.parentElement;
-    if (!(mount instanceof HTMLTableElement)) {
-      throw new Error("A virtual row canvas lost its table mount.");
+    if (
+      !(mount instanceof HTMLDivElement) ||
+      mount.getAttribute("role") !== VIRTUAL_ROWS_MOUNT_ROLE
+    ) {
+      throw new Error("A virtual row canvas lost its semantic table mount.");
     }
     canvas.remove();
     suspendedMountByCanvas.set(canvas, mount);
@@ -211,8 +226,8 @@ export function suspendVirtualRowsCanvases(root: HTMLElement): void {
 }
 
 function transferActivityCanvasRegistration(
-  previousCanvas: HTMLTableSectionElement,
-  nextCanvas: HTMLTableSectionElement,
+  previousCanvas: VirtualRowsCanvas,
+  nextCanvas: VirtualRowsCanvas,
 ): void {
   const root =
     activityRootByCanvas.get(previousCanvas) ??
@@ -232,7 +247,7 @@ function transferActivityCanvasRegistration(
   activityRootByCanvas.set(nextCanvas, root);
 }
 
-function registerActivityCanvas(canvas: HTMLTableSectionElement): void {
+function registerActivityCanvas(canvas: VirtualRowsCanvas): void {
   if (activityRootByCanvas.has(canvas)) {
     return;
   }
@@ -249,7 +264,7 @@ function registerActivityCanvas(canvas: HTMLTableSectionElement): void {
   activityRootByCanvas.set(canvas, root);
 }
 
-function unregisterActivityCanvas(canvas: HTMLTableSectionElement): void {
+function unregisterActivityCanvas(canvas: VirtualRowsCanvas): void {
   const root = activityRootByCanvas.get(canvas);
   if (root === undefined) {
     return;
@@ -263,15 +278,15 @@ function unregisterActivityCanvas(canvas: HTMLTableSectionElement): void {
 }
 
 function readRowsByKey(
-  section: HTMLTableSectionElement,
+  section: VirtualRowsCanvas,
   source: "canvas" | "template",
-): Map<string, HTMLTableRowElement> {
-  const rows = new Map<string, HTMLTableRowElement>();
+): Map<string, VirtualRowsRow> {
+  const rows = new Map<string, VirtualRowsRow>();
   for (const child of section.children) {
-    if (child.tagName !== "TR") {
-      throw new Error(`A virtual row ${source} contains a non-row element.`);
+    if (!(child instanceof HTMLDivElement) || child.getAttribute("role") !== VIRTUAL_ROW_ROLE) {
+      throw new Error(`A virtual row ${source} contains an invalid semantic row.`);
     }
-    const row = child as HTMLTableRowElement;
+    const row = child;
     const key = row.getAttribute("aria-rowindex");
     if (key === null || key.length === 0) {
       throw new Error(`A virtual row ${source} is missing its semantic key.`);

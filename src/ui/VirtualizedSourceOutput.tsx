@@ -3,7 +3,11 @@ import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { calculateFixedRowVirtualRange } from "./fixedRowVirtualization";
 import { readSourceVirtualRows } from "./sourceVirtualRows";
 import type { SourceOutputProjection } from "./toolOutputProjection";
-import { releaseVirtualRowsCanvas, type VirtualRowsWindow } from "./virtualRowsWindow";
+import {
+  releaseVirtualRowsCanvas,
+  type VirtualRowsCanvas,
+  type VirtualRowsWindow,
+} from "./virtualRowsWindow";
 
 const SOURCE_ROW_HEIGHT_PX = 22;
 const SOURCE_OVERSCAN_ROWS = 0;
@@ -12,7 +16,7 @@ const MAX_SOURCE_CANVAS_HEIGHT_PX = 8_000_000;
 
 export function VirtualizedSourceOutput(props: { readonly projection: SourceOutputProjection }) {
   let viewportElement: HTMLDivElement | undefined;
-  let canvasElement: HTMLTableSectionElement | undefined;
+  let canvasElement: VirtualRowsCanvas | undefined;
   let rowsWindow: VirtualRowsWindow | undefined;
   let observedLines = props.projection.lines;
   let knownScrollLeft = 0;
@@ -83,17 +87,22 @@ export function VirtualizedSourceOutput(props: { readonly projection: SourceOutp
       // biome-ignore lint/a11y/noNoninteractiveTabindex: the virtual source viewport must remain keyboard-scrollable without mounting the full document.
       tabIndex={0}
     >
-      <table
+      {/* biome-ignore lint/a11y/useSemanticElements: native table formatting is not interoperable with absolutely positioned virtual rows in supported WebViews. */}
+      <div
         aria-label="Código lido do arquivo"
+        aria-colcount={2}
         aria-rowcount={props.projection.lines.length}
         class="tool-source-output tool-source-virtual-table"
+        role="table"
         style={{
           "--tool-source-line-number-width": `calc(${props.projection.lineNumberDigits}ch + 10px)`,
           width: canvasWidth(),
         }}
       >
-        <tbody
+        {/* biome-ignore lint/a11y/useSemanticElements: the virtual rowgroup must remain a block canvas outside native table layout. */}
+        <div
           class="tool-source-virtual-canvas"
+          role="rowgroup"
           ref={(element) => {
             canvasElement = element;
             queueMicrotask(() => {
@@ -107,7 +116,7 @@ export function VirtualizedSourceOutput(props: { readonly projection: SourceOutp
             });
           }}
         />
-      </table>
+      </div>
     </div>
   );
 }

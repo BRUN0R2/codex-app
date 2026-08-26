@@ -8,7 +8,7 @@ import { DIFF_ROW_HEIGHT_PX, type DiffVirtualRange } from "./diffViewport";
 import type { SyntaxLine } from "./syntax/contracts";
 import { DiffSyntaxHighlighter } from "./syntax/diffHighlighter";
 import { escapeHtml, syntaxLineToHtml } from "./syntax/render";
-import { VirtualRowsWindow } from "./virtualRowsWindow";
+import { type VirtualRowsCanvas, VirtualRowsWindow } from "./virtualRowsWindow";
 
 export type DiffVirtualRowsMode = "split" | "unified";
 
@@ -75,9 +75,9 @@ function renderUnifiedRow(
   top: number,
   tokens: SyntaxLine | null,
 ): string {
-  const opening = `<tr aria-rowindex="${rowIndex + 1}" class="diff-virtual-row unified-diff-row is-${row.type}" style="top:${Math.round(top)}px">`;
+  const opening = `<div aria-rowindex="${rowIndex + 1}" class="diff-virtual-row unified-diff-row is-${row.type}" role="row" style="top:${Math.round(top)}px">`;
   const lineNumber = row.type === "deletion" ? row.oldNumber : row.newNumber;
-  return `${opening}<th class="diff-line-number" scope="row"><span class="diff-line-number-content">${lineNumber ?? ""}</span></th><td class="unified-diff-code"><code>${renderSyntaxContent(row.content, tokens)}</code></td></tr>`;
+  return `${opening}<div class="diff-line-number" role="rowheader"><span class="diff-line-number-content">${lineNumber ?? ""}</span></div><div class="unified-diff-code" role="cell"><code>${renderSyntaxContent(row.content, tokens)}</code></div></div>`;
 }
 
 function renderSplitRows(input: {
@@ -106,7 +106,7 @@ function renderSplitRow(
   rowIndex: number,
   top: number,
 ): string {
-  const opening = `<tr aria-rowindex="${rowIndex + 1}" class="diff-virtual-row split-diff-row" style="top:${Math.round(top)}px">`;
+  const opening = `<div aria-rowindex="${rowIndex + 1}" class="diff-virtual-row split-diff-row" role="row" style="top:${Math.round(top)}px">`;
   const leftTokens = highlighter.render(
     document,
     path,
@@ -117,7 +117,7 @@ function renderSplitRow(
     path,
     readSplitSourceIndex(projection.rightSourceIndexes, rowIndex),
   );
-  return `${opening}<th class="diff-line-number left" scope="row"><span class="diff-line-number-content">${row.leftNumber ?? ""}</span></th><td class="split-diff-cell left ${row.leftType}"><code>${renderSyntaxContent(row.leftContent, leftTokens)}</code></td><th class="diff-line-number right" scope="row"><span class="diff-line-number-content">${row.rightNumber ?? ""}</span></th><td class="split-diff-cell right ${row.rightType}"><code>${renderSyntaxContent(row.rightContent, rightTokens)}</code></td></tr>`;
+  return `${opening}<div class="diff-line-number left" role="rowheader"><span class="diff-line-number-content">${row.leftNumber ?? ""}</span></div><div class="split-diff-cell left ${row.leftType}" role="cell"><code>${renderSyntaxContent(row.leftContent, leftTokens)}</code></div><div class="diff-line-number right" role="rowheader"><span class="diff-line-number-content">${row.rightNumber ?? ""}</span></div><div class="split-diff-cell right ${row.rightType}" role="cell"><code>${renderSyntaxContent(row.rightContent, rightTokens)}</code></div></div>`;
 }
 
 function readSplitSourceIndex(indexes: Uint32Array, rowIndex: number): number | null {
@@ -141,12 +141,12 @@ function readDocumentCache(document: DiffDocument): Map<string, VirtualRowsWindo
   return cache;
 }
 
-function parseRows(markup: string, totalHeight: number): HTMLTableSectionElement {
+function parseRows(markup: string, totalHeight: number): VirtualRowsCanvas {
   const template = document.createElement("template");
-  template.innerHTML = `<table><tbody class="diff-virtual-canvas" style="height:${totalHeight}px">${markup}</tbody></table>`;
-  const body = template.content.querySelector("tbody");
-  if (body === null) {
+  template.innerHTML = `<div class="diff-virtual-canvas" role="rowgroup" style="height:${totalHeight}px">${markup}</div>`;
+  const canvas = template.content.firstElementChild;
+  if (!(canvas instanceof HTMLDivElement) || canvas.nextElementSibling !== null) {
     throw new Error("O navegador não materializou as linhas virtuais do diff.");
   }
-  return body;
+  return canvas;
 }
