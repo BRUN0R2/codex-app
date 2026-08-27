@@ -9,6 +9,10 @@ interface PackageManifest {
 const packageManifest = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
 ) as PackageManifest;
+const verifyWorkflow = readFileSync(
+  new URL("../.github/workflows/verify.yml", import.meta.url),
+  "utf8",
+);
 
 describe("tooling bootstrap contract", () => {
   it("prepares bundled tools before benchmarks can invoke Cargo", () => {
@@ -18,5 +22,9 @@ describe("tooling bootstrap contract", () => {
     expect(benchmarkCommand).toMatch(/^pnpm tools:bootstrap && /);
     expect(benchmarkCommand).toContain("pnpm measure:command-stream");
     expect(benchmarkCommand).toContain("pnpm measure:background-command");
+  });
+
+  it("does not duplicate push and pull-request checks for feature branches", () => {
+    expect(verifyWorkflow).toMatch(/push:\r?\n {4}branches:\r?\n {6}- main/u);
   });
 });
