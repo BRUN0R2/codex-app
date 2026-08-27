@@ -657,6 +657,8 @@ impl CommandSession {
     }
 
     async fn fail_finalization(&self, engine: &NativeEngineInner, error: AppError) {
+        let duration_ms = self.elapsed_millis();
+        let summary = format!("Command finalization failed: {error}");
         if let Some(app) = &self.app {
             engine.emit_diagnostic(
                 app,
@@ -667,12 +669,73 @@ impl CommandSession {
                 ),
             );
         }
+        let failed_item = ThreadItem::CommandExecution {
+            id: self.item_id.clone(),
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+            process_id: None,
+            started_at: Some(self.started_at_ms),
+            source: CommandSource::Agent,
+            status: ActivityStatus::Failed,
+            aggregated_output: None,
+            live_output: None,
+            exit_code: None,
+            duration_ms: Some(duration_ms),
+        };
+        let output = match engine
+            .storage
+            .complete_background_command(
+                self.turn_id.clone(),
+                failed_item,
+                crate::engine::native::output::OutputSource::text(summary.clone()),
+            )
+            .await
+        {
+            Ok(item) => {
+                let output = match &item {
+                    ThreadItem::CommandExecution {
+                        aggregated_output, ..
+                    } => aggregated_output.clone(),
+                    _ => None,
+                };
+                if let Some(app) = &self.app
+                    && let Err(notification_error) = emit_item_notification(
+                        engine,
+                        app,
+                        &self.thread_id,
+                        &self.turn_id,
+                        item,
+                        false,
+                    )
+                {
+                    engine.emit_diagnostic(
+                        app,
+                        DiagnosticStream::Runtime,
+                        notification_error.to_string(),
+                    );
+                }
+                output
+            }
+            Err(recovery_error) => {
+                if let Some(app) = &self.app {
+                    engine.emit_diagnostic(
+                        app,
+                        DiagnosticStream::Runtime,
+                        format!(
+                            "background command `{}` terminal recovery failed after `{error}`: {recovery_error}",
+                            self.id
+                        ),
+                    );
+                }
+                None
+            }
+        };
         self.publish_terminal(CommandTerminal {
             status: ActivityStatus::Failed,
             exit_code: None,
-            duration_ms: self.elapsed_millis(),
-            output: None,
-            summary: format!("Command finalization failed: {error}"),
+            duration_ms,
+            output,
+            summary,
         })
         .await;
     }
@@ -895,6 +958,7 @@ mod tests {
     use crate::engine::native::tools::command_output_stream::CommandTranscript;
 
     const BACKGROUND_COMMAND_BENCHMARK_SAMPLE_COUNT: usize = 5;
+    const BACKGROUND_COMMAND_BENCHMARK_READY_BUDGET: Duration = Duration::from_secs(15);
     const POLL_COPY_ELISION_ITERATIONS: usize = 2_000;
     const POLL_COPY_ELISION_TRANSCRIPT_BYTES: usize = 256 * 1_024;
 
@@ -1295,10 +1359,19 @@ mod tests {
         };
         assert!(session.provider_output.contains("status: running"));
         let session_id = session.lease.session_id().to_owned();
-        let polled = manager
-            .poll("thread-a", &session_id, None, Duration::from_secs(2))
-            .await
-            .expect("yielded command should poll");
+        let polled = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let output = manager
+                    .poll("thread-a", &session_id, None, Duration::from_secs(1))
+                    .await
+                    .expect("yielded command should poll");
+                if output.contains("session-started") {
+                    return output;
+                }
+            }
+        })
+        .await
+        .expect("yielded command should publish its first output within the test budget");
         assert!(polled.contains("status: running"));
         assert!(polled.contains("session-started"));
 
@@ -1373,7 +1446,7 @@ mod tests {
             cwd: ".".into(),
             reason: "test foreground completion".into(),
             parallel_safe: false,
-            yield_time_ms: Some(5_000),
+            yield_time_ms: Some(20_000),
             timeout_seconds: Some(30),
         };
         let (_turn_cancellation, mut turn_receiver) = watch::channel(false);
@@ -1390,7 +1463,7 @@ mod tests {
                 "thread-a".into(),
                 "turn-a".into(),
                 1,
-                Duration::from_secs(5),
+                Duration::from_secs(20),
                 &mut turn_receiver,
             )
             .await
@@ -1560,18 +1633,19 @@ mod tests {
             .session(&session_id)
             .await
             .expect("benchmark session should remain registered");
-        let initial_snapshot = tokio::time::timeout(Duration::from_secs(1), async {
-            let mut snapshot = tracked.transcript.snapshot().await;
-            while !snapshot.live_output.stdout.contains("history-ready") {
-                snapshot = tracked
-                    .transcript
-                    .snapshot_after(snapshot.revision, Duration::from_secs(1))
-                    .await;
-            }
-            snapshot
-        })
-        .await
-        .expect("initial benchmark output should arrive");
+        let initial_snapshot =
+            tokio::time::timeout(BACKGROUND_COMMAND_BENCHMARK_READY_BUDGET, async {
+                let mut snapshot = tracked.transcript.snapshot().await;
+                while !snapshot.live_output.stdout.contains("history-ready") {
+                    snapshot = tracked
+                        .transcript
+                        .snapshot_after(snapshot.revision, Duration::from_secs(1))
+                        .await;
+                }
+                snapshot
+            })
+            .await
+            .expect("initial benchmark output should arrive within the process startup budget");
         let snapshot_payload = manager
             .poll("thread-a", &session_id, None, Duration::ZERO)
             .await

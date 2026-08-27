@@ -312,9 +312,7 @@ impl NativeStorage {
                 validate_database(&connection, migrated_version, application_id)?;
             }
 
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(storage_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
             let now = unix_timestamp()?;
             promote_all_pending_turn_inputs(&transaction)?;
             transaction
@@ -707,7 +705,7 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
             if let Some(active_turn_id) = active_turn_id {
                 let owned: bool = transaction
                     .query_row(
@@ -758,7 +756,7 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
             let source = transaction
                 .query_row(
                     "SELECT cwd, project_path, mode, name, preview
@@ -1017,7 +1015,7 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
             let available: bool = transaction
                 .query_row(
                     "SELECT EXISTS(
@@ -1141,7 +1139,7 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
             transaction
                 .execute(
                     "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
@@ -1169,7 +1167,7 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
             let (sequence, current_payload) = transaction
                 .query_row(
                     "SELECT sequence, payload
@@ -1361,7 +1359,7 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
             for provider_payload in provider_payloads {
                 transaction
                     .execute(
@@ -1434,7 +1432,7 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
             let exists: bool = transaction
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1 AND archived = 0)",
@@ -1475,7 +1473,7 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
             let active: bool = transaction
                 .query_row(
                     "SELECT EXISTS(
@@ -1600,7 +1598,7 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
             let now = unix_timestamp()?;
             let changed = transaction
                 .execute(
@@ -1616,6 +1614,7 @@ impl NativeStorage {
                 )
                 .map_err(storage_error)?;
             require_changed(changed, "active turn")?;
+            interrupt_unfinished_activity_items_for_turn(&transaction, &turn_id)?;
             promote_pending_turn_inputs_rows(&transaction, &thread_id, &turn_id)?;
             transaction
                 .execute(
@@ -2046,7 +2045,7 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
-            let transaction = connection.transaction().map_err(storage_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
             let (current_version, payload): (i64, String) = transaction
                 .query_row(
                     "SELECT version, payload FROM app_config WHERE singleton = 1",
@@ -2964,26 +2963,59 @@ fn copy_thread_items_for_fork(
 }
 
 fn interrupt_unfinished_activity_items(transaction: &Transaction<'_>) -> Result<(), AppError> {
+    interrupt_unfinished_activity_items_matching(transaction, None)
+}
+
+fn interrupt_unfinished_activity_items_for_turn(
+    transaction: &Transaction<'_>,
+    turn_id: &str,
+) -> Result<(), AppError> {
+    interrupt_unfinished_activity_items_matching(transaction, Some(turn_id))
+}
+
+fn interrupt_unfinished_activity_items_matching(
+    transaction: &Transaction<'_>,
+    turn_id: Option<&str>,
+) -> Result<(), AppError> {
     let rows = {
-        let mut statement = transaction
-            .prepare("SELECT sequence, payload FROM thread_items ORDER BY sequence")
-            .map_err(storage_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(storage_error)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?
+        if let Some(turn_id) = turn_id {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT sequence, payload
+                     FROM thread_items
+                     WHERE turn_id = ?1
+                     ORDER BY sequence",
+                )
+                .map_err(storage_error)?;
+            let rows = statement
+                .query_map([turn_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(storage_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?
+        } else {
+            let mut statement = transaction
+                .prepare("SELECT sequence, payload FROM thread_items ORDER BY sequence")
+                .map_err(storage_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(storage_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?
+        }
     };
     for (sequence, payload) in rows {
         let mut item: ThreadItem =
             decode_bounded(&payload, MAX_ITEM_BYTES, "unfinished thread item")?;
         let changed = match &mut item {
             ThreadItem::CommandExecution {
+                process_id,
                 status,
                 live_output,
                 ..
             } if matches!(status, ActivityStatus::InProgress) => {
+                *process_id = None;
                 *status = ActivityStatus::Failed;
                 *live_output = None;
                 true
@@ -3275,7 +3307,7 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
         )));
     }
     let default_payload = encode_bounded(&AppConfig::default(), MAX_ITEM_BYTES, "config")?;
-    let transaction = connection.transaction().map_err(storage_error)?;
+    let transaction = begin_write_transaction(connection)?;
     transaction
         .execute_batch(
             "CREATE TABLE threads (
@@ -3370,7 +3402,7 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
 }
 
 fn migrate_database_v1_to_v2(connection: &mut Connection) -> Result<(), AppError> {
-    let transaction = connection.transaction().map_err(storage_error)?;
+    let transaction = begin_write_transaction(connection)?;
     transaction
         .execute_batch(
             "CREATE TABLE output_resources (
@@ -3466,7 +3498,7 @@ fn migrate_database_v1_to_v2(connection: &mut Connection) -> Result<(), AppError
 }
 
 fn migrate_database_v2_to_v3(connection: &mut Connection) -> Result<(), AppError> {
-    let transaction = connection.transaction().map_err(storage_error)?;
+    let transaction = begin_write_transaction(connection)?;
     transaction
         .execute_batch(AUTOMATION_SCHEMA_SQL)
         .map_err(storage_error)?;
@@ -3477,7 +3509,7 @@ fn migrate_database_v2_to_v3(connection: &mut Connection) -> Result<(), AppError
 }
 
 fn migrate_database_v3_to_v4(connection: &mut Connection) -> Result<(), AppError> {
-    let transaction = connection.transaction().map_err(storage_error)?;
+    let transaction = begin_write_transaction(connection)?;
     transaction
         .execute_batch(PENDING_TURN_INPUT_SCHEMA_SQL)
         .map_err(storage_error)?;
@@ -3648,6 +3680,12 @@ fn configure_database_connection(connection: &Connection) -> rusqlite::Result<()
     )
 }
 
+fn begin_write_transaction(connection: &mut Connection) -> Result<Transaction<'_>, AppError> {
+    connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_error)
+}
+
 fn database_connection_limit() -> u32 {
     std::thread::available_parallelism()
         .map_or(MIN_DATABASE_CONNECTIONS, std::num::NonZeroUsize::get)
@@ -3692,12 +3730,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use rusqlite::{Connection, params};
     use tempfile::TempDir;
 
     use super::{
         DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, MAX_ITEM_BYTES, NativeStorage,
-        encode_bounded, encode_provider_item, initialize_database,
+        begin_write_transaction, encode_bounded, encode_provider_item, initialize_database,
+        open_database_connection,
     };
     use crate::engine::native::automation::{AutomationDraft, AutomationUpdate};
     use crate::engine::native::output::OutputSource;
@@ -5537,6 +5578,155 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_completion_waits_for_an_existing_writer_before_reading_state() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory
+            .path()
+            .join("background-command-contention.sqlite3");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(database_path.clone())
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "background-user".into(),
+                    content: vec![UserContent::Text {
+                        text: "run in background".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "run in background".into(),
+                }]),
+                "run in background".into(),
+            )
+            .await
+            .expect("turn should begin");
+        storage
+            .append_thread_item(
+                turn.id.clone(),
+                background_command_item(ActivityStatus::InProgress, true),
+                None,
+            )
+            .await
+            .expect("running command should persist");
+
+        let mut blocker =
+            open_database_connection(&database_path).expect("blocking connection should open");
+        let blocker_transaction =
+            begin_write_transaction(&mut blocker).expect("blocking writer should begin");
+        blocker_transaction
+            .execute(
+                "UPDATE threads SET updated_at = updated_at + 1 WHERE id = ?1",
+                [&thread.id],
+            )
+            .expect("blocking writer should advance the WAL");
+
+        let completion = storage.complete_background_command(
+            turn.id,
+            background_command_item(ActivityStatus::Completed, false),
+            OutputSource::text("exit_code: 0\nstdout:\ncontention-safe\nstderr:\n".into()),
+        );
+        tokio::pin!(completion);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), completion.as_mut())
+                .await
+                .is_err(),
+            "completion should wait for the current writer instead of reading a stale snapshot"
+        );
+        blocker_transaction
+            .commit()
+            .expect("blocking writer should commit");
+
+        let completed = tokio::time::timeout(Duration::from_secs(5), completion)
+            .await
+            .expect("completion should resume after writer release")
+            .expect("completion must not fail with database is locked");
+        assert!(matches!(
+            completed,
+            ThreadItem::CommandExecution {
+                status: ActivityStatus::Completed,
+                process_id: None,
+                aggregated_output: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_turns_cannot_retain_in_progress_activity() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("terminal-activity.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                Some(directory.path().display().to_string()),
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("thread should persist");
+        let turn = storage
+            .begin_turn(
+                thread.id.clone(),
+                "gpt-test".into(),
+                None,
+                ThreadItem::UserMessage {
+                    id: "terminal-user".into(),
+                    content: vec![UserContent::Text {
+                        text: "settle stale activity".into(),
+                    }],
+                },
+                ResponseItem::user_content(vec![ResponseContent::InputText {
+                    text: "settle stale activity".into(),
+                }]),
+                "settle stale activity".into(),
+            )
+            .await
+            .expect("turn should begin");
+        storage
+            .append_thread_item(
+                turn.id.clone(),
+                background_command_item(ActivityStatus::InProgress, true),
+                None,
+            )
+            .await
+            .expect("running command should persist");
+        storage
+            .complete_turn(thread.id.clone(), turn.id, TurnStatus::Completed, None)
+            .await
+            .expect("turn should settle");
+        let loaded = storage
+            .read_thread(thread.id.clone())
+            .await
+            .expect("settled thread should reload");
+        assert!(matches!(
+            loaded.turns[0].items.last(),
+            Some(ThreadItem::CommandExecution {
+                status: ActivityStatus::Failed,
+                process_id: None,
+                live_output: None,
+                ..
+            })
+        ));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn startup_marks_unfinished_activity_items_as_failed() {
         let directory = TempDir::new().expect("temporary directory should be created");
@@ -5613,6 +5803,7 @@ mod tests {
             thread.turns[0].items.get(1),
             Some(ThreadItem::CommandExecution {
                 status: ActivityStatus::Failed,
+                process_id: None,
                 live_output: None,
                 ..
             })

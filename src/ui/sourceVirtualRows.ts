@@ -1,7 +1,7 @@
 import type { FixedRowVirtualRange } from "./fixedRowVirtualization";
 import { escapeHtml, syntaxLineToHtml } from "./syntax/render";
 import type { SourceOutputProjection } from "./toolOutputProjection";
-import { type VirtualRowsCanvas, VirtualRowsWindow } from "./virtualRowsWindow";
+import { createFixedVirtualRowsCanvas, VirtualRowsWindow } from "./virtualRowsWindow";
 
 const MAXIMUM_WINDOWS_PER_PROJECTION = 16;
 const rowsByProjection = new WeakMap<SourceOutputProjection, Map<string, VirtualRowsWindow>>();
@@ -25,14 +25,19 @@ export function readSourceVirtualRows(
     if (line === undefined) {
       throw new Error(`A linha de código ${rowIndex} não existe.`);
     }
-    const top = range.offset + (rowIndex - range.start) * rowHeight;
     const tokens = projection.tokensAt(rowIndex);
     const content = tokens === null ? escapeHtml(line.content) : syntaxLineToHtml(tokens);
-    markup += `<div aria-rowindex="${rowIndex + 1}" class="tool-source-line" role="row" style="top:${Math.round(top)}px"><div class="tool-source-line-number" role="rowheader">${line.number}</div><div class="tool-source-code-cell" role="cell"><code>${content}</code></div></div>`;
+    markup += `<div aria-rowindex="${rowIndex + 1}" class="tool-source-line" role="row"><div class="tool-source-line-number" role="rowheader">${line.number}</div><div class="tool-source-code-cell" role="cell"><code>${content}</code></div></div>`;
   }
   const rows = new VirtualRowsWindow({
     owner: projection,
-    template: parseRows(markup, range.physicalTotalSize),
+    template: createFixedVirtualRowsCanvas({
+      className: "tool-source-virtual-canvas",
+      firstRowTop: range.offset,
+      rowHeight,
+      rowMarkup: markup,
+      totalHeight: range.physicalTotalSize,
+    }),
     variant: `source\u0000${rowHeight}`,
   });
   cache.set(key, rows);
@@ -53,14 +58,4 @@ function readProjectionCache(projection: SourceOutputProjection): Map<string, Vi
     rowsByProjection.set(projection, cache);
   }
   return cache;
-}
-
-function parseRows(markup: string, totalHeight: number): VirtualRowsCanvas {
-  const template = document.createElement("template");
-  template.innerHTML = `<div class="tool-source-virtual-canvas" role="rowgroup" style="height:${totalHeight}px">${markup}</div>`;
-  const canvas = template.content.firstElementChild;
-  if (!(canvas instanceof HTMLDivElement) || canvas.nextElementSibling !== null) {
-    throw new Error("O navegador não materializou as linhas virtuais da leitura.");
-  }
-  return canvas;
 }

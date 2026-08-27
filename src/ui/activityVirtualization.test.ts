@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ActivityVirtualizerStore,
   includeRetainedActivityAnchor,
+  isActivityListNearViewport,
   isCurrentActivityMeasurement,
   overscanActivityVirtualRange,
   resolveActivityViewport,
@@ -240,6 +241,34 @@ describe("activity viewport geometry", () => {
       offset: 150,
       size: 720,
     });
+  });
+
+  it("derives list visibility from the current viewport after rapid scroll reversals", () => {
+    const list = {
+      listSize: 1_200,
+      listTop: 2_400,
+      overscanViewports: 1,
+      viewportSize: 600,
+    } as const;
+
+    expect(isActivityListNearViewport({ ...list, scrollTop: 4_800 })).toBe(false);
+    expect(isActivityListNearViewport({ ...list, scrollTop: 2_650 })).toBe(true);
+    expect(isActivityListNearViewport({ ...list, scrollTop: 100 })).toBe(false);
+    expect(isActivityListNearViewport({ ...list, scrollTop: 2_100 })).toBe(true);
+  });
+
+  it("keeps intersection boundaries inclusive across the overscan margin", () => {
+    const list = {
+      listSize: 400,
+      listTop: 1_600,
+      overscanViewports: 1,
+      viewportSize: 500,
+    } as const;
+
+    expect(isActivityListNearViewport({ ...list, scrollTop: 600 })).toBe(true);
+    expect(isActivityListNearViewport({ ...list, scrollTop: 599 })).toBe(false);
+    expect(isActivityListNearViewport({ ...list, scrollTop: 2_500 })).toBe(true);
+    expect(isActivityListNearViewport({ ...list, scrollTop: 2_501 })).toBe(false);
   });
 
   it("defers heavy activity bodies only for large viewport jumps", () => {

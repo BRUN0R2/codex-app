@@ -8,7 +8,7 @@ import { DIFF_ROW_HEIGHT_PX, type DiffVirtualRange } from "./diffViewport";
 import type { SyntaxLine } from "./syntax/contracts";
 import { DiffSyntaxHighlighter } from "./syntax/diffHighlighter";
 import { escapeHtml, syntaxLineToHtml } from "./syntax/render";
-import { type VirtualRowsCanvas, VirtualRowsWindow } from "./virtualRowsWindow";
+import { createFixedVirtualRowsCanvas, VirtualRowsWindow } from "./virtualRowsWindow";
 
 export type DiffVirtualRowsMode = "split" | "unified";
 
@@ -33,7 +33,13 @@ export function readDiffVirtualRows(input: {
   const markup = input.mode === "split" ? renderSplitRows(input) : renderUnifiedRows(input);
   const rows = new VirtualRowsWindow({
     owner: input.document,
-    template: parseRows(markup, input.range.totalHeight),
+    template: createFixedVirtualRowsCanvas({
+      className: "diff-virtual-canvas",
+      firstRowTop: input.range.offsetTop,
+      rowHeight: DIFF_ROW_HEIGHT_PX,
+      rowMarkup: markup,
+      totalHeight: input.range.totalHeight,
+    }),
     variant: `${input.path}\u0000${input.mode}`,
   });
   cache.set(key, rows);
@@ -58,11 +64,9 @@ function renderUnifiedRows(input: {
     if (row === undefined) {
       throw new Error(`A linha unificada ${rowIndex} não existe.`);
     }
-    const top = input.range.offsetTop + (rowIndex - input.range.start) * DIFF_ROW_HEIGHT_PX;
     markup += renderUnifiedRow(
       row,
       rowIndex,
-      top,
       highlighter.render(input.document, input.path, rowIndex),
     );
   }
@@ -72,10 +76,9 @@ function renderUnifiedRows(input: {
 function renderUnifiedRow(
   row: UnifiedDiffLine,
   rowIndex: number,
-  top: number,
   tokens: SyntaxLine | null,
 ): string {
-  const opening = `<div aria-rowindex="${rowIndex + 1}" class="diff-virtual-row unified-diff-row is-${row.type}" role="row" style="top:${Math.round(top)}px">`;
+  const opening = `<div aria-rowindex="${rowIndex + 1}" class="diff-virtual-row unified-diff-row is-${row.type}" role="row">`;
   const lineNumber = row.type === "deletion" ? row.oldNumber : row.newNumber;
   return `${opening}<div class="diff-line-number" role="rowheader"><span class="diff-line-number-content">${lineNumber ?? ""}</span></div><div class="unified-diff-code" role="cell"><code>${renderSyntaxContent(row.content, tokens)}</code></div></div>`;
 }
@@ -92,8 +95,7 @@ function renderSplitRows(input: {
     if (row === undefined) {
       throw new Error(`A linha dividida ${rowIndex} não existe.`);
     }
-    const top = input.range.offsetTop + (rowIndex - input.range.start) * DIFF_ROW_HEIGHT_PX;
-    markup += renderSplitRow(input.document, input.path, projection, row, rowIndex, top);
+    markup += renderSplitRow(input.document, input.path, projection, row, rowIndex);
   }
   return markup;
 }
@@ -104,9 +106,8 @@ function renderSplitRow(
   projection: SplitDiffProjection,
   row: SplitDiffRow,
   rowIndex: number,
-  top: number,
 ): string {
-  const opening = `<div aria-rowindex="${rowIndex + 1}" class="diff-virtual-row split-diff-row" role="row" style="top:${Math.round(top)}px">`;
+  const opening = `<div aria-rowindex="${rowIndex + 1}" class="diff-virtual-row split-diff-row" role="row">`;
   const leftTokens = highlighter.render(
     document,
     path,
@@ -139,14 +140,4 @@ function readDocumentCache(document: DiffDocument): Map<string, VirtualRowsWindo
     rowsByDocument.set(document, cache);
   }
   return cache;
-}
-
-function parseRows(markup: string, totalHeight: number): VirtualRowsCanvas {
-  const template = document.createElement("template");
-  template.innerHTML = `<div class="diff-virtual-canvas" role="rowgroup" style="height:${totalHeight}px">${markup}</div>`;
-  const canvas = template.content.firstElementChild;
-  if (!(canvas instanceof HTMLDivElement) || canvas.nextElementSibling !== null) {
-    throw new Error("O navegador não materializou as linhas virtuais do diff.");
-  }
-  return canvas;
 }

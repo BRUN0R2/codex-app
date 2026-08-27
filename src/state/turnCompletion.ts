@@ -105,6 +105,7 @@ export function applyTurnCompletion(thread: CodexThread, completion: CompletedTu
   const turns = thread.turns.slice();
   turns[turnIndex] = {
     ...current,
+    items: current.items.map(settleActiveItem),
     status: completion.status,
     error: completion.error,
     updatedAt: completion.updatedAt,
@@ -115,4 +116,23 @@ export function applyTurnCompletion(thread: CodexThread, completion: CompletedTu
     turns,
     updatedAt: Math.max(thread.updatedAt, completion.updatedAt),
   };
+}
+
+function settleActiveItem(item: ThreadItem): ThreadItem {
+  switch (item.type) {
+    case "commandExecution":
+      return item.status === "inProgress"
+        ? {
+            ...item,
+            processId: null,
+            status: "failed",
+            liveOutput: null,
+          }
+        : item;
+    case "fileChange":
+    case "toolExecution":
+      return item.status === "inProgress" ? { ...item, status: "failed" } : item;
+    default:
+      return item;
+  }
 }

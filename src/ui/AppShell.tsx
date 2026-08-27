@@ -28,6 +28,13 @@ import { Timeline } from "./Timeline";
 import { TurnProgress } from "./TurnProgress";
 import { shouldShowTurnProgress } from "./turnProgressVisibility";
 import {
+  readWorkspaceSplitRatio,
+  resolveWorkspaceSplitMetrics,
+  WORKSPACE_SPLIT_DEFAULT_RATIO,
+  workspaceSplitRatioFromPointer,
+  writeWorkspaceSplitRatio,
+} from "./workspaceSplit";
+import {
   activeWorkspaceTab,
   browserWorkspaceTabId,
   closeWorkspaceTab,
@@ -61,6 +68,11 @@ export function AppShell(props: { readonly controller: AppController }) {
   const reviewChangeStore = new LatestTurnFileChangeStore();
   const browserController = createBrowserController(props.controller.reportError);
   const [workspaceTabs, setWorkspaceTabs] = createSignal(emptyWorkspaceTabsState());
+  const [workspaceSplitRatio, setWorkspaceSplitRatio] = createSignal(readWorkspaceSplitRatio());
+  const [workspaceSplitMetrics, setWorkspaceSplitMetrics] = createSignal(
+    resolveWorkspaceSplitMetrics(workspaceSplitRatio(), 0),
+  );
+  const [workspaceSplitDragging, setWorkspaceSplitDragging] = createSignal(false);
   let previewBrowserPending = readPreviewBrowserOpen();
   let observedBrowserAgentActivity: BrowserAgentActivityNotification | null = null;
   const reviewChanges = createMemo(() =>
@@ -81,8 +93,12 @@ export function AppShell(props: { readonly controller: AppController }) {
   let nextDraftRequestId = 0;
   let chatPageElement: HTMLElement | undefined;
   let chatDockElement: HTMLDivElement | undefined;
+  let mainPanelContentElement: HTMLDivElement | undefined;
+  let workspaceSplitterElement: HTMLHRElement | undefined;
   let chatDockResizeObserver: ResizeObserver | undefined;
+  let workspaceSplitResizeObserver: ResizeObserver | undefined;
   let chatDockResizeFrame: number | undefined;
+  let workspaceSplitPointerId: number | undefined;
   let disposed = false;
   const eventUnlisteners: Array<() => void> = [];
 
@@ -311,6 +327,114 @@ export function AppShell(props: { readonly controller: AppController }) {
     });
   }
 
+  function synchronizeWorkspaceSplitGeometry(requestedRatio = workspaceSplitRatio()): void {
+    if (mainPanelContentElement === undefined) {
+      return;
+    }
+    const metrics = resolveWorkspaceSplitMetrics(
+      requestedRatio,
+      mainPanelContentElement.getBoundingClientRect().width,
+    );
+    setWorkspaceSplitMetrics(metrics);
+    mainPanelContentElement.style.setProperty(
+      "--workspace-chat-pane-width",
+      `${metrics.chatPaneWidth}px`,
+    );
+  }
+
+  function commitWorkspaceSplitRatio(requestedRatio: number, persist: boolean): void {
+    if (mainPanelContentElement === undefined) {
+      return;
+    }
+    const metrics = resolveWorkspaceSplitMetrics(
+      requestedRatio,
+      mainPanelContentElement.getBoundingClientRect().width,
+    );
+    setWorkspaceSplitRatio(metrics.ratio);
+    setWorkspaceSplitMetrics(metrics);
+    mainPanelContentElement.style.setProperty(
+      "--workspace-chat-pane-width",
+      `${metrics.chatPaneWidth}px`,
+    );
+    if (persist) {
+      writeWorkspaceSplitRatio(metrics.ratio);
+    }
+  }
+
+  function updateWorkspaceSplitFromPointer(event: PointerEvent): void {
+    if (workspaceSplitPointerId !== event.pointerId || mainPanelContentElement === undefined) {
+      return;
+    }
+    const bounds = mainPanelContentElement.getBoundingClientRect();
+    commitWorkspaceSplitRatio(
+      workspaceSplitRatioFromPointer(event.clientX, bounds.left, bounds.width),
+      false,
+    );
+  }
+
+  function handleWorkspaceSplitPointerDown(event: PointerEvent): void {
+    if (event.button !== 0 || workspaceSplitPointerId !== undefined) {
+      return;
+    }
+    event.preventDefault();
+    workspaceSplitPointerId = event.pointerId;
+    setWorkspaceSplitDragging(true);
+    workspaceSplitterElement?.setPointerCapture(event.pointerId);
+    updateWorkspaceSplitFromPointer(event);
+  }
+
+  function endWorkspaceSplitPointerDrag(event: PointerEvent, releaseCapture: boolean): void {
+    if (workspaceSplitPointerId !== event.pointerId) {
+      return;
+    }
+    workspaceSplitPointerId = undefined;
+    setWorkspaceSplitDragging(false);
+    writeWorkspaceSplitRatio(workspaceSplitRatio());
+    if (releaseCapture && workspaceSplitterElement?.hasPointerCapture(event.pointerId) === true) {
+      workspaceSplitterElement.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function handleWorkspaceSplitKeyDown(event: KeyboardEvent): void {
+    const metrics = workspaceSplitMetrics();
+    const step = event.shiftKey ? 0.1 : 0.04;
+    let requestedRatio: number;
+    switch (event.key) {
+      case "ArrowLeft":
+        requestedRatio = metrics.ratio - step;
+        break;
+      case "ArrowRight":
+        requestedRatio = metrics.ratio + step;
+        break;
+      case "Home":
+        requestedRatio = metrics.minimumRatio;
+        break;
+      case "End":
+        requestedRatio = metrics.maximumRatio;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    commitWorkspaceSplitRatio(requestedRatio, true);
+  }
+
+  createEffect(() => {
+    if (activeSurface() !== "chat" || !workspaceTabs().visible) {
+      const pointerId = workspaceSplitPointerId;
+      workspaceSplitPointerId = undefined;
+      setWorkspaceSplitDragging(false);
+      if (
+        pointerId !== undefined &&
+        workspaceSplitterElement?.hasPointerCapture(pointerId) === true
+      ) {
+        workspaceSplitterElement.releasePointerCapture(pointerId);
+      }
+      return;
+    }
+    queueMicrotask(() => synchronizeWorkspaceSplitGeometry());
+  });
+
   onMount(() => {
     browserController.start();
     window.addEventListener("keydown", handleKeyboardShortcut);
@@ -318,6 +442,11 @@ export function AppShell(props: { readonly controller: AppController }) {
       chatDockResizeObserver = new ResizeObserver(scheduleChatDockInset);
       chatDockResizeObserver.observe(chatDockElement);
       scheduleChatDockInset();
+    }
+    if (mainPanelContentElement !== undefined) {
+      workspaceSplitResizeObserver = new ResizeObserver(() => synchronizeWorkspaceSplitGeometry());
+      workspaceSplitResizeObserver.observe(mainPanelContentElement);
+      synchronizeWorkspaceSplitGeometry();
     }
     void subscribeToMenuEvents({
       onNewThread: () => {
@@ -342,6 +471,7 @@ export function AppShell(props: { readonly controller: AppController }) {
     }
     window.removeEventListener("keydown", handleKeyboardShortcut);
     chatDockResizeObserver?.disconnect();
+    workspaceSplitResizeObserver?.disconnect();
     if (chatDockResizeFrame !== undefined) {
       cancelAnimationFrame(chatDockResizeFrame);
     }
@@ -376,7 +506,14 @@ export function AppShell(props: { readonly controller: AppController }) {
             onChange={(mode) => void props.controller.selectChatGptMode(mode)}
           />
         </Show>
-        <div class="main-panel-content">
+        <div
+          class="main-panel-content"
+          classList={{
+            "workspace-split-dragging": workspaceSplitDragging(),
+            "workspace-visible": activeSurface() === "chat" && workspaceTabs().visible,
+          }}
+          ref={mainPanelContentElement}
+        >
           <Show
             when={
               activeSurface() === "chat" &&
@@ -408,7 +545,7 @@ export function AppShell(props: { readonly controller: AppController }) {
                 props.controller.currentThread() === null,
               "work-surface": props.controller.conversationMode() === "work",
             }}
-            hidden={activeSurface() !== "chat" || workspaceTabs().visible}
+            hidden={activeSurface() !== "chat"}
             ref={chatPageElement}
           >
             <Timeline
@@ -444,6 +581,35 @@ export function AppShell(props: { readonly controller: AppController }) {
               />
             </div>
           </section>
+          <Show
+            when={
+              activeSurface() === "chat" &&
+              workspaceTabs().visible &&
+              props.controller.currentThread() !== null
+            }
+          >
+            <hr
+              aria-label="Redimensionar chat e área de trabalho"
+              aria-orientation="vertical"
+              aria-valuemax={Math.round(workspaceSplitMetrics().maximumRatio * 100)}
+              aria-valuemin={Math.round(workspaceSplitMetrics().minimumRatio * 100)}
+              aria-valuenow={Math.round(workspaceSplitMetrics().ratio * 100)}
+              aria-valuetext={`Chat ${Math.round(
+                workspaceSplitMetrics().ratio * 100,
+              )}%, área de trabalho ${Math.round((1 - workspaceSplitMetrics().ratio) * 100)}%`}
+              class="workspace-splitter"
+              onDblClick={() => commitWorkspaceSplitRatio(WORKSPACE_SPLIT_DEFAULT_RATIO, true)}
+              onKeyDown={handleWorkspaceSplitKeyDown}
+              onLostPointerCapture={(event) => endWorkspaceSplitPointerDrag(event, false)}
+              onPointerCancel={(event) => endWorkspaceSplitPointerDrag(event, true)}
+              onPointerDown={handleWorkspaceSplitPointerDown}
+              onPointerMove={updateWorkspaceSplitFromPointer}
+              onPointerUp={(event) => endWorkspaceSplitPointerDrag(event, true)}
+              ref={workspaceSplitterElement}
+              tabIndex={0}
+              title="Arraste para redimensionar; clique duas vezes para dividir igualmente"
+            />
+          </Show>
           <Show
             keyed
             when={

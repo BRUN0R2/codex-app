@@ -244,6 +244,11 @@ export interface ActivityViewportInput {
   readonly viewportSize: number;
 }
 
+export interface ActivityListViewportIntersectionInput extends ActivityViewportInput {
+  readonly listSize: number;
+  readonly overscanViewports: number;
+}
+
 export interface ActivityViewport {
   readonly offset: number;
   readonly size: number;
@@ -257,6 +262,18 @@ export function resolveActivityViewport(input: ActivityViewportInput): ActivityV
     offset: Math.max(0, scrollTop - listTop),
     size: viewportSize,
   };
+}
+
+export function isActivityListNearViewport(input: ActivityListViewportIntersectionInput): boolean {
+  const scrollTop = Number.isFinite(input.scrollTop) ? Math.max(0, input.scrollTop) : 0;
+  const listTop = Number.isFinite(input.listTop) ? input.listTop : 0;
+  const listSize = Number.isFinite(input.listSize) ? Math.max(0, input.listSize) : 0;
+  const viewportSize = Number.isFinite(input.viewportSize) ? Math.max(1, input.viewportSize) : 1;
+  const overscanViewports = Number.isFinite(input.overscanViewports)
+    ? Math.max(0, input.overscanViewports)
+    : 0;
+  const margin = viewportSize * overscanViewports;
+  return listTop + listSize >= scrollTop - margin && listTop <= scrollTop + viewportSize + margin;
 }
 
 export function shouldDeferActivityContent(scrollDelta: number, viewportSize: number): boolean {

@@ -65,7 +65,9 @@ const SCENARIOS = [
       );
       threadButton?.click();
     })()`,
-    readyExpression: `document.querySelector(".activity-title.is-running .activity-title-sweep") !== null`,
+    readyExpression: `document.querySelector(
+      ".activity-title.is-running.is-shimmer-active .activity-title-sweep",
+    ) !== null`,
     auditExpression: activeActivityReflectionVisualAuditExpression,
     validate: validateActiveActivityReflectionMetrics,
   },
@@ -233,6 +235,10 @@ const SCENARIOS = [
       (button) => button.textContent?.includes("Inspecionar janela de contexto"),
     )`,
     prepareExpression: `(() => {
+      const csp = document.createElement("meta");
+      csp.httpEquiv = "Content-Security-Policy";
+      csp.content = "style-src 'self'";
+      document.head.append(csp);
       const threadButton = [...document.querySelectorAll(".thread-main")].find(
         (button) => button.textContent?.includes("Inspecionar janela de contexto"),
       );
@@ -267,6 +273,10 @@ const SCENARIOS = [
     )`,
     prepareExpression: `(() => {
       void (async () => {
+        const csp = document.createElement("meta");
+        csp.httpEquiv = "Content-Security-Policy";
+        csp.content = "style-src 'self'";
+        document.head.append(csp);
         const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
         const waitUntil = async (label, predicate) => {
           const deadline = performance.now() + 5_000;
@@ -297,13 +307,62 @@ const SCENARIOS = [
           throw new Error("O arquivo grande da revisão está ausente.");
         }
         largeFile.click();
+        await waitUntil(
+          "as linhas virtuais da revisão",
+          () => document.querySelector(".review-panel .diff-virtual-row") instanceof HTMLElement,
+        );
         await frame();
         await frame();
+        const measureReviewVirtualization = () => {
+          const diffViewport = document.querySelector(".review-panel .diff-viewport");
+          const canvas = diffViewport?.querySelector(".diff-virtual-canvas");
+          if (!(diffViewport instanceof HTMLElement) || !(canvas instanceof HTMLElement)) {
+            throw new Error("A geometria virtual da revisão está ausente.");
+          }
+          const rows = [...diffViewport.querySelectorAll(".diff-virtual-row")];
+          const viewportBounds = diffViewport.getBoundingClientRect();
+          const rowTopOffsets = rows.map(
+            (row) => row.getBoundingClientRect().top - viewportBounds.top,
+          );
+          return {
+            canvasHeight: canvas.getBoundingClientRect().height,
+            clientHeight: diffViewport.clientHeight,
+            mountedRowIndexes: rows.map((row) =>
+              Number.parseInt(row.getAttribute("aria-rowindex") ?? "0", 10),
+            ),
+            rowGaps: rowTopOffsets.slice(1).map(
+              (top, rowIndex) => top - (rowTopOffsets[rowIndex] ?? top),
+            ),
+            rowInlineTops: rows.map((row) =>
+              row instanceof HTMLElement ? row.style.top : null,
+            ),
+            scrollHeight: diffViewport.scrollHeight,
+            scrollTop: diffViewport.scrollTop,
+          };
+        };
+        const initial = measureReviewVirtualization();
+        const diffViewport = document.querySelector(".review-panel .diff-viewport");
+        if (!(diffViewport instanceof HTMLElement)) {
+          throw new Error("A viewport da revisão está ausente.");
+        }
+        diffViewport.scrollTop = diffViewport.scrollHeight;
+        await frame();
+        await frame();
+        await frame();
+        const bottom = measureReviewVirtualization();
+        diffViewport.scrollTop = 0;
+        await frame();
+        await frame();
+        await frame();
+        const restored = measureReviewVirtualization();
+        window.__previewReviewVirtualizationCycle = { initial, bottom, restored };
       })();
     })()`,
     readyExpression: `document.querySelector(".review-file-option.selected code")?.textContent?.endsWith("module-15.ts") === true &&
-      document.querySelector(".review-panel .diff-virtual-row") !== null`,
+      document.querySelector(".review-panel .diff-virtual-row") !== null &&
+      window.__previewReviewVirtualizationCycle !== undefined`,
     auditExpression: reviewFileLayoutVisualAuditExpression,
+    interact: exerciseWorkspaceSplitInteraction,
     validate: validateReviewFileLayoutMetrics,
   },
   {
@@ -562,6 +621,7 @@ const SCENARIOS = [
       document.querySelector(".browser-native-surface") !== null &&
       document.querySelector(".workspace-tab[data-kind='browser']") !== null`,
     auditExpression: browserPanelVisualAuditExpression,
+    interact: exerciseWorkspaceSplitInteraction,
     validate: validateBrowserPanelMetrics,
   },
   {
@@ -679,6 +739,18 @@ const SCENARIOS = [
     readyExpression: `window.__previewImageViewReady === true`,
     auditExpression: imageViewGroupVisualAuditExpression,
     validate: validateImageViewGroupMetrics,
+  },
+  {
+    id: "activity-shimmer-cadence",
+    url: HOME_PREVIEW_URL,
+    readyTimeoutMs: 15_000,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: activityShimmerPrepareExpression(),
+    readyExpression: `window.__activityShimmerReady === true`,
+    auditExpression: activityShimmerAuditExpression,
+    validate: validateActivityShimmerMetrics,
   },
   {
     id: "activity-reconciliation-stream",
@@ -958,6 +1030,8 @@ function browserPanelVisualAuditExpression() {
     };
     return {
       viewport: { width: innerWidth, height: innerHeight },
+      workspaceSplit: ${workspaceSplitVisualStateExpression()},
+      workspaceSplitInteraction: window.__previewWorkspaceSplitInteraction ?? null,
       workspace: rectangle(workspace),
       panel: rectangle(panel),
       tabs: rectangle(tabs),
@@ -970,6 +1044,55 @@ function browserPanelVisualAuditExpression() {
       addressInputs: panel.querySelectorAll('.browser-address input[aria-label="Pesquisar ou digitar endereço"]').length,
       previewPages: panel.querySelectorAll(".browser-preview-page").length,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function workspaceSplitVisualStateExpression() {
+  return `(() => {
+    const container = document.querySelector(".main-panel-content");
+    const chat = container?.querySelector(":scope > .chat-page");
+    const splitter = container?.querySelector(":scope > .workspace-splitter");
+    const workspace = container?.querySelector(":scope > .workspace-panel");
+    if (
+      !(container instanceof HTMLElement) ||
+      !(chat instanceof HTMLElement) ||
+      !(splitter instanceof HTMLElement) ||
+      !(workspace instanceof HTMLElement)
+    ) {
+      throw new Error("A divisão entre chat e área de trabalho está incompleta.");
+    }
+    const rectangle = (element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        bottom: bounds.bottom,
+        height: bounds.height,
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+        width: bounds.width,
+      };
+    };
+    const chatBounds = rectangle(chat);
+    const workspaceBounds = rectangle(workspace);
+    const splitterBounds = rectangle(splitter);
+    const paneWidth = chatBounds.width + workspaceBounds.width;
+    return {
+      ariaMaximum: Number(splitter.getAttribute("aria-valuemax")),
+      ariaMinimum: Number(splitter.getAttribute("aria-valuemin")),
+      ariaNow: Number(splitter.getAttribute("aria-valuenow")),
+      ariaOrientation: splitter.getAttribute("aria-orientation"),
+      ariaText: splitter.getAttribute("aria-valuetext"),
+      chat: chatBounds,
+      chatDisplay: getComputedStyle(chat).display,
+      chatHidden: chat.hidden,
+      container: rectangle(container),
+      paneRatio: paneWidth === 0 ? null : chatBounds.width / paneWidth,
+      persistedRatio: localStorage.getItem("codex-desktop.profile-v2.workspace-split-ratio"),
+      role: splitter.getAttribute("role") ?? (splitter.tagName === "HR" ? "separator" : null),
+      splitter: splitterBounds,
+      splitterDisplay: getComputedStyle(splitter).display,
+      workspace: workspaceBounds,
     };
   })()`;
 }
@@ -1308,6 +1431,10 @@ function previewFileDetailPrepareExpression(fileName) {
 function previewHighlightedToolOutputsPrepareExpression() {
   return `(() => {
     void (async () => {
+      const csp = document.createElement("meta");
+      csp.httpEquiv = "Content-Security-Policy";
+      csp.content = "style-src 'self'";
+      document.head.append(csp);
       const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
       const threadButton = [...document.querySelectorAll(".thread-main")].find(
         (button) => button.textContent?.includes("Inspecionar janela de contexto"),
@@ -1343,10 +1470,68 @@ function previewHighlightedToolOutputsPrepareExpression() {
             }
           }
           await new Promise((resolve) => setTimeout(resolve, 120));
-          const source = document.querySelector(".tool-source-output");
-          const search = document.querySelector(".tool-search-output");
+          const measureSourceVirtualization = () => {
+            const currentSource = sourceCard.querySelector(".tool-source-output");
+            const currentCanvas = currentSource?.querySelector(".tool-source-virtual-canvas");
+            const currentViewport = currentSource?.closest(".tool-source-viewport");
+            if (
+              !(currentSource instanceof HTMLElement) ||
+              !(currentCanvas instanceof HTMLElement) ||
+              !(currentViewport instanceof HTMLElement)
+            ) {
+              throw new Error("A leitura virtual não está materializada.");
+            }
+            const currentRows = [...currentSource.querySelectorAll(".tool-source-line")];
+            const viewportBounds = currentViewport.getBoundingClientRect();
+            const rowTopOffsets = currentRows.map(
+              (row) => row.getBoundingClientRect().top - viewportBounds.top,
+            );
+            return {
+              canvasHeight: currentCanvas.getBoundingClientRect().height,
+              clientHeight: currentViewport.clientHeight,
+              lineNumbers: currentRows.map(
+                (row) => row.querySelector(".tool-source-line-number")?.textContent?.trim() ?? "",
+              ),
+              mountedRowIndexes: currentRows.map((row) =>
+                Number.parseInt(row.getAttribute("aria-rowindex") ?? "0", 10),
+              ),
+              rowGaps: rowTopOffsets.slice(1).map(
+                (top, rowIndex) => top - (rowTopOffsets[rowIndex] ?? top),
+              ),
+              rowInlineTops: currentRows.map((row) =>
+                row instanceof HTMLElement ? row.style.top : null,
+              ),
+              scrollHeight: currentViewport.scrollHeight,
+              scrollTop: currentViewport.scrollTop,
+            };
+          };
+          const firstOpen = measureSourceVirtualization();
+          const sourceSummary = sourceCard.querySelector(":scope > summary");
+          sourceSummary?.click();
+          await frame();
+          await frame();
+          sourceSummary?.click();
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          await frame();
+          await frame();
+          const reopened = measureSourceVirtualization();
+          const sourceViewport = sourceCard.querySelector(".tool-source-viewport");
+          if (!(sourceViewport instanceof HTMLElement)) {
+            throw new Error("A viewport reaberta da leitura está ausente.");
+          }
+          sourceViewport.scrollTop = sourceViewport.scrollHeight;
+          await frame();
+          await frame();
+          await frame();
+          const bottom = measureSourceVirtualization();
+          sourceViewport.scrollTop = 0;
+          await frame();
+          await frame();
+          await frame();
+          const restored = measureSourceVirtualization();
+          const source = sourceCard.querySelector(".tool-source-output");
+          const search = searchCard.querySelector(".tool-search-output");
           const sourceCanvas = source?.querySelector(".tool-source-virtual-canvas");
-          const sourceViewport = source?.closest(".tool-source-viewport");
           if (
             source instanceof HTMLElement &&
             search instanceof HTMLElement &&
@@ -1385,7 +1570,6 @@ function previewHighlightedToolOutputsPrepareExpression() {
                 }).length
               );
             }, 0);
-            const sourceSummary = sourceCard.querySelector(":scope > summary");
             const readIcon = sourceSummary?.querySelector(".activity-icon svg");
             const readChevron = sourceSummary?.querySelector(".activity-chevron");
             const readChevronIcon = readChevron?.querySelector("svg");
@@ -1439,6 +1623,7 @@ function previewHighlightedToolOutputsPrepareExpression() {
               sourceCanvasHeight: sourceCanvas.getBoundingClientRect().height,
               sourceViewportClientHeight: sourceViewport.clientHeight,
               sourceViewportScrollHeight: sourceViewport.scrollHeight,
+              sourceVirtualizationCycle: { firstOpen, reopened, bottom, restored },
               sourceTokenKinds: [
                 ...new Set(
                   sourceTokens.flatMap((token) =>
@@ -2670,6 +2855,69 @@ async function exerciseHighlightedReadInteraction(client) {
   });
 }
 
+async function exerciseWorkspaceSplitInteraction(client) {
+  const initial = await client.evaluate(workspaceSplitVisualStateExpression(), false);
+  if (initial.splitterDisplay === "none") {
+    await client.evaluate(
+      `window.__previewWorkspaceSplitInteraction = ${JSON.stringify({
+        dragged: initial,
+        initial,
+        supported: false,
+      })}`,
+      false,
+    );
+    return;
+  }
+  const pointer = {
+    startX: initial.splitter.left + initial.splitter.width / 2,
+    targetX: initial.container.left + initial.container.width * 0.64,
+    y: initial.splitter.top + Math.min(120, initial.splitter.height / 2),
+  };
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: pointer.startX,
+    y: pointer.y,
+  });
+  await client.send("Input.dispatchMouseEvent", {
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+    type: "mousePressed",
+    x: pointer.startX,
+    y: pointer.y,
+  });
+  for (let step = 1; step <= 5; step += 1) {
+    await client.send("Input.dispatchMouseEvent", {
+      button: "left",
+      buttons: 1,
+      type: "mouseMoved",
+      x: pointer.startX + ((pointer.targetX - pointer.startX) * step) / 5,
+      y: pointer.y,
+    });
+  }
+  await client.send("Input.dispatchMouseEvent", {
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+    type: "mouseReleased",
+    x: pointer.targetX,
+    y: pointer.y,
+  });
+  await client.evaluate(
+    `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+    true,
+  );
+  const dragged = await client.evaluate(workspaceSplitVisualStateExpression(), false);
+  await client.evaluate(
+    `window.__previewWorkspaceSplitInteraction = ${JSON.stringify({
+      dragged,
+      initial,
+      supported: true,
+    })}`,
+    false,
+  );
+}
+
 async function exerciseIntrinsicSummaryInteraction(
   client,
   { actionSelector, chevronSelector, identitySelector, stateProperty, summaryExpression },
@@ -3065,10 +3313,58 @@ function timelinePerformanceStressPrepareExpression() {
         let maximumVisibleDeferredBodies = 0;
         let legacyPlaceholderFrames = 0;
         let missingSummaryFrames = 0;
+        let visibleEmptyActivityListFrames = 0;
+        let maximumVisibleEmptyActivityLists = 0;
+        const visibleEmptyActivityListSamples = [];
         const rapidFrameOutliers = [];
         let consecutiveSummaryComparisons = 0;
         let summaryIdentityChanges = 0;
         let previousSummariesByKey = new Map();
+        const inspectVisibleActivityCoverage = (phaseLabel, timelineBounds) => {
+          let emptyLists = 0;
+          for (const list of document.querySelectorAll(".agent-activity-virtual-list")) {
+            if (!(list instanceof HTMLElement)) {
+              continue;
+            }
+            const total = Number(list.getAttribute("data-virtual-activity-total") ?? 0);
+            const listBounds = list.getBoundingClientRect();
+            const visibleTop = Math.max(timelineBounds.top, listBounds.top);
+            const visibleBottom = Math.min(timelineBounds.bottom, listBounds.bottom);
+            if (total <= 0 || visibleBottom - visibleTop <= 2) {
+              continue;
+            }
+            const mountedCount = Number(
+              list.getAttribute("data-virtual-activity-count") ?? 0,
+            );
+            const visibleItem = [...list.querySelectorAll(".agent-activity-virtual-item")].some(
+              (item) => {
+                const bounds = item.getBoundingClientRect();
+                return bounds.bottom > visibleTop + 1 && bounds.top < visibleBottom - 1;
+              },
+            );
+            if (mountedCount > 0 && visibleItem) {
+              continue;
+            }
+            emptyLists += 1;
+            if (visibleEmptyActivityListSamples.length < 12) {
+              visibleEmptyActivityListSamples.push({
+                listBottom: listBounds.bottom,
+                listTop: listBounds.top,
+                mountedCount,
+                phase: phaseLabel,
+                scrollTop: timeline.scrollTop,
+                total,
+                visibleBottom,
+                visibleTop,
+              });
+            }
+          }
+          visibleEmptyActivityListFrames += emptyLists === 0 ? 0 : 1;
+          maximumVisibleEmptyActivityLists = Math.max(
+            maximumVisibleEmptyActivityLists,
+            emptyLists,
+          );
+        };
         await new Promise((resolve) => {
           const tick = (now) => {
             const frameInterval = now - previousFrame;
@@ -3100,6 +3396,7 @@ function timelinePerformanceStressPrepareExpression() {
             );
             const deferredBodies = deferredBodyElements.length;
             const timelineBounds = timeline.getBoundingClientRect();
+            inspectVisibleActivityCoverage("rapid", timelineBounds);
             const visibleDeferredBodies = [...deferredBodyElements].filter((element) => {
               const bounds = element.getBoundingClientRect();
               return bounds.bottom > timelineBounds.top && bounds.top < timelineBounds.bottom;
@@ -3160,6 +3457,17 @@ function timelinePerformanceStressPrepareExpression() {
         );
         const percentile = (values, percentileValue) =>
           values[Math.min(values.length - 1, Math.floor(values.length * percentileValue))] ?? 0;
+        const reversalTargets = [0.94, 0.08, 0.86, 0.14, 0.78, 0.22, 0.7, 0.3, 0.62, 0.38];
+        for (const ratio of reversalTargets) {
+          const maximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+          timeline.scrollTop = maximum * ratio;
+          await frame();
+          await frame();
+          inspectVisibleActivityCoverage(
+            "rapid-reversal-" + ratio,
+            timeline.getBoundingClientRect(),
+          );
+        }
         await new Promise((resolve) => setTimeout(resolve, 150));
         window.__timelineStressProgress = { phase: "rapid-scroll-complete" };
 
@@ -3411,6 +3719,9 @@ function timelinePerformanceStressPrepareExpression() {
           maximumVisibleDeferredBodies,
           legacyPlaceholderFrames,
           missingSummaryFrames,
+          visibleEmptyActivityListFrames,
+          maximumVisibleEmptyActivityLists,
+          visibleEmptyActivityListSamples,
           consecutiveSummaryComparisons,
           summaryIdentityChanges,
           iconIntegrityComparisons,
@@ -3497,6 +3808,93 @@ function activityReconciliationPrepareExpression() {
   })()`;
 }
 
+function activityShimmerPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      try {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const waitUntil = async (label, predicate, timeoutMs) => {
+          const deadline = performance.now() + timeoutMs;
+          while (!predicate()) {
+            if (performance.now() > deadline) {
+              throw new Error("Tempo esgotado aguardando " + label + ".");
+            }
+            await frame();
+          }
+        };
+        const threadButton = [...document.querySelectorAll(".thread-main")].find(
+          (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+        );
+        threadButton?.click();
+        await waitUntil(
+          "o título de comando em execução",
+          () => document.querySelector(".command-activity-card .activity-title.is-running") !== null,
+          3000,
+        );
+        const title = document.querySelector(
+          ".command-activity-card .activity-title.is-running",
+        );
+        if (!(title instanceof HTMLElement)) {
+          throw new Error("O título animado do comando não foi encontrado.");
+        }
+        const isActive = () => title.classList.contains("is-shimmer-active");
+        if (isActive()) {
+          await waitUntil("o fim do pulso já iniciado", () => !isActive(), 2500);
+        }
+        await waitUntil("o início do primeiro pulso", isActive, 5000);
+        const firstStartedAt = performance.now();
+        const sweep = title.querySelector(".activity-title-sweep");
+        if (!(sweep instanceof HTMLElement)) {
+          throw new Error("A camada visual do shimmer não foi encontrada.");
+        }
+        const activeStyle = getComputedStyle(sweep);
+        const activeAnimation = {
+          duration: activeStyle.animationDuration,
+          iterationCount: activeStyle.animationIterationCount,
+          name: activeStyle.animationName,
+          timingFunction: activeStyle.animationTimingFunction,
+        };
+        await waitUntil("o fim do primeiro pulso", () => !isActive(), 2500);
+        const firstFinishedAt = performance.now();
+        const inactiveAnimationName = getComputedStyle(sweep).animationName;
+        await waitUntil("o início do segundo pulso", isActive, 5000);
+        const secondStartedAt = performance.now();
+        window.__activityShimmerMetrics = {
+          activeDurationMs: firstFinishedAt - firstStartedAt,
+          cadenceMs: secondStartedAt - firstStartedAt,
+          activeAnimation,
+          inactiveAnimationName,
+          titleText: title.textContent?.trim() ?? "",
+        };
+      } catch (error) {
+        window.__activityShimmerError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      } finally {
+        window.__activityShimmerReady = true;
+      }
+    })();
+  })()`;
+}
+
+function activityShimmerAuditExpression() {
+  return `(() => {
+    if (window.__activityShimmerError !== undefined) {
+      throw new Error(window.__activityShimmerError);
+    }
+    if (window.__activityShimmerMetrics === undefined) {
+      throw new Error("As métricas temporais do shimmer estão ausentes.");
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      ...window.__activityShimmerMetrics,
+      activeTargets: document.querySelectorAll(
+        ".activity-title.is-running.is-shimmer-active",
+      ).length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
 function timelinePerformanceStressAuditExpression() {
   return `(() => {
     if (window.__timelinePerformanceStressError !== undefined) {
@@ -3522,16 +3920,32 @@ function activityReconciliationAuditExpression() {
     const mountedKeys = [...document.querySelectorAll(
       ".agent-activity-virtual-item[data-virtual-activity-key]",
     )].map((element) => element.getAttribute("data-virtual-activity-key"));
+    const activityGroup = document.querySelector(".agent-activity-group");
+    const newerCommentary = [...document.querySelectorAll(".commentary")].find(
+      (element) =>
+        element.textContent?.includes(
+          "Mensagem mais recente preservada depois dos comandos antigos.",
+        ),
+    );
     return {
       viewport: { width: innerWidth, height: innerHeight },
       state: root.dataset.activityReconciliationState ?? null,
       started: Number(root.dataset.activityReconciliationStarted ?? Number.NaN),
       completed: Number(root.dataset.activityReconciliationCompleted ?? Number.NaN),
+      commentaryState: root.dataset.activityReconciliationCommentary ?? null,
       durationMs: Number(root.dataset.activityReconciliationDurationMs ?? Number.NaN),
       identityComparisons: Number(
         root.dataset.activityReconciliationIdentityComparisons ?? Number.NaN,
       ),
       identityChanges: Number(root.dataset.activityReconciliationIdentityChanges ?? Number.NaN),
+      commentaryCount: document.querySelectorAll(".commentary").length,
+      causalOrderPreserved:
+        activityGroup !== null &&
+        newerCommentary !== undefined &&
+        Boolean(
+          activityGroup.compareDocumentPosition(newerCommentary) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+        ),
       turnFailures: document.querySelectorAll(".turn-failure").length,
       totalActivities: Number(
         virtualList?.getAttribute("data-virtual-activity-total") ?? Number.NaN,
@@ -4552,6 +4966,8 @@ function reviewFileLayoutVisualAuditExpression() {
     );
     return {
       viewport: { width: innerWidth, height: innerHeight },
+      workspaceSplit: ${workspaceSplitVisualStateExpression()},
+      workspaceSplitInteraction: window.__previewWorkspaceSplitInteraction ?? null,
       panelHeight: panel.getBoundingClientRect().height,
       contentHeight: content.getBoundingClientRect().height,
       contentDisplay: getComputedStyle(content).display,
@@ -4589,6 +5005,7 @@ function reviewFileLayoutVisualAuditExpression() {
         (top, index) => top - (rowTopOffsets[index] ?? top),
       ),
       canvasHeight: canvas.getBoundingClientRect().height,
+      virtualizationCycle: window.__previewReviewVirtualizationCycle ?? null,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
@@ -5532,13 +5949,16 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
       metrics.highlightAnimationName === "activity-reflection-text",
     "as duas transformações sincronizadas da reflexão estão ausentes",
   );
-  assert(metrics.animationDuration === "2s", "o ciclo do reflexo não mede 2 segundos");
-  assert(metrics.animationDelay === "0.6s", "o atraso inicial não mede 600 ms");
-  assert(metrics.animationTimingFunction === "linear", "o ciclo externo deixou de ser linear");
-  assert(metrics.animationIterationCount === "infinite", "a reflexão não repete continuamente");
+  assert(metrics.animationDuration === "1s", "o pulso do reflexo não mede 1 segundo");
+  assert(metrics.animationDelay === "0s", "o pulso CSS manteve um atraso residual");
   assert(
-    metrics.keyframeEasings.some((easing) => easing.includes("steps(48")),
-    `a passagem perdeu os 48 degraus: ${JSON.stringify(metrics.keyframeEasings)}`,
+    metrics.animationTimingFunction.includes("steps(48"),
+    "o pulso perdeu a progressão oficial em 48 passos",
+  );
+  assert(metrics.animationIterationCount === "1", "a reflexão voltou a repetir continuamente");
+  assert(
+    metrics.keyframeEasings.length >= 2,
+    `os keyframes da passagem estão ausentes: ${JSON.stringify(metrics.keyframeEasings)}`,
   );
   assert(
     metrics.sidebarItemGaps.length > 0 &&
@@ -5566,8 +5986,8 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
     `a faixa não atravessou o título: ${JSON.stringify(metrics.passPositions)}`,
   );
   assert(
-    metrics.pausePositions.length === 3 && new Set(metrics.pausePositions).size === 1,
-    `a pausa longa não manteve a faixa fora do texto: ${JSON.stringify(metrics.pausePositions)}`,
+    metrics.pausePositions.length === 3 && new Set(metrics.pausePositions).size === 3,
+    `a faixa ficou presa antes de concluir a travessia: ${JSON.stringify(metrics.pausePositions)}`,
   );
   assert(
     metrics.alignmentError !== null && metrics.alignmentError <= tolerance,
@@ -5950,6 +6370,11 @@ function validateReviewFileLayoutMetrics(metrics, viewport) {
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
     `viewport inesperado na revisão em ${viewport.width}x${viewport.height}`,
   );
+  validateWorkspaceSplitMetrics(
+    metrics.workspaceSplit,
+    "revisão",
+    metrics.workspaceSplitInteraction,
+  );
   assert(metrics.horizontalOverflow <= tolerance, "a revisão criou overflow horizontal global");
   assert(metrics.fileCount === 60, "a revisão não reuniu os sessenta arquivos alterados do turno");
   assert(metrics.fileListScrollable, "a lista extensa da revisão não preservou sua própria rolagem");
@@ -6007,6 +6432,34 @@ function validateReviewFileLayoutMetrics(metrics, viewport) {
   assert(
     metrics.canvasHeight >= metrics.diffViewportScrollHeight - tolerance,
     "o canvas virtual da revisão ficou menor que sua área rolável",
+  );
+  const virtualizationCycle = metrics.virtualizationCycle;
+  const virtualizationPhases = [
+    virtualizationCycle?.initial,
+    virtualizationCycle?.bottom,
+    virtualizationCycle?.restored,
+  ];
+  assert(
+    virtualizationPhases.every(
+      (phase) =>
+        phase !== undefined &&
+        Math.abs(phase.canvasHeight - virtualizationCycle.initial.canvasHeight) <= tolerance &&
+        phase.clientHeight === virtualizationCycle.initial.clientHeight &&
+        Math.abs(phase.scrollHeight - virtualizationCycle.initial.scrollHeight) <= tolerance &&
+        phase.rowGaps.every((gap) => Math.abs(gap - 20) <= tolerance) &&
+        phase.rowInlineTops.every((top) => /^\d+px$/u.test(top ?? "")),
+    ),
+    "a geometria virtual da revisão mudou durante a rolagem sob o CSP de produção",
+  );
+  assert(
+    virtualizationCycle.initial.canvasHeight > virtualizationCycle.initial.clientHeight &&
+      virtualizationCycle.initial.scrollTop === 0 &&
+      virtualizationCycle.initial.mountedRowIndexes[0] === 1 &&
+      virtualizationCycle.bottom.scrollTop > 0 &&
+      virtualizationCycle.bottom.mountedRowIndexes[0] > 1 &&
+      virtualizationCycle.restored.scrollTop === 0 &&
+      virtualizationCycle.restored.mountedRowIndexes[0] === 1,
+    "a revisão não preservou início, fim e retorno ao topo durante a rematerialização",
   );
 }
 
@@ -6212,7 +6665,8 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
   );
   assert(metrics.horizontalOverflow <= tolerance, "as saídas tipadas criaram overflow global");
   assert(
-    JSON.stringify(metrics.sourceLineNumbers) === JSON.stringify(["20", "21", "22", "23", "24", "25", "26", "27"]),
+    JSON.stringify(metrics.sourceLineNumbers) ===
+      JSON.stringify(["20", "21", "22", "23", "24", "25", "26", "27", "28", "29"]),
     "a leitura de arquivo perdeu seus números de linha",
   );
   assert(metrics.sourceTokenKinds.includes("token-keyword"), "a leitura de arquivo não coloriu keywords");
@@ -6232,13 +6686,13 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
     "a leitura perdeu sua grade semântica independente de tabelas nativas",
   );
   assert(
-    metrics.sourceMountedRowIndexes.length === 8 &&
+    metrics.sourceMountedRowIndexes.length === 10 &&
       metrics.sourceMountedRowIndexes[0] === 1 &&
-      metrics.sourceMountedRowIndexes.at(-1) === 8,
+      metrics.sourceMountedRowIndexes.at(-1) === 10,
     "a leitura não materializou exatamente a janela visível esperada",
   );
   assert(
-    metrics.sourceRowGaps.length === 7 &&
+    metrics.sourceRowGaps.length === 9 &&
       metrics.sourceRowGaps.every((gap) => Math.abs(gap - 22) <= tolerance),
     "as linhas da leitura se sobrepõem ou perderam o passo virtual de 22 px",
   );
@@ -6248,8 +6702,41 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
   );
   assert(
     metrics.sourceCanvasHeight >= metrics.sourceViewportScrollHeight - tolerance &&
-      metrics.sourceViewportClientHeight === 8 * 22,
+      metrics.sourceViewportClientHeight === 205,
     "o canvas da leitura não representa integralmente sua faixa virtual",
+  );
+  const virtualizationCycle = metrics.sourceVirtualizationCycle;
+  const virtualizationPhases = [
+    virtualizationCycle?.firstOpen,
+    virtualizationCycle?.reopened,
+    virtualizationCycle?.bottom,
+    virtualizationCycle?.restored,
+  ];
+  assert(
+    virtualizationPhases.every(
+      (phase) =>
+        phase !== undefined &&
+        Math.abs(phase.canvasHeight - 56 * 22) <= tolerance &&
+        phase.clientHeight === 205 &&
+        Math.abs(phase.scrollHeight - 56 * 22) <= tolerance &&
+        phase.rowGaps.length === 9 &&
+        phase.rowGaps.every((gap) => Math.abs(gap - 22) <= tolerance) &&
+        phase.rowInlineTops.every((top) => /^\d+px$/u.test(top ?? "")),
+    ),
+    "a geometria virtual mudou ao reabrir ou rolar a leitura sob o CSP de produção",
+  );
+  assert(
+    virtualizationCycle.firstOpen.mountedRowIndexes[0] === 1 &&
+      virtualizationCycle.firstOpen.lineNumbers[0] === "20" &&
+      virtualizationCycle.reopened.mountedRowIndexes[0] === 1 &&
+      virtualizationCycle.reopened.lineNumbers[0] === "20" &&
+      virtualizationCycle.bottom.scrollTop > 0 &&
+      virtualizationCycle.bottom.mountedRowIndexes[0] > 1 &&
+      virtualizationCycle.bottom.lineNumbers.at(-1) === "75" &&
+      virtualizationCycle.restored.scrollTop === 0 &&
+      virtualizationCycle.restored.mountedRowIndexes[0] === 1 &&
+      virtualizationCycle.restored.lineNumbers[0] === "20",
+    "a leitura não preservou início, fim e retorno ao topo durante a rematerialização",
   );
   assert(
     metrics.readTitle === "Executou leitura de arquivo: diffHighlighter.test.ts",
@@ -6697,6 +7184,11 @@ function validateAutomationEditorMetrics(metrics, viewport) {
 
 function validateBrowserPanelMetrics(metrics, viewport) {
   const tolerance = 1;
+  validateWorkspaceSplitMetrics(
+    metrics.workspaceSplit,
+    "navegador",
+    metrics.workspaceSplitInteraction,
+  );
   assert(metrics.horizontalOverflow <= tolerance, "o navegador criou overflow horizontal global");
   assert(metrics.workspace.top >= 34 - tolerance, "a área de trabalho invadiu o chrome da janela");
   assert(
@@ -6722,6 +7214,81 @@ function validateBrowserPanelMetrics(metrics, viewport) {
   assert(metrics.navigationButtons === 6, "faltam controles de navegação/viewport na barra");
   assert(metrics.addressInputs === 1, "a barra de endereço não possui um único campo");
   assert(metrics.previewPages === 1, "a prévia não expõe a superfície substituta do webview nativo");
+}
+
+function validateWorkspaceSplitMetrics(metrics, label, interaction = null) {
+  const tolerance = 1;
+  assert(metrics.chatHidden === false, `o chat foi desmontado ao abrir ${label}`);
+  assert(
+    metrics.role === "separator" && metrics.ariaOrientation === "vertical",
+    `o divisor de ${label} não expõe semântica vertical acessível`,
+  );
+  assert(
+    metrics.ariaMinimum <= metrics.ariaNow && metrics.ariaNow <= metrics.ariaMaximum,
+    `o valor acessível do divisor de ${label} saiu dos limites`,
+  );
+  assert(
+    metrics.ariaText?.includes("Chat") && metrics.ariaText.includes("área de trabalho"),
+    `o divisor de ${label} não descreve as duas proporções`,
+  );
+  if (metrics.splitterDisplay === "none") {
+    assert(metrics.chatDisplay === "none", `o fallback estreito de ${label} deixou o chat espremido`);
+    assert(
+      Math.abs(metrics.workspace.left - metrics.container.left) <= tolerance &&
+        Math.abs(metrics.workspace.right - metrics.container.right) <= tolerance,
+      `o fallback estreito de ${label} não usa toda a área disponível`,
+    );
+    assert(
+      interaction === null || interaction.supported === false,
+      `o teste tentou arrastar o divisor oculto de ${label}`,
+    );
+    return;
+  }
+  assert(metrics.chatDisplay !== "none", `o chat não permaneceu visível ao lado de ${label}`);
+  assert(
+    Math.abs(metrics.chat.left - metrics.container.left) <= tolerance &&
+      Math.abs(metrics.chat.right - metrics.splitter.left) <= tolerance &&
+      Math.abs(metrics.workspace.left - metrics.splitter.right) <= tolerance &&
+      Math.abs(metrics.workspace.right - metrics.container.right) <= tolerance,
+    `chat, divisor e ${label} não preenchem a área lado a lado`,
+  );
+  assert(
+    Math.abs(metrics.splitter.width - 8) <= tolerance,
+    `o alvo de arraste de ${label} não preservou 8 px`,
+  );
+  assert(
+    metrics.chat.width >= 420 - tolerance && metrics.workspace.width >= 420 - tolerance,
+    `o redimensionamento de ${label} violou a largura mínima dos painéis`,
+  );
+  if (interaction === null) {
+    assert(
+      Math.abs(metrics.chat.width - metrics.workspace.width) <= tolerance,
+      `${label} não abriu inicialmente em uma divisão 50/50`,
+    );
+    return;
+  }
+  assert(interaction.supported === true, `o arraste de ${label} não foi exercitado`);
+  assert(
+    Math.abs(interaction.initial.chat.width - interaction.initial.workspace.width) <= tolerance,
+    `${label} não iniciou em 50/50 antes do arraste`,
+  );
+  assert(
+    interaction.dragged.chat.width >= interaction.initial.chat.width + 40 &&
+      interaction.dragged.workspace.width <= interaction.initial.workspace.width - 40,
+    `arrastar o divisor de ${label} não redistribuiu espaço entre os painéis`,
+  );
+  assert(
+    Math.abs(metrics.chat.width - interaction.dragged.chat.width) <= tolerance &&
+      Math.abs(metrics.workspace.width - interaction.dragged.workspace.width) <= tolerance,
+    `a divisão de ${label} não permaneceu na posição escolhida pelo mouse`,
+  );
+  const persistedRatio = Number(interaction.dragged.persistedRatio);
+  assert(
+    Number.isFinite(persistedRatio) &&
+      interaction.dragged.paneRatio !== null &&
+      Math.abs(persistedRatio - interaction.dragged.paneRatio) <= 0.01,
+    `a proporção escolhida para ${label} não foi persistida`,
+  );
 }
 
 function validateBrowserResponsiveMetrics(metrics, viewport) {
@@ -6819,6 +7386,11 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
   assert(
     metrics.missingSummaryFrames === 0,
     "o scroll rápido removeu resumos reais de atividades montadas",
+  );
+  assert(
+    metrics.visibleEmptyActivityListFrames === 0 &&
+      metrics.maximumVisibleEmptyActivityLists === 0,
+    `a timeline deixou listas visíveis sem conteúdo em ${metrics.visibleEmptyActivityListFrames} frames: ${JSON.stringify(metrics.visibleEmptyActivityListSamples)}`,
   );
   assert(
     metrics.consecutiveSummaryComparisons > 0,
@@ -6924,6 +7496,12 @@ function validateActivityReconciliationMetrics(metrics, viewport) {
   assert(metrics.state === "completed", "a reconciliação paralela não foi concluída");
   assert(metrics.started === 64, `somente ${metrics.started} comandos foram iniciados`);
   assert(metrics.completed === 64, `somente ${metrics.completed} comandos foram concluídos`);
+  assert(metrics.commentaryState === "emitted", "o comentário mais novo não foi emitido");
+  assert(metrics.commentaryCount === 1, "o comentário mais novo foi perdido ou duplicado");
+  assert(
+    metrics.causalOrderPreserved === true,
+    "uma atualização de comando antigo reapareceu depois do comentário mais novo",
+  );
   assert(metrics.turnFailures === 0, "a conclusão fora de ordem derrubou a renderização do turno");
   assert(metrics.totalActivities === 64, "a projeção perdeu comandos concluídos fora de ordem");
   assert(metrics.identityComparisons > 0, "nenhum slot retido foi comparado durante o streaming");
@@ -6937,6 +7515,42 @@ function validateActivityReconciliationMetrics(metrics, viewport) {
   );
   assert(metrics.durationMs < 10_000, "a reconciliação paralela ultrapassou 10 s");
   assert(metrics.horizontalOverflow <= tolerance, "a reconciliação criou overflow horizontal");
+}
+
+function validateActivityShimmerMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `viewport inesperado no shimmer em ${viewport.width}x${viewport.height}`,
+  );
+  assert(
+    metrics.activeDurationMs >= 700 && metrics.activeDurationMs <= 1600,
+    `o pulso visual durou ${metrics.activeDurationMs.toFixed(1)} ms em vez de cerca de 1 s`,
+  );
+  assert(
+    metrics.cadenceMs >= 3200 && metrics.cadenceMs <= 4800,
+    `a cadência visual foi ${metrics.cadenceMs.toFixed(1)} ms em vez de cerca de 4 s`,
+  );
+  assert(metrics.activeAnimation.duration === "1s", "a animação visual não dura exatamente 1 s");
+  assert(
+    metrics.activeAnimation.iterationCount === "1",
+    "o shimmer voltou a executar em loop infinito",
+  );
+  assert(
+    metrics.activeAnimation.name === "activity-reflection-sweep",
+    "a camada do shimmer usa uma animação inesperada",
+  );
+  assert(
+    metrics.activeAnimation.timingFunction.includes("steps(48"),
+    "o shimmer perdeu a progressão oficial em 48 passos",
+  );
+  assert(
+    metrics.inactiveAnimationName === "none",
+    "a animação permaneceu presa no quadro final depois do pulso",
+  );
+  assert(metrics.activeTargets === 1, "o segundo pulso não ficou restrito à atividade em execução");
+  assert(metrics.titleText.length > 0, "o título animado ficou vazio");
+  assert(metrics.horizontalOverflow <= tolerance, "o shimmer criou overflow horizontal");
 }
 
 function validateTimelineExtremeFilesMetrics(metrics, viewport) {

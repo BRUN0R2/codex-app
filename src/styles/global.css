@@ -1615,6 +1615,67 @@ pre {
   margin-top: var(--app-titlebar-height);
 }
 
+.main-panel-content.workspace-visible {
+  display: grid;
+  grid-template-columns:
+    minmax(0, var(--workspace-chat-pane-width, calc((100% - 8px) / 2)))
+    8px
+    minmax(0, 1fr);
+}
+
+.main-panel-content.workspace-visible > .chat-page {
+  grid-column: 1;
+}
+
+.workspace-splitter {
+  position: relative;
+  z-index: 18;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  grid-column: 2;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.workspace-splitter::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: var(--color-token-border);
+  content: "";
+  transform: translateX(-50%);
+  transition: width 120ms ease, background-color 120ms ease;
+}
+
+.workspace-splitter:hover::before,
+.workspace-splitter:focus-visible::before,
+.workspace-split-dragging > .workspace-splitter::before {
+  width: 3px;
+  background: var(--color-token-border-heavy);
+}
+
+.workspace-splitter:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+
+.main-panel-content.workspace-split-dragging,
+.main-panel-content.workspace-split-dragging * {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.main-panel-content.workspace-split-dragging .workspace-active-surface {
+  pointer-events: none;
+}
+
 .automations-view {
   position: relative;
   width: 100%;
@@ -3810,7 +3871,6 @@ pre {
   inset: 0;
   width: 100%;
   overflow: hidden;
-  animation: activity-reflection-sweep 2s linear 600ms infinite;
   color: var(--color-token-text-primary);
   mask-image: linear-gradient(
     90deg,
@@ -3834,9 +3894,16 @@ pre {
 }
 
 .activity-title-highlight {
-  animation: activity-reflection-text 2s linear 600ms infinite;
   transform: translate3d(50%, 0, 0);
   will-change: transform;
+}
+
+.activity-title.is-shimmer-active .activity-title-sweep {
+  animation: activity-reflection-sweep 1s steps(48, end) 1;
+}
+
+.activity-title.is-shimmer-active .activity-title-highlight {
+  animation: activity-reflection-text 1s steps(48, end) 1;
 }
 
 .activity-elapsed {
@@ -4433,21 +4500,13 @@ pre {
 }
 
 @keyframes activity-reflection-sweep {
-  0% {
-    transform: translate3d(-50%, 0, 0);
-    animation-timing-function: steps(48, end);
-  }
-  25%,
-  100% { transform: translate3d(125%, 0, 0); }
+  from { transform: translate3d(-50%, 0, 0); }
+  to { transform: translate3d(125%, 0, 0); }
 }
 
 @keyframes activity-reflection-text {
-  0% {
-    transform: translate3d(50%, 0, 0);
-    animation-timing-function: steps(48, end);
-  }
-  25%,
-  100% { transform: translate3d(-125%, 0, 0); }
+  from { transform: translate3d(50%, 0, 0); }
+  to { transform: translate3d(-125%, 0, 0); }
 }
 
 @keyframes spin {
@@ -5010,6 +5069,32 @@ pre {
   flex-direction: column;
   overflow: hidden;
   background: var(--gray-900);
+  container-name: workspace-panel;
+  container-type: inline-size;
+}
+
+.main-panel-content.workspace-visible > .workspace-panel {
+  width: auto;
+  height: 100%;
+  grid-column: 3;
+  flex: none;
+}
+
+@container main-panel (max-width: 847px) {
+  .main-panel-content.workspace-visible {
+    display: flex;
+  }
+
+  .main-panel-content.workspace-visible > .chat-page,
+  .main-panel-content.workspace-visible > .workspace-splitter {
+    display: none;
+  }
+
+  .main-panel-content.workspace-visible > .workspace-panel {
+    width: 100%;
+    height: auto;
+    flex: 1;
+  }
 }
 
 .workspace-tab-bar {
@@ -5681,7 +5766,7 @@ pre {
   border-radius: 0;
 }
 
-@container main-panel (max-width: 560px) {
+@container workspace-panel (max-width: 560px) {
   .workspace-tab-bar {
     height: 38px;
     padding-inline: 6px;
@@ -5733,6 +5818,24 @@ pre {
   .browser-responsive-toolbar input {
     width: 58px;
     padding-inline: 5px;
+  }
+}
+
+@container workspace-panel (max-width: 460px) {
+  .browser-responsive-toolbar strong {
+    display: none;
+  }
+
+  .browser-responsive-toolbar select {
+    width: 104px;
+  }
+
+  .browser-responsive-toolbar select[aria-label="Escala do viewport"] {
+    width: 68px;
+  }
+
+  .browser-responsive-toolbar input {
+    width: 54px;
   }
 }
 

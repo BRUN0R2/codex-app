@@ -655,6 +655,11 @@ const PREVIEW_CONTEXT_THREAD = {
               '25:       "       continues */",',
               "26:     );",
               "27:   });",
+              ...Array.from(
+                { length: 48 },
+                (_, index) =>
+                  `${28 + index}:   const checkpoint${index} = highlighter.render(document, "src/fixture-${index}.ts", ${index});`,
+              ),
             ].join("\n"),
           ),
         },
@@ -883,6 +888,9 @@ const PREVIEW_TIMELINE_MAX_FILE_COUNT = 100_000;
 const PREVIEW_ACTIVITY_RECONCILIATION_COMMAND_COUNT = 64;
 const PREVIEW_ACTIVITY_RECONCILIATION_COMMAND_ID =
   "fc_0dcf3068ac8a016b016a8d7160898c87d28d89439526a8ea4b";
+const PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_ID = "activity-reconciliation-newer-commentary";
+const PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_TEXT =
+  "Mensagem mais recente preservada depois dos comandos antigos.";
 
 function previewTimelineStressSource(index: number): string {
   return Array.from(
@@ -1192,12 +1200,6 @@ const PREVIEW_ACTIVITY_RECONCILIATION_THREAD = {
               text: "Execute comandos paralelos e preserve cada atividade durante conclusões fora de ordem.",
             },
           ],
-        },
-        {
-          type: "agentMessage",
-          id: "activity-reconciliation-commentary",
-          text: "Executando comandos paralelos com conclusões fora de ordem.",
-          phase: "commentary",
         },
       ],
     },
@@ -1725,8 +1727,15 @@ function schedulePreviewActivityReconciliation(): void {
     ...commands.filter((_, index) => index % 2 === 0).reverse(),
     ...commands.filter((_, index) => index % 2 === 1).reverse(),
   ];
+  const newerCommentary = {
+    type: "agentMessage" as const,
+    id: PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_ID,
+    text: PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_TEXT,
+    phase: "commentary" as const,
+  };
   let warmupFrames = 6;
   let started = 0;
+  let commentaryEmitted = false;
   let completed = 0;
   let identityComparisons = 0;
   let identityChanges = 0;
@@ -1792,6 +1801,20 @@ function schedulePreviewActivityReconciliation(): void {
         }
         started += 1;
         setMetric("started", String(started));
+        continue;
+      }
+      if (!commentaryEmitted) {
+        if (
+          !emitBrowserPreviewRuntimeEvent("engine://notification", {
+            method: "item.completed",
+            params: { threadId, turnId, item: newerCommentary },
+          })
+        ) {
+          requestAnimationFrame(publishFrame);
+          return;
+        }
+        commentaryEmitted = true;
+        setMetric("commentary", "emitted");
         continue;
       }
       if (completed < completionOrder.length) {

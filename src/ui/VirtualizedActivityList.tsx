@@ -13,6 +13,7 @@ import {
 import {
   type ActivityMeasurementVersion,
   includeRetainedActivityAnchor,
+  isActivityListNearViewport,
   isCurrentActivityMeasurement,
   overscanActivityVirtualRange,
   resolveActivityViewport,
@@ -212,9 +213,24 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
     const viewportRect = viewport.element.getBoundingClientRect();
     const listRect = listElement.getBoundingClientRect();
     listContentTop = viewport.scrollTop + listRect.top - viewportRect.top;
-    const margin = viewport.size * ACTIVITY_INTERSECTION_OVERSCAN_VIEWPORTS;
+    synchronizeCachedIntersection(viewport, physicalTotalSize());
+  }
+
+  function synchronizeCachedIntersection(
+    viewport: NonNullable<ReturnType<typeof context.viewport>>,
+    listSize: number,
+  ): void {
+    if (listContentTop === undefined) {
+      return;
+    }
     setNearViewport(
-      listRect.bottom >= viewportRect.top - margin && listRect.top <= viewportRect.bottom + margin,
+      isActivityListNearViewport({
+        listSize,
+        listTop: listContentTop,
+        overscanViewports: ACTIVITY_INTERSECTION_OVERSCAN_VIEWPORTS,
+        scrollTop: viewport.scrollTop,
+        viewportSize: viewport.size,
+      }),
     );
   }
 
@@ -468,12 +484,8 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
       return;
     }
     intersectionObserver = new IntersectionObserver(
-      (entries) => {
-        const entry = entries[0];
-        if (entry !== undefined) {
-          setNearViewport(entry.isIntersecting);
-          scheduleGeometrySynchronization();
-        }
+      () => {
+        scheduleGeometrySynchronization();
       },
       {
         root: viewport.element,
@@ -500,6 +512,20 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
     context.layoutRevision();
     context.layoutSignature();
     scheduleGeometrySynchronization();
+  });
+
+  createEffect(() => {
+    const viewport = context.viewport();
+    const listSize = physicalTotalSize();
+    if (viewport === null || listElement === undefined) {
+      setNearViewport(false);
+      return;
+    }
+    if (listContentTop === undefined) {
+      scheduleGeometrySynchronization();
+      return;
+    }
+    synchronizeCachedIntersection(viewport, listSize);
   });
 
   return (

@@ -1129,19 +1129,26 @@ export function createAppController(): AppController {
         return;
       case "item.started":
       case "item.completed":
+        {
+          const item = notification.params.item;
+          const materializeInThread =
+            notification.method === "item.completed" || isTimelineVisibleItem(item);
+          if (materializeInThread) {
+            updateCachedThread(notification.params.threadId, (thread) =>
+              applyTurnItem(thread, notification.params.turnId, item),
+            );
+            setCurrentThread((current) =>
+              current?.id === notification.params.threadId
+                ? applyTurnItem(current, notification.params.turnId, item)
+                : current,
+            );
+          }
+        }
         if (notification.method === "item.completed") {
           streamDeltas.releaseItem(
             notification.params.threadId,
             notification.params.turnId,
             notification.params.item.id,
-          );
-          updateCachedThread(notification.params.threadId, (thread) =>
-            applyTurnItem(thread, notification.params.turnId, notification.params.item),
-          );
-          setCurrentThread((current) =>
-            current?.id === notification.params.threadId
-              ? applyTurnItem(current, notification.params.turnId, notification.params.item)
-              : current,
           );
         }
         updateThreadRuntime(notification.params.threadId, (runtime) => {

@@ -251,6 +251,44 @@ describe("thread runtime reducer", () => {
     expect(turns.at(0)?.createdAt).toBe(1);
   });
 
+  it("keeps a running command in its causal slot before newer commentary", () => {
+    const command = backgroundCommand();
+    const baseThread = threadFixture("inProgress");
+    const baseTurn = baseThread.turns.at(0);
+    if (!baseTurn) {
+      throw new Error("Expected the thread fixture to contain a turn");
+    }
+    const commentary = {
+      type: "agentMessage" as const,
+      id: "commentary-newer",
+      text: "Mensagem mais recente",
+      phase: "commentary" as const,
+    };
+    const thread: CodexThread = {
+      ...baseThread,
+      turns: [
+        {
+          ...baseTurn,
+          items: [command, commentary],
+        },
+      ],
+    };
+    const liveCommand = {
+      ...command,
+      liveOutput: { stdout: "still available\n", stderr: "", truncated: false },
+    };
+
+    const turns = mergeRuntimeThreadItems(
+      thread,
+      readPersistedVisibleTurns(newTurnCache(), thread),
+      overlays("turn-a", [liveCommand]),
+      "turn-a",
+    );
+
+    expect(turns.at(0)?.items.map((item) => item.id)).toEqual([command.id, commentary.id]);
+    expect(turns.at(0)?.items[0]).toEqual(liveCommand);
+  });
+
   it("keeps an older background command attached to its owning turn", () => {
     const oldCommand = {
       ...backgroundCommand(),

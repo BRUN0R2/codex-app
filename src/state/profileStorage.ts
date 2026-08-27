@@ -8,4 +8,5 @@ export const PROFILE_STORAGE_KEYS = {
   productFlow: "codex-desktop.profile-v2.product-flow",
   projects: "codex-desktop.profile-v2.projects",
   projectSidebar: "codex-desktop.profile-v2.project-sidebar",
+  workspaceSplitRatio: "codex-desktop.profile-v2.workspace-split-ratio",
 } as const;

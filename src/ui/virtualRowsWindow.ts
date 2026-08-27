@@ -18,6 +18,44 @@ export interface VirtualRowsRenderResult {
   readonly retained: number;
 }
 
+export function createFixedVirtualRowsCanvas(input: {
+  readonly className: string;
+  readonly firstRowTop: number;
+  readonly rowHeight: number;
+  readonly rowMarkup: string;
+  readonly totalHeight: number;
+}): VirtualRowsCanvas {
+  if (!Number.isFinite(input.firstRowTop) || input.firstRowTop < 0) {
+    throw new Error("A virtual row canvas requires a non-negative finite first-row offset.");
+  }
+  if (!Number.isFinite(input.rowHeight) || input.rowHeight <= 0) {
+    throw new Error("A virtual row canvas requires a positive finite row height.");
+  }
+  if (!Number.isFinite(input.totalHeight) || input.totalHeight < 0) {
+    throw new Error("A virtual row canvas requires a non-negative finite total height.");
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = input.rowMarkup;
+  const rows = [...template.content.children];
+  const canvas = document.createElement("div");
+  canvas.className = input.className;
+  canvas.setAttribute("role", VIRTUAL_ROWS_CANVAS_ROLE);
+  canvas.style.height = `${input.totalHeight}px`;
+
+  for (const [index, candidate] of rows.entries()) {
+    if (
+      !(candidate instanceof HTMLDivElement) ||
+      candidate.getAttribute("role") !== VIRTUAL_ROW_ROLE
+    ) {
+      throw new Error(`A virtual row template contains an invalid row at index ${index}.`);
+    }
+    candidate.style.top = `${Math.round(input.firstRowTop + index * input.rowHeight)}px`;
+  }
+  canvas.append(template.content);
+  return canvas;
+}
+
 const canvasStates = new WeakMap<VirtualRowsCanvas, VirtualRowsCanvasState>();
 const activityRootByCanvas = new WeakMap<VirtualRowsCanvas, HTMLElement>();
 const canvasesByActivityRoot = new WeakMap<HTMLElement, Set<VirtualRowsCanvas>>();
@@ -30,7 +68,7 @@ export class VirtualRowsWindow {
   readonly #presentations: VirtualRowsCanvas[];
   readonly #rowBlueprints: ReadonlyMap<string, VirtualRowsRow>;
   readonly #rowKeys: readonly string[];
-  readonly #style: string | null;
+  readonly #height: string;
   readonly #variant: string;
 
   constructor(input: {
@@ -46,7 +84,10 @@ export class VirtualRowsWindow {
     this.#presentations = [input.template];
     this.#rowBlueprints = readRowsByKey(input.template, "template");
     this.#rowKeys = [...this.#rowBlueprints.keys()];
-    this.#style = input.template.getAttribute("style");
+    this.#height = input.template.style.height;
+    if (this.#height.length === 0) {
+      throw new Error("A virtual row window requires an explicit canvas height.");
+    }
     this.#variant = input.variant;
   }
 
@@ -126,6 +167,11 @@ export class VirtualRowsWindow {
     for (const key of this.#rowKeys) {
       const existing = currentRows.get(key);
       if (existing?.parentElement === canvas) {
+        const blueprint = this.#rowBlueprints.get(key);
+        if (blueprint === undefined) {
+          throw new Error(`A virtual row window lost blueprint ${key}.`);
+        }
+        synchronizeVirtualRowPosition(existing, blueprint);
         if (pendingRows !== null) {
           canvas.insertBefore(pendingRows, existing);
           pendingRows = null;
@@ -141,7 +187,7 @@ export class VirtualRowsWindow {
         throw new Error(`A virtual row window lost blueprint ${key}.`);
       }
       pendingRows ??= document.createDocumentFragment();
-      pendingRows.appendChild(blueprint.cloneNode(true));
+      pendingRows.appendChild(cloneVirtualRow(blueprint));
       added += 1;
     }
     if (pendingRows !== null) {
@@ -159,7 +205,7 @@ export class VirtualRowsWindow {
       if (blueprint === undefined) {
         throw new Error(`A virtual row window lost blueprint ${key}.`);
       }
-      fragment.appendChild(blueprint.cloneNode(true));
+      fragment.appendChild(cloneVirtualRow(blueprint));
     }
     presentation.appendChild(fragment);
     return presentation;
@@ -181,16 +227,32 @@ export class VirtualRowsWindow {
     if (canvas.getAttribute("role") !== VIRTUAL_ROWS_CANVAS_ROLE) {
       canvas.setAttribute("role", VIRTUAL_ROWS_CANVAS_ROLE);
     }
-    if (this.#style === null) {
-      canvas.removeAttribute("style");
-    } else if (canvas.getAttribute("style") !== this.#style) {
-      canvas.setAttribute("style", this.#style);
+    if (canvas.style.height !== this.#height) {
+      canvas.style.height = this.#height;
     }
   }
 
   #takePresentation(): VirtualRowsCanvas {
     return this.#presentations.pop() ?? this.#createPresentation();
   }
+}
+
+function cloneVirtualRow(blueprint: VirtualRowsRow): VirtualRowsRow {
+  const clone = blueprint.cloneNode(true);
+  if (!(clone instanceof HTMLDivElement)) {
+    throw new Error("A virtual row blueprint produced an invalid clone.");
+  }
+  clone.removeAttribute("style");
+  synchronizeVirtualRowPosition(clone, blueprint);
+  return clone;
+}
+
+function synchronizeVirtualRowPosition(row: VirtualRowsRow, blueprint: VirtualRowsRow): void {
+  const top = blueprint.style.top;
+  if (top.length === 0) {
+    throw new Error("A virtual row blueprint is missing its fixed position.");
+  }
+  row.style.top = top;
 }
 
 export function releaseVirtualRowsCanvas(canvas: VirtualRowsCanvas): void {

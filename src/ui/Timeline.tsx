@@ -43,6 +43,7 @@ import {
   createActivityListProjection,
   estimateActivityListEntrySize,
 } from "./activityListProjection";
+import { scheduleCadencedActivityShimmer } from "./activityShimmer";
 import {
   ActivityVirtualizerStore,
   shouldDeferActivityContent,
@@ -312,6 +313,7 @@ export function Timeline(props: {
   const [activityContentDeferred, setActivityContentDeferred] = createSignal(false);
   const [activityMinimalOverscan, setActivityMinimalOverscan] = createSignal(false);
   const [activityLayoutRevision, setActivityLayoutRevision] = createSignal(0);
+  const [activityScrollTop, setActivityScrollTop] = createSignal(0);
   const [clock, setClock] = createSignal(Date.now());
   const [timelineLayoutWidth, setTimelineLayoutWidth] = createSignal(0);
   const timelineSessions = new TimelineThreadSessionStore(
@@ -330,6 +332,7 @@ export function Timeline(props: {
   const [virtualViewport, setVirtualViewportSignal] =
     createSignal<TimelineVirtualViewport>(virtualViewportBufferA);
   function commitVirtualViewport(offset: number, scrollTop: number, size: number): void {
+    setActivityScrollTop(scrollTop);
     const current = untrack(virtualViewport);
     if (current.offset === offset && current.scrollTop === scrollTop && current.size === size) {
       return;
@@ -369,6 +372,7 @@ export function Timeline(props: {
   const activityViewport = createMemo<TimelineActivityViewportSnapshot | null>((previous) => {
     virtualRevision();
     const viewport = virtualViewport();
+    const scrollTop = activityScrollTop();
     const element = scrollElement;
     if (element === undefined) {
       return null;
@@ -376,10 +380,10 @@ export function Timeline(props: {
     const size = Math.max(1, viewport.size - props.bottomOcclusion);
     return previous !== null &&
       previous.element === element &&
-      previous.scrollTop === viewport.scrollTop &&
+      previous.scrollTop === scrollTop &&
       previous.size === size
       ? previous
-      : { element, scrollTop: viewport.scrollTop, size };
+      : { element, scrollTop, size };
   }, null);
   const activityContext: TimelineActivityContextValue = {
     preserveVisualAnchor: (anchor) => {
@@ -1688,6 +1692,7 @@ export function Timeline(props: {
       return;
     }
     const handleScroll = () => {
+      setActivityScrollTop(Math.max(0, scrollElement?.scrollTop ?? 0));
       if (!consumeProgrammaticScroll()) {
         pendingUnownedScrollMeasurement = true;
       }
@@ -2775,10 +2780,30 @@ function ActivityHeadline(props: {
   readonly class?: string;
   readonly text: string;
 }) {
+  const [shimmerActive, setShimmerActive] = createSignal(false);
+  let stopShimmer = () => {};
+
+  createEffect(() => {
+    stopShimmer();
+    stopShimmer = () => {};
+    if (
+      props.active !== true ||
+      (typeof window !== "undefined" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches)
+    ) {
+      return;
+    }
+    stopShimmer = scheduleCadencedActivityShimmer(setShimmerActive);
+  });
+  onCleanup(() => stopShimmer());
+
   return (
     <span
       class={props.class ?? "activity-title"}
-      classList={{ "is-running": props.active === true }}
+      classList={{
+        "is-running": props.active === true,
+        "is-shimmer-active": shimmerActive(),
+      }}
     >
       <span class="activity-title-base">{props.text}</span>
       <Show when={props.active === true}>
