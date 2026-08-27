@@ -911,6 +911,9 @@ async function auditViewport(debugPort, viewport, scenario) {
       deviceScaleFactor: 1,
       mobile: false,
     });
+    await client.send("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: "no-preference" }],
+    });
     const loaded = client.waitForEvent("Page.loadEventFired");
     await client.send("Page.navigate", { url: scenario.url });
     await loaded;
@@ -985,6 +988,7 @@ async function waitForPreview(client, readyExpression, scenarioId, timeoutMs = 1
       `({
         title: document.title,
         body: document.body?.innerText?.slice(0, 4000) ?? "",
+        reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
         timelineStressProgress: window.__timelineStressProgress ?? null,
         failures: [...document.querySelectorAll(
           ".bootstrap-failure, .render-failure, .frontend-failure, [role='alert']",
@@ -4101,6 +4105,7 @@ function activeActivityReflectionVisualAuditExpression() {
     }
     return {
       viewport: { width: innerWidth, height: innerHeight },
+      reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches,
       titleText: title.textContent?.trim() ?? null,
       baseText: base.textContent?.trim() ?? null,
       highlightText: highlight.textContent?.trim() ?? null,
@@ -5904,6 +5909,7 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
     `viewport inesperado na reflexão em ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.horizontalOverflow <= tolerance, "a reflexão criou overflow horizontal");
+  assert(metrics.reducedMotion === false, "a auditoria de movimento não normalizou a preferência");
   assert(
     metrics.titleText === metrics.baseText + metrics.highlightText,
     "a camada visual perdeu o texto do título",
