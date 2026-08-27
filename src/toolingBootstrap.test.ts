@@ -13,6 +13,10 @@ const verifyWorkflow = readFileSync(
   new URL("../.github/workflows/verify.yml", import.meta.url),
   "utf8",
 );
+const visualAuditScript = readFileSync(
+  new URL("../scripts/verify-visual-preview.mjs", import.meta.url),
+  "utf8",
+);
 
 describe("tooling bootstrap contract", () => {
   it("prepares bundled tools before benchmarks can invoke Cargo", () => {
@@ -26,5 +30,13 @@ describe("tooling bootstrap contract", () => {
 
   it("does not duplicate push and pull-request checks for feature branches", () => {
     expect(verifyWorkflow).toMatch(/push:\r?\n {4}branches:\r?\n {6}- main/u);
+  });
+
+  it("normalizes native and page motion for deterministic visual checks", () => {
+    expect(visualAuditScript).toContain('"--enable-smooth-scrolling"');
+    expect(visualAuditScript).toContain('"--force-prefers-no-reduced-motion"');
+    expect(visualAuditScript).toContain(
+      'features: [{ name: "prefers-reduced-motion", value: "no-preference" }]',
+    );
   });
 });

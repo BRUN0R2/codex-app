@@ -833,6 +833,8 @@ async function main() {
         "--disable-features=Translate",
         "--disable-renderer-backgrounding",
         "--disable-sync",
+        "--enable-smooth-scrolling",
+        "--force-prefers-no-reduced-motion",
         "--hide-scrollbars",
         "--metrics-recording-only",
         "--no-first-run",
