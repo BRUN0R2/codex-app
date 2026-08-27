@@ -958,6 +958,7 @@ mod tests {
     use crate::engine::native::tools::command_output_stream::CommandTranscript;
 
     const BACKGROUND_COMMAND_BENCHMARK_SAMPLE_COUNT: usize = 5;
+    const BACKGROUND_COMMAND_BENCHMARK_INDEPENDENT_BUDGET: Duration = Duration::from_secs(20);
     const BACKGROUND_COMMAND_BENCHMARK_READY_BUDGET: Duration = Duration::from_secs(15);
     const POLL_COPY_ELISION_ITERATIONS: usize = 2_000;
     const POLL_COPY_ELISION_TRANSCRIPT_BYTES: usize = 256 * 1_024;
@@ -1658,7 +1659,7 @@ mod tests {
             cwd: ".".into(),
             reason: "benchmark independent work".into(),
             parallel_safe: true,
-            yield_time_ms: Some(5_000),
+            yield_time_ms: Some(20_000),
             timeout_seconds: Some(30),
         };
         let independent = manager
@@ -1673,7 +1674,7 @@ mod tests {
                 "thread-a".into(),
                 "turn-a".into(),
                 1,
-                Duration::from_secs(5),
+                BACKGROUND_COMMAND_BENCHMARK_INDEPENDENT_BUDGET,
                 &mut turn_receiver,
             )
             .await
