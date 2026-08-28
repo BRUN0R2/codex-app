@@ -33,7 +33,7 @@
     "verify:benchmarks": "pnpm tools:bootstrap && pnpm measure:streaming && pnpm measure:soak && pnpm measure:diff && pnpm measure:syntax && pnpm measure:command-stream && pnpm measure:background-command && pnpm measure:parallel-commands",
     "verify:encoding": "node scripts/verify-text-encoding.mjs",
     "verify:frontend": "pnpm verify:encoding && pnpm lint && pnpm test:frontend && pnpm verify:benchmarks && pnpm verify:visual",
-    "verify:visual": "pnpm build && node scripts/verify-visual-preview.mjs",
+    "verify:visual": "pnpm build && node --experimental-strip-types scripts/verify-visual-preview.mjs",
     "verify:native": "pnpm tools:bootstrap && pnpm verify:transitive && cargo check --locked --manifest-path src-tauri/Cargo.toml && pnpm format:check && pnpm clippy && pnpm test",
     "verify": "pnpm verify:frontend && pnpm verify:native",
     "verify:transitive": "node scripts/verify-transitive-dependencies.mjs",
