@@ -543,10 +543,25 @@ impl ResponseItem {
         }
     }
 
-    pub fn context_text(role: impl Into<String>, text: String, content_kind: &str) -> Self {
+    pub fn user_content_with_id(stable_seed: &str, content: Vec<ResponseContent>) -> Self {
         Self::Message {
-            id: None,
-            role: role.into(),
+            id: Some(stable_message_id([stable_seed])),
+            role: "user".into(),
+            content,
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    pub fn context_text(role: impl Into<String>, text: String, content_kind: &str) -> Self {
+        let role = role.into();
+        Self::Message {
+            id: Some(stable_message_id([
+                role.as_str(),
+                content_kind,
+                text.as_str(),
+            ])),
+            role,
             content: vec![ResponseContent::InputText { text }],
             phase: None,
             internal_chat_message_metadata_passthrough: Some(
@@ -715,6 +730,15 @@ impl ResponseItem {
             _ => false,
         }
     }
+}
+
+fn stable_message_id<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
+    let namespace = segments
+        .into_iter()
+        .fold(Uuid::NAMESPACE_OID, |namespace, segment| {
+            Uuid::new_v5(&namespace, segment.as_bytes())
+        });
+    format!("msg_{namespace}")
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1812,6 +1836,38 @@ mod tests {
         let encoded = serde_json::to_value(request).expect("request should serialize");
 
         assert!(encoded.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn locally_generated_messages_keep_stable_prefixed_ids() {
+        let first = ResponseItem::user_content_with_id(
+            "client-message-1",
+            vec![ResponseContent::InputText {
+                text: "hello".into(),
+            }],
+        );
+        let retried = ResponseItem::user_content_with_id(
+            "client-message-1",
+            vec![ResponseContent::InputText {
+                text: "hello".into(),
+            }],
+        );
+        let other = ResponseItem::user_content_with_id(
+            "client-message-2",
+            vec![ResponseContent::InputText {
+                text: "hello".into(),
+            }],
+        );
+        let context = ResponseItem::context_text("developer", "context".into(), "context.kind");
+        let rebuilt_context =
+            ResponseItem::context_text("developer", "context".into(), "context.kind");
+
+        assert_eq!(first.id(), retried.id());
+        assert_ne!(first.id(), other.id());
+        assert_eq!(context.id(), rebuilt_context.id());
+        for id in [first.id(), other.id(), context.id()] {
+            assert!(id.is_some_and(|id| id.starts_with("msg_")));
+        }
     }
 
     #[test]

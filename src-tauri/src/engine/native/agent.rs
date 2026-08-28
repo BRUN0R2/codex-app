@@ -218,10 +218,13 @@ pub(super) async fn prepare_user_input(
 
     Ok(PreparedTurn {
         user_item: ThreadItem::UserMessage {
-            id: client_user_message_id,
+            id: client_user_message_id.clone(),
             content: user_content,
         },
-        provider_item: ResponseItem::user_content(provider_content),
+        provider_item: ResponseItem::user_content_with_id(
+            &client_user_message_id,
+            provider_content,
+        ),
         preview: preview.unwrap_or_else(|| "New conversation".into()),
     })
 }
@@ -1714,6 +1717,34 @@ mod tests {
         };
 
         assert!(error.to_string().contains("safe decode limits"));
+    }
+
+    #[tokio::test]
+    async fn prepared_user_input_reuses_the_client_identity_for_provider_retries() {
+        let first = prepare_user_input(
+            "client-message-1".into(),
+            vec![TurnInput::Text("hello".into())],
+        )
+        .await
+        .expect("first input should prepare");
+        let retried = prepare_user_input(
+            "client-message-1".into(),
+            vec![TurnInput::Text("hello".into())],
+        )
+        .await
+        .expect("retried input should prepare");
+
+        assert_eq!(first.provider_item.id(), retried.provider_item.id());
+        assert!(
+            first
+                .provider_item
+                .id()
+                .is_some_and(|id| id.starts_with("msg_"))
+        );
+        assert!(matches!(
+            first.user_item,
+            ThreadItem::UserMessage { id, .. } if id == "client-message-1"
+        ));
     }
 
     #[test]
