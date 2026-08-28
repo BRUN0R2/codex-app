@@ -494,6 +494,10 @@ impl FunctionCallOutputPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "Responses API wire names are input_text, input_image, and input_audio"
+)]
 pub enum FunctionCallOutputContent {
     InputText {
         text: String,
@@ -538,6 +542,7 @@ impl InternalChatMessageMetadataPassthrough {
 }
 
 impl ResponseItem {
+    #[cfg(test)]
     pub fn user_content(content: Vec<ResponseContent>) -> Self {
         Self::Message {
             id: None,
@@ -577,12 +582,40 @@ impl ResponseItem {
         }
     }
 
+    pub fn context_text_with_seed(
+        role: impl Into<String>,
+        text: String,
+        content_kind: &str,
+        stable_seed: &str,
+    ) -> Self {
+        let role = role.into();
+        Self::Message {
+            id: Some(stable_item_id(
+                "msg",
+                [role.as_str(), content_kind, stable_seed, text.as_str()],
+            )),
+            role,
+            content: vec![ResponseContent::InputText { text }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    turn_id: None,
+                    content_item_kinds: Some(vec![content_kind.into()]),
+                },
+            ),
+        }
+    }
+
     pub fn function_output(call_id: String, output: String) -> Self {
+        Self::function_output_payload(call_id, FunctionCallOutputPayload::Text(output))
+    }
+
+    pub fn function_output_payload(call_id: String, output: FunctionCallOutputPayload) -> Self {
         let id = stable_item_id("fco", [call_id.as_str()]);
         Self::FunctionCallOutput {
             id: Some(id),
             call_id,
-            output: FunctionCallOutputPayload::Text(output),
+            output,
         }
     }
 

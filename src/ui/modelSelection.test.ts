@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import type { CodexModel } from "../contracts/types";
 import {
-  modelIsRuntimeCompatible,
   reasoningEffortIsRuntimeCompatible,
   selectRuntimeCompatibleModel,
   selectRuntimeCompatibleReasoningEffort,
@@ -19,18 +18,19 @@ describe("model selection", () => {
     );
   });
 
-  it("reconciles a stale Code Mode selection with the compatible default", () => {
-    const unavailable = modelFixture({
+  it("keeps Code Mode models selectable while multi-agent execution is unavailable", () => {
+    const codeMode = modelFixture({
       id: "code-mode-only",
       model: "code-mode-only",
-      unsupportedRuntimeCapabilities: ["codeMode", "multiAgent"],
+      unsupportedRuntimeCapabilities: ["multiAgent"],
+      unsupportedReasoningEfforts: ["ultra"],
     });
     const fallback = modelFixture({ id: "direct", isDefault: true, model: "direct" });
 
-    expect(modelIsRuntimeCompatible(unavailable)).toBe(false);
-    expect(
-      selectRuntimeCompatibleModel([unavailable, fallback], unavailable.id, unavailable.id),
-    ).toBe(fallback);
+    expect(selectRuntimeCompatibleModel([codeMode, fallback], codeMode.id, fallback.id)).toBe(
+      codeMode,
+    );
+    expect(selectRuntimeCompatibleReasoningEffort(codeMode, "ultra")).toBe("max");
   });
 
   it("falls back from Ultra without affecting supported reasoning efforts", () => {

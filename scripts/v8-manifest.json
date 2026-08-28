@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "version": "150.4.0",
+  "releaseBaseUrl": "https://github.com/openai/codex/releases/download/rusty-v8-v150.4.0",
+  "targets": {
+    "x86_64-pc-windows-msvc": {
+      "archiveAssetName": "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz",
+      "archiveSha256": "732ec5da4243aa166799780c8519a5eea6f32f6e47657a323342794dc3c239d6",
+      "bindingAssetName": "src_binding_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.rs",
+      "bindingSha256": "dabf78ba1faac127660db9862b1d0354175c71b8db2d4fcb5bacbd9c93576b16"
+    },
+    "aarch64-pc-windows-msvc": {
+      "archiveAssetName": "rusty_v8_ptrcomp_sandbox_release_aarch64-pc-windows-msvc.lib.gz",
+      "archiveSha256": "54722842af36b74248c403ff531254efac6ff65d281198bab0c6350fc1188ad4",
+      "bindingAssetName": "src_binding_ptrcomp_sandbox_release_aarch64-pc-windows-msvc.rs",
+      "bindingSha256": "dabf78ba1faac127660db9862b1d0354175c71b8db2d4fcb5bacbd9c93576b16"
+    }
+  }
+}

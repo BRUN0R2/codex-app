@@ -44,7 +44,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 19;
+  readonly schemaVersion: 20;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -165,7 +165,7 @@ export interface ModelContextWindow {
   readonly maximumTokens: number | null;
 }
 
-export type ModelRuntimeCapability = "codeMode" | "multiAgent";
+export type ModelRuntimeCapability = "multiAgent";
 
 export type ModelContextWindowPreference = "default" | "maximum";
 

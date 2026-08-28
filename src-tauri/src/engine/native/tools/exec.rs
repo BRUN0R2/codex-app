@@ -483,45 +483,40 @@ mod tests {
             .await
             .expect("workspace should canonicalize");
         let args = command_args(
-            "[Console]::Out.WriteLine('before-cancel'); Start-Sleep -Seconds 5",
+            "[Console]::Out.WriteLine('before-cancel'); [Console]::Out.Flush(); Start-Sleep -Seconds 30",
             30,
         );
         let transcript = CommandTranscript::default();
         let emitter = CommandOutputEmitter::without_notifications(transcript.clone());
         let (cancellation, mut receiver) = watch::channel(false);
-        let cancellation_transcript = transcript.clone();
-        tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-            let mut revision = 0;
-            loop {
-                let snapshot = cancellation_transcript
-                    .snapshot_after(
-                        revision,
-                        deadline.saturating_duration_since(tokio::time::Instant::now()),
-                    )
-                    .await;
-                if snapshot.live_output.stdout.contains("before-cancel") {
-                    break;
-                }
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "command should publish its sentinel before cancellation"
-                );
-                revision = snapshot.revision;
-            }
-            cancellation.send_replace(true);
-        });
-
-        let output = execute_command(
+        let ripgrep = Ripgrep::for_project_tests();
+        let command = execute_command(
             &canonical_workspace,
             &args,
-            &Ripgrep::for_project_tests(),
+            &ripgrep,
             emitter,
             &mut receiver,
-        )
-        .await
-        .expect("cancelled command should return its captured output");
-
+        );
+        tokio::pin!(command);
+        let mut revision = 0;
+        loop {
+            let snapshot = tokio::select! {
+                result = &mut command => {
+                    result.expect("command should remain active until cancellation");
+                    panic!("command completed before publishing its flushed sentinel");
+                }
+                snapshot = transcript.snapshot_after(revision, Duration::from_secs(30)) => snapshot,
+            };
+            if snapshot.live_output.stdout.contains("before-cancel") {
+                break;
+            }
+            revision = snapshot.revision;
+        }
+        cancellation.send_replace(true);
+        let output = command
+            .await
+            .expect("cancelled command should return its captured output");
+        drop(cancellation);
         assert!(matches!(output.termination, CommandTermination::Cancelled));
         assert!(read_file(output.stdout).contains("before-cancel"));
         assert!(

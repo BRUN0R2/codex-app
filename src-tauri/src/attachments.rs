@@ -29,6 +29,33 @@ pub(crate) enum ImageContentError {
     InvalidOrUnsafeData,
 }
 
+#[derive(Debug)]
+pub(crate) struct ValidatedImageContent {
+    bytes: Vec<u8>,
+    media_type: &'static str,
+}
+
+impl ValidatedImageContent {
+    pub(crate) fn decode(bytes: Vec<u8>) -> Result<Self, ImageContentError> {
+        let media_type = validate_image_content(&bytes)?;
+        Ok(Self { bytes, media_type })
+    }
+
+    pub(crate) fn data_url(&self) -> String {
+        image_data_url(self.media_type, &self.bytes)
+    }
+
+    fn extension(&self) -> &'static str {
+        match self.media_type {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            _ => unreachable!("validated images always use a supported media type"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AttachmentKind {
@@ -184,6 +211,18 @@ pub(crate) async fn persist_attachment(
         .map_err(|error| AppError::FileSystem(error.to_string()))?
         .join(ATTACHMENT_DIRECTORY);
     persist_attachment_at(&attachment_directory, source_path).await
+}
+
+pub(crate) async fn persist_image_snapshot(
+    app: &AppHandle,
+    image: &ValidatedImageContent,
+) -> Result<PathBuf, AppError> {
+    let attachment_directory = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| AppError::FileSystem(error.to_string()))?
+        .join(ATTACHMENT_DIRECTORY);
+    persist_image_snapshot_at(&attachment_directory, image).await
 }
 
 #[tauri::command]
@@ -368,6 +407,14 @@ async fn persist_attachment_bytes(
     Ok(path)
 }
 
+async fn persist_image_snapshot_at(
+    attachment_directory: &Path,
+    image: &ValidatedImageContent,
+) -> Result<PathBuf, AppError> {
+    let name = format!("viewed-{}.{}", Uuid::now_v7(), image.extension());
+    persist_attachment_bytes(attachment_directory, &name, &image.bytes).await
+}
+
 fn media_type_from_extension(path: &Path) -> Option<&'static str> {
     match path
         .extension()
@@ -484,8 +531,8 @@ mod tests {
     use image::{ImageBuffer, ImageFormat, Rgba};
 
     use super::{
-        ImageContentError, detect_image_format, image_data_url, inspect_path,
-        persist_attachment_at, validate_image_content,
+        ImageContentError, ValidatedImageContent, detect_image_format, image_data_url,
+        inspect_path, persist_attachment_at, persist_image_snapshot_at, validate_image_content,
     };
 
     fn tiny_png() -> Vec<u8> {
@@ -563,6 +610,25 @@ mod tests {
                 .expect("durable image should remain valid")
                 .kind,
             super::AttachmentKind::Image
+        );
+    }
+
+    #[tokio::test]
+    async fn viewed_image_snapshot_preserves_the_validated_bytes() {
+        let directory = tempfile::tempdir().expect("temporary directory should exist");
+        let bytes = tiny_png();
+        let image =
+            ValidatedImageContent::decode(bytes.clone()).expect("test image should be valid");
+
+        let path = persist_image_snapshot_at(directory.path(), &image)
+            .await
+            .expect("viewed image should be snapshotted");
+
+        assert_eq!(
+            tokio::fs::read(path)
+                .await
+                .expect("viewed image snapshot should remain readable"),
+            bytes
         );
     }
 

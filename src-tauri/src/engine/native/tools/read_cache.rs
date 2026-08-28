@@ -195,7 +195,10 @@ impl ReadToolCacheKey {
             | ToolOperation::WriteFile(_)
             | ToolOperation::ExecCommand(_)
             | ToolOperation::PollCommand(_)
-            | ToolOperation::UpdatePlan { .. } => return None,
+            | ToolOperation::UpdatePlan { .. }
+            | ToolOperation::CodeExec(_)
+            | ToolOperation::CodeWait(_)
+            | ToolOperation::MultiAgent(_) => return None,
         };
         Some(Self {
             workspace: workspace.to_path_buf(),

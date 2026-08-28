@@ -12,10 +12,12 @@ use tokio::sync::{Mutex, RwLock};
 
 use self::client::ProviderClient;
 pub(crate) use self::models::ModelCatalog;
+pub(crate) use self::models::ModelToolMode;
 use super::auth::{AuthSession, ChatGptAuth};
 use crate::engine::AccountPlanType;
 use crate::engine::AccountRateLimitsResponse;
 use crate::engine::AutoTopUpSettingsSnapshot;
+use crate::engine::CodexModel;
 use crate::engine::CreditsSnapshot;
 use crate::engine::ModelListResponse;
 use crate::engine::PlanPriceSnapshot;
@@ -130,6 +132,14 @@ impl ChatGptCodexProvider {
     ) -> Result<SelectedModel, AppError> {
         let catalog = self.catalog(app, auth).await?;
         catalog.select(requested)
+    }
+
+    pub async fn multi_agent_models(
+        &self,
+        app: &AppHandle,
+        auth: &ChatGptAuth,
+    ) -> Result<Vec<CodexModel>, AppError> {
+        Ok(self.catalog(app, auth).await?.multi_agent_models())
     }
 
     pub async fn reconcile_catalog_etag(&self, incoming_etag: &str) {

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::Weak;
 use std::time::{Duration, Instant};
@@ -12,6 +13,9 @@ use super::apply_patch::parser::{ParsedPatch, parse_patch};
 use super::apply_patch::plan::{prepare_patch, preview_changes};
 use super::apply_patch::transaction::{PatchOutcome, commit_patch};
 use super::approval::ApprovalBroker;
+use super::code_mode::{
+    CodeModeSession, ParsedExecSource, ToolDefinition as CodeModeToolDefinition, ToolDelegate,
+};
 use super::file_diff::{line_stats, render_replacement_diff};
 use super::output::OutputSource;
 use super::output_compaction::{
@@ -21,19 +25,22 @@ use super::storage::{MAX_OUTPUT_SEARCH_QUERY_BYTES, NativeStorage};
 use super::stream_notifications::StreamNotificationBatcher;
 use super::text::truncate_utf8;
 use crate::engine::{
-    ActivityStatus, ApprovalDecision, ApprovalPolicy, CommandApprovalRequest, CommandLiveOutput,
-    CommandSource, FileChange, FileChangeKind, ImageDetail, PermissionProfile, PlanStep,
-    PlanStepStatus, SandboxMode, ThreadItem, ToolOutputPresentation,
+    ActivityStatus, ApprovalDecision, ApprovalPolicy, CodexModel, CommandApprovalRequest,
+    CommandLiveOutput, CommandSource, FileChange, FileChangeKind, ImageDetail, PermissionProfile,
+    PlanStep, PlanStepStatus, SandboxMode, ThreadItem, ToolOutputPresentation,
 };
 use crate::error::AppError;
 
 mod browser;
+mod code_mode;
+pub(super) use self::code_mode::{CodeModeToolDelegate, CodeModeToolDelegateContext};
 mod command_output_stream;
 mod command_sessions;
 mod exec;
 pub(super) use self::command_sessions::CommandSessionManager;
 use self::command_sessions::{BackgroundCommandLease, BackgroundCommandStart, CommandStartOutcome};
 mod fs;
+mod multi_agent;
 mod read_cache;
 mod ripgrep;
 mod view_image;
@@ -107,11 +114,15 @@ enum ToolOperation {
         explanation: Option<String>,
         steps: Vec<PlanStep>,
     },
+    CodeExec(ParsedExecSource),
+    CodeWait(CodeModeWaitArgs),
+    MultiAgent(multi_agent::Operation),
 }
 
 #[derive(Debug)]
 pub struct ToolExecutionResult {
     pub provider_output: String,
+    pub provider_content: Option<Vec<super::provider::FunctionCallOutputContent>>,
     pub completed_item: ThreadItem,
     pub display_output: Option<OutputSource>,
     pub background_command: Option<BackgroundCommandLease>,
@@ -132,6 +143,8 @@ pub struct ToolExecutionContext<'a> {
     pub permissions: PermissionProfile,
     pub thread_id: &'a str,
     pub turn_id: &'a str,
+    pub provider_call_id: &'a str,
+    pub agent: &'a super::multi_agent::AgentInvocationContext,
     pub approvals: &'a ApprovalBroker,
     pub storage: &'a NativeStorage,
     pub ripgrep: &'a Ripgrep,
@@ -141,6 +154,9 @@ pub struct ToolExecutionContext<'a> {
     pub supports_image_input: bool,
     pub supports_original_image_detail: bool,
     pub provider_output_budget: ProviderOutputBudget,
+    pub code_mode: Option<&'a CodeModeSession>,
+    pub code_mode_delegate: Option<&'a Arc<dyn ToolDelegate>>,
+    pub code_mode_tools: &'a [CodeModeToolDefinition],
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,6 +249,22 @@ struct UpdatePlanArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CodeModeWaitArgs {
+    cell_id: String,
+    #[serde(default = "default_code_mode_wait_ms")]
+    yield_time_ms: u64,
+    #[serde(default)]
+    max_tokens: Option<usize>,
+    #[serde(default)]
+    terminate: bool,
+}
+
+const fn default_code_mode_wait_ms() -> u64 {
+    super::code_mode::DEFAULT_WAIT_YIELD_TIME_MS
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdatePlanStep {
     step: String,
     status: UpdatePlanStatus,
@@ -278,8 +310,10 @@ impl ToolRegistry {
         permissions: PermissionProfile,
         supports_image_input: bool,
         supports_original_image_detail: bool,
+        multi_agent_models: Option<&[CodexModel]>,
     ) -> Vec<Value> {
-        self.definitions_for(permissions)
+        let mut definitions = self
+            .definitions_for(permissions)
             .iter()
             .filter_map(|definition| {
                 if definition["name"] != "view_image" {
@@ -287,7 +321,65 @@ impl ToolRegistry {
                 }
                 supports_image_input.then(|| view_image::definition(supports_original_image_detail))
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(models) = multi_agent_models {
+            definitions.extend(multi_agent::definitions(models));
+        }
+        definitions
+    }
+
+    pub fn code_mode_definitions(
+        &self,
+        nested_tools: &[CodeModeToolDefinition],
+        code_mode_only: bool,
+    ) -> Vec<Value> {
+        vec![
+            super::code_mode::exec_definition(nested_tools, code_mode_only),
+            super::code_mode::wait_definition(),
+        ]
+    }
+
+    pub fn code_mode_nested_definitions(
+        &self,
+        permissions: PermissionProfile,
+        supports_image_input: bool,
+        supports_original_image_detail: bool,
+    ) -> Vec<CodeModeToolDefinition> {
+        self.definitions_for_model(
+            permissions,
+            supports_image_input,
+            supports_original_image_detail,
+            None,
+        )
+        .into_iter()
+        .filter_map(|definition| {
+            let name = definition.get("name")?.as_str()?.to_string();
+            let description = definition
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let kind = match definition.get("type").and_then(Value::as_str) {
+                Some("function") => super::code_mode::ToolKind::Function,
+                Some("custom") => super::code_mode::ToolKind::Freeform,
+                _ => return None,
+            };
+            let input_schema = matches!(kind, super::code_mode::ToolKind::Function)
+                .then(|| definition.get("parameters").cloned())
+                .flatten();
+            Some(CodeModeToolDefinition {
+                output_schema: Some(code_mode_output_schema(&name)),
+                name,
+                description,
+                kind,
+                input_schema,
+            })
+        })
+        .collect()
+    }
+
+    pub fn multi_agent_definitions(&self, models: &[CodexModel]) -> Vec<Value> {
+        multi_agent::definitions(models)
     }
 
     fn build_definitions() -> Vec<Value> {
@@ -587,13 +679,44 @@ impl ToolRegistry {
                     ToolOperation::UpdatePlan { explanation, steps },
                 )
             }
-            _ => match browser::prepare(name, arguments) {
-                Some(prepared) => {
-                    let (name, description, operation) = prepared?;
-                    (name, description, ToolOperation::Browser(operation))
+            "wait" => {
+                let args: CodeModeWaitArgs = decode_arguments(name, arguments)?;
+                validate_identifier("Code Mode cell id", &args.cell_id)?;
+                if args.yield_time_ms > super::code_mode::MAX_YIELD_TIME_MS {
+                    return Err(AppError::Tool(format!(
+                        "Code Mode wait must not exceed {} milliseconds",
+                        super::code_mode::MAX_YIELD_TIME_MS
+                    )));
                 }
-                None => return Err(AppError::Tool(format!("unknown tool `{name}`"))),
-            },
+                if args
+                    .max_tokens
+                    .is_some_and(|value| value > super::code_mode::MAX_RESPONSE_TOKEN_BUDGET)
+                {
+                    return Err(AppError::Tool(format!(
+                        "Code Mode output budget must not exceed {} tokens",
+                        super::code_mode::MAX_RESPONSE_TOKEN_BUDGET
+                    )));
+                }
+                (
+                    "wait",
+                    format!("Wait for Code Mode cell {}", args.cell_id),
+                    ToolOperation::CodeWait(args),
+                )
+            }
+            _ => {
+                if let Some(prepared) = multi_agent::prepare(name, arguments) {
+                    let (name, description, operation) = prepared?;
+                    (name, description, ToolOperation::MultiAgent(operation))
+                } else {
+                    match browser::prepare(name, arguments) {
+                        Some(prepared) => {
+                            let (name, description, operation) = prepared?;
+                            (name, description, ToolOperation::Browser(operation))
+                        }
+                        None => return Err(AppError::Tool(format!("unknown tool `{name}`"))),
+                    }
+                }
+            }
         };
         Ok(PreparedTool {
             item_id,
@@ -617,6 +740,17 @@ impl ToolRegistry {
             )));
         }
         match name {
+            "exec" => {
+                let parsed = super::code_mode::parse_exec_source(input)
+                    .map_err(|error| AppError::Tool(error.to_string()))?;
+                Ok(PreparedTool {
+                    item_id,
+                    name: "exec",
+                    description: "Run JavaScript in Code Mode".into(),
+                    operation: ToolOperation::CodeExec(parsed),
+                    started_at_ms: OnceLock::new(),
+                })
+            }
             "apply_patch" => {
                 let patch = parse_patch(input)?;
                 let file_count = patch.hunks.len();
@@ -660,6 +794,17 @@ impl PreparedTool {
                     && permissions.sandbox == SandboxMode::DangerFullAccess
                     && permissions.approvals == ApprovalPolicy::Never
             }
+            _ => false,
+        }
+    }
+
+    pub(super) fn invalidates_read_cache(&self, permissions: PermissionProfile) -> bool {
+        match &self.operation {
+            ToolOperation::ApplyPatch(_)
+            | ToolOperation::EditFile(_)
+            | ToolOperation::WriteFile(_)
+            | ToolOperation::PollCommand(_) => true,
+            ToolOperation::ExecCommand(_) => !self.supports_parallel_execution(permissions),
             _ => false,
         }
     }
@@ -709,6 +854,7 @@ impl PreparedTool {
             provider_output: format!(
                 "Duplicate read skipped; the identical result was returned by tool call `{original_call_id}`."
             ),
+            provider_content: None,
             completed_item: self.finish_item(workspace, ActivityStatus::Completed, None, Some(0)),
             display_output: None,
             background_command: None,
@@ -739,9 +885,19 @@ impl PreparedTool {
         context: ToolExecutionContext<'_>,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<ToolExecutionResult, AppError> {
+        if matches!(
+            &self.operation,
+            ToolOperation::CodeExec(_) | ToolOperation::CodeWait(_)
+        ) {
+            return code_mode::execute(self, &context, cancellation).await;
+        }
+        if let ToolOperation::MultiAgent(operation) = &self.operation {
+            return multi_agent::execute(self, operation, &context, cancellation).await;
+        }
         if let ToolOperation::UpdatePlan { explanation, steps } = &self.operation {
             return Ok(ToolExecutionResult {
                 provider_output: "Plan updated.".into(),
+                provider_content: None,
                 completed_item: ThreadItem::Plan {
                     id: self.item_id.clone(),
                     explanation: explanation.clone(),
@@ -953,6 +1109,16 @@ impl PreparedTool {
                     "update_plan must complete before filesystem tool execution".into(),
                 ));
             }
+            ToolOperation::CodeExec(_) | ToolOperation::CodeWait(_) => {
+                return Err(AppError::State(
+                    "Code Mode operation escaped its dedicated executor".into(),
+                ));
+            }
+            ToolOperation::MultiAgent(_) => {
+                return Err(AppError::State(
+                    "multi-agent operation escaped its dedicated executor".into(),
+                ));
+            }
         };
 
         match execution {
@@ -973,6 +1139,7 @@ impl PreparedTool {
                 };
                 Ok(ToolExecutionResult {
                     provider_output: output.provider_output,
+                    provider_content: None,
                     completed_item: self.finish_item(
                         &workspace,
                         output.status,
@@ -987,9 +1154,13 @@ impl PreparedTool {
             Ok(ToolResult::ViewedImage(output)) => {
                 let duration = elapsed_millis(started_at)?;
                 let provider_output = format!("Viewed image at `{}`.", output.display_path);
-                let display_output = json!({ "image_path": &output.source_path }).to_string();
+                let snapshot_path =
+                    crate::attachments::persist_image_snapshot(context.app, &output.image).await?;
+                let display_output =
+                    json!({ "image_path": snapshot_path.to_string_lossy() }).to_string();
                 Ok(ToolExecutionResult {
                     provider_output,
+                    provider_content: None,
                     completed_item: self.finish_item(
                         &workspace,
                         ActivityStatus::Completed,
@@ -999,7 +1170,7 @@ impl PreparedTool {
                     display_output: Some(OutputSource::text(display_output)),
                     background_command: None,
                     visual_context: Some(ToolVisualContext {
-                        image_url: output.data_url,
+                        image_url: output.image.data_url(),
                         detail: output.detail,
                         model_text: None,
                     }),
@@ -1014,6 +1185,7 @@ impl PreparedTool {
                 let session_id = session.lease.session_id().to_owned();
                 Ok(ToolExecutionResult {
                     provider_output: session.provider_output,
+                    provider_content: None,
                     completed_item: ThreadItem::CommandExecution {
                         id: self.item_id.clone(),
                         command: args.command.clone(),
@@ -1034,6 +1206,7 @@ impl PreparedTool {
             }
             Ok(ToolResult::Patch(outcome)) => Ok(ToolExecutionResult {
                 provider_output: outcome.output,
+                provider_content: None,
                 completed_item: ThreadItem::FileChange {
                     id: self.item_id.clone(),
                     changes: outcome.changes,
@@ -1068,6 +1241,7 @@ impl PreparedTool {
         let duration = elapsed_millis(started_at)?;
         Ok(ToolExecutionResult {
             provider_output,
+            provider_content: None,
             completed_item: self.finish_item(
                 workspace,
                 ActivityStatus::Completed,
@@ -1093,6 +1267,7 @@ impl PreparedTool {
             self.finish_item(workspace, output.status, output.exit_code, Some(duration));
         Ok(ToolExecutionResult {
             provider_output: output.provider_output,
+            provider_content: None,
             completed_item,
             display_output: Some(output.source),
             background_command: None,
@@ -1194,6 +1369,7 @@ impl PreparedTool {
             provider_output: display_output
                 .as_ref()
                 .map_or_else(|| output.clone(), OutputSource::provider_output),
+            provider_content: None,
             completed_item: self.finish_item(workspace, status, exit_code, duration_ms),
             display_output,
             background_command: None,
@@ -1216,6 +1392,8 @@ impl PreparedTool {
                 | ToolOperation::ReadOutput(_)
                 | ToolOperation::PollCommand(_)
                 | ToolOperation::ExecCommand(_)
+                | ToolOperation::CodeExec(_)
+                | ToolOperation::CodeWait(_)
         )
     }
 }
@@ -1332,7 +1510,8 @@ fn require_workspace_write(permissions: PermissionProfile) -> Result<(), AppErro
     }
 }
 
-fn function_tool(name: &'static str, description: &'static str, parameters: Value) -> Value {
+fn function_tool(name: &'static str, description: impl Into<String>, parameters: Value) -> Value {
+    let description = description.into();
     json!({
         "type": "function",
         "name": name,
@@ -1340,6 +1519,31 @@ fn function_tool(name: &'static str, description: &'static str, parameters: Valu
         "strict": true,
         "parameters": parameters
     })
+}
+
+fn code_mode_output_schema(name: &str) -> Value {
+    if matches!(name, "browser_screenshot" | "view_image") {
+        json!({
+            "anyOf": [
+                { "type": "string" },
+                {
+                    "type": "object",
+                    "properties": {
+                        "output": { "type": "string" },
+                        "image_url": { "type": "string" },
+                        "detail": {
+                            "type": "string",
+                            "enum": ["auto", "low", "high", "original"]
+                        }
+                    },
+                    "required": ["output", "image_url", "detail"],
+                    "additionalProperties": false
+                }
+            ]
+        })
+    } else {
+        json!({ "type": "string" })
+    }
 }
 
 fn decode_arguments<T: for<'de> Deserialize<'de>>(
@@ -1571,7 +1775,7 @@ mod tests {
     #[test]
     fn model_capabilities_control_the_view_image_contract() {
         let unsupported =
-            ToolRegistry.definitions_for_model(PermissionProfile::read_only(), false, false);
+            ToolRegistry.definitions_for_model(PermissionProfile::read_only(), false, false, None);
         assert!(
             unsupported
                 .iter()
@@ -1579,7 +1783,7 @@ mod tests {
         );
 
         let high_only =
-            ToolRegistry.definitions_for_model(PermissionProfile::read_only(), true, false);
+            ToolRegistry.definitions_for_model(PermissionProfile::read_only(), true, false, None);
         let high_only = high_only
             .iter()
             .find(|definition| definition["name"] == "view_image")
@@ -1591,15 +1795,93 @@ mod tests {
         );
 
         let original =
-            ToolRegistry.definitions_for_model(PermissionProfile::read_only(), true, true);
+            ToolRegistry.definitions_for_model(PermissionProfile::read_only(), true, true, None);
         let original = original
             .iter()
             .find(|definition| definition["name"] == "view_image")
             .expect("image-capable models should receive view_image");
         assert_eq!(
             original["parameters"]["properties"]["detail"]["enum"],
-            serde_json::json!(["high", "original", null])
+            serde_json::json!(["high", "original"])
         );
+        assert_eq!(
+            original["parameters"]["required"],
+            serde_json::json!(["path"])
+        );
+    }
+
+    #[test]
+    fn code_mode_nests_the_permission_filtered_local_contract_without_recursion() {
+        let definitions =
+            ToolRegistry.code_mode_nested_definitions(PermissionProfile::read_only(), true, true);
+        let names = definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(names.contains("read_file"));
+        assert!(names.contains("view_image"));
+        assert!(!names.contains("exec"));
+        assert!(!names.contains("wait"));
+        assert!(!names.contains("exec_command"));
+        assert!(!names.contains("apply_patch"));
+    }
+
+    #[test]
+    fn collaboration_tools_are_direct_only_and_never_nested_in_code_mode() {
+        let direct = ToolRegistry.definitions_for_model(
+            PermissionProfile::workspace_write(),
+            true,
+            true,
+            Some(&[]),
+        );
+        let direct_names = direct
+            .iter()
+            .filter_map(|definition| definition["name"].as_str())
+            .collect::<BTreeSet<_>>();
+        let nested = ToolRegistry.code_mode_nested_definitions(
+            PermissionProfile::workspace_write(),
+            true,
+            true,
+        );
+        let nested_names = nested
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<BTreeSet<_>>();
+
+        for name in [
+            "spawn_agent",
+            "send_message",
+            "followup_task",
+            "interrupt_agent",
+            "list_agents",
+            "wait_agent",
+        ] {
+            assert!(direct_names.contains(name));
+            assert!(!nested_names.contains(name));
+        }
+    }
+
+    #[test]
+    fn code_mode_wait_rejects_budgets_outside_its_advertised_contract() {
+        let registry = ToolRegistry;
+        for arguments in [
+            format!(
+                r#"{{"cell_id":"1","yield_time_ms":{},"max_tokens":null,"terminate":false}}"#,
+                super::super::code_mode::MAX_YIELD_TIME_MS + 1
+            ),
+            format!(
+                r#"{{"cell_id":"1","yield_time_ms":0,"max_tokens":{},"terminate":false}}"#,
+                super::super::code_mode::MAX_RESPONSE_TOKEN_BUDGET + 1
+            ),
+        ] {
+            assert!(
+                registry
+                    .prepare("wait-1".into(), "wait", &arguments)
+                    .is_err(),
+                "out-of-contract wait arguments must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -1863,6 +2145,12 @@ mod tests {
         assert!(!command.supports_parallel_execution(PermissionProfile::workspace_write()));
         assert!(!command.supports_parallel_execution(PermissionProfile::read_only()));
         assert!(!exclusive_command.supports_parallel_execution(PermissionProfile::full_access()));
+        assert!(!read.invalidates_read_cache(PermissionProfile::full_access()));
+        assert!(!search.invalidates_read_cache(PermissionProfile::full_access()));
+        assert!(poll.invalidates_read_cache(PermissionProfile::full_access()));
+        assert!(!command.invalidates_read_cache(PermissionProfile::full_access()));
+        assert!(command.invalidates_read_cache(PermissionProfile::workspace_write()));
+        assert!(exclusive_command.invalidates_read_cache(PermissionProfile::full_access()));
     }
 
     #[test]
@@ -2004,7 +2292,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_function_schemas_require_every_declared_property() {
+    fn function_schemas_follow_their_declared_strictness() {
         for definition in ToolRegistry
             .definitions()
             .iter()
@@ -2013,9 +2301,13 @@ mod tests {
             let name = definition["name"]
                 .as_str()
                 .expect("function tools should have names");
-            assert_eq!(definition["strict"], true, "{name} must use strict mode");
-            assert_strict_object_schema(&definition["parameters"], name);
             assert_provider_schema_keywords(&definition["parameters"], name);
+            if definition["strict"] == true {
+                assert_strict_object_schema(&definition["parameters"], name);
+            } else {
+                assert_eq!(name, "view_image", "only view_image has optional arguments");
+                assert_eq!(definition["strict"], false);
+            }
         }
     }
 

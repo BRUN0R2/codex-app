@@ -9,31 +9,35 @@ use tauri::AppHandle;
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use super::code_mode::ToolDelegate;
 use super::compaction::{CompactionContext, compact_context};
 use super::content_references::strip_content_reference_markers;
 use super::context_window::{
     ContextUsageSnapshot, ContextWindowEvaluation, evaluate_context_window, full_context_usage,
 };
+use super::multi_agent::{
+    AgentInvocationContext, compose_prompt_context as compose_multi_agent_prompt_context,
+};
 use super::output::OutputSource;
 use super::prompt_context::compose_prompt_context;
 use super::provider::{
-    DEFAULT_FUNCTION_NAMESPACE, ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase,
-    ResponseRequest, ResponseRequestSettings, SelectedModel, WebSearchAction,
-    normalize_provider_history,
+    DEFAULT_FUNCTION_NAMESPACE, FunctionCallOutputPayload, ModelToolMode, ResponseContent,
+    ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseRequest, ResponseRequestSettings,
+    SelectedModel, WebSearchAction, normalize_provider_history,
 };
 use super::storage::ProviderHistorySnapshot;
 use super::stream_notifications::StreamNotificationBatcher;
 use super::text::truncate_utf8;
 use super::tools::{
-    MAX_PROVIDER_ITEM_BYTES, PreparedTool, ReadToolCache, ReadToolCacheKey, ToolExecutionContext,
-    ToolExecutionResult, ToolRegistry,
+    CodeModeToolDelegate, CodeModeToolDelegateContext, MAX_PROVIDER_ITEM_BYTES, PreparedTool,
+    ReadToolCache, ReadToolCacheKey, ToolExecutionContext, ToolExecutionResult, ToolRegistry,
 };
 use super::turn_recovery;
 use super::{NativeEngineInner, TurnContinuation};
 use crate::attachments::{AttachmentKind, ImageContentError, inspect_path, validate_image_content};
 use crate::engine::{
-    ActivityStatus, AppConfig, ConversationMode, DiagnosticStream, ImageDetail, ItemNotification,
-    MessagePhase, ModelRerouteReason, ModelReroutedNotification,
+    ActivityStatus, AppConfig, CodexModel, ConversationMode, DiagnosticStream, ImageDetail,
+    ItemNotification, MessagePhase, ModelRerouteReason, ModelReroutedNotification,
     ModelSafetyBufferingUpdatedNotification, ModelVerificationNotification, PermissionProfile,
     StreamDelta, ThreadItem, TurnInput, WebSearchMode,
 };
@@ -71,6 +75,7 @@ pub(super) struct TurnRun {
     pub mode: ConversationMode,
     pub model: SelectedModel,
     pub config: AppConfig,
+    pub selected_reasoning_effort: Option<crate::engine::ReasoningEffort>,
     pub provider_reasoning_effort: Option<crate::engine::ReasoningEffort>,
     pub service_tier: Option<String>,
     pub timezone: String,
@@ -235,18 +240,51 @@ pub(super) async fn run_turn(
     mut run: TurnRun,
 ) -> Result<RunCompletion, AppError> {
     let base_instructions = run.model.instructions(run.config.personality);
+    let multi_agent_context = if run.model.multi_agent_version().is_supported() {
+        let identity = inner
+            .multi_agents
+            .identity(&inner.storage, &run.thread_id)
+            .await?;
+        Some(compose_multi_agent_prompt_context(
+            &identity,
+            &run.model,
+            run.selected_reasoning_effort,
+        ))
+    } else {
+        None
+    };
     let prompt_context = compose_prompt_context(
         &run.workspace,
         &run.config,
         run.mode,
         &run.model,
+        multi_agent_context.as_ref(),
         &run.timezone,
         run.timezone_offset_min,
     )
     .await?;
     let verbosity = run.model.select_verbosity(run.config.model_verbosity)?;
+    let agent_invocation = AgentInvocationContext {
+        thread_id: run.thread_id.clone(),
+        model: run.model.id().to_string(),
+        reasoning_effort: run.selected_reasoning_effort,
+        service_tier: run.service_tier.clone(),
+        timezone: run.timezone.clone(),
+        timezone_offset_min: run.timezone_offset_min,
+    };
     let mut provider_state = TurnProviderState::default();
-    let tools = provider_tools(&inner, &run.config, run.mode, &run.model);
+    let multi_agent_models = if run.model.multi_agent_version().is_supported() {
+        Some(inner.provider.multi_agent_models(&app, &inner.auth).await?)
+    } else {
+        None
+    };
+    let tools = provider_tools(
+        &inner,
+        &run.config,
+        run.mode,
+        &run.model,
+        multi_agent_models.as_deref(),
+    );
     let mut history = load_prompt_history(&inner, &app, &run.thread_id).await?;
     let mut context_snapshot = inner
         .storage
@@ -263,6 +301,39 @@ pub(super) async fn run_turn(
         run.thread_id.clone(),
         run.turn_id.clone(),
     );
+    let code_mode_tools =
+        if local_tools_enabled(run.mode) && run.model.tool_mode() != ModelToolMode::Direct {
+            inner.tools.code_mode_nested_definitions(
+                run.config.permission_profile,
+                run.model.supports_image_input(),
+                run.model.supports_image_detail_original(),
+            )
+        } else {
+            Vec::new()
+        };
+    let code_mode_enabled =
+        local_tools_enabled(run.mode) && run.model.tool_mode() != ModelToolMode::Direct;
+    let code_mode_session = if code_mode_enabled {
+        Some(inner.code_mode_sessions.session(&run.thread_id).await)
+    } else {
+        None
+    };
+    let code_mode_delegate: Option<Arc<dyn ToolDelegate>> = code_mode_enabled.then(|| {
+        Arc::new(CodeModeToolDelegate::new(
+            Arc::clone(&inner),
+            app.clone(),
+            CodeModeToolDelegateContext {
+                workspace: run.workspace.clone(),
+                permissions: run.config.permission_profile,
+                thread_id: run.thread_id.clone(),
+                turn_id: run.turn_id.clone(),
+                supports_image_input: run.model.supports_image_input(),
+                supports_original_image_detail: run.model.supports_image_detail_original(),
+                provider_output_budget: run.model.provider_output_budget(),
+                agent: agent_invocation.clone(),
+            },
+        )) as Arc<dyn ToolDelegate>
+    });
 
     let result = async {
         'sampling: loop {
@@ -685,6 +756,8 @@ pub(super) async fn run_turn(
                                 permissions: run.config.permission_profile,
                                 thread_id,
                                 turn_id,
+                                provider_call_id: &pending.call_id,
+                                agent: &agent_invocation,
                                 approvals: &inner.approvals,
                                 storage: &inner.storage,
                                 ripgrep: &inner.ripgrep,
@@ -696,6 +769,9 @@ pub(super) async fn run_turn(
                                     .model
                                     .supports_image_detail_original(),
                                 provider_output_budget: run.model.provider_output_budget(),
+                                code_mode: code_mode_session.as_ref(),
+                                code_mode_delegate: code_mode_delegate.as_ref(),
+                                code_mode_tools: &code_mode_tools,
                             };
                             async move {
                                 match duplicate_of {
@@ -734,8 +810,9 @@ pub(super) async fn run_turn(
                     };
                     let background_command = result.background_command.take();
                     let visual_context = result.visual_context.take();
-                    let output = match (pending.output_kind, visual_context) {
-                        (ToolOutputKind::Function, Some(visual)) => {
+                    let provider_content = result.provider_content.take();
+                    let output = match (pending.output_kind, visual_context, provider_content) {
+                        (ToolOutputKind::Function, Some(visual), None) => {
                             ResponseItem::function_output_with_image(
                                 pending.call_id,
                                 visual.model_text,
@@ -743,15 +820,27 @@ pub(super) async fn run_turn(
                                 Some(visual.detail),
                             )
                         }
-                        (ToolOutputKind::Function, None) => {
+                        (ToolOutputKind::Function, None, None) => {
                             ResponseItem::function_output(pending.call_id, result.provider_output)
                         }
-                        (ToolOutputKind::Custom, None) => {
+                        (ToolOutputKind::Custom, None, None) => {
                             ResponseItem::custom_output(pending.call_id, result.provider_output)
                         }
-                        (ToolOutputKind::Custom, Some(_)) => {
+                        (ToolOutputKind::Function, None, Some(content)) => {
+                            ResponseItem::function_output_payload(
+                                pending.call_id,
+                                FunctionCallOutputPayload::Content(content),
+                            )
+                        }
+                        (ToolOutputKind::Custom, None, Some(content)) => {
+                            ResponseItem::custom_output_payload(
+                                pending.call_id,
+                                FunctionCallOutputPayload::Content(content),
+                            )
+                        }
+                        (_, Some(_), Some(_)) | (ToolOutputKind::Custom, Some(_), None) => {
                             return Err(AppError::State(
-                                "custom tool produced unsupported visual context".into(),
+                                "tool produced conflicting provider output channels".into(),
                             ));
                         }
                     };
@@ -803,7 +892,11 @@ pub(super) async fn run_turn(
         }
     }
     .await;
-    stream_deltas.flush().await?;
+    let flush_result = stream_deltas.flush().await;
+    if let Some(session) = code_mode_session.as_ref() {
+        session.cancel_owner(&run.turn_id).await;
+    }
+    flush_result?;
     result
 }
 
@@ -870,12 +963,16 @@ pub(super) fn provider_tools(
     config: &AppConfig,
     mode: ConversationMode,
     model: &SelectedModel,
+    multi_agent_models: Option<&[CodexModel]>,
 ) -> Vec<serde_json::Value> {
     let mut tools = if local_tools_enabled(mode) {
-        inner.tools.definitions_for_model(
+        local_provider_tools(
+            &inner.tools,
             config.permission_profile,
             model.supports_image_input(),
             model.supports_image_detail_original(),
+            multi_agent_models,
+            model.tool_mode(),
         )
     } else {
         Vec::new()
@@ -886,6 +983,38 @@ pub(super) fn provider_tools(
         model.web_search_includes_images(),
     ) {
         tools.push(web_search);
+    }
+    tools
+}
+
+fn local_provider_tools(
+    registry: &ToolRegistry,
+    permissions: PermissionProfile,
+    supports_image_input: bool,
+    supports_original_image_detail: bool,
+    multi_agent_models: Option<&[CodexModel]>,
+    tool_mode: ModelToolMode,
+) -> Vec<serde_json::Value> {
+    let mut tools = match tool_mode {
+        ModelToolMode::Direct | ModelToolMode::CodeMode => registry.definitions_for_model(
+            permissions,
+            supports_image_input,
+            supports_original_image_detail,
+            multi_agent_models,
+        ),
+        ModelToolMode::CodeModeOnly => multi_agent_models
+            .map(|models| registry.multi_agent_definitions(models))
+            .unwrap_or_default(),
+    };
+    if tool_mode != ModelToolMode::Direct {
+        let nested_tools = registry.code_mode_nested_definitions(
+            permissions,
+            supports_image_input,
+            supports_original_image_detail,
+        );
+        tools.extend(
+            registry.code_mode_definitions(&nested_tools, tool_mode == ModelToolMode::CodeModeOnly),
+        );
     }
     tools
 }
@@ -1365,6 +1494,7 @@ impl RejectedToolCall {
         let display_output = OutputSource::text(error.clone());
         ToolExecutionResult {
             provider_output: format!("Tool failed: {error}"),
+            provider_content: None,
             completed_item: self.failed_item(),
             display_output: Some(display_output),
             background_command: None,
@@ -1512,7 +1642,7 @@ fn required_visible_item_id(item: &ResponseItem) -> Result<String, AppError> {
         .ok_or_else(|| AppError::Provider("visible response item is missing its id".into()))
 }
 
-fn item_remains_in_progress(item: &ThreadItem) -> bool {
+pub(super) fn item_remains_in_progress(item: &ThreadItem) -> bool {
     matches!(
         item,
         ThreadItem::CommandExecution {
@@ -1686,16 +1816,93 @@ mod tests {
         MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS, MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS,
         PendingTool, add_input_bytes, automatic_provider_retry_wait, automatic_rate_limit_wait,
         collect_tool_batch, deduplicate_read_calls, hosted_web_search_tool,
-        item_remains_in_progress, local_tool_name, local_tools_enabled, prepare_user_input,
-        record_turn_state, tool_failure_diagnostic, validate_local_response_item,
-        validate_response_item, web_search_activity_detail,
+        item_remains_in_progress, local_provider_tools, local_tool_name, local_tools_enabled,
+        prepare_user_input, record_turn_state, tool_failure_diagnostic,
+        validate_local_response_item, validate_response_item, web_search_activity_detail,
     };
+    use crate::engine::native::provider::ModelToolMode;
     use crate::engine::native::provider::{ResponseItem, ResponseProtocol, WebSearchAction};
     use crate::engine::native::tools::{ToolExecutionResult, ToolRegistry};
     use crate::engine::{
         ActivityStatus, CommandLiveOutput, CommandSource, ConversationMode, PermissionProfile,
         ThreadItem, TurnInput, WebSearchMode,
     };
+
+    #[test]
+    fn model_tool_modes_expose_only_their_intended_top_level_contracts() {
+        let registry = ToolRegistry;
+        let names = |mode| {
+            local_provider_tools(
+                &registry,
+                PermissionProfile::workspace_write(),
+                true,
+                true,
+                None,
+                mode,
+            )
+            .into_iter()
+            .filter_map(|definition| definition["name"].as_str().map(str::to_string))
+            .collect::<std::collections::BTreeSet<_>>()
+        };
+
+        let direct = names(ModelToolMode::Direct);
+        assert!(direct.contains("read_file"));
+        assert!(!direct.contains("exec"));
+        assert!(!direct.contains("wait"));
+
+        let hybrid = names(ModelToolMode::CodeMode);
+        assert!(hybrid.contains("read_file"));
+        assert!(hybrid.contains("exec"));
+        assert!(hybrid.contains("wait"));
+
+        assert_eq!(
+            names(ModelToolMode::CodeModeOnly),
+            std::collections::BTreeSet::from(["exec".into(), "wait".into()])
+        );
+
+        let code_mode_only = local_provider_tools(
+            &registry,
+            PermissionProfile::workspace_write(),
+            true,
+            true,
+            None,
+            ModelToolMode::CodeModeOnly,
+        );
+        let exec_description = code_mode_only
+            .iter()
+            .find(|definition| definition["name"] == "exec")
+            .and_then(|definition| definition["description"].as_str())
+            .expect("CodeModeOnly must describe the exec tool");
+        assert!(exec_description.contains("read_file(args:"));
+        assert!(exec_description.contains("apply_patch(input: string): Promise<string>;"));
+        assert!(exec_description.contains("view_image(args:"));
+        assert!(!exec_description.contains("spawn_agent(args:"));
+
+        let code_mode_only_with_collaboration = local_provider_tools(
+            &registry,
+            PermissionProfile::workspace_write(),
+            true,
+            true,
+            Some(&[]),
+            ModelToolMode::CodeModeOnly,
+        );
+        let names = code_mode_only_with_collaboration
+            .iter()
+            .filter_map(|definition| definition["name"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in [
+            "exec",
+            "wait",
+            "spawn_agent",
+            "send_message",
+            "followup_task",
+            "interrupt_agent",
+            "list_agents",
+            "wait_agent",
+        ] {
+            assert!(names.contains(name));
+        }
+    }
 
     #[tokio::test]
     async fn user_images_are_fully_decoded_before_reaching_the_provider() {

@@ -69,7 +69,6 @@ import { Icon } from "./Icon";
 import { ImagePreview } from "./ImagePreview";
 import { modelContextWindowPreference, resolveModelContextWindow } from "./modelContextWindow";
 import {
-  modelIsRuntimeCompatible,
   selectRuntimeCompatibleModel,
   selectRuntimeCompatibleReasoningEffort,
   selectRuntimeCompatibleServiceTier,
@@ -1047,25 +1046,19 @@ function ModelMenuOptions(props: {
         <Show when={props.section === "model"}>
           <For each={props.models}>
             {(entry) => {
-              const runtimeNotice = unsupportedModelMessage(entry);
-              const unavailable = !modelIsRuntimeCompatible(entry);
               return (
                 <button
                   aria-checked={entry.id === props.model?.id}
                   class="model-menu-option"
                   classList={{
-                    described: runtimeNotice !== null,
                     selected: entry.id === props.model?.id,
                   }}
-                  disabled={unavailable}
                   onClick={() => props.onSelectModel(entry.id)}
                   role="menuitemradio"
-                  title={runtimeNotice ?? undefined}
                   type="button"
                 >
                   <span class="model-menu-option-copy">
                     <strong>{entry.displayName}</strong>
-                    <Show when={runtimeNotice}>{(message) => <small>{message()}</small>}</Show>
                   </span>
                   <Show when={entry.id === props.model?.id}>
                     <Icon name="check" size={15} />
@@ -1162,13 +1155,6 @@ function modelMenuSectionLabel(section: ModelMenuSection): string {
     case "serviceTier":
       return "Velocidade";
   }
-}
-
-function unsupportedModelMessage(model: CodexModel | undefined): string | null {
-  if (model === undefined || modelIsRuntimeCompatible(model)) {
-    return null;
-  }
-  return "Requer host do Code Mode, indisponível neste runtime.";
 }
 
 function mergeAttachments(

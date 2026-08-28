@@ -1,9 +1,5 @@
 import type { CodexModel, ReasoningEffort } from "../contracts/types";
 
-export function modelIsRuntimeCompatible(model: CodexModel | undefined): boolean {
-  return model?.unsupportedRuntimeCapabilities.includes("codeMode") === false;
-}
-
 export function reasoningEffortIsRuntimeCompatible(
   model: CodexModel | undefined,
   effort: ReasoningEffort,
@@ -22,15 +18,12 @@ export function selectRuntimeCompatibleModel(
 ): CodexModel | undefined {
   for (const id of [requested, fallback]) {
     const candidate = id === null ? undefined : models.find((model) => model.id === id);
-    if (modelIsRuntimeCompatible(candidate)) {
+    if (candidate !== undefined) {
       return candidate;
     }
   }
 
-  return (
-    models.find((model) => model.isDefault && modelIsRuntimeCompatible(model)) ??
-    models.find(modelIsRuntimeCompatible)
-  );
+  return models.find((model) => model.isDefault) ?? models[0];
 }
 
 export function selectRuntimeCompatibleReasoningEffort(
