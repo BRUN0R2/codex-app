@@ -17,6 +17,11 @@ const visualAuditScript = readFileSync(
   new URL("../scripts/verify-visual-preview.mjs", import.meta.url),
   "utf8",
 );
+const projectToolsScript = readFileSync(
+  new URL("../scripts/project-tools.ps1", import.meta.url),
+  "utf8",
+);
+const v8Manifest = readFileSync(new URL("../scripts/v8-manifest.json", import.meta.url), "utf8");
 
 describe("tooling bootstrap contract", () => {
   it("prepares bundled tools before benchmarks can invoke Cargo", () => {
@@ -26,6 +31,17 @@ describe("tooling bootstrap contract", () => {
     expect(benchmarkCommand).toMatch(/^pnpm tools:bootstrap && /);
     expect(benchmarkCommand).toContain("pnpm measure:command-stream");
     expect(benchmarkCommand).toContain("pnpm measure:background-command");
+  });
+
+  it("selects matching V8 archives and bindings for native or cross targets", () => {
+    expect(projectToolsScript).toContain('GetEnvironmentVariable("CARGO_BUILD_TARGET")');
+    expect(projectToolsScript).toContain("$targetDefinition.bindingAssetName");
+    expect(v8Manifest).toContain(
+      '"bindingAssetName": "src_binding_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.rs"',
+    );
+    expect(v8Manifest).toContain(
+      '"bindingAssetName": "src_binding_ptrcomp_sandbox_release_aarch64-pc-windows-msvc.rs"',
+    );
   });
 
   it("does not duplicate push and pull-request checks for feature branches", () => {
@@ -46,8 +62,17 @@ describe("tooling bootstrap contract", () => {
     );
     expect(visualAuditScript).toContain('"--remote-debugging-port=0"');
     expect(visualAuditScript).toContain("waitForDevToolsEndpoint");
+    expect(visualAuditScript).not.toContain("/json/version");
     expect(visualAuditScript).not.toContain("reservePort");
     expect(visualAuditScript).not.toContain("allowExited");
+  });
+
+  it("lets the in-process visual preview server own an ephemeral port", () => {
+    expect(visualAuditScript).toContain('import { createServer } from "vite"');
+    expect(visualAuditScript).toContain("loopbackHttpOrigin");
+    expect(visualAuditScript).toContain("port: 0");
+    expect(visualAuditScript).not.toContain("PREVIEW_PORT");
+    expect(visualAuditScript).not.toContain("VITE_ENTRY");
   });
 
   it("probes retained timeline identity independently from display refresh rate", () => {

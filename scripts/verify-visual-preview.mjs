@@ -4,18 +4,18 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createServer } from "vite";
 
 import {
   compareRetainedIdentities,
+  loopbackHttpOrigin,
   observeProcess,
   waitForDevToolsEndpoint,
-  waitForHttp,
 } from "../src/tooling/visualAuditRuntime.ts";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const VITE_ENTRY = path.join(PROJECT_ROOT, "node_modules", "vite", "bin", "vite.js");
-const PREVIEW_PORT = 1420;
-const HOME_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1`;
+const PREVIEW_PLACEHOLDER_ORIGIN = "http://127.0.0.1";
+const HOME_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1`;
 const RUNTIME_RESTRICTIONS_PREVIEW_URL = `${HOME_PREVIEW_URL}&runtimeRestrictions=1`;
 const CHAT_REFERENCE_PREVIEW_URL = `${HOME_PREVIEW_URL}&chatReference=1`;
 const TIMELINE_STRESS_PREVIEW_URL = `${HOME_PREVIEW_URL}&timelineStress=1`;
@@ -25,11 +25,11 @@ const BROWSER_PANEL_PREVIEW_URL = `${TIMELINE_STRESS_PREVIEW_URL}&browser=1`;
 const BROWSER_DEBUG_PREVIEW_URL = `${BROWSER_PANEL_PREVIEW_URL}&browserMetrics=1`;
 const OFFICIAL_READ_ICON_PATH =
   "M16.3965 5.01128C16.3963 4.93399 16.3489 4.87691 16.293 4.85406L16.2354 4.84332C13.9306 4.91764 12.5622 5.32101 10.665 6.34722V16.3716C11.3851 15.9994 12.0688 15.7115 12.7861 15.5015C13.8286 15.1965 14.9113 15.0633 16.2402 15.0435L16.2979 15.0308C16.353 15.0063 16.3965 14.9483 16.3965 14.8755V5.01128ZM3.54492 14.8765C3.54492 14.9725 3.62159 15.0422 3.70117 15.0435L4.19629 15.0562C5.94062 15.1247 7.26036 15.4201 8.65918 16.0484C8.05544 15.1706 7.14706 14.436 6.17871 14.1109V14.1099C5.56757 13.9045 5.16816 13.3314 5.16797 12.6988V4.98882C4.86679 4.93786 4.60268 4.8999 4.28223 4.87457L3.72754 4.84429C3.62093 4.84079 3.54505 4.92417 3.54492 5.01226V14.8765ZM17.7266 14.8755C17.7266 15.6314 17.1607 16.2751 16.4121 16.3628L16.2598 16.3736C15.0122 16.3922 14.0555 16.5159 13.1602 16.7779C12.2629 17.0404 11.3966 17.4508 10.3369 18.0738C10.129 18.1959 9.87099 18.1958 9.66309 18.0738C7.71455 16.9283 6.31974 16.4689 4.12988 16.3853L3.68164 16.3736C2.85966 16.3614 2.21484 15.6838 2.21484 14.8765V5.01226C2.21497 4.15391 2.93263 3.4871 3.77246 3.51519L4.39844 3.54937C4.67996 3.57191 4.92258 3.60421 5.16797 3.64214V2.51031C5.16797 1.44939 6.29018 0.645615 7.31055 1.15679L7.31152 1.15582C8.78675 1.89511 10.0656 3.33006 10.5352 4.91461C12.3595 3.98907 13.8688 3.58817 16.1924 3.51324L16.3506 3.51714C17.1285 3.5741 17.7264 4.23496 17.7266 5.01128V14.8755ZM6.49805 12.6988C6.49824 12.7723 6.5442 12.8296 6.60254 12.8492L6.96289 12.9859C7.85245 13.3586 8.68125 13.9846 9.33496 14.7496V5.5816C9.08794 4.37762 8.13648 3.1566 6.95801 2.47613L6.71582 2.34527C6.67779 2.32617 6.6337 2.32502 6.58301 2.35796C6.52946 2.39279 6.49805 2.44863 6.49805 2.51031V12.6988Z";
-const SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=general`;
-const USAGE_SETTINGS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=usage`;
+const SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=general`;
+const USAGE_SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=usage`;
 const SETTINGS_INTERACTION_PREVIEW_URL = `${SETTINGS_PREVIEW_URL}&preferenceDelay=400`;
-const AUTOMATIONS_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&surface=automations`;
-const PROFILE_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1&settings=profile`;
+const AUTOMATIONS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&surface=automations`;
+const PROFILE_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=profile`;
 const ARTIFACT_DIRECTORY = path.join(PROJECT_ROOT, ".freebuff", "visual-audit");
 const VIEWPORTS = [
   { width: 920, height: 640 },
@@ -109,7 +109,7 @@ const SCENARIOS = [
     id: "composer-runtime-restrictions",
     url: RUNTIME_RESTRICTIONS_PREVIEW_URL,
     initialReadyExpression: `document.querySelector(".model-button") instanceof HTMLButtonElement &&
-      document.querySelector(".model-button-name")?.textContent?.includes("5.5") === true`,
+      document.querySelector(".model-button-name")?.textContent?.includes("5.6 Luna") === true`,
     prepareExpression: `(() => {
       const modelButton = document.querySelector(".model-button");
       if (!(modelButton instanceof HTMLButtonElement)) {
@@ -885,33 +885,27 @@ const SCENARIOS = [
 
 async function main() {
   const browserPath = resolveBrowserPath();
-  const browserProfile = await mkdtemp(path.join(os.tmpdir(), "codex-app-visual-"));
-  // Browser fixtures are guarded by import.meta.env.DEV; the production build is validated
-  // separately, while this server keeps those deterministic fixtures available to the audit.
-  const server = spawn(
-    process.execPath,
-    [
-      VITE_ENTRY,
-      "--host",
-      "127.0.0.1",
-      "--mode",
-      "production",
-      "--port",
-      String(PREVIEW_PORT),
-      "--strictPort",
-    ],
-    {
-      cwd: PROJECT_ROOT,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    },
-  );
-  const serverProcess = observeProcess(server, "Servidor da auditoria visual");
+  let browserProfile;
+  let server;
   let browser;
   let browserController;
 
   try {
-    await waitForHttp(SETTINGS_PREVIEW_URL, serverProcess);
+    // Browser fixtures are guarded by import.meta.env.DEV; the production build is validated
+    // separately, while this server keeps those deterministic fixtures available to the audit.
+    server = await createServer({
+      clearScreen: false,
+      mode: "production",
+      root: PROJECT_ROOT,
+      server: {
+        host: "127.0.0.1",
+        port: 0,
+        strictPort: true,
+      },
+    });
+    await server.listen();
+    const previewOrigin = loopbackHttpOrigin(server.httpServer?.address() ?? null);
+    browserProfile = await mkdtemp(path.join(os.tmpdir(), "codex-app-visual-"));
     browser = spawn(
       browserPath,
       [
@@ -942,22 +936,25 @@ async function main() {
     );
     const browserProcess = observeProcess(browser, "Navegador da auditoria visual");
     const devToolsEndpoint = await waitForDevToolsEndpoint(browserProfile, browserProcess);
-    await waitForHttp(devToolsEndpoint.versionUrl, browserProcess);
     browserController = await CdpClient.connect(devToolsEndpoint.browserWebSocketUrl);
     await mkdir(ARTIFACT_DIRECTORY, { recursive: true });
 
     const reports = [];
-    const scenarios =
+    const selectedScenarios =
       REQUESTED_SCENARIOS.size === 0
         ? SCENARIOS
         : SCENARIOS.filter((scenario) => REQUESTED_SCENARIOS.has(scenario.id));
-    if (scenarios.length !== (REQUESTED_SCENARIOS.size || SCENARIOS.length)) {
+    if (selectedScenarios.length !== (REQUESTED_SCENARIOS.size || SCENARIOS.length)) {
       const knownScenarios = new Set(SCENARIOS.map((scenario) => scenario.id));
       const unknownScenarios = [...REQUESTED_SCENARIOS].filter(
         (scenarioId) => !knownScenarios.has(scenarioId),
       );
       throw new Error(`Cenários visuais desconhecidos: ${unknownScenarios.join(", ")}`);
     }
+    const scenarios = selectedScenarios.map((scenario) => ({
+      ...scenario,
+      url: rebasePreviewUrl(scenario.url, previewOrigin),
+    }));
     for (const scenario of scenarios) {
       for (const viewport of scenario.viewports ?? VIEWPORTS) {
         reports.push(await auditViewport(devToolsEndpoint.port, viewport, scenario));
@@ -975,14 +972,21 @@ async function main() {
       await delay(250);
     }
     await terminate(browser, { processTree: true });
-    await terminate(server);
-    await rm(browserProfile, {
-      force: true,
-      maxRetries: 10,
-      recursive: true,
-      retryDelay: 200,
-    }).catch(() => undefined);
+    await server?.close().catch(() => undefined);
+    if (browserProfile !== undefined) {
+      await rm(browserProfile, {
+        force: true,
+        maxRetries: 10,
+        recursive: true,
+        retryDelay: 200,
+      }).catch(() => undefined);
+    }
   }
+}
+
+function rebasePreviewUrl(url, previewOrigin) {
+  const parsed = new URL(url);
+  return `${previewOrigin}${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
 async function auditViewport(debugPort, viewport, scenario) {
@@ -6048,7 +6052,7 @@ function validateComposerUltraEffortMetrics(metrics) {
 
 function validateComposerRuntimeRestrictionsMetrics(metrics) {
   assert(metrics.horizontalOverflow <= 1, "o aviso contextual criou overflow horizontal");
-  assert(metrics.selectedModel === "5.5", "a seleção incompatível não usou o fallback seguro");
+  assert(metrics.selectedModel === "5.6 Luna", "o modelo Code Mode configurado foi substituído");
   assert(
     metrics.persistentCompatibilityNoticeCount === 0,
     "o requisito de runtime permaneceu visível fora do seletor",

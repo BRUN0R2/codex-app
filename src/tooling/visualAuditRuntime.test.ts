@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   compareRetainedIdentities,
+  loopbackHttpOrigin,
   type ObservedProcess,
   observeProcess,
   parseDevToolsActivePort,
@@ -25,6 +26,19 @@ afterEach(async () => {
 });
 
 describe("visual audit runtime", () => {
+  it("builds a loopback origin from an ephemeral server address", () => {
+    expect(loopbackHttpOrigin({ address: "127.0.0.1", family: "IPv4", port: 43_123 })).toBe(
+      "http://127.0.0.1:43123",
+    );
+  });
+
+  it.each([null, "named-pipe", { address: "127.0.0.1", family: "IPv4", port: 0 }])(
+    "rejects a non-TCP or unbound visual server address",
+    (address) => {
+      expect(() => loopbackHttpOrigin(address)).toThrow();
+    },
+  );
+
   it("compares identity only for keys retained between samples", () => {
     const retained = {};
     const replacedBefore = {};
@@ -57,7 +71,6 @@ describe("visual audit runtime", () => {
     expect(parseDevToolsActivePort("64914\r\n/devtools/browser/session-id\r\n")).toEqual({
       browserWebSocketUrl: "ws://127.0.0.1:64914/devtools/browser/session-id",
       port: 64_914,
-      versionUrl: "http://127.0.0.1:64914/json/version",
     });
   });
 

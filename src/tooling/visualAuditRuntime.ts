@@ -1,5 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
 
 const DEFAULT_POLL_INTERVAL_MILLISECONDS = 100;
@@ -10,7 +11,6 @@ const DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort";
 export interface DevToolsEndpoint {
   readonly browserWebSocketUrl: string;
   readonly port: number;
-  readonly versionUrl: string;
 }
 
 export interface ObservedProcess {
@@ -26,6 +26,16 @@ export interface ReadinessOptions {
 export interface RetainedIdentityComparison {
   readonly replacementCount: number;
   readonly retainedCount: number;
+}
+
+export function loopbackHttpOrigin(address: AddressInfo | string | null): string {
+  if (address === null || typeof address === "string") {
+    throw new Error("O servidor visual não publicou um endereço TCP.");
+  }
+  if (!Number.isSafeInteger(address.port) || address.port < 1 || address.port > 65_535) {
+    throw new Error(`O servidor visual publicou uma porta inválida: ${address.port}.`);
+  }
+  return `http://127.0.0.1:${address.port}`;
 }
 
 interface WaitSettings {
@@ -115,7 +125,6 @@ export function parseDevToolsActivePort(content: string): DevToolsEndpoint {
   return {
     browserWebSocketUrl: `ws://127.0.0.1:${port}${browserWebSocketPath}`,
     port,
-    versionUrl: `http://127.0.0.1:${port}/json/version`,
   };
 }
 
