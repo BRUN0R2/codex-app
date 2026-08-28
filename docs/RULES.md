@@ -1,315 +1,169 @@
-# Constituicao do Projeto - CODEX APP
+# Regras do projeto
 
-## Regra Suprema
+Este documento é o contrato máximo do repositório. Nenhuma implementação,
+refatoração, dependência ou atalho pode contrariá-lo.
 
-O Codex / IA deve seguir todas as regras do projeto rigorosamente e sem excecao.
+Em caso de conflito, priorize: regras do projeto, integridade arquitetural,
+manutenção, previsibilidade, segurança, desempenho e, por último, velocidade de
+entrega. Informe o conflito antes de continuar.
 
-Nenhuma implementacao, otimizacao, abstracao, refatoracao, dependencia, atalho
-ou decisao arquitetural pode violar as regras definidas neste documento.
+## Princípios
 
-Quando existir conflito, a ordem de prioridade deve ser sempre:
+- Resolva a causa, nunca apenas o sintoma.
+- Use a menor complexidade capaz de resolver o problema completo.
+- Prefira código explícito, coeso, previsível, modular e pronto para produção.
+- Prefira composição, contratos pequenos e fluxos determinísticos.
+- Evite abstrações prematuras, camadas profundas, estado oculto e fallbacks
+  silenciosos.
+- Remova código morto, duplicado, obsoleto e compatibilidade sem uso real.
+- Uma refatoração deve reduzir complexidade total, não apenas movê-la.
+- Entradas, saídas, efeitos, ownership, transições e falhas devem ser visíveis.
 
-1. Regras do projeto
-2. Integridade da arquitetura
-3. Manutenibilidade
-4. Previsibilidade
-5. Seguranca
-6. Performance
-7. Velocidade de desenvolvimento
+## Produto e stack
 
-Velocidade nunca justifica degradacao arquitetural.
+- O alvo operacional é Windows, com Tauri 2, Rust edition 2024, TypeScript
+  estrito e Vite.
+- A toolchain Rust é a versão estável fixada em `rust-toolchain.toml`.
+- `NativeEngine` é o dono da composição do agente.
+- OAuth ChatGPT, provider, ferramentas, configuração, secrets e persistência
+  pertencem ao backend Rust deste aplicativo.
+- O Codex CLI pode ser estudado como referência, mas nunca pode ser dependência
+  de build, runtime, configuração, armazenamento ou credenciais.
+- A interface nunca deve receber tokens ou reinterpretar credenciais.
+- Não crie aliases, adaptadores ou caminhos gerais para formatos externos ou
+  protocolos obsoletos.
+- Toda tecnologia nova precisa de benefício comprovado, fronteira isolada e
+  custo de manutenção proporcional.
 
----
+## Arquitetura
 
-# Filosofia Central
+- Organize o sistema em módulos pequenos, coesos e com um dono claro.
+- Mantenha regras de negócio no domínio responsável, sem duplicá-las entre
+  backend, infraestrutura e UI.
+- Use tipos de domínio para estados e valores com semântica própria.
+- APIs devem ser mínimas; não exponha detalhes internos por conveniência.
+- Estado global mutável exige ownership explícito e justificativa.
+- Recursos concorrentes precisam de lifecycle, cancelamento e encerramento
+  definidos.
+- Erros operacionais devem ser estruturados, observáveis e previsíveis.
+- Não esconda falhas de inicialização nem simule resiliência com recuperação
+  implícita.
 
-O projeto deve permanecer:
-
-* Limpo
-* Previsivel
-* Minimalista
-* Modular
-* Explicito
-* Facil de manter
-* Escalavel
-* Pronto para producao
-
-A base do codigo deve evoluir continuamente em direcao a simplicidade, nunca a
-complexidade.
-
-Toda implementacao deve resolver problemas reais usando a menor complexidade
-necessaria.
-
-Evitar:
-
-* Overengineering
-* Abstracoes prematuras
-* Solucoes temporarias
-* Comportamentos ocultos
-* Fluxos implicitos
-* Caos defensivo
-* Inconsistencia arquitetural
-
-O sistema deve continuar compreensivel meses depois sem depender de contexto
-historico.
-
----
-
-# Regras do Repositorio
-
-* Manter um repositorio Git local desde o inicio.
-* Comitar toda mudanca logica concluida.
-* Mensagens de commit devem:
-
-  * estar em ingles
-  * ser curtas
-  * usar verbo no imperativo
-  * descrever claramente mudancas reais
-* Manter `docs/TODO.md` minimalista, atualizado e acionavel.
-* Nunca versionar segredos, credenciais, tokens ou dados privados.
-* Evitar arquivos, dependencias, assets, logs ou ferramentas sem necessidade
-  real.
-* Preferir uma base limpa e funcional ao inves de preservar compatibilidade
-  obsoleta.
-* Evitar acumular divida tecnica intencionalmente.
-
----
-
-# Stack Oficial
-
-* Rust 2024 Edition e toolchain estavel atual.
-* Tauri 2 para shell desktop nativo.
-* TypeScript estrito no frontend.
-* Vite como empacotador frontend.
-* Windows e o alvo operacional inicial.
-* O `NativeEngine` deste projeto e o dono da composicao do agente.
-* OAuth ChatGPT, provider, ferramentas, configuracao e persistencia pertencem ao
-  backend Rust nativo deste projeto.
-* O Codex CLI aberto pode ser consultado somente como referencia de protocolo;
-  nunca pode ser dependencia de build, runtime, armazenamento ou configuracao.
-* Credenciais pertencem ao diretorio e ao cofre privados deste aplicativo;
-  nunca devem ser importadas da CLI, copiadas, expostas ou reinterpretadas pela
-  interface.
-* Nao criar adaptadores, aliases ou caminhos de retrocompatibilidade para a CLI,
-  protocolos, contratos ou formatos externos obsoletos.
-* Migracoes internas do schema e dos dados persistidos pelo proprio aplicativo
-  sao permitidas quando necessarias para preservar dados existentes ou evoluir o
-  produto. Toda migracao interna deve:
-  * possuir versao explicita e escopo delimitado;
-  * validar a identidade e o schema do banco antes de executar;
-  * ser atomica e transacional, sem deixar estado parcial em caso de falha;
-  * preservar a integridade dos dados ou interromper a operacao de forma visivel;
-  * possuir testes de sucesso, falha e integridade dos dados;
-  * permanecer restrita ao dominio interno, sem importar formatos externos ou
-    criar uma camada geral de compatibilidade.
-
-Qualquer tecnologia nova deve ter motivo claro, escopo isolado e custo de
-manutencao proporcional ao beneficio.
-
----
-
-# Regras de Arquitetura
-
-## Estrutura
-
-* Organizar sistemas em modulos pequenos e coesos.
-* Cada modulo deve possuir responsabilidade clara.
-* Preferir composicao ao inves de heranca.
-* Preferir contratos explicitos ao inves de comportamento implicito.
-* Preferir fluxos deterministicos ao inves de magica dinamica.
-* Preferir abstracoes simples ao inves de camadas profundas de abstracao.
-* Evitar objetos gigantes e acumulo centralizado de logica.
-* Regras de negocio nao devem se espalhar de forma imprevisivel.
-
-## Design
-
-* APIs devem permanecer pequenas e explicitas.
-* Entradas, saidas, efeitos colaterais e falhas devem ser sempre visiveis.
-* Nenhum fallback silencioso.
-* Nenhum caminho oculto de recuperacao de inicializacao.
-* Nenhuma falsa resiliencia escondendo falhas reais.
-* Erros devem aparecer de forma clara e previsivel.
-* Transicoes de estado devem ser rastreaveis.
-
-## Evolucao
-
-* Sistemas devem ser preparados para expansao futura sem reescritas
-  destrutivas.
-* Refatoracoes devem simplificar o projeto, nao reorganizar complexidade.
-* Reduzir fragmentacao sempre que possivel.
-* Remover continuamente codigo morto, obsoleto ou duplicado.
-
----
-
-# Regras de Codigo
+Migrações internas são permitidas apenas para dados deste aplicativo. Cada
+migração deve ter versão e escopo explícitos, validar identidade e schema,
+executar atomicamente, preservar dados ou falhar de forma visível e possuir
+testes de sucesso, falha e integridade. Nunca importe formatos da CLI por essa
+via.
 
 ## Rust
 
-* Usar Rust estavel moderno com `edition = "2024"`.
-* Ativar tipagem forte, ownership explicito e erros estruturados.
-* Evitar `unsafe`; quando inevitavel, isolar em modulo pequeno, documentar
-  invariantes e validar em runtime.
-* Preferir tipos de dominio a strings soltas quando houver regra semantica.
-* Usar `Result` para falhas recuperaveis; nenhum erro operacional deve ser
-  escondido.
-* Evitar `panic!`, `unwrap` e `expect` fora da inicializacao irrecuperavel.
-* Modulos e arquivos Rust devem seguir convencoes idiomaticas da linguagem.
+- Use Rust idiomático, ownership explícito e erros estruturados.
+- Use `Result` para falhas recuperáveis; não descarte erros operacionais.
+- Evite `panic!`, `unwrap` e `expect` fora de inicialização comprovadamente
+  irrecuperável.
+- Evite `unsafe`. Quando inevitável, isole-o, documente as invariantes e valide
+  as pré-condições.
+- Prefira enums, newtypes e estruturas validadas a strings ou mapas soltos.
+- Recursos do sistema operacional devem ser liberados de forma determinística.
 
-## TypeScript
+## TypeScript e interface
 
-* Usar TypeScript estrito.
-* Manter tipos de fronteira sincronizados com os contratos expostos pelo Rust.
-* Evitar estado global mutavel sem dono claro.
-* UI deve chamar comandos Tauri pequenos, explicitos e rastreaveis.
+- Mantenha `strict` ativo e não contorne o compilador com tipos amplos.
+- Decodifique toda resposta e evento Tauri antes de alterar estado.
+- Mantenha os contratos TypeScript sincronizados com os contratos Rust.
+- Componentes de UI não acessam IPC diretamente; infraestrutura e estado são as
+  fronteiras responsáveis.
+- A interface deve ser limpa, direta, acessível e sem controles sem função.
+- Estados de carregamento, erro, vazio, aprovação e cancelamento devem ser
+  explícitos.
+- Densidade visual e animação precisam de utilidade prática e comportamento
+  estável.
 
-## Nomeacao
+## Código
 
-* Usar nomes claros e descritivos.
-* Evitar abreviacoes, salvo quando universalmente conhecidas.
-* Evitar prefixos e sufixos artificiais.
-* Respeitar a convencao nativa de cada linguagem e ferramenta.
-* Snake case e kebab case sao permitidos quando forem convencoes do ecossistema.
+- Use nomes descritivos e as convenções nativas de cada linguagem.
+- Evite abreviações não universais, números mágicos e comentários obsoletos.
+- Constantes precisam de nome semântico, tipo adequado e contexto claro.
+- Aplique responsabilidade única e elimine duplicação real; não force DRY entre
+  conceitos apenas parecidos.
+- Não use God Classes, Service Locator, globais ocultos, ciclos, herança
+  profunda, reflection indiscriminada ou ownership implícito.
+- Logs devem ser úteis para operação, estruturados quando necessário e nunca
+  conter dados privados.
 
-## Logica
+## Segurança e persistência
 
-Aplicar:
+- Nunca versione secrets, credenciais, tokens ou dados privados.
+- Secrets ficam no cofre e no diretório privado deste aplicativo.
+- SQLite armazena apenas dados adequados ao seu domínio, com transações nas
+  alterações compostas.
+- Valide tamanho, formato, identidade e destino de toda entrada externa.
+- Alterações de arquivo ou configuração devem ter alvo validado, efeito
+  explícito e ser reversíveis quando possível.
+- Permissões são fechadas por padrão e não podem ser ampliadas implicitamente.
+- Limites de memória, saída, arquivos, processos, streams e concorrência devem
+  ser explícitos e testados.
 
-* Single Responsibility Principle
-* DRY
-* Ownership explicito
-* Gerenciamento explicito de lifetime
+## Testes e validação
 
-Evitar:
+- Valide em runtime todas as fronteiras externas e invariantes que dependem do
+  ambiente.
+- Cada defeito corrigido deve receber um teste de regressão focado no contrato
+  violado.
+- Teste caminhos de sucesso, erro, cancelamento e concorrência quando forem
+  relevantes.
+- Evite testes duplicados, frágeis ou sem valor observável.
+- `pnpm verify` é o gate completo antes de concluir ou publicar mudanças.
+- Não enfraqueça lint, tipagem, Clippy, testes ou medições para fazer o gate
+  passar.
 
-* Numeros magicos
-* Codigo morto
-* Codigo comentado obsoleto
-* Mutacao oculta de estado
-* Ownership implicito
-* Manipulacao insegura de recursos
+## Desempenho
 
-Constantes devem sempre possuir:
+- Meça antes e depois de otimizações relevantes com cenário reproduzível.
+- Proteja regressões críticas com limites ou benchmarks estáveis.
+- Prefira latência e uso de memória previsíveis a micro-otimizações complexas.
+- Evite cópias, alocações, serializações e trabalho no thread principal sem
+  necessidade.
+- Uma otimização não pode degradar clareza, correção ou manutenção sem benefício
+  mensurável e documentado.
 
-* significado semantico
-* tipo explicito
-* clareza contextual
+## Dependências
 
----
+- Cada dependência direta deve justificar seu custo e permanecer fixada no
+  manifesto e no lockfile.
+- Prefira implementação local quando ela for pequena, segura e mais simples de
+  manter.
+- Isole integrações externas e atualize dependências regularmente.
+- Exceções transitivas precisam de justificativa, versão exata e gate de
+  regressão.
+- Não mantenha assets, ferramentas ou pacotes sem uso real.
 
-# Regras de Runtime e Confiabilidade
+## Git e documentação
 
-* Validacao em runtime e a principal fonte de confianca.
-* Preferir validacao live ao inves de excesso de testes automatizados.
-* Criar testes apenas quando entregarem valor real e mensuravel.
-* Evitar testes barulhentos, redundantes ou caros de manter.
-* Logs devem existir apenas quando operacionalmente uteis.
-* Evitar poluicao de debug.
+- Preserve mudanças do usuário e não reescreva histórico sem autorização.
+- Faça um commit para cada mudança lógica concluída.
+- Mensagens de commit são curtas, em inglês, no imperativo e descrevem a mudança
+  real.
+- Mantenha `docs/TODO.md` curto, atual e acionável.
+- Documente contratos e decisões duráveis; detalhes que o código expressa com
+  mais precisão pertencem ao código e aos testes.
+- Atualize números medidos, versões e capacidades junto com a mudança que os
+  altera. Não acumule cronologias em documentos de estado atual.
 
-O sistema deve validar continuamente:
+## Processo de mudança
 
-* seguranca de memoria
-* lifetime de recursos
-* correcao de ownership
-* ordem de inicializacao
-* visibilidade de falhas
+Antes de implementar:
 
-Operacoes que alteram configuracoes ou arquivos devem ser explicitas, reversiveis
-quando possivel e precedidas por validacao de alvo.
+1. leia estas regras e identifique o dono do comportamento;
+2. confirme o estado real no código, nos testes e nos manifestos;
+3. escolha a solução com menos acoplamento e partes móveis.
 
----
+Antes de concluir:
 
-# Regras de Performance
+1. revise duplicação, código morto, ambiguidades, ownership e falhas;
+2. adicione a cobertura de regressão necessária;
+3. atualize documentação e TODO afetados;
+4. execute `pnpm verify` e revise o diff completo.
 
-* Otimizar com responsabilidade.
-* Nunca sacrificar manutencao por micro-otimizacoes.
-* Evitar alocacoes desnecessarias.
-* Evitar overhead desnecessario em runtime.
-* Priorizar performance estavel e previsivel.
-* Medir antes de otimizar agressivamente.
-
-Performance deve ser intencional, nunca acidental.
-
----
-
-# Regras de Dependencias
-
-* Toda dependencia deve justificar sua existencia.
-* Preferir solucoes internas quando a complexidade for baixa.
-* Evitar excesso de dependencias.
-* Manter integracoes externas isoladas.
-* Atualizar dependencias regularmente para versoes modernas e seguras.
-
----
-
-# Regras de UI e UX
-
-* Interfaces devem permanecer limpas, diretas e funcionais.
-* Nenhuma complexidade visual sem valor pratico.
-* Evitar estados, opcoes ou controles sem utilidade real.
-* Menus e fluxos devem minimizar atrito.
-* A densidade de informacao deve permanecer organizada e intencional.
-
----
-
-# Regras Operacionais da IA
-
-A IA deve:
-
-* Pensar antes de implementar.
-* Preservar consistencia arquitetural.
-* Detectar riscos futuros de manutencao.
-* Alertar violacoes arquiteturais antes de prosseguir.
-* Evitar implementacoes especulativas.
-* Nunca inventar APIs, sistemas ou comportamentos inexistentes.
-* Evitar solucoes parciais e inacabadas.
-* Preferir implementacoes completas e funcionais.
-
-Antes de finalizar qualquer mudanca, sempre revisar:
-
-* duplicacao
-* codigo morto
-* ambiguidade
-* ownership inseguro
-* impacto de manutencao
-* consistencia arquitetural
-
----
-
-# Padroes Proibidos
-
-Evitar explicitamente:
-
-* Abuso de Singleton
-* Abuso de Service Locator
-* Globais ocultos
-* Dependencias circulares
-* Arvores profundas de heranca
-* Mutacao de estado sem ownership claro
-* God Classes
-* Abuso de reflection em runtime
-* Ownership implicito de recursos
-
----
-
-# Regras de Decisao de Engenharia
-
-Quando multiplas solucoes existirem, preferir sempre a que:
-
-1. Reduz manutencao futura
-2. Melhora previsibilidade
-3. Reduz complexidade oculta
-4. Minimiza acoplamento
-5. Facilita debugging
-6. Possui menos partes moveis
-7. Preserva consistencia arquitetural
-
----
-
-# Diretiva Final
-
-Todas as futuras instrucoes devem ser interpretadas atraves desta constituicao.
-
-Caso uma solicitacao entre em conflito com estas regras, o conflito deve ser
-explicitamente informado antes da implementacao continuar.
-
-A integridade de longo prazo do projeto e obrigatoria e inegociavel.
+Não invente APIs ou comportamentos, não entregue soluções parciais e não troque
+integridade de longo prazo por velocidade.
