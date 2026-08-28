@@ -7,9 +7,9 @@ local continua independente.
 
 | Fonte | Versão |
 | --- | --- |
-| [`openai/codex`](https://github.com/openai/codex) | commit `6be2a6ca952ac9f70676ce4dd07fda27175aa9dd`, 28/08/2026 |
+| [`openai/codex`](https://github.com/openai/codex) | commit `d9511fb7888d98f89526d4ae019dd9be2f14199e`, 28/08/2026 |
 | release estável | `rust-v0.150.1`, commit `90854393966b21e9ebfd21b122334eb09a20c93d` |
-| Codex Desktop para Windows | build `26.818.5229.0`, validado em 28/08/2026 |
+| Codex Desktop para Windows | build `26.825.3734.0`, validado em 28/08/2026 |
 
 O clone de estudo fica em `.references/openai-codex`, que é ignorado. Nenhum
 crate, pacote, executável, banco, configuração ou credencial da referência entra
@@ -57,6 +57,8 @@ Referências oficiais:
 | patch | ferramenta freeform com parser dedicado | gramática Lark e commit transacional próprios |
 | imagens | inspeção multimodal é uma tool activity nativa | `view_image`, miniatura e visualizador próprios |
 | browser | superfície visível, ações fechadas e aprovação de origem | child WebView2 controlado pelo engine |
+| Code Mode | V8 isolado, manifesto, callbacks, yield e cancelamento | runtime e ponte Rust próprios |
+| multiagente v2 | árvore, mailbox e lifecycle tipados | persistência transacional e seis tools diretas |
 
 O core oficial não define um único “máximo de comandos paralelos” equivalente
 ao limite local: o agendamento depende dos handlers e das barreiras. O manager
@@ -73,10 +75,12 @@ O fluxo oficial é híbrido:
    colaboração, workspace, shell, data e timezone;
 3. o provider recebe cada camada com papel e tamanho próprios.
 
-Portanto, instruções locais são necessárias para fatos que só o runtime conhece,
-mas não devem repetir personalidade ou protocolo já fornecidos pelo catálogo. O
-protocolo comportamental manual antigo e nudges específicos de browser foram
-removidos porque competiam com templates mais atuais.
+Portanto, nem tudo vem do servidor. O core oficial mantém textos locais para
+papéis, modos, ferramentas, permissões e contexto que o servidor não conhece;
+alguns podem ser substituídos ou suprimidos pelo catálogo. Instruções locais são
+necessárias, mas não devem duplicar personalidade ou protocolo já fornecidos por
+`instructions_template`. O runtime local segue essa separação e removeu camadas
+universais concorrentes.
 
 Responses Lite mantém a mesma semântica por wire diferente: tools entram em
 `additional_tools`, funções ficam no namespace `functions` e instruções-base
@@ -90,28 +94,39 @@ imediatamente; ausência do header não destrói uma entrada válida. A chave de
 prompt é o ID estável da tarefa, evitando fragmentação entre rodadas e polls.
 
 A auditoria local validou `PRAGMA integrity_check`, JSON persistido e referências
-entre tabelas sem encontrar corrupção. O problema de eficiência observado não
-era cache corrompido: as causas estavam em instruções redundantes, capabilities
-não respeitadas e diferenças do loop, corrigidas nos respectivos módulos.
+entre tabelas sem encontrar corrupção. Não havia corrupção no cache do catálogo
+ou no prompt cache. Havia um defeito real no cache de leituras aninhadas: uma
+mutação no Code Mode podia deixar uma leitura anterior reutilizável. O cache agora
+troca de geração após qualquer mutação, com regressões para escrita e patch.
 
 ## Code Mode, multiagente e Ultra
 
 No core oficial, Code Mode é um subsistema com protocolo, runtime V8 sandboxed,
-host, negociação, backpressure, limites, yield e cancelamento. Expor apenas uma
-tool JavaScript não seria equivalente nem seguro.
+host, negociação, backpressure, limites, yield e cancelamento. O Desktop auditado
+habilita `features.code_mode_host` e inicia `codex-code-mode-host.exe`.
 
-Modelos `code_mode_only` permanecem visíveis, porém bloqueados sem o host. Uma
-preferência antiga incompatível volta ao modelo padrão utilizável. Ultra permanece
-bloqueado sem multiagente v2, e seu requisito aparece somente na própria opção.
-O engine não anuncia capabilities ausentes nem envia `ultra` ao provider. As
-implementações completas estão no backlog; shims são proibidos.
+O runtime local reproduz esse fluxo com isolate V8 próprio e manifesto de tools
+filtrado. O isolate não possui Node.js nem acesso implícito ao host; chamadas
+passam por uma ponte Rust limitada e cancelável. Modelos `code_mode_only` são
+selecionáveis porque o host agora existe.
+
+Multiagente v2 usa quatro slots concorrentes, incluindo a raiz, limite vitalício
+de 64 tarefas por árvore, mailbox persistida e operações distintas para enfileirar
+mensagem ou iniciar follow-up. As tools de colaboração permanecem diretas e não
+entram no Code Mode.
+
+Ultra é uma preferência de orquestração local: fica roxo na interface, exige
+multiagente v2 e aparece indisponível somente dentro do seletor quando a capability
+falta. O provider recebe o esforço multiagente informado pelo catálogo ou o maior
+esforço suportado; o literal `ultra` nunca atravessa a rede.
 
 ## Imagens e Browser Use
 
 O Desktop representa a inspeção de imagem como atividade da ferramenta, com
 miniatura expansível. O fluxo local segue o mesmo contrato visual e semântico:
-`view_image` decodifica o arquivo, envia conteúdo multimodal e publica a atividade
-“Visualizou uma imagem”. Não há navegação para `file://` nem abertura do browser.
+`view_image` decodifica o arquivo uma vez, envia esses bytes como conteúdo
+multimodal, guarda um snapshot gerenciado idêntico e publica “Visualizou uma
+imagem”. Não há navegação para `file://` nem abertura do browser.
 
 Browser Use é um subsistema diferente: controla página HTTP(S) visível por ações
 fechadas, screenshot, snapshot e aprovação da primeira origem. Computer Use,
@@ -120,8 +135,6 @@ controle amplo do desktop e CDP irrestrito não fazem parte do escopo local.
 ## Decisões não portadas
 
 - armazenamento, config e processo do Codex CLI;
-- host Code Mode incompleto;
-- multiagente ou Ultra simulados;
 - Computer Use amplo;
 - CDP arbitrário e perfil de navegação externo;
 - Responses WebSocket sem equivalência comprovada com SSE;
@@ -136,9 +149,11 @@ Fixtures e testes locais travam:
 - TTL/ETag e ausência de cache persistente;
 - pareamento call/output, ordenação e retomada;
 - paralelismo, barreiras, yield, cursor e cancelamento;
+- isolate, manifesto, callback, limites e lifecycle do Code Mode;
+- árvore, mailbox, concorrência, herança e lifecycle multiagente;
 - compactação e recuperação de janela;
 - atomicidade do patch;
-- validação, apresentação e limites de imagem;
+- validação, snapshot exato, apresentação e limites de imagem;
 - origem, bounds e lifecycle do browser.
 
 ## Atualização da referência

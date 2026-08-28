@@ -13,7 +13,8 @@ Tauri infrastructure
     ↓ commands / ↑ events
 Rust NativeEngine
     ├─ auth e providers
-    ├─ loop do agente e ferramentas
+    ├─ loop do agente, Code Mode e multiagente
+    ├─ ferramentas e runtime V8 isolado
     ├─ browser WebView2 e processos
     └─ SQLite e cofre de credenciais
 ```
@@ -58,6 +59,19 @@ reexecutam a fronteira responsável.
 Tarefas distintas podem progredir em paralelo. Cada recurso compartilhado tem
 um dono e limites próprios; cancelamento não depende de desmontar a interface.
 
+## Code Mode e colaboração
+
+Code Mode executa JavaScript em um isolate V8 dedicado. O modelo recebe apenas
+um manifesto tipado das ferramentas permitidas; callbacks atravessam uma ponte
+Rust limitada, cancelável e sem acesso implícito a Node.js, filesystem, rede ou
+processo. Leituras podem coexistir, enquanto mutações criam uma barreira e
+invalidam o cache da célula.
+
+Multiagente v2 mantém identidade, árvore, mailbox e estado no SQLite. Spawn,
+mensagens, follow-up, interrupção, listagem e espera são operações diretas do
+agente e nunca entram recursivamente no Code Mode. O limite é de quatro agentes
+ativos, incluindo a raiz, e 64 tarefas por árvore durante sua vida útil.
+
 ## Ferramentas e comandos
 
 O catálogo é construído no backend conforme perfil de permissão, plataforma e
@@ -75,9 +89,9 @@ O contrato completo está em [ENGINE.md](ENGINE.md).
 ## Imagens
 
 Anexos são inspecionados no backend. `view_image` lê e valida a imagem local,
-gera o conteúdo multimodal para o provider e publica uma atividade própria na
-timeline. A interface exibe a miniatura e o visualizador nativo; abrir um
-navegador não faz parte desse fluxo.
+persiste uma cópia gerenciada dos mesmos bytes enviados ao provider e publica
+uma atividade própria na timeline. A interface exibe a miniatura e o visualizador
+nativo; abrir um navegador não faz parte desse fluxo.
 
 ## Browser Use
 
@@ -92,7 +106,8 @@ aplicação.
 
 ## Persistência e secrets
 
-- SQLite em WAL guarda tarefas, eventos, configuração e metadados;
+- SQLite em WAL guarda tarefas, eventos, agentes, mailboxes, configuração e
+  metadados;
 - mudanças compostas usam transações e concorrência otimista quando aplicável;
 - pares incompletos de chamada e saída são reparados por regras explícitas;
 - credenciais são cifradas em envelope privado do aplicativo;

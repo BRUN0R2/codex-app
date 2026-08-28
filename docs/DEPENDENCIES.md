@@ -25,6 +25,7 @@ desenvolvimento e build.
 | shell | `tauri`, plugins e `tauri-build` | janela, integração Windows e bundle |
 | Windows | `webview2-com`, `windows` | child WebView2, COM e Job Objects |
 | async | `tokio`, `futures-util` | tarefas, concorrência e SSE |
+| sandbox | `v8` | isolate JavaScript do Code Mode |
 | HTTP | `reqwest`, `url` | HTTPS rustls, cookies e URLs validadas |
 | storage | `rusqlite`, `r2d2`, `r2d2_sqlite` | SQLite WAL e pool |
 | secrets | `age`, `keyring-core`, `windows-native-keyring-store`, `zeroize`, `rand`, `sha2` | cofre, PKCE e hashes |
@@ -48,6 +49,13 @@ Fontes:
 
 Novas APIs ou lints só devem ser adotados quando reduzirem complexidade ou
 melhorarem correção no código real. Não use `allow` para esconder regressões.
+
+A revisão do Rust 1.98 não adotou operações algébricas de ponto flutuante porque
+elas podem variar entre plataformas, nem trocou código simples por APIs novas sem
+ganho medido. O benefício aplicável é o toolchain atual, o MSRV explícito e
+warnings como erro. Os novos diagnósticos `filter_map_bool_then` e
+`obfuscated_if_else` simplificaram fluxos reais do multiagente; novas APIs entram
+somente quando houver uso real.
 
 ## Exceção transitiva
 

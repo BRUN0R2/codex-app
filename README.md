@@ -10,7 +10,9 @@ referência de protocolo e comportamento.
 - OAuth ChatGPT com PKCE, renovação, revogação e cancelamento;
 - Chat e Codex com catálogos próprios, streaming HTTPS/SSE e histórico isolado;
 - tarefas simultâneas, direcionamento, interrupção, compactação, fork e arquivo;
-- agente nativo com ferramentas de arquivos, comandos, planos, imagens e browser;
+- agente nativo com Code Mode V8, arquivos, comandos, planos, imagens e browser;
+- colaboração multiagente v2 persistida, cancelável e limitada por ownership;
+- esforço Ultra identificado em roxo e traduzido para capabilities do catálogo;
 - três perfis explícitos: somente leitura, escrita no projeto e acesso total;
 - processos longos em segundo plano, saída incremental e encerramento da árvore;
 - SQLite local com WAL e credenciais protegidas pelo Windows Credential Manager;
@@ -85,7 +87,8 @@ Releases oficiais seguem [docs/RELEASE.md](docs/RELEASE.md).
 - `src/infrastructure`: comandos e eventos Tauri;
 - `src/state`: estado reativo e reduções determinísticas;
 - `src/ui`: apresentação sem acesso direto ao IPC;
-- `src-tauri/src/engine/native`: agente, auth, provider, storage e ferramentas;
+- `src-tauri/src/engine/native`: agente, auth, provider, storage, Code Mode,
+  multiagente e ferramentas;
 - `scripts`: gates, medições e automação local;
 - `docs`: contrato, arquitetura, referência, desempenho e release.
 
