@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  compareRetainedIdentities,
   type ObservedProcess,
   observeProcess,
   parseDevToolsActivePort,
@@ -24,6 +25,34 @@ afterEach(async () => {
 });
 
 describe("visual audit runtime", () => {
+  it("compares identity only for keys retained between samples", () => {
+    const retained = {};
+    const replacedBefore = {};
+    const replacedAfter = {};
+
+    expect(
+      compareRetainedIdentities(
+        new Map([
+          ["retained", retained],
+          ["replaced", replacedBefore],
+          ["removed", {}],
+        ]),
+        new Map([
+          ["retained", retained],
+          ["replaced", replacedAfter],
+          ["added", {}],
+        ]),
+      ),
+    ).toEqual({ replacementCount: 1, retainedCount: 2 });
+  });
+
+  it("treats disjoint samples as valid but inconclusive", () => {
+    expect(compareRetainedIdentities(new Map([["before", {}]]), new Map([["after", {}]]))).toEqual({
+      replacementCount: 0,
+      retainedCount: 0,
+    });
+  });
+
   it("parses the ephemeral DevTools endpoint emitted by Chromium", () => {
     expect(parseDevToolsActivePort("64914\r\n/devtools/browser/session-id\r\n")).toEqual({
       browserWebSocketUrl: "ws://127.0.0.1:64914/devtools/browser/session-id",
