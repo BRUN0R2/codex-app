@@ -100,10 +100,11 @@ No core oficial, Code Mode é um subsistema com protocolo, runtime V8 sandboxed,
 host, negociação, backpressure, limites, yield e cancelamento. Expor apenas uma
 tool JavaScript não seria equivalente nem seguro.
 
-Modelos `code_mode_only` permanecem visíveis, porém bloqueados sem o host. Ultra
-permanece bloqueado sem multiagente v2. A UI pode apresentar o requisito, mas o
-engine não seleciona o modelo, não anuncia a capability e não envia `ultra` ao
-provider. As implementações completas estão no backlog; shims são proibidos.
+Modelos `code_mode_only` permanecem visíveis, porém bloqueados sem o host. Uma
+preferência antiga incompatível volta ao modelo padrão utilizável. Ultra permanece
+bloqueado sem multiagente v2, e seu requisito aparece somente na própria opção.
+O engine não anuncia capabilities ausentes nem envia `ultra` ao provider. As
+implementações completas estão no backlog; shims são proibidos.
 
 ## Imagens e Browser Use
 

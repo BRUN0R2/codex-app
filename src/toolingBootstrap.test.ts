@@ -39,4 +39,14 @@ describe("tooling bootstrap contract", () => {
       'features: [{ name: "prefers-reduced-motion", value: "no-preference" }]',
     );
   });
+
+  it("lets Chromium own its ephemeral DevTools port without hiding early exits", () => {
+    expect(packageManifest.scripts?.["verify:visual"]).toContain(
+      "node --experimental-strip-types scripts/verify-visual-preview.mjs",
+    );
+    expect(visualAuditScript).toContain('"--remote-debugging-port=0"');
+    expect(visualAuditScript).toContain("waitForDevToolsEndpoint");
+    expect(visualAuditScript).not.toContain("reservePort");
+    expect(visualAuditScript).not.toContain("allowExited");
+  });
 });

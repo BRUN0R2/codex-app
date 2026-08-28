@@ -242,6 +242,18 @@ const PREVIEW_MODEL_CATALOG = {
   data: PREVIEW_MODELS,
 } satisfies ModelListResponse;
 
+const PREVIEW_RUNTIME_RESTRICTED_MODEL_CATALOG = {
+  data: PREVIEW_MODELS.map((model) => ({
+    ...model,
+    unsupportedRuntimeCapabilities:
+      model.id === PREVIEW_MODEL_ID
+        ? (["codeMode", "multiAgent"] as const)
+        : (["multiAgent"] as const),
+    unsupportedReasoningEfforts: ["ultra"] as const,
+    isDefault: model.id === "gpt-5.5",
+  })),
+} satisfies ModelListResponse;
+
 const PREVIEW_CHAT_MODEL_CATALOG = {
   data: [
     {
@@ -1339,6 +1351,10 @@ let previewApplicationPreferences: ApplicationPreferences = {
 
 export function setupBrowserPreview(): void {
   const previewParameters = new URLSearchParams(window.location.search);
+  const previewModelCatalog =
+    previewParameters.get("runtimeRestrictions") === "1"
+      ? PREVIEW_RUNTIME_RESTRICTED_MODEL_CATALOG
+      : PREVIEW_MODEL_CATALOG;
   const preferenceUpdateDelay = previewDelay(previewParameters.get("preferenceDelay"));
   const timelineStressPreview = previewParameters.get("timelineStress") === "1";
   const activityReconciliationPreview =
@@ -1455,7 +1471,7 @@ export function setupBrowserPreview(): void {
       case "engine_account_profile_read":
         return PREVIEW_ACCOUNT_PROFILE;
       case "engine_model_list":
-        return PREVIEW_MODEL_CATALOG;
+        return previewModelCatalog;
       case "engine_chat_model_list":
         return PREVIEW_CHAT_MODEL_CATALOG;
       case "engine_thread_list":

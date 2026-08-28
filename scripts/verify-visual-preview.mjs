@@ -1,15 +1,21 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import {
+  observeProcess,
+  waitForDevToolsEndpoint,
+  waitForHttp,
+} from "../src/tooling/visualAuditRuntime.ts";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VITE_ENTRY = path.join(PROJECT_ROOT, "node_modules", "vite", "bin", "vite.js");
 const PREVIEW_PORT = 1420;
 const HOME_PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}/?preview=1&chrome=1`;
+const RUNTIME_RESTRICTIONS_PREVIEW_URL = `${HOME_PREVIEW_URL}&runtimeRestrictions=1`;
 const CHAT_REFERENCE_PREVIEW_URL = `${HOME_PREVIEW_URL}&chatReference=1`;
 const TIMELINE_STRESS_PREVIEW_URL = `${HOME_PREVIEW_URL}&timelineStress=1`;
 const TIMELINE_EXTREME_PREVIEW_URL = `${TIMELINE_STRESS_PREVIEW_URL}&timelineFiles=100000`;
@@ -97,6 +103,47 @@ const SCENARIOS = [
       };
     })()`,
     validate: validateComposerUltraEffortMetrics,
+  },
+  {
+    id: "composer-runtime-restrictions",
+    url: RUNTIME_RESTRICTIONS_PREVIEW_URL,
+    initialReadyExpression: `document.querySelector(".model-button") instanceof HTMLButtonElement &&
+      document.querySelector(".model-button-name")?.textContent?.includes("5.5") === true`,
+    prepareExpression: `(() => {
+      const modelButton = document.querySelector(".model-button");
+      if (!(modelButton instanceof HTMLButtonElement)) {
+        throw new Error("O seletor do modelo está ausente.");
+      }
+      modelButton.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const effortRow = [...document.querySelectorAll(".model-menu-row")].find(
+          (button) => button.textContent?.includes("Esforço"),
+        );
+        if (!(effortRow instanceof HTMLButtonElement)) {
+          throw new Error("A seção de esforço está ausente.");
+        }
+        effortRow.click();
+      }));
+    })()`,
+    readyExpression: `[...document.querySelectorAll(".model-menu-option")].some(
+      (button) => button.textContent?.includes("Ultra") &&
+        button.textContent?.includes("Requer execução multiagente"),
+    )`,
+    auditExpression: () => `(() => {
+      const ultraOption = [...document.querySelectorAll(".model-menu-option")].find(
+        (button) => button.textContent?.includes("Ultra"),
+      );
+      return {
+        selectedModel: document.querySelector(".model-button-name")?.textContent?.trim() ?? null,
+        persistentCompatibilityNoticeCount: [...document.querySelectorAll(".composer-input-error")]
+          .filter((element) => element.textContent?.includes("Requer")).length,
+        ultraDisabled: ultraOption instanceof HTMLButtonElement ? ultraOption.disabled : null,
+        ultraLabel: ultraOption?.querySelector("strong")?.textContent?.trim() ?? null,
+        ultraRequirement: ultraOption?.querySelector("small")?.textContent?.trim() ?? null,
+        horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      };
+    })()`,
+    validate: validateComposerRuntimeRestrictionsMetrics,
   },
   {
     id: "active-activity-reflection",
@@ -838,7 +885,6 @@ const SCENARIOS = [
 async function main() {
   const browserPath = resolveBrowserPath();
   const browserProfile = await mkdtemp(path.join(os.tmpdir(), "codex-app-visual-"));
-  const debugPort = await reservePort();
   // Browser fixtures are guarded by import.meta.env.DEV; the production build is validated
   // separately, while this server keeps those deterministic fixtures available to the audit.
   const server = spawn(
@@ -859,12 +905,12 @@ async function main() {
       windowsHide: true,
     },
   );
-  const serverOutput = captureOutput(server);
+  const serverProcess = observeProcess(server, "Servidor da auditoria visual");
   let browser;
   let browserController;
 
   try {
-    await waitForHttp(SETTINGS_PREVIEW_URL, server, serverOutput);
+    await waitForHttp(SETTINGS_PREVIEW_URL, serverProcess);
     browser = spawn(
       browserPath,
       [
@@ -883,7 +929,7 @@ async function main() {
         "--hide-scrollbars",
         "--metrics-recording-only",
         "--no-first-run",
-        `--remote-debugging-port=${debugPort}`,
+        "--remote-debugging-port=0",
         `--user-data-dir=${browserProfile}`,
         "about:blank",
       ],
@@ -893,11 +939,10 @@ async function main() {
         windowsHide: true,
       },
     );
-    const browserOutput = captureOutput(browser);
-    const versionUrl = `http://127.0.0.1:${debugPort}/json/version`;
-    await waitForHttp(versionUrl, browser, browserOutput, { allowExited: true });
-    const browserVersion = await fetchJson(versionUrl);
-    browserController = await CdpClient.connect(browserVersion.webSocketDebuggerUrl);
+    const browserProcess = observeProcess(browser, "Navegador da auditoria visual");
+    const devToolsEndpoint = await waitForDevToolsEndpoint(browserProfile, browserProcess);
+    await waitForHttp(devToolsEndpoint.versionUrl, browserProcess);
+    browserController = await CdpClient.connect(devToolsEndpoint.browserWebSocketUrl);
     await mkdir(ARTIFACT_DIRECTORY, { recursive: true });
 
     const reports = [];
@@ -914,7 +959,7 @@ async function main() {
     }
     for (const scenario of scenarios) {
       for (const viewport of scenario.viewports ?? VIEWPORTS) {
-        reports.push(await auditViewport(debugPort, viewport, scenario));
+        reports.push(await auditViewport(devToolsEndpoint.port, viewport, scenario));
       }
     }
 
@@ -5956,6 +6001,20 @@ function validateComposerUltraEffortMetrics(metrics) {
   assert(metrics.color === "rgb(167, 139, 250)", "o esforço Ultra ativo deixou de ser roxo");
 }
 
+function validateComposerRuntimeRestrictionsMetrics(metrics) {
+  assert(metrics.horizontalOverflow <= 1, "o aviso contextual criou overflow horizontal");
+  assert(metrics.selectedModel === "5.5", "a seleção incompatível não usou o fallback seguro");
+  assert(
+    metrics.persistentCompatibilityNoticeCount === 0,
+    "o requisito de runtime permaneceu visível fora do seletor",
+  );
+  assert(metrics.ultraDisabled === true, "Ultra ficou selecionável sem execução multiagente");
+  assert(
+    metrics.ultraLabel === "Ultra" && metrics.ultraRequirement === "Requer execução multiagente",
+    "o requisito de Ultra não ficou restrito à opção",
+  );
+}
+
 function validateActiveActivityReflectionMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
@@ -7764,52 +7823,6 @@ function resolveBrowserPath() {
     throw new Error("Edge ou Chrome não foi encontrado para a auditoria visual.");
   }
   return resolved;
-}
-
-async function reservePort() {
-  const server = net.createServer();
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  if (address === null || typeof address === "string") {
-    server.close();
-    throw new Error("Não foi possível reservar a porta de depuração do navegador.");
-  }
-  await new Promise((resolve, reject) => {
-    server.close((error) => (error === undefined ? resolve() : reject(error)));
-  });
-  return address.port;
-}
-
-function captureOutput(child) {
-  let output = "";
-  const append = (chunk) => {
-    output = `${output}${chunk.toString()}`.slice(-16_384);
-  };
-  child.stdout?.on("data", append);
-  child.stderr?.on("data", append);
-  return () => output;
-}
-
-async function waitForHttp(url, child, output, options = {}) {
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null && options.allowExited !== true) {
-      throw new Error(`Processo encerrou antes de responder em ${url}:\n${output()}`);
-    }
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-    } catch {
-      // The server or browser is still starting.
-    }
-    await delay(100);
-  }
-  throw new Error(`Tempo esgotado aguardando ${url}:\n${output()}`);
 }
 
 async function fetchJson(url, init) {

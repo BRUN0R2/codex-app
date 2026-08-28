@@ -13,7 +13,6 @@ import type {
   Attachment,
   ChatModelOption,
   CodexModel,
-  ModelRuntimeCapability,
   PermissionProfile,
   ReasoningEffort,
 } from "../contracts/types";
@@ -51,11 +50,6 @@ type ComposerController = Pick<
   | "workspace"
 >;
 
-const MODEL_RUNTIME_CAPABILITY_LABELS: Readonly<Record<ModelRuntimeCapability, string>> = {
-  codeMode: "host do Code Mode",
-  multiAgent: "execução multiagente",
-};
-
 import {
   type ChatIntelligenceSelection,
   chatOptionLabel,
@@ -74,6 +68,12 @@ import { ContextWindowIndicator } from "./ContextWindowIndicator";
 import { Icon } from "./Icon";
 import { ImagePreview } from "./ImagePreview";
 import { modelContextWindowPreference, resolveModelContextWindow } from "./modelContextWindow";
+import {
+  modelIsRuntimeCompatible,
+  selectRuntimeCompatibleModel,
+  selectRuntimeCompatibleReasoningEffort,
+  selectRuntimeCompatibleServiceTier,
+} from "./modelSelection";
 
 const COMPOSER_MESSAGE_MAXIMUM_CHARACTERS: number = 1_048_576;
 const COMPOSER_ATTACHMENT_MAXIMUM_COUNT: number = 12;
@@ -129,7 +129,7 @@ export function Composer(props: ComposerProps) {
   let textArea: HTMLTextAreaElement | undefined;
 
   const configuredModel = createMemo(() =>
-    selectModel(
+    selectRuntimeCompatibleModel(
       props.controller.models(),
       model(),
       props.controller.config()?.config.model ?? null,
@@ -158,23 +158,8 @@ export function Composer(props: ComposerProps) {
     return option === undefined ? "Carregando" : chatOptionLabel(option);
   });
   const reasoningOptions = createMemo(() => configuredModel()?.supportedReasoningEfforts ?? []);
-  const modelUnavailableMessage = createMemo(() =>
-    mode() === "chat" || !modelIsUnavailable(selectedModel())
-      ? null
-      : unsupportedModelMessage(selectedModel()),
-  );
-  const reasoningEffortUnavailableMessage = createMemo(() =>
-    mode() === "chat" ? null : unsupportedReasoningEffortMessage(selectedModel(), effort()),
-  );
   const canSend = createMemo(
-    () =>
-      !sending() &&
-      modelUnavailableMessage() === null &&
-      reasoningEffortUnavailableMessage() === null &&
-      (text().trim().length > 0 || attachments().length > 0),
-  );
-  const composerError = createMemo(
-    () => attachmentError() ?? modelUnavailableMessage() ?? reasoningEffortUnavailableMessage(),
+    () => !sending() && (text().trim().length > 0 || attachments().length > 0),
   );
 
   createEffect(() => {
@@ -195,10 +180,7 @@ export function Composer(props: ComposerProps) {
     if (configured === undefined || catalog.length === 0) {
       return;
     }
-    const nextModel = selectModel(catalog, configured.model, null);
-    setModel(nextModel?.id ?? null);
-    setEffort(configured.modelReasoningEffort ?? nextModel?.defaultReasoningEffort ?? null);
-    setServiceTier(configured.serviceTier ?? nextModel?.defaultServiceTier ?? null);
+    applyCodexSelection(configured.model, configured.modelReasoningEffort, configured.serviceTier);
   });
 
   createEffect(
@@ -264,17 +246,7 @@ export function Composer(props: ComposerProps) {
   });
 
   function selectNextModel(value: string): void {
-    setModel(value);
-    const next = props.controller.models().find((entry) => entry.id === value);
-    if (next === undefined) {
-      setEffort(null);
-      setServiceTier(null);
-      return;
-    }
-    if (!next.supportedReasoningEfforts.some((option) => option.reasoningEffort === effort())) {
-      setEffort(next.defaultReasoningEffort);
-    }
-    setServiceTier(next.defaultServiceTier);
+    applyCodexSelection(value, effort(), null);
   }
 
   function selectNextChatOption(option: ChatModelOption): void {
@@ -300,10 +272,22 @@ export function Composer(props: ComposerProps) {
 
   function resetModelSelection(): void {
     const configured = props.controller.config()?.config;
-    const nextModel = selectModel(props.controller.models(), configured?.model ?? null, null);
+    applyCodexSelection(
+      configured?.model ?? null,
+      configured?.modelReasoningEffort ?? null,
+      configured?.serviceTier ?? null,
+    );
+  }
+
+  function applyCodexSelection(
+    requestedModel: string | null,
+    requestedEffort: ReasoningEffort | null,
+    requestedServiceTier: string | null,
+  ): void {
+    const nextModel = selectRuntimeCompatibleModel(props.controller.models(), requestedModel, null);
     setModel(nextModel?.id ?? null);
-    setEffort(configured?.modelReasoningEffort ?? nextModel?.defaultReasoningEffort ?? null);
-    setServiceTier(configured?.serviceTier ?? nextModel?.defaultServiceTier ?? null);
+    setEffort(selectRuntimeCompatibleReasoningEffort(nextModel, requestedEffort));
+    setServiceTier(selectRuntimeCompatibleServiceTier(nextModel, requestedServiceTier));
   }
 
   async function selectPermission(profile: PermissionProfile): Promise<void> {
@@ -343,14 +327,24 @@ export function Composer(props: ComposerProps) {
       return;
     }
     const selectedChatIntelligence = mode() === "chat" ? chatIntelligence() : null;
+    const selectedCodexModel = mode() === "chat" ? undefined : selectedModel();
     const submittedDraftKey = activeDraftKey;
     const submittedDraft = currentDraft();
     const input = {
       text: submittedDraft.text,
       attachments: submittedDraft.attachments,
-      model: mode() === "chat" ? (selectedChatIntelligence?.option?.id ?? null) : model(),
-      effort: mode() === "chat" ? null : effort(),
-      serviceTier: mode() === "chat" ? null : serviceTier(),
+      model:
+        mode() === "chat"
+          ? (selectedChatIntelligence?.option?.id ?? null)
+          : (selectedCodexModel?.id ?? null),
+      effort:
+        mode() === "chat"
+          ? null
+          : selectRuntimeCompatibleReasoningEffort(selectedCodexModel, effort()),
+      serviceTier:
+        mode() === "chat"
+          ? null
+          : selectRuntimeCompatibleServiceTier(selectedCodexModel, serviceTier()),
     };
     if (props.controller.turnBusy() && queueingEnabled()) {
       if (props.controller.enqueueMessage(input)) {
@@ -409,16 +403,17 @@ export function Composer(props: ComposerProps) {
     }
     setText(message.text);
     setAttachments(message.attachments);
-    if (mode() === "chat" && message.model !== null) {
-      setChatSelection({
-        version: 2,
-        optionId: message.model,
-      });
+    if (mode() === "chat") {
+      if (message.model !== null) {
+        setChatSelection({
+          version: 2,
+          optionId: message.model,
+        });
+      }
+      setServiceTier(message.serviceTier);
     } else {
-      setModel(message.model);
-      setEffort(message.effort);
+      applyCodexSelection(message.model, message.effort, message.serviceTier);
     }
-    setServiceTier(message.serviceTier);
     setAttachmentError(null);
     queueMicrotask(() => {
       resizeTextArea(textArea);
@@ -914,7 +909,7 @@ export function Composer(props: ComposerProps) {
           </div>
         </div>
       </form>
-      <Show when={composerError()}>
+      <Show when={attachmentError()}>
         {(message) => (
           <p class="composer-input-error" role="alert">
             {message()}
@@ -1053,7 +1048,7 @@ function ModelMenuOptions(props: {
           <For each={props.models}>
             {(entry) => {
               const runtimeNotice = unsupportedModelMessage(entry);
-              const unavailable = modelIsUnavailable(entry);
+              const unavailable = !modelIsRuntimeCompatible(entry);
               return (
                 <button
                   aria-checked={entry.id === props.model?.id}
@@ -1169,35 +1164,11 @@ function modelMenuSectionLabel(section: ModelMenuSection): string {
   }
 }
 
-function selectModel(
-  models: readonly CodexModel[],
-  requested: string | null,
-  fallback: string | null,
-): CodexModel | undefined {
-  const id = requested ?? fallback;
-  return models.find((model) => model.id === id) ?? models.find((model) => model.isDefault);
-}
-
 function unsupportedModelMessage(model: CodexModel | undefined): string | null {
-  const capabilities = model?.unsupportedRuntimeCapabilities ?? [];
-  if (capabilities.length === 0) {
+  if (model === undefined || modelIsRuntimeCompatible(model)) {
     return null;
   }
-  const labels = capabilities.map((capability) => MODEL_RUNTIME_CAPABILITY_LABELS[capability]);
-  return `Requer ${new Intl.ListFormat("pt-BR").format(labels)}, indisponível neste runtime.`;
-}
-
-function modelIsUnavailable(model: CodexModel | undefined): boolean {
-  return model?.unsupportedRuntimeCapabilities.includes("codeMode") === true;
-}
-
-function unsupportedReasoningEffortMessage(
-  model: CodexModel | undefined,
-  effort: ReasoningEffort | null,
-): string | null {
-  return effort !== null && model?.unsupportedReasoningEfforts.includes(effort) === true
-    ? `O esforço ${effortLabel(effort)} requer execução multiagente, indisponível neste runtime.`
-    : null;
+  return "Requer host do Code Mode, indisponível neste runtime.";
 }
 
 function mergeAttachments(
