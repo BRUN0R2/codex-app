@@ -49,4 +49,12 @@ describe("tooling bootstrap contract", () => {
     expect(visualAuditScript).not.toContain("reservePort");
     expect(visualAuditScript).not.toContain("allowExited");
   });
+
+  it("probes retained timeline identity independently from display refresh rate", () => {
+    expect(visualAuditScript).toContain("summaryIdentityProbeComparisons");
+    expect(visualAuditScript).toContain("rapidSummaryComparisons");
+    expect(visualAuditScript).not.toContain(
+      "o teste rápido não comparou a identidade de nenhum resumo entre frames consecutivos",
+    );
+  });
 });

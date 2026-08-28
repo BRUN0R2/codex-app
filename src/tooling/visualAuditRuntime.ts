@@ -23,9 +23,33 @@ export interface ReadinessOptions {
   readonly timeoutMilliseconds?: number;
 }
 
+export interface RetainedIdentityComparison {
+  readonly replacementCount: number;
+  readonly retainedCount: number;
+}
+
 interface WaitSettings {
   readonly pollIntervalMilliseconds: number;
   readonly timeoutMilliseconds: number;
+}
+
+export function compareRetainedIdentities<TIdentity extends object>(
+  previous: ReadonlyMap<string, TIdentity>,
+  current: ReadonlyMap<string, TIdentity>,
+): RetainedIdentityComparison {
+  let replacementCount = 0;
+  let retainedCount = 0;
+
+  for (const [key, currentIdentity] of current) {
+    const previousIdentity = previous.get(key);
+    if (previousIdentity === undefined) {
+      continue;
+    }
+    retainedCount += 1;
+    replacementCount += previousIdentity === currentIdentity ? 0 : 1;
+  }
+
+  return { replacementCount, retainedCount };
 }
 
 export function observeProcess(child: ChildProcess, label: string): ObservedProcess {

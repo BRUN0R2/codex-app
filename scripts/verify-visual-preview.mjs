@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  compareRetainedIdentities,
   observeProcess,
   waitForDevToolsEndpoint,
   waitForHttp,
@@ -3213,10 +3214,12 @@ function nestedScrollFollowingPrepareExpression() {
 }
 
 function timelinePerformanceStressPrepareExpression() {
+  const compareRetainedIdentitiesSource = compareRetainedIdentities.toString();
   return `(() => {
     void (async () => {
       try {
         window.__timelineStressProgress = { phase: "starting" };
+        const compareRetainedIdentities = ${compareRetainedIdentitiesSource};
         const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
         const waitUntil = async (label, predicate, timeoutMs) => {
           const deadline = performance.now() + timeoutMs;
@@ -3353,6 +3356,45 @@ function timelinePerformanceStressPrepareExpression() {
           visited: visited.size,
         };
 
+        const mountedSummariesByKey = () => {
+          const summaries = new Map();
+          for (const wrapper of document.querySelectorAll(".agent-activity-virtual-item")) {
+            const key = wrapper.getAttribute("data-virtual-activity-key");
+            const summary = wrapper.querySelector("summary");
+            if (key !== null && summary instanceof HTMLElement) {
+              summaries.set(key, summary);
+            }
+          }
+          return summaries;
+        };
+        const probeMaximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+        if (probeMaximum <= 1) {
+          throw new Error("A timeline não possui alcance para sondar identidade durante scroll.");
+        }
+        const probeStep = Math.max(
+          1,
+          Math.min(timeline.clientHeight / 4, probeMaximum / 8),
+        );
+        timeline.scrollTop = probeMaximum / 4;
+        await frame();
+        await frame();
+        let previousProbeSummaries = mountedSummariesByKey();
+        let summaryIdentityProbeComparisons = 0;
+        let summaryIdentityProbeChanges = 0;
+        for (let probeIndex = 0; probeIndex < 6; probeIndex += 1) {
+          timeline.scrollTop = Math.min(probeMaximum, timeline.scrollTop + probeStep);
+          await frame();
+          await frame();
+          const currentProbeSummaries = mountedSummariesByKey();
+          const comparison = compareRetainedIdentities(
+            previousProbeSummaries,
+            currentProbeSummaries,
+          );
+          summaryIdentityProbeComparisons += comparison.retainedCount;
+          summaryIdentityProbeChanges += comparison.replacementCount;
+          previousProbeSummaries = currentProbeSummaries;
+        }
+
         const frameIntervals = [];
         const animationWorkByFrame = new Map();
         const animationCallbackOutliers = [];
@@ -3413,8 +3455,8 @@ function timelinePerformanceStressPrepareExpression() {
         let maximumVisibleEmptyActivityLists = 0;
         const visibleEmptyActivityListSamples = [];
         const rapidFrameOutliers = [];
-        let consecutiveSummaryComparisons = 0;
-        let summaryIdentityChanges = 0;
+        let rapidSummaryComparisons = 0;
+        let rapidSummaryIdentityChanges = 0;
         let previousSummariesByKey = new Map();
         const inspectVisibleActivityCoverage = (phaseLabel, timelineBounds) => {
           let emptyLists = 0;
@@ -3479,13 +3521,14 @@ function timelinePerformanceStressPrepareExpression() {
                 continue;
               }
               mountedSummaries += 1;
-              const previousSummary = previousSummariesByKey.get(key);
-              if (previousSummary !== undefined) {
-                consecutiveSummaryComparisons += 1;
-                summaryIdentityChanges += previousSummary === summary ? 0 : 1;
-              }
               currentSummariesByKey.set(key, summary);
             }
+            const rapidIdentityComparison = compareRetainedIdentities(
+              previousSummariesByKey,
+              currentSummariesByKey,
+            );
+            rapidSummaryComparisons += rapidIdentityComparison.retainedCount;
+            rapidSummaryIdentityChanges += rapidIdentityComparison.replacementCount;
             previousSummariesByKey = currentSummariesByKey;
             const deferredBodyElements = document.querySelectorAll(
               '[data-activity-content="deferred"]',
@@ -3818,8 +3861,10 @@ function timelinePerformanceStressPrepareExpression() {
           visibleEmptyActivityListFrames,
           maximumVisibleEmptyActivityLists,
           visibleEmptyActivityListSamples,
-          consecutiveSummaryComparisons,
-          summaryIdentityChanges,
+          summaryIdentityProbeComparisons,
+          summaryIdentityProbeChanges,
+          rapidSummaryComparisons,
+          rapidSummaryIdentityChanges,
           iconIntegrityComparisons,
           iconIntegrityFailures,
           iconIntegrityKinds: [...iconIntegrityKinds].sort(),
@@ -7512,12 +7557,16 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
     `a timeline deixou listas visíveis sem conteúdo em ${metrics.visibleEmptyActivityListFrames} frames: ${JSON.stringify(metrics.visibleEmptyActivityListSamples)}`,
   );
   assert(
-    metrics.consecutiveSummaryComparisons > 0,
-    "o teste rápido não comparou a identidade de nenhum resumo entre frames consecutivos",
+    metrics.summaryIdentityProbeComparisons > 0,
+    "a sondagem controlada não reteve resumos entre amostras consecutivas",
   );
   assert(
-    metrics.summaryIdentityChanges === 0,
-    `o scroll rápido substituiu ${metrics.summaryIdentityChanges} resumos que continuavam visíveis`,
+    metrics.summaryIdentityProbeChanges === 0,
+    `a sondagem controlada substituiu ${metrics.summaryIdentityProbeChanges} resumos retidos`,
+  );
+  assert(
+    metrics.rapidSummaryIdentityChanges === 0,
+    `o scroll rápido substituiu ${metrics.rapidSummaryIdentityChanges} resumos que permaneceram montados`,
   );
   assert(
     metrics.iconIntegrityComparisons > 0 &&

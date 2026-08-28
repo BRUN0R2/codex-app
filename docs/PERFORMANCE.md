@@ -66,9 +66,9 @@ o bloqueio de capability no engine.
 
 | Verificação | Resultado |
 | --- | ---: |
-| encoding | 360 arquivos UTF-8 válidos |
-| frontend | 78 arquivos; 428 testes aprovados |
-| bundle principal JS | 443,13 kB; 134,70 kB gzip |
+| encoding | 364 arquivos UTF-8 válidos |
+| frontend | 80 arquivos; 443 testes aprovados |
+| bundle principal JS | 442,84 kB; 134,59 kB gzip |
 | CSS | 144,20 kB; 25,82 kB gzip |
 | Rust | 357 aprovados; 9 benchmarks ignorados; 0 falhas |
 | Cargo, formato e Clippy | aprovados sem warnings |
@@ -85,6 +85,7 @@ o bloqueio de capability no engine.
 | concorrência quebrar ordem | lote com barreiras e benchmark de comandos paralelos |
 | tools consumirem contexto sem controle | orçamento do catálogo e `measure:tokens` |
 | browser degradar layout | matrizes de viewport, métricas e smoke WebView2 |
+| taxa de atualização alterar o QA | sondagem de identidade controlada, separada do scroll rápido |
 | processos escaparem do turno | testes Windows com Job Object e descendente real |
 
 Os thresholds vivem nos scripts para que documentação e gate não divirjam.
