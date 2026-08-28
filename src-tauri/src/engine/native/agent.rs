@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use futures_util::future::join_all;
@@ -10,13 +9,17 @@ use tauri::AppHandle;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use super::compaction::compact_context;
+use super::compaction::{CompactionContext, compact_context};
 use super::content_references::strip_content_reference_markers;
-use super::context_window::{ContextUsageSnapshot, evaluate_context_window, full_context_usage};
+use super::context_window::{
+    ContextUsageSnapshot, ContextWindowEvaluation, evaluate_context_window, full_context_usage,
+};
 use super::output::OutputSource;
+use super::prompt_context::compose_prompt_context;
 use super::provider::{
-    ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseRequest,
-    ResponseRequestSettings, SelectedModel, WebSearchAction, normalize_provider_history,
+    DEFAULT_FUNCTION_NAMESPACE, ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase,
+    ResponseRequest, ResponseRequestSettings, SelectedModel, WebSearchAction,
+    normalize_provider_history,
 };
 use super::storage::ProviderHistorySnapshot;
 use super::stream_notifications::StreamNotificationBatcher;
@@ -27,12 +30,12 @@ use super::tools::{
 };
 use super::turn_recovery;
 use super::{NativeEngineInner, TurnContinuation};
-use crate::attachments::{AttachmentKind, detect_image_media_type, inspect_path};
+use crate::attachments::{AttachmentKind, ImageContentError, inspect_path, validate_image_content};
 use crate::engine::{
     ActivityStatus, AppConfig, ConversationMode, DiagnosticStream, ImageDetail, ItemNotification,
     MessagePhase, ModelRerouteReason, ModelReroutedNotification,
     ModelSafetyBufferingUpdatedNotification, ModelVerificationNotification, PermissionProfile,
-    Personality, StreamDelta, ThreadItem, TurnInput, WebSearchMode,
+    StreamDelta, ThreadItem, TurnInput, WebSearchMode,
 };
 use crate::error::AppError;
 
@@ -48,21 +51,13 @@ const MAX_USER_TEXT_BYTES: usize = 1_048_576;
 const MAX_ATTACHMENT_TEXT_BYTES: usize = 2 * 1_048_576;
 const MAX_IMAGE_BYTES: usize = 10 * 1_048_576;
 const MAX_RAW_INPUT_BYTES: usize = 16 * 1_048_576;
-const MAX_INSTRUCTIONS_BYTES: usize = 524_288;
+const MAX_LOCAL_PROVIDER_ITEM_BYTES: usize = 24 * 1_048_576;
 const MAX_TURN_PREVIEW_BYTES: usize = 160;
 const MAX_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_ERROR_BYTES: usize = 4_096;
 const MAX_PARALLEL_TOOLS: usize = 8;
 const MAX_CONTEXT_RECOVERY_ATTEMPTS_WITHOUT_PROGRESS: u8 = 1;
-const WORK_EXECUTION_PROTOCOL: &str = "# Work execution protocol\n\
-- Own implementation tasks end to end: inspect, change, verify, and report the outcome without stopping at a proposal. Make reasonable in-scope assumptions instead of asking avoidable questions.\n\
-- Before the first tool call, send a brief user-visible commentary update with the goal and immediate next step. During work, send another short commentary update only for a concrete discovery, completed phase, plan change, blocker, or before and after a long heads-down wait. Each update must state an outcome and what comes next; do not narrate routine calls or repeat the plan. Do not leave ongoing work without an update for roughly 60 seconds. Reserve the final answer for completed work.\n\
-- Use update_plan for non-trivial multi-phase work, keep exactly one step in progress, and update it when the real phase changes. Skip plans for trivial work.\n\
-- For a command expected to run longer than a few seconds, choose a short yield_time_ms so it becomes a background session promptly. Continue independent safe work before waiting. Poll with the latest cursor for at most 30 seconds at a time, report meaningful progress between waits, and never claim required validation succeeded or finish the turn while its command is still running.\n\
-- Batch independent reads and explicitly parallel-safe commands. Preserve barriers around dependent work, mutations, approvals, and shared state.\n\
-- Treat safe local reads, in-scope edits, and relevant tests as authorized by an implementation request. Stop only for a genuine permission boundary, destructive or external action, material scope expansion, or an unresolved blocker.";
-
 pub(super) struct PreparedTurn {
     pub user_item: ThreadItem,
     pub provider_item: ResponseItem,
@@ -76,8 +71,10 @@ pub(super) struct TurnRun {
     pub mode: ConversationMode,
     pub model: SelectedModel,
     pub config: AppConfig,
-    pub reasoning_effort: Option<crate::engine::ReasoningEffort>,
+    pub provider_reasoning_effort: Option<crate::engine::ReasoningEffort>,
     pub service_tier: Option<String>,
+    pub timezone: String,
+    pub timezone_offset_min: i32,
     pub cancellation: watch::Receiver<bool>,
 }
 
@@ -97,7 +94,8 @@ enum ContextWindowRecovery {
 struct SamplingContext<'a> {
     app: &'a AppHandle,
     inner: &'a NativeEngineInner,
-    instructions: &'a str,
+    base_instructions: &'a str,
+    prompt_context: &'a [ResponseItem],
     snapshot: &'a mut Option<ContextUsageSnapshot>,
     tools: &'a [serde_json::Value],
 }
@@ -147,7 +145,23 @@ pub(super) async fn prepare_user_input(
                 let media_type = attachment.media_type.ok_or_else(|| {
                     AppError::InvalidAttachment("image media type is unavailable".into())
                 })?;
-                if detect_image_media_type(&bytes) != Some(media_type.as_str()) {
+                let (bytes, validated_media_type) = tokio::task::spawn_blocking(move || {
+                    validate_image_content(&bytes)
+                        .map(|validated_media_type| (bytes, validated_media_type))
+                })
+                .await
+                .map_err(|error| AppError::State(format!("image decoder task failed: {error}")))?
+                .map_err(|error| {
+                    AppError::InvalidAttachment(match error {
+                        ImageContentError::UnsupportedFormat => {
+                            "image format is not supported".into()
+                        }
+                        ImageContentError::InvalidOrUnsafeData => {
+                            "image data is invalid or exceeds the safe decode limits".into()
+                        }
+                    })
+                })?;
+                if validated_media_type != media_type {
                     return Err(AppError::InvalidAttachment(
                         "image contents changed after attachment validation".into(),
                     ));
@@ -217,9 +231,19 @@ pub(super) async fn run_turn(
     app: AppHandle,
     mut run: TurnRun,
 ) -> Result<RunCompletion, AppError> {
-    let instructions = compose_instructions(&run.model, &run.workspace, &run.config, run.mode)?;
+    let base_instructions = run.model.instructions(run.config.personality);
+    let prompt_context = compose_prompt_context(
+        &run.workspace,
+        &run.config,
+        run.mode,
+        &run.model,
+        &run.timezone,
+        run.timezone_offset_min,
+    )
+    .await?;
+    let verbosity = run.model.select_verbosity(run.config.model_verbosity)?;
     let mut provider_state = TurnProviderState::default();
-    let tools = provider_tools(&inner, &run.config, run.mode);
+    let tools = provider_tools(&inner, &run.config, run.mode, &run.model);
     let mut history = load_prompt_history(&inner, &app, &run.thread_id).await?;
     let mut context_snapshot = inner
         .storage
@@ -271,9 +295,10 @@ pub(super) async fn run_turn(
                 SamplingContext {
                     app: &app,
                     inner: &inner,
-                    instructions: &instructions,
+                    base_instructions: &base_instructions,
+                    prompt_context: prompt_context.items(),
                     snapshot: &mut context_snapshot,
-                    tools,
+                    tools: &tools,
                 },
                 &mut run,
                 &mut provider_state,
@@ -286,17 +311,20 @@ pub(super) async fn run_turn(
             let sampled_through_steer_sequence = promoted_through_steer_sequence;
             let request = ResponseRequest::new(
                 run.model.id(),
-                &instructions,
+                &base_instructions,
+                prompt_context.items(),
                 &history.items,
-                tools,
+                &tools,
                 ResponseRequestSettings {
-                    parallel_tool_calls: run.model.supports_parallel_tool_calls(),
-                    reasoning_effort: run.reasoning_effort,
+                    protocol: run.model.response_protocol(),
+                    parallel_tool_calls: run.model.request_parallel_tool_calls(),
+                    reasoning_effort: run.provider_reasoning_effort,
+                    reasoning_summary: run.model.reasoning_summary(),
                     service_tier: run.service_tier.as_deref(),
                     prompt_cache_key: Some(&run.thread_id),
-                    verbosity: run.config.model_verbosity,
+                    verbosity,
                 },
-            );
+            )?;
             let mut stream = match inner
                 .provider
                 .start_response(
@@ -328,9 +356,10 @@ pub(super) async fn run_turn(
                             SamplingContext {
                                 app: &app,
                                 inner: &inner,
-                                instructions: &instructions,
+                                base_instructions: &base_instructions,
+                                prompt_context: prompt_context.items(),
                                 snapshot: &mut context_snapshot,
-                                tools,
+                                tools: &tools,
                             },
                             &mut run,
                             &mut provider_state,
@@ -382,9 +411,10 @@ pub(super) async fn run_turn(
                                 SamplingContext {
                                     app: &app,
                                     inner: &inner,
-                                    instructions: &instructions,
+                                    base_instructions: &base_instructions,
+                                    prompt_context: prompt_context.items(),
                                     snapshot: &mut context_snapshot,
-                                    tools,
+                                    tools: &tools,
                                 },
                                 &mut run,
                                 &mut provider_state,
@@ -419,7 +449,8 @@ pub(super) async fn run_turn(
                     stream_deltas.flush().await?;
                 }
                 let Some(event) =
-                    handle_provider_control_event(&inner, &app, &run, &mut provider_state, event)?
+                    handle_provider_control_event(&inner, &app, &run, &mut provider_state, event)
+                        .await?
                 else {
                     continue;
                 };
@@ -505,6 +536,7 @@ pub(super) async fn run_turn(
                         match item {
                             ResponseItem::FunctionCall {
                                 id,
+                                namespace,
                                 name,
                                 arguments,
                                 call_id,
@@ -513,6 +545,7 @@ pub(super) async fn run_turn(
                                 pending_tools.push(PendingTool::function(
                                     &inner.tools,
                                     item_id,
+                                    namespace.as_deref(),
                                     &name,
                                     &arguments,
                                     call_id,
@@ -520,6 +553,7 @@ pub(super) async fn run_turn(
                             }
                             ResponseItem::CustomToolCall {
                                 id,
+                                namespace,
                                 call_id,
                                 name,
                                 input,
@@ -528,6 +562,7 @@ pub(super) async fn run_turn(
                                 pending_tools.push(PendingTool::custom(
                                     &inner.tools,
                                     item_id,
+                                    namespace.as_deref(),
                                     &name,
                                     &input,
                                     call_id,
@@ -564,6 +599,7 @@ pub(super) async fn run_turn(
                     }
                     ResponseEvent::Interrupted => return Ok(RunCompletion::Interrupted),
                     ResponseEvent::ServerModel(_)
+                    | ResponseEvent::ModelsEtag(_)
                     | ResponseEvent::TurnState(_)
                     | ResponseEvent::ModelVerifications(_)
                     | ResponseEvent::SafetyBuffering(_) => {
@@ -596,7 +632,7 @@ pub(super) async fn run_turn(
                 }
             }
 
-            let allow_parallel_tools = run.model.supports_parallel_tool_calls();
+            let allow_safe_local_overlap = true;
             let mut pending_tools = pending_tools.into_iter().peekable();
             let mut read_cache = ReadToolCache::default();
             let mut read_leaders = HashMap::<ReadToolCacheKey, String>::new();
@@ -604,7 +640,7 @@ pub(super) async fn run_turn(
                 let batch = collect_tool_batch(
                     first,
                     &mut pending_tools,
-                    allow_parallel_tools,
+                    allow_safe_local_overlap,
                     run.config.permission_profile,
                 );
                 let (duplicate_reads, read_only_batch) = deduplicate_read_calls(
@@ -652,6 +688,11 @@ pub(super) async fn run_turn(
                                 command_sessions: &inner.command_sessions,
                                 stream_deltas: &stream_deltas,
                                 read_cache: &read_cache,
+                                supports_image_input: run.model.supports_image_input(),
+                                supports_original_image_detail: run
+                                    .model
+                                    .supports_image_detail_original(),
+                                provider_output_budget: run.model.provider_output_budget(),
                             };
                             async move {
                                 match duplicate_of {
@@ -694,9 +735,9 @@ pub(super) async fn run_turn(
                         (ToolOutputKind::Function, Some(visual)) => {
                             ResponseItem::function_output_with_image(
                                 pending.call_id,
-                                format!("{}\n\n{}", result.provider_output, visual.description),
+                                visual.model_text,
                                 visual.image_url,
-                                Some(ImageDetail::High),
+                                Some(visual.detail),
                             )
                         }
                         (ToolOutputKind::Function, None) => {
@@ -711,7 +752,7 @@ pub(super) async fn run_turn(
                             ));
                         }
                     };
-                    validate_response_item(&output)?;
+                    validate_local_response_item(&output)?;
                     let completed_item = match inner
                         .storage
                         .append_provider_and_thread_item(
@@ -785,10 +826,13 @@ async fn recover_from_context_window(
         context.inner,
         context.app,
         run,
-        context.instructions,
         provider_state,
         history,
-        context.tools,
+        CompactionContext {
+            base_instructions: context.base_instructions,
+            prompt_context: context.prompt_context,
+            tools: context.tools,
+        },
     )
     .await
     {
@@ -822,37 +866,47 @@ pub(super) fn provider_tools(
     inner: &NativeEngineInner,
     config: &AppConfig,
     mode: ConversationMode,
-) -> &'static [serde_json::Value] {
-    static WEB_ONLY_TOOLS: OnceLock<Vec<serde_json::Value>> = OnceLock::new();
-    static FULL_WEB_TOOLS: OnceLock<Vec<serde_json::Value>> = OnceLock::new();
-    static READ_ONLY_WEB_TOOLS: OnceLock<Vec<serde_json::Value>> = OnceLock::new();
-
-    let local =
-        local_tools_enabled(mode).then(|| inner.tools.definitions_for(config.permission_profile));
-    if config.web_search != WebSearchMode::Live {
-        return local.unwrap_or(&[]);
+    model: &SelectedModel,
+) -> Vec<serde_json::Value> {
+    let mut tools = if local_tools_enabled(mode) {
+        inner.tools.definitions_for_model(
+            config.permission_profile,
+            model.supports_image_input(),
+            model.supports_image_detail_original(),
+        )
+    } else {
+        Vec::new()
+    };
+    if let Some(web_search) = hosted_web_search_tool(
+        config.web_search,
+        model.response_protocol(),
+        model.web_search_includes_images(),
+    ) {
+        tools.push(web_search);
     }
-    let web_search = || {
+    tools
+}
+
+fn hosted_web_search_tool(
+    mode: WebSearchMode,
+    protocol: super::provider::ResponseProtocol,
+    includes_images: bool,
+) -> Option<serde_json::Value> {
+    if mode != WebSearchMode::Live || protocol == super::provider::ResponseProtocol::Lite {
+        return None;
+    }
+    Some(if includes_images {
+        json!({
+            "type": "web_search",
+            "external_web_access": true,
+            "search_content_types": ["text", "image"]
+        })
+    } else {
         json!({
             "type": "web_search",
             "external_web_access": true
         })
-    };
-    let Some(local) = local else {
-        return WEB_ONLY_TOOLS.get_or_init(|| vec![web_search()]).as_slice();
-    };
-    let cache = if config.permission_profile.sandbox == crate::engine::SandboxMode::ReadOnly {
-        &READ_ONLY_WEB_TOOLS
-    } else {
-        &FULL_WEB_TOOLS
-    };
-    cache
-        .get_or_init(|| {
-            let mut combined = local.to_vec();
-            combined.push(web_search());
-            combined
-        })
-        .as_slice()
+    })
 }
 
 const fn local_tools_enabled(mode: ConversationMode) -> bool {
@@ -904,15 +958,16 @@ async fn prepare_sampling_input(
     history: &mut ProviderHistorySnapshot,
 ) -> Result<bool, AppError> {
     let context_window = run.model.context_window();
-    let status = evaluate_context_window(
-        run.model.id(),
-        context.instructions,
-        &history.items,
-        context.tools,
-        context.snapshot.as_ref(),
-        run.model.auto_compact_token_limit(),
-        context_window.as_ref(),
-    );
+    let status = evaluate_context_window(ContextWindowEvaluation {
+        model_id: run.model.id(),
+        base_instructions: context.base_instructions,
+        prompt_context: context.prompt_context,
+        history: &history.items,
+        tools: context.tools,
+        snapshot: context.snapshot.as_ref(),
+        auto_compact_limit: run.model.auto_compact_token_limit(),
+        context_window: context_window.as_ref(),
+    });
     if !status.should_compact {
         return Ok(true);
     }
@@ -929,10 +984,13 @@ async fn prepare_sampling_input(
         context.inner,
         context.app,
         run,
-        context.instructions,
         provider_state,
         history,
-        context.tools,
+        CompactionContext {
+            base_instructions: context.base_instructions,
+            prompt_context: context.prompt_context,
+            tools: context.tools,
+        },
     )
     .await?
     {
@@ -982,7 +1040,7 @@ impl TurnProviderState {
     }
 }
 
-pub(super) fn handle_provider_control_event(
+pub(super) async fn handle_provider_control_event(
     inner: &NativeEngineInner,
     app: &AppHandle,
     run: &TurnRun,
@@ -992,6 +1050,10 @@ pub(super) fn handle_provider_control_event(
     match event {
         ResponseEvent::TurnState(turn_state) => {
             record_turn_state(&mut state.turn_state, turn_state)?;
+            Ok(None)
+        }
+        ResponseEvent::ModelsEtag(etag) => {
+            inner.provider.reconcile_catalog_etag(&etag).await;
             Ok(None)
         }
         ResponseEvent::ServerModel(server_model) => {
@@ -1082,36 +1144,60 @@ enum ToolOutputKind {
     Custom,
 }
 
+fn local_tool_name<'a>(namespace: Option<&str>, name: &'a str) -> Result<&'a str, AppError> {
+    match namespace {
+        None | Some("") | Some(DEFAULT_FUNCTION_NAMESPACE) => Ok(name),
+        Some(namespace) => Err(AppError::Protocol(format!(
+            "tool `{namespace}.{name}` belongs to an unadvertised namespace"
+        ))),
+    }
+}
+
+fn display_tool_name(namespace: Option<&str>, name: &str) -> String {
+    match namespace {
+        None | Some("") | Some(DEFAULT_FUNCTION_NAMESPACE) => name.to_string(),
+        Some(namespace) => format!("{namespace}.{name}"),
+    }
+}
+
 impl PendingTool {
     fn function(
         registry: &ToolRegistry,
         item_id: String,
+        namespace: Option<&str>,
         name: &str,
         arguments: &str,
         call_id: String,
     ) -> Self {
+        let display_name = display_tool_name(namespace, name);
+        let preparation = local_tool_name(namespace, name)
+            .and_then(|name| registry.prepare(item_id.clone(), name, arguments));
         Self::from_preparation(
-            item_id.clone(),
-            name,
+            item_id,
+            &display_name,
             call_id,
             ToolOutputKind::Function,
-            registry.prepare(item_id, name, arguments),
+            preparation,
         )
     }
 
     fn custom(
         registry: &ToolRegistry,
         item_id: String,
+        namespace: Option<&str>,
         name: &str,
         input: &str,
         call_id: String,
     ) -> Self {
+        let display_name = display_tool_name(namespace, name);
+        let preparation = local_tool_name(namespace, name)
+            .and_then(|name| registry.prepare_custom(item_id.clone(), name, input));
         Self::from_preparation(
-            item_id.clone(),
-            name,
+            item_id,
+            &display_name,
             call_id,
             ToolOutputKind::Custom,
-            registry.prepare_custom(item_id, name, input),
+            preparation,
         )
     }
 
@@ -1423,69 +1509,6 @@ fn required_visible_item_id(item: &ResponseItem) -> Result<String, AppError> {
         .ok_or_else(|| AppError::Provider("visible response item is missing its id".into()))
 }
 
-fn compose_instructions(
-    model: &SelectedModel,
-    workspace: &Path,
-    config: &AppConfig,
-    mode: ConversationMode,
-) -> Result<String, AppError> {
-    let personality = match config.personality {
-        Personality::Friendly => "Communicate warmly and clearly.",
-        Personality::Pragmatic => "Be direct, practical, and concise.",
-        Personality::None => "Do not apply an additional personality style.",
-    };
-    let developer = config
-        .developer_instructions
-        .as_deref()
-        .map(|instructions| format!("\n\n# User developer instructions\n{instructions}"))
-        .unwrap_or_default();
-    let browser_guidance = "The built-in browser tools control the visible browser attached to this conversation. \
-        For interface QA, open or navigate with browser_manage, inspect with browser_snapshot before using element refs, \
-        treat refs as stale after page changes, use browser_viewport for explicit breakpoint QA, and use browser_metrics \
-        to verify latency and runtime findings. Browser actions return concise state; use browser_screenshot only when \
-        visual judgment is required, and reset temporary viewport overrides before finishing.";
-    let work_execution_protocol = WORK_EXECUTION_PROTOCOL;
-    let runtime = match mode {
-        ConversationMode::Chat => format!(
-            "# ChatGPT Chat\n\
-             You are ChatGPT in Chat mode. Help the user ask questions, explore ideas, learn, \
-             and have a natural back-and-forth conversation. Do not claim access to local files, \
-             applications, shell commands, or coding tools. Use only tools advertised in this request. \
-             Give the answer directly unless the user asks for a larger deliverable. {personality}"
-        ),
-        ConversationMode::Work => format!(
-            "{}\n\n# ChatGPT Work — local\n\
-             You are completing a substantial task through ChatGPT Work in local mode. \
-             The local workspace is {}. Use only tools advertised in this request, and treat tool paths \
-             as workspace-relative. Drive the task to a reviewable result. \
-             {work_execution_protocol} \
-             {browser_guidance} \
-             Never claim an operation succeeded until its tool result confirms it. \
-             Surface blockers and failures plainly. {personality}",
-            model.instructions(),
-            workspace.display(),
-        ),
-        ConversationMode::Codex => format!(
-            "{}\n\n# Native Codex Desktop runtime\n\
-             You are operating through an independent desktop runtime in workspace {}. \
-             Use only the tools advertised in this request. Tool paths are workspace-relative. \
-             {work_execution_protocol} \
-             {browser_guidance} \
-             Never claim an operation succeeded until its tool result confirms it. \
-             Surface blockers and failures plainly. {personality}",
-            model.instructions(),
-            workspace.display(),
-        ),
-    };
-    let instructions = format!("{runtime}{developer}");
-    if instructions.len() > MAX_INSTRUCTIONS_BYTES {
-        return Err(AppError::Protocol(format!(
-            "combined instructions exceed {MAX_INSTRUCTIONS_BYTES} bytes"
-        )));
-    }
-    Ok(instructions)
-}
-
 fn item_remains_in_progress(item: &ThreadItem) -> bool {
     matches!(
         item,
@@ -1503,20 +1526,37 @@ fn item_remains_in_progress(item: &ThreadItem) -> bool {
 }
 
 pub(super) fn validate_response_item(item: &ResponseItem) -> Result<(), AppError> {
+    validate_response_item_with_limit(item, MAX_PROVIDER_ITEM_BYTES)
+}
+
+fn validate_local_response_item(item: &ResponseItem) -> Result<(), AppError> {
+    validate_response_item_with_limit(item, MAX_LOCAL_PROVIDER_ITEM_BYTES)
+}
+
+fn validate_response_item_with_limit(
+    item: &ResponseItem,
+    maximum_bytes: usize,
+) -> Result<(), AppError> {
     if let Some(id) = item.id() {
         validate_provider_id(id)?;
     }
     let encoded = serde_json::to_vec(item).map_err(|error| {
         AppError::Provider(format!("response item could not be encoded: {error}"))
     })?;
-    if encoded.len() > MAX_PROVIDER_ITEM_BYTES {
+    if encoded.len() > maximum_bytes {
         return Err(AppError::Provider(format!(
-            "response item exceeds {MAX_PROVIDER_ITEM_BYTES} bytes"
+            "response item exceeds {maximum_bytes} bytes"
         )));
     }
     match item {
-        ResponseItem::FunctionCall { name, call_id, .. } => {
+        ResponseItem::FunctionCall {
+            namespace,
+            name,
+            call_id,
+            ..
+        } => {
             validate_provider_id(call_id)?;
+            validate_tool_namespace(namespace.as_deref())?;
             if name.is_empty()
                 || name.len() > MAX_TOOL_NAME_BYTES
                 || name.chars().any(char::is_control)
@@ -1524,8 +1564,14 @@ pub(super) fn validate_response_item(item: &ResponseItem) -> Result<(), AppError
                 return Err(AppError::Provider("tool name is invalid".into()));
             }
         }
-        ResponseItem::CustomToolCall { name, call_id, .. } => {
+        ResponseItem::CustomToolCall {
+            namespace,
+            name,
+            call_id,
+            ..
+        } => {
             validate_provider_id(call_id)?;
+            validate_tool_namespace(namespace.as_deref())?;
             if name.is_empty()
                 || name.len() > MAX_TOOL_NAME_BYTES
                 || name.chars().any(char::is_control)
@@ -1552,6 +1598,16 @@ pub(super) fn validate_response_item(item: &ResponseItem) -> Result<(), AppError
         _ => {}
     }
     Ok(())
+}
+
+fn validate_tool_namespace(namespace: Option<&str>) -> Result<(), AppError> {
+    if namespace.is_some_and(|namespace| {
+        namespace.len() > MAX_TOOL_NAME_BYTES || namespace.chars().any(char::is_control)
+    }) {
+        Err(AppError::Provider("tool namespace is invalid".into()))
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_delta(item_id: &str, delta: &str) -> Result<(), AppError> {
@@ -1625,38 +1681,39 @@ mod tests {
 
     use super::{
         MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS, MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS,
-        PendingTool, WORK_EXECUTION_PROTOCOL, add_input_bytes, automatic_provider_retry_wait,
-        automatic_rate_limit_wait, collect_tool_batch, deduplicate_read_calls,
-        item_remains_in_progress, local_tools_enabled, record_turn_state, tool_failure_diagnostic,
+        PendingTool, add_input_bytes, automatic_provider_retry_wait, automatic_rate_limit_wait,
+        collect_tool_batch, deduplicate_read_calls, hosted_web_search_tool,
+        item_remains_in_progress, local_tool_name, local_tools_enabled, prepare_user_input,
+        record_turn_state, tool_failure_diagnostic, validate_local_response_item,
         validate_response_item, web_search_activity_detail,
     };
-    use crate::engine::native::provider::{ResponseItem, WebSearchAction};
+    use crate::engine::native::provider::{ResponseItem, ResponseProtocol, WebSearchAction};
     use crate::engine::native::tools::{ToolExecutionResult, ToolRegistry};
     use crate::engine::{
         ActivityStatus, CommandLiveOutput, CommandSource, ConversationMode, PermissionProfile,
-        ThreadItem,
+        ThreadItem, TurnInput, WebSearchMode,
     };
 
-    #[test]
-    fn work_protocol_requires_updates_background_progress_and_autonomous_completion() {
-        assert!(
-            WORK_EXECUTION_PROTOCOL.len() <= 2_500,
-            "work protocol must stay cache-friendly and concise"
-        );
-        for expected in [
-            "user-visible commentary update",
-            "roughly 60 seconds",
-            "background session promptly",
-            "at most 30 seconds",
-            "Continue independent safe work",
-            "never claim required validation succeeded",
-            "reasonable in-scope assumptions",
-        ] {
-            assert!(
-                WORK_EXECUTION_PROTOCOL.contains(expected),
-                "missing {expected}"
-            );
-        }
+    #[tokio::test]
+    async fn user_images_are_fully_decoded_before_reaching_the_provider() {
+        let directory = tempfile::tempdir().expect("temporary directory should exist");
+        let path = directory.path().join("invalid.png");
+        tokio::fs::write(&path, b"\x89PNG\r\n\x1a\ninvalid")
+            .await
+            .expect("invalid image fixture should exist");
+
+        let result = prepare_user_input(
+            "message-1".into(),
+            vec![TurnInput::LocalImage {
+                path: path.to_string_lossy().into_owned(),
+            }],
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("signature-only images must not reach the provider");
+        };
+
+        assert!(error.to_string().contains("safe decode limits"));
     }
 
     #[test]
@@ -1711,6 +1768,7 @@ mod tests {
         let first = PendingTool::function(
             &registry,
             "read-item-1".into(),
+            None,
             "read_file",
             r#"{"path":"src/lib.rs","start_line":1,"end_line":20}"#,
             "read-call-1".into(),
@@ -1718,6 +1776,7 @@ mod tests {
         let duplicate = PendingTool::function(
             &registry,
             "read-item-2".into(),
+            None,
             "read_file",
             r#"{"path":"src/lib.rs","start_line":1,"end_line":20}"#,
             "read-call-2".into(),
@@ -1725,6 +1784,7 @@ mod tests {
         let distinct = PendingTool::function(
             &registry,
             "read-item-3".into(),
+            None,
             "read_file",
             r#"{"path":"src/lib.rs","start_line":21,"end_line":40}"#,
             "read-call-3".into(),
@@ -1755,6 +1815,7 @@ mod tests {
         let mutation = PendingTool::function(
             &ToolRegistry,
             "edit-item".into(),
+            None,
             "edit_file",
             r#"{"path":"src/lib.rs","old_text":"old","new_text":"new","expected_occurrences":1}"#,
             "edit-call".into(),
@@ -1809,12 +1870,44 @@ mod tests {
     }
 
     #[test]
+    fn responses_lite_never_receives_a_hosted_web_search_tool() {
+        assert_eq!(
+            hosted_web_search_tool(WebSearchMode::Live, ResponseProtocol::Lite, true),
+            None
+        );
+    }
+
+    #[test]
+    fn standard_web_search_preserves_the_catalog_content_types() {
+        assert_eq!(
+            hosted_web_search_tool(WebSearchMode::Live, ResponseProtocol::Standard, true),
+            Some(serde_json::json!({
+                "type": "web_search",
+                "external_web_access": true,
+                "search_content_types": ["text", "image"]
+            }))
+        );
+        assert_eq!(
+            hosted_web_search_tool(WebSearchMode::Live, ResponseProtocol::Standard, false),
+            Some(serde_json::json!({
+                "type": "web_search",
+                "external_web_access": true
+            }))
+        );
+        assert_eq!(
+            hosted_web_search_tool(WebSearchMode::Disabled, ResponseProtocol::Standard, true),
+            None
+        );
+    }
+
+    #[test]
     fn tool_batches_overlap_only_consecutive_explicitly_safe_operations() {
         let registry = ToolRegistry;
         let read = |item_id: &str| {
             PendingTool::function(
                 &registry,
                 item_id.into(),
+                None,
                 "read_file",
                 r#"{"path":"source.rs","start_line":1,"end_line":1}"#,
                 format!("call-{item_id}"),
@@ -1824,6 +1917,7 @@ mod tests {
             PendingTool::function(
                 &registry,
                 item_id.into(),
+                None,
                 "exec_command",
                 &serde_json::json!({
                     "command": "Get-Date",
@@ -1948,6 +2042,7 @@ mod tests {
         let pending = PendingTool::function(
             &ToolRegistry,
             "item-1".into(),
+            None,
             "update_plan",
             &arguments,
             "call-1".into(),
@@ -1993,6 +2088,7 @@ mod tests {
         let pending = PendingTool::custom(
             &ToolRegistry,
             "patch-1".into(),
+            None,
             "apply_patch",
             "*** Begin Patch\n*** Update File: source.txt\n@@\n*** End Patch",
             "call-1".into(),
@@ -2021,6 +2117,7 @@ mod tests {
         let pending = PendingTool::function(
             &ToolRegistry,
             String::new(),
+            None,
             "future_tool",
             "{}",
             "call-1".into(),
@@ -2040,11 +2137,43 @@ mod tests {
     fn provider_tool_names_reject_control_characters() {
         let item = ResponseItem::FunctionCall {
             id: Some("item-1".into()),
+            namespace: None,
             name: "read_\nfile".into(),
             arguments: "{}".into(),
             call_id: "call-1".into(),
         };
 
         assert!(validate_response_item(&item).is_err());
+    }
+
+    #[test]
+    fn only_the_advertised_function_namespace_can_execute_local_tools() {
+        assert_eq!(
+            local_tool_name(None, "read_file").expect("legacy call"),
+            "read_file"
+        );
+        assert_eq!(
+            local_tool_name(Some(""), "read_file").expect("empty legacy namespace"),
+            "read_file"
+        );
+        assert_eq!(
+            local_tool_name(Some("functions"), "read_file").expect("Lite namespace"),
+            "read_file"
+        );
+        assert!(local_tool_name(Some("foreign"), "read_file").is_err());
+    }
+
+    #[test]
+    fn locally_generated_image_outputs_use_the_request_limit_not_the_stream_limit() {
+        let item = ResponseItem::function_output_with_image(
+            "call-view-image".into(),
+            None,
+            format!("data:image/png;base64,{}", "A".repeat(4_600_000)),
+            Some(crate::engine::ImageDetail::High),
+        );
+
+        assert!(validate_response_item(&item).is_err());
+        validate_local_response_item(&item)
+            .expect("bounded local image output should fit the provider request contract");
     }
 }

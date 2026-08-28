@@ -1,7 +1,9 @@
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
+use image::ImageFormat as DecoderImageFormat;
 use serde::Deserialize;
 use serde::Serialize;
 use tauri::AppHandle;
@@ -17,7 +19,15 @@ const MAX_ATTACHMENT_COUNT: usize = 12;
 const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_PASTED_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_PASTED_IMAGE_BASE64_BYTES: usize = MAX_PASTED_IMAGE_BYTES.div_ceil(3) * 4;
+const MAX_DECODED_IMAGE_BYTES: u64 = 256 * 1_048_576;
+const MAX_IMAGE_DIMENSION: u32 = 16_384;
 const ATTACHMENT_DIRECTORY: &str = "attachments";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageContentError {
+    UnsupportedFormat,
+    InvalidOrUnsafeData,
+}
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -128,6 +138,23 @@ pub async fn attachment_save_pasted_image(
     let format = detect_image_format(&bytes).ok_or_else(|| {
         AppError::InvalidAttachment("clipboard image must be PNG, JPEG, GIF, or WebP".into())
     })?;
+    let bytes = tokio::task::spawn_blocking(move || {
+        validate_image_content(&bytes).map(|media_type| (bytes, media_type))
+    })
+    .await
+    .map_err(|error| AppError::State(format!("image decoder task failed: {error}")))?
+    .map_err(|_| {
+        AppError::InvalidAttachment(
+            "clipboard image data is invalid or exceeds the safe decode limits".into(),
+        )
+    })?;
+    let (bytes, media_type) = bytes;
+    if media_type != format.media_type {
+        return Err(AppError::InvalidAttachment(
+            "clipboard image format could not be identified consistently".into(),
+        )
+        .into());
+    }
     let attachment_directory = app
         .path()
         .app_local_data_dir()
@@ -178,8 +205,19 @@ pub async fn attachment_read_image(request: ReadImageRequest) -> CommandResult<R
             AppError::InvalidAttachment("image changed while it was being read".into()).into(),
         );
     }
-    let media_type = detect_image_media_type(&bytes)
-        .ok_or_else(|| AppError::InvalidAttachment("image signature is not supported".into()))?;
+    let (bytes, media_type) = tokio::task::spawn_blocking(move || {
+        validate_image_content(&bytes).map(|media_type| (bytes, media_type))
+    })
+    .await
+    .map_err(|error| AppError::State(format!("image decoder task failed: {error}")))?
+    .map_err(|error| {
+        AppError::InvalidAttachment(match error {
+            ImageContentError::UnsupportedFormat => "image format is not supported".into(),
+            ImageContentError::InvalidOrUnsafeData => {
+                "image data is invalid or exceeds the safe decode limits".into()
+            }
+        })
+    })?;
     if attachment.media_type.as_deref() != Some(media_type) {
         return Err(
             AppError::InvalidAttachment("image changed while it was being read".into()).into(),
@@ -280,12 +318,25 @@ async fn persist_attachment_at(
             "attachment changed while its durable snapshot was being created".into(),
         ));
     }
-    if let Some(media_type) = source.media_type.as_deref()
-        && detect_image_media_type(&bytes) != Some(media_type)
-    {
-        return Err(AppError::InvalidAttachment(
-            "image changed while its durable snapshot was being created".into(),
-        ));
+    if let Some(media_type) = source.media_type.as_deref() {
+        let (validated_bytes, validated_media_type) = tokio::task::spawn_blocking(move || {
+            validate_image_content(&bytes).map(|validated_media_type| (bytes, validated_media_type))
+        })
+        .await
+        .map_err(|error| AppError::State(format!("image decoder task failed: {error}")))?
+        .map_err(|_| {
+            AppError::InvalidAttachment(
+                "image data is invalid or exceeds the safe decode limits".into(),
+            )
+        })?;
+        if validated_media_type != media_type {
+            return Err(AppError::InvalidAttachment(
+                "image changed while its durable snapshot was being created".into(),
+            ));
+        }
+        let path =
+            persist_attachment_bytes(attachment_directory, &source.name, &validated_bytes).await?;
+        return inspect_path(&path.to_string_lossy()).await;
     }
 
     let path = persist_attachment_bytes(attachment_directory, &source.name, &bytes).await?;
@@ -368,6 +419,27 @@ pub(crate) fn detect_image_media_type(bytes: &[u8]) -> Option<&'static str> {
     detect_image_format(bytes).map(|format| format.media_type)
 }
 
+pub(crate) fn validate_image_content(bytes: &[u8]) -> Result<&'static str, ImageContentError> {
+    let format = image::guess_format(bytes).map_err(|_| ImageContentError::UnsupportedFormat)?;
+    let media_type = match format {
+        DecoderImageFormat::Png => "image/png",
+        DecoderImageFormat::Jpeg => "image/jpeg",
+        DecoderImageFormat::Gif => "image/gif",
+        DecoderImageFormat::WebP => "image/webp",
+        _ => return Err(ImageContentError::UnsupportedFormat),
+    };
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODED_IMAGE_BYTES);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|_| ImageContentError::InvalidOrUnsafeData)?;
+    Ok(media_type)
+}
+
 fn image_data_url(media_type: &str, bytes: &[u8]) -> String {
     format!("data:{media_type};base64,{}", BASE64_STANDARD.encode(bytes))
 }
@@ -409,7 +481,21 @@ async fn write_new_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_image_format, image_data_url, inspect_path, persist_attachment_at};
+    use image::{ImageBuffer, ImageFormat, Rgba};
+
+    use super::{
+        ImageContentError, detect_image_format, image_data_url, inspect_path,
+        persist_attachment_at, validate_image_content,
+    };
+
+    fn tiny_png() -> Vec<u8> {
+        let image = ImageBuffer::from_pixel(1, 1, Rgba([255_u8, 0, 0, 255]));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+            .expect("test image should encode");
+        bytes
+    }
 
     #[test]
     fn detects_supported_image_signatures() {
@@ -430,13 +516,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validates_complete_image_data_with_bounded_decoding() {
+        let bytes = tiny_png();
+
+        assert_eq!(validate_image_content(&bytes), Ok("image/png"));
+        assert_eq!(
+            validate_image_content(b"\x89PNG\r\n\x1a\ninvalid"),
+            Err(ImageContentError::InvalidOrUnsafeData)
+        );
+    }
+
     #[tokio::test]
     async fn durable_attachment_snapshot_survives_source_removal_and_preserves_name() {
         let directory = tempfile::tempdir().expect("temporary directory should exist");
         let source = directory.path().join("captura.png");
         let attachment_directory = directory.path().join("managed");
-        let bytes = b"\x89PNG\r\n\x1a\nfixture";
-        tokio::fs::write(&source, bytes)
+        let bytes = tiny_png();
+        tokio::fs::write(&source, &bytes)
             .await
             .expect("source image should exist");
 
@@ -467,6 +564,26 @@ mod tests {
                 .kind,
             super::AttachmentKind::Image
         );
+    }
+
+    #[tokio::test]
+    async fn durable_snapshot_rejects_an_image_with_only_a_valid_signature() {
+        let directory = tempfile::tempdir().expect("temporary directory should exist");
+        let source = directory.path().join("invalid.png");
+        tokio::fs::write(&source, b"\x89PNG\r\n\x1a\ninvalid")
+            .await
+            .expect("invalid image fixture should exist");
+
+        let error = persist_attachment_at(
+            &directory.path().join("managed"),
+            source
+                .to_str()
+                .expect("temporary source path should be valid Unicode"),
+        )
+        .await
+        .expect_err("invalid image content must not be persisted");
+
+        assert!(error.to_string().contains("safe decode limits"));
     }
 
     #[tokio::test]

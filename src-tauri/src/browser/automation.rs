@@ -1154,6 +1154,9 @@ async fn execute_script(webview: &Webview, script: &str) -> Result<String, AppEr
             let callback_completion = Arc::clone(&dispatched_completion);
             let dispatch = (|| {
                 let controller = platform.controller();
+                // SAFETY: Tauri supplies a live WebView2 controller on its owning UI thread;
+                // the returned COM interface is used only inside this callback and HRESULTs
+                // are converted into explicit errors before the interface can escape.
                 let core = unsafe { controller.CoreWebView2() }
                     .map_err(|error| format!("could not access CoreWebView2: {error}"))?;
                 let handler =
@@ -1168,6 +1171,9 @@ async fn execute_script(webview: &Webview, script: &str) -> Result<String, AppEr
                         complete(&callback_completion, result);
                         Ok(())
                     }));
+                // SAFETY: `core`, the immutable script HSTRING, and the COM completion handler
+                // are valid for dispatch. WebView2 retains the handler for the asynchronous
+                // callback, whose sender is guarded so it can be completed at most once.
                 unsafe { core.ExecuteScript(&script, &handler) }
                     .map_err(|error| format!("could not dispatch WebView2 script: {error}"))
             })();
@@ -1226,6 +1232,9 @@ async fn call_cdp(webview: &Webview, method: &str, parameters: Value) -> Result<
             let callback_completion = Arc::clone(&dispatched_completion);
             let dispatch = (|| {
                 let controller = platform.controller();
+                // SAFETY: Tauri supplies a live WebView2 controller on its owning UI thread;
+                // the returned COM interface remains local to this callback and every HRESULT
+                // is checked before any result crosses into async Rust.
                 let core = unsafe { controller.CoreWebView2() }
                     .map_err(|error| format!("could not access CoreWebView2: {error}"))?;
                 let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
@@ -1239,6 +1248,9 @@ async fn call_cdp(webview: &Webview, method: &str, parameters: Value) -> Result<
                         Ok(())
                     },
                 ));
+                // SAFETY: the COM interface, HSTRING arguments, and completion handler are all
+                // valid at dispatch. WebView2 retains the handler until callback completion, and
+                // the shared sender enforces a single observable completion.
                 unsafe { core.CallDevToolsProtocolMethod(&method_name, &parameters, &handler) }
                     .map_err(|error| format!("could not dispatch WebView2 CDP call: {error}"))
             })();

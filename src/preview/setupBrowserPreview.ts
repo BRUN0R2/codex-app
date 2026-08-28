@@ -2129,6 +2129,8 @@ function createPreviewModel(id: string, displayName: string, isDefault: boolean)
       usablePercent: 95,
       maximumTokens: 400_000,
     },
+    unsupportedRuntimeCapabilities: [],
+    unsupportedReasoningEfforts: [],
     isDefault,
   };
 }

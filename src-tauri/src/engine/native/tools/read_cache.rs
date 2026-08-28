@@ -190,6 +190,7 @@ impl ReadToolCacheKey {
             },
             ToolOperation::ApplyPatch(_)
             | ToolOperation::Browser(_)
+            | ToolOperation::ViewImage(_)
             | ToolOperation::EditFile(_)
             | ToolOperation::WriteFile(_)
             | ToolOperation::ExecCommand(_)
@@ -244,7 +245,7 @@ mod tests {
     use futures_util::future::join_all;
 
     use super::{CachedReadOutput, READ_CACHE_MAXIMUM_ENTRIES, ReadToolCache, ReadToolCacheKey};
-    use crate::engine::native::output_compaction::TextOutputKind;
+    use crate::engine::native::output_compaction::{ProviderOutputBudget, TextOutputKind};
     use crate::engine::native::tools::ToolRegistry;
     use crate::error::AppError;
 
@@ -290,7 +291,7 @@ mod tests {
             let output = result
                 .expect("coalesced read should succeed")
                 .into_stored_output()
-                .into_output()
+                .into_output(ProviderOutputBudget::default())
                 .await
                 .expect("each result should materialize independently");
             assert_eq!(output.provider_output, "shared result");

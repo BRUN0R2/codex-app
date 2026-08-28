@@ -1,11 +1,26 @@
 use std::ffi::OsStr;
+#[cfg(windows)]
+use std::process::Stdio;
+#[cfg(windows)]
+use std::time::Duration;
 
 use tokio::process::Command;
+#[cfg(windows)]
+use tokio::sync::OnceCell;
+
+#[cfg(windows)]
+mod windows_job;
+#[cfg(windows)]
+pub(crate) use windows_job::WindowsProcessJob;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
 const WINDOWS_POWERSHELL_EXECUTABLE: &str = "pwsh.exe";
+#[cfg(windows)]
+const POWERSHELL_VERSION_MAX_BYTES: usize = 64;
+#[cfg(windows)]
+const POWERSHELL_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(windows)]
 const WINDOWS_POWERSHELL_SESSION_SETUP: &str = concat!(
     "$__codexUtf8NoBom = [System.Text.UTF8Encoding]::new($false); ",
@@ -17,11 +32,64 @@ const WINDOWS_POWERSHELL_SESSION_SETUP: &str = concat!(
     "$PSDefaultParameterValues['Start-Process:Wait'] = $true;"
 );
 
+#[cfg(windows)]
+static POWERSHELL_VERSION: OnceCell<Option<String>> = OnceCell::const_new();
+
 pub(crate) fn headless_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     command
+}
+
+pub(crate) const fn shell_name() -> &'static str {
+    if cfg!(windows) { "powershell" } else { "sh" }
+}
+
+#[cfg(windows)]
+pub(crate) async fn shell_version() -> Option<String> {
+    POWERSHELL_VERSION
+        .get_or_init(detect_powershell_version)
+        .await
+        .clone()
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn shell_version() -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+async fn detect_powershell_version() -> Option<String> {
+    let mut command = headless_command(WINDOWS_POWERSHELL_EXECUTABLE);
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$PSVersionTable.PSVersion.ToString()",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    tokio::time::timeout(POWERSHELL_VERSION_TIMEOUT, command.output())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .filter(|output| output.status.success())
+        .and_then(|output| parse_powershell_version(&output.stdout))
+}
+
+#[cfg(windows)]
+fn parse_powershell_version(output: &[u8]) -> Option<String> {
+    if output.len() > POWERSHELL_VERSION_MAX_BYTES {
+        return None;
+    }
+    let mut components = std::str::from_utf8(output).ok()?.trim().split('.');
+    let major = components.next()?.parse::<u16>().ok()?;
+    let minor = components.next()?.parse::<u16>().ok()?;
+    Some(format!("{major}.{minor}"))
 }
 
 #[cfg(windows)]
@@ -53,7 +121,32 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[cfg(windows)]
-    use super::headless_shell_command;
+    use super::{headless_shell_command, parse_powershell_version, shell_version};
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_version_parser_is_bounded_and_semantic() {
+        assert_eq!(
+            parse_powershell_version(b"7.6.0\r\n").as_deref(),
+            Some("7.6")
+        );
+        assert_eq!(parse_powershell_version(b"not-a-version"), None);
+        assert_eq!(parse_powershell_version(&[b'7'; 65]), None);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn reports_the_actual_powershell_major_and_minor_version() {
+        let version = shell_version()
+            .await
+            .expect("the configured PowerShell host should report a version");
+        let (major, minor) = version
+            .split_once('.')
+            .expect("the version should contain major and minor components");
+
+        assert!(major.parse::<u16>().is_ok_and(|major| major >= 7));
+        assert!(minor.parse::<u16>().is_ok());
+    }
 
     #[cfg(windows)]
     #[tokio::test]

@@ -49,6 +49,7 @@ import type {
   ModelContextWindow,
   ModelContextWindowPreference,
   ModelListResponse,
+  ModelRuntimeCapability,
   ModelServiceTier,
   ModelVerbosity,
   MotionPreference,
@@ -130,6 +131,7 @@ const REASONING_EFFORTS = [
   "ultra",
   "xhigh",
 ] as const;
+const MODEL_RUNTIME_CAPABILITIES = ["codeMode", "multiAgent"] as const;
 const CHAT_THINKING_EFFORTS = [
   "extended",
   "max",
@@ -145,7 +147,7 @@ const TERMINAL_TURN_STATUSES = ["completed", "failed", "interrupted"] as const;
 const ACTIVITY_STATUSES = ["completed", "declined", "failed", "inProgress"] as const;
 const PLAN_STEP_STATUSES = ["completed", "inProgress", "pending"] as const;
 const MESSAGE_PHASES = ["commentary", "finalAnswer"] as const;
-const IMAGE_DETAILS = ["auto", "high", "low"] as const;
+const IMAGE_DETAILS = ["auto", "high", "low", "original"] as const;
 const WEB_SEARCH_MODES = ["disabled", "live"] as const;
 const MODEL_VERBOSITIES = ["high", "low", "medium"] as const;
 const STORED_MODEL_CONTEXT_WINDOW_PREFERENCES = ["maximum"] as const;
@@ -466,8 +468,18 @@ export function decodeModelListResponse(value: unknown): ModelListResponse {
     identifiers.add(model.id);
   }
   const defaults = data.filter((model) => model.isDefault);
-  if (defaults.length !== 1 || defaults[0]?.hidden === true) {
-    throw new ContractError("$.data", "model catalog must contain one visible default model");
+  if (
+    defaults.length !== 1 ||
+    defaults[0]?.hidden === true ||
+    defaults[0]?.unsupportedRuntimeCapabilities.includes("codeMode") === true ||
+    (defaults[0]?.defaultReasoningEffort !== null &&
+      defaults[0]?.unsupportedReasoningEfforts.includes(defaults[0].defaultReasoningEffort) ===
+        true)
+  ) {
+    throw new ContractError(
+      "$.data",
+      "model catalog must contain one visible runtime-compatible default model",
+    );
   }
   return { data };
 }
@@ -1311,6 +1323,8 @@ function decodeModel(value: unknown, path: string): CodexModel {
     "contextWindow",
     "serviceTiers",
     "supportedReasoningEfforts",
+    "unsupportedRuntimeCapabilities",
+    "unsupportedReasoningEfforts",
   ]);
   const id = identifier(object.id, `${path}.id`);
   const model = identifier(object.model, `${path}.model`);
@@ -1326,10 +1340,7 @@ function decodeModel(value: unknown, path: string): CodexModel {
   const reasoningEffortNames = new Set(
     supportedReasoningEfforts.map((option) => option.reasoningEffort),
   );
-  if (
-    supportedReasoningEfforts.length === 0 ||
-    reasoningEffortNames.size !== supportedReasoningEfforts.length
-  ) {
+  if (reasoningEffortNames.size !== supportedReasoningEfforts.length) {
     throw new ContractError(
       `${path}.supportedReasoningEfforts`,
       "must contain unique reasoning efforts",
@@ -1357,6 +1368,35 @@ function decodeModel(value: unknown, path: string): CodexModel {
       "must be one of the advertised service tiers",
     );
   }
+  const unsupportedRuntimeCapabilities = array(
+    object.unsupportedRuntimeCapabilities,
+    `${path}.unsupportedRuntimeCapabilities`,
+    (value, capabilityPath): ModelRuntimeCapability =>
+      literal(value, capabilityPath, MODEL_RUNTIME_CAPABILITIES),
+    MODEL_RUNTIME_CAPABILITIES.length,
+  );
+  if (new Set(unsupportedRuntimeCapabilities).size !== unsupportedRuntimeCapabilities.length) {
+    throw new ContractError(
+      `${path}.unsupportedRuntimeCapabilities`,
+      "must contain unique runtime capabilities",
+    );
+  }
+  const unsupportedReasoningEfforts = array(
+    object.unsupportedReasoningEfforts,
+    `${path}.unsupportedReasoningEfforts`,
+    (value, effortPath): ReasoningEffort => literal(value, effortPath, REASONING_EFFORTS),
+    REASONING_EFFORTS.length,
+  );
+  const unsupportedReasoningEffortNames = new Set(unsupportedReasoningEfforts);
+  if (
+    unsupportedReasoningEffortNames.size !== unsupportedReasoningEfforts.length ||
+    unsupportedReasoningEfforts.some((effort) => !reasoningEffortNames.has(effort))
+  ) {
+    throw new ContractError(
+      `${path}.unsupportedReasoningEfforts`,
+      "must contain unique advertised reasoning efforts",
+    );
+  }
   return {
     id,
     model,
@@ -1374,6 +1414,8 @@ function decodeModel(value: unknown, path: string): CodexModel {
       object.contextWindow === null
         ? null
         : decodeModelContextWindow(object.contextWindow, `${path}.contextWindow`),
+    unsupportedRuntimeCapabilities,
+    unsupportedReasoningEfforts,
     isDefault: booleanValue(object.isDefault, `${path}.isDefault`),
   };
 }

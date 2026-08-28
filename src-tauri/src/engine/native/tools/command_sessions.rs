@@ -25,7 +25,8 @@ use super::command_output_stream::CommandTranscriptOutputMode;
 use super::command_output_stream::CommandTranscriptPollSnapshot;
 use super::command_output_stream::CommandTranscriptSnapshot;
 use super::exec::CommandOutput;
-use super::exec::execute_command;
+use super::exec::execute_spawned_command;
+use super::exec::spawn_command;
 use super::workspace::display_workspace_path;
 use crate::engine::ActivityStatus;
 use crate::engine::CommandLiveOutput;
@@ -35,6 +36,7 @@ use crate::engine::ThreadItem;
 use crate::engine::ThreadOutput;
 use crate::engine::native::NativeEngineInner;
 use crate::engine::native::agent::emit_item_notification;
+use crate::engine::native::output_compaction::ProviderOutputBudget;
 use crate::engine::native::stream_notifications::StreamNotificationBatcher;
 use crate::error::AppError;
 
@@ -88,6 +90,7 @@ struct CommandSession {
     started_at: Instant,
     app: Option<AppHandle>,
     engine: Weak<NativeEngineInner>,
+    provider_output_budget: ProviderOutputBudget,
     transcript: CommandTranscript,
     cancellation: watch::Sender<bool>,
     result: Mutex<Option<Result<CommandOutput, AppError>>>,
@@ -165,6 +168,7 @@ impl CommandSessionManager {
         turn_id: String,
         started_at_ms: i64,
         yield_time: Duration,
+        provider_output_budget: ProviderOutputBudget,
         turn_cancellation: &mut watch::Receiver<bool>,
     ) -> Result<CommandStartOutcome, AppError> {
         let id = Uuid::now_v7().to_string();
@@ -177,6 +181,7 @@ impl CommandSessionManager {
         };
         let flush_emitter = emitter.clone();
         let (cancellation, mut cancellation_receiver) = watch::channel(false);
+        let command = spawn_command(&workspace, &args, &ripgrep, emitter).await?;
         let session = Arc::new(CommandSession {
             id,
             thread_id,
@@ -188,6 +193,7 @@ impl CommandSessionManager {
             started_at: Instant::now(),
             app,
             engine,
+            provider_output_budget,
             transcript,
             cancellation,
             result: Mutex::new(None),
@@ -208,14 +214,7 @@ impl CommandSessionManager {
         let worker_session = Arc::clone(&session);
         tokio::spawn(async move {
             let execution = tokio::spawn(async move {
-                execute_command(
-                    &workspace,
-                    &args,
-                    &ripgrep,
-                    emitter,
-                    &mut cancellation_receiver,
-                )
-                .await
+                execute_spawned_command(command, &mut cancellation_receiver).await
             })
             .await
             .map_err(|error| AppError::Tool(format!("command task failed: {error}")))
@@ -581,7 +580,10 @@ impl CommandSession {
             return;
         };
         let (source, provider_output, exit_code, status) = match result {
-            Ok(output) => match StoredToolOutput::Command(output).into_output().await {
+            Ok(output) => match StoredToolOutput::Command(output)
+                .into_output(self.provider_output_budget)
+                .await
+            {
                 Ok(output) => (
                     output.source,
                     output.provider_output,
@@ -951,6 +953,7 @@ mod tests {
     use crate::engine::CommandOutputStream;
     use crate::engine::ThreadOutput;
     use crate::engine::native::NativeEngineInner;
+    use crate::engine::native::output_compaction::ProviderOutputBudget;
     use crate::engine::native::terminal_output::TerminalOperation;
     use crate::engine::native::tools::EXCLUSIVE_COMMAND_TEST_LOCK;
     use crate::engine::native::tools::ExecCommandArgs;
@@ -1350,6 +1353,7 @@ mod tests {
                 "turn-a".into(),
                 1,
                 Duration::from_secs(2),
+                ProviderOutputBudget::default(),
                 &mut turn_receiver,
             )
             .await
@@ -1414,6 +1418,7 @@ mod tests {
                 "turn-owned".into(),
                 1,
                 Duration::from_millis(250),
+                ProviderOutputBudget::default(),
                 &mut turn_receiver,
             )
             .await?;
@@ -1465,6 +1470,7 @@ mod tests {
                 "turn-a".into(),
                 1,
                 Duration::from_secs(20),
+                ProviderOutputBudget::default(),
                 &mut turn_receiver,
             )
             .await
@@ -1620,6 +1626,7 @@ mod tests {
                 "turn-a".into(),
                 1,
                 Duration::from_millis(250),
+                ProviderOutputBudget::default(),
                 &mut turn_receiver,
             )
             .await
@@ -1675,6 +1682,7 @@ mod tests {
                 "turn-a".into(),
                 1,
                 BACKGROUND_COMMAND_BENCHMARK_INDEPENDENT_BUDGET,
+                ProviderOutputBudget::default(),
                 &mut turn_receiver,
             )
             .await
@@ -1732,6 +1740,7 @@ mod tests {
             started_at: Instant::now(),
             app: None,
             engine: Weak::<NativeEngineInner>::new(),
+            provider_output_budget: ProviderOutputBudget::default(),
             transcript: CommandTranscript::default(),
             cancellation,
             result: Mutex::new(None),

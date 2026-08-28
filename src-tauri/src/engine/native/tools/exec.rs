@@ -20,15 +20,26 @@ use super::{
 };
 use crate::engine::CommandOutputStream;
 use crate::error::AppError;
-use crate::process::{headless_command, headless_shell_command};
+#[cfg(windows)]
+use crate::process::WindowsProcessJob;
+use crate::process::headless_shell_command;
 
-const TASKKILL_TIME_LIMIT: Duration = Duration::from_secs(5);
 const TERMINATED_CHILD_REAP_TIME_LIMIT: Duration = Duration::from_secs(5);
 
 pub(super) struct CommandOutput {
     pub(super) termination: CommandTermination,
     pub(super) stdout: File,
     pub(super) stderr: File,
+}
+
+pub(super) struct SpawnedCommand {
+    child: tokio::process::Child,
+    stdout_task: tokio::task::JoinHandle<Result<File, AppError>>,
+    stderr_task: tokio::task::JoinHandle<Result<File, AppError>>,
+    deadline: Instant,
+    command_timeout: Duration,
+    #[cfg(windows)]
+    process_job: WindowsProcessJob,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +85,7 @@ impl CommandOutput {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn execute_command(
     workspace: &Path,
     args: &ExecCommandArgs,
@@ -81,6 +93,16 @@ pub(super) async fn execute_command(
     output_emitter: CommandOutputEmitter,
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<CommandOutput, AppError> {
+    let command = spawn_command(workspace, args, ripgrep, output_emitter).await?;
+    execute_spawned_command(command, cancellation).await
+}
+
+pub(super) async fn spawn_command(
+    workspace: &Path,
+    args: &ExecCommandArgs,
+    ripgrep: &Ripgrep,
+    output_emitter: CommandOutputEmitter,
+) -> Result<SpawnedCommand, AppError> {
     if args.command.trim().is_empty() || args.command.len() > MAX_COMMAND_BYTES {
         return Err(AppError::Tool(format!(
             "command must contain between 1 and {MAX_COMMAND_BYTES} bytes"
@@ -96,6 +118,12 @@ pub(super) async fn execute_command(
     let mut command = headless_shell_command(&args.command);
     configure_plain_terminal(&mut command);
     ripgrep.configure_child_command(&mut command)?;
+    #[cfg(windows)]
+    let process_job = WindowsProcessJob::new().map_err(|error| {
+        AppError::Tool(format!(
+            "could not create command process ownership: {error}"
+        ))
+    })?;
     let mut child = command
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -104,6 +132,16 @@ pub(super) async fn execute_command(
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| AppError::Tool(format!("could not start command: {error}")))?;
+    #[cfg(windows)]
+    if let Err(error) = process_job.assign(&child) {
+        let cleanup = child.kill().await;
+        return Err(AppError::Tool(match cleanup {
+            Ok(()) => format!("could not establish command process ownership: {error}"),
+            Err(cleanup_error) => format!(
+                "could not establish command process ownership: {error}; direct child cleanup also failed: {cleanup_error}"
+            ),
+        }));
+    }
     let stdout = child
         .stdout
         .take()
@@ -112,25 +150,54 @@ pub(super) async fn execute_command(
         .stderr
         .take()
         .ok_or_else(|| AppError::Tool("command stderr pipe was not created".into()))?;
-    let mut stdout_task = tokio::spawn(read_stream_spooled(
+    let stdout_task = tokio::spawn(read_stream_spooled(
         stdout,
         CommandOutputStream::Stdout,
         output_emitter.clone(),
     ));
-    let mut stderr_task = tokio::spawn(read_stream_spooled(
+    let stderr_task = tokio::spawn(read_stream_spooled(
         stderr,
         CommandOutputStream::Stderr,
-        output_emitter.clone(),
+        output_emitter,
     ));
-    let mut stdout_output = None;
-    let mut stderr_output = None;
     let deadline = Instant::now()
         .checked_add(command_timeout)
         .ok_or_else(|| AppError::Tool("command timeout could not be represented".into()))?;
+    Ok(SpawnedCommand {
+        child,
+        stdout_task,
+        stderr_task,
+        deadline,
+        command_timeout,
+        #[cfg(windows)]
+        process_job,
+    })
+}
+
+pub(super) async fn execute_spawned_command(
+    command: SpawnedCommand,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<CommandOutput, AppError> {
+    let SpawnedCommand {
+        mut child,
+        mut stdout_task,
+        mut stderr_task,
+        deadline,
+        command_timeout,
+        #[cfg(windows)]
+        process_job,
+    } = command;
+    let mut stdout_output = None;
+    let mut stderr_output = None;
 
     let termination = loop {
         if *cancellation.borrow() {
-            terminate_child(&mut child).await?;
+            terminate_child(
+                &mut child,
+                #[cfg(windows)]
+                &process_job,
+            )
+            .await?;
             break CommandTermination::Cancelled;
         }
         if let Some(status) = child
@@ -140,6 +207,12 @@ pub(super) async fn execute_command(
             let exit_code = status
                 .code()
                 .ok_or_else(|| AppError::Tool("command ended without an exit code".into()))?;
+            #[cfg(windows)]
+            process_job.terminate().map_err(|error| {
+                AppError::Tool(format!(
+                    "command exited but its remaining process tree could not be terminated: {error}"
+                ))
+            })?;
             break CommandTermination::Exited(exit_code);
         }
         if stdout_output.is_none() && stdout_task.is_finished() {
@@ -148,7 +221,13 @@ pub(super) async fn execute_command(
                 Err(error) => {
                     stdout_task.abort();
                     stderr_task.abort();
-                    if let Err(termination_error) = terminate_child(&mut child).await {
+                    if let Err(termination_error) = terminate_child(
+                        &mut child,
+                        #[cfg(windows)]
+                        &process_job,
+                    )
+                    .await
+                    {
                         return Err(AppError::Tool(format!(
                             "{error}; command termination also failed: {termination_error}"
                         )));
@@ -163,7 +242,13 @@ pub(super) async fn execute_command(
                 Err(error) => {
                     stdout_task.abort();
                     stderr_task.abort();
-                    if let Err(termination_error) = terminate_child(&mut child).await {
+                    if let Err(termination_error) = terminate_child(
+                        &mut child,
+                        #[cfg(windows)]
+                        &process_job,
+                    )
+                    .await
+                    {
                         return Err(AppError::Tool(format!(
                             "{error}; command termination also failed: {termination_error}"
                         )));
@@ -173,7 +258,13 @@ pub(super) async fn execute_command(
             }
         }
         if Instant::now() >= deadline {
-            terminate_child(&mut child).await.map_err(|error| {
+            terminate_child(
+                &mut child,
+                #[cfg(windows)]
+                &process_job,
+            )
+            .await
+            .map_err(|error| {
                 AppError::Tool(format!(
                     "command timed out and could not be terminated safely: {error}"
                 ))
@@ -185,7 +276,12 @@ pub(super) async fn execute_command(
         tokio::select! {
             changed = cancellation.changed() => {
                 if changed.is_err() || *cancellation.borrow() {
-                    terminate_child(&mut child).await?;
+                    terminate_child(
+                        &mut child,
+                        #[cfg(windows)]
+                        &process_job,
+                    )
+                    .await?;
                     break CommandTermination::Cancelled;
                 }
             }
@@ -289,54 +385,18 @@ async fn read_stream_spooled<R: AsyncRead + Unpin>(
 }
 
 #[cfg(windows)]
-async fn terminate_child(child: &mut tokio::process::Child) -> Result<(), AppError> {
-    let Some(process_id) = child.id() else {
+async fn terminate_child(
+    child: &mut tokio::process::Child,
+    process_job: &WindowsProcessJob,
+) -> Result<(), AppError> {
+    if child.id().is_none() {
         return child.try_wait().map(|_| ()).map_err(|error| {
             AppError::Tool(format!("could not inspect command process: {error}"))
         });
-    };
-    let mut taskkill = headless_command("taskkill.exe");
-    taskkill
-        .args(["/PID", &process_id.to_string(), "/T", "/F"])
-        .kill_on_drop(true);
-    let output = match tokio::time::timeout(TASKKILL_TIME_LIMIT, taskkill.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            return terminate_direct_child_after_tree_failure(
-                child,
-                format!("could not start taskkill: {error}"),
-            )
-            .await;
-        }
-        Err(_) => {
-            return terminate_direct_child_after_tree_failure(
-                child,
-                format!(
-                    "taskkill exceeded its {} second time limit",
-                    TASKKILL_TIME_LIMIT.as_secs()
-                ),
-            )
-            .await;
-        }
-    };
-    if !output.status.success() {
-        if child
-            .try_wait()
-            .map_err(|error| AppError::Tool(format!("could not inspect command process: {error}")))?
-            .is_some()
-        {
-            return Ok(());
-        }
-        let message = String::from_utf8_lossy(&output.stderr);
-        return terminate_direct_child_after_tree_failure(
-            child,
-            format!(
-                "taskkill could not terminate process tree {process_id}: {}",
-                message.trim()
-            ),
-        )
-        .await;
     }
+    process_job.terminate().map_err(|error| {
+        AppError::Tool(format!("could not terminate command process tree: {error}"))
+    })?;
     tokio::time::timeout(TERMINATED_CHILD_REAP_TIME_LIMIT, child.wait())
         .await
         .map_err(|_| {
@@ -347,28 +407,6 @@ async fn terminate_child(child: &mut tokio::process::Child) -> Result<(), AppErr
         })?
         .map_err(|error| AppError::Tool(format!("could not reap command process: {error}")))?;
     Ok(())
-}
-
-#[cfg(windows)]
-async fn terminate_direct_child_after_tree_failure(
-    child: &mut tokio::process::Child,
-    tree_error: String,
-) -> Result<(), AppError> {
-    if child
-        .try_wait()
-        .map_err(|error| AppError::Tool(format!("could not inspect command process: {error}")))?
-        .is_some()
-    {
-        return Ok(());
-    }
-    match child.kill().await {
-        Ok(()) => Err(AppError::Tool(format!(
-            "{tree_error}; the direct child was terminated, but descendant termination could not be confirmed"
-        ))),
-        Err(error) => Err(AppError::Tool(format!(
-            "{tree_error}; direct child termination also failed: {error}"
-        ))),
-    }
 }
 
 #[cfg(not(windows))]
@@ -453,9 +491,24 @@ mod tests {
         let (cancellation, mut receiver) = watch::channel(false);
         let cancellation_transcript = transcript.clone();
         tokio::spawn(async move {
-            cancellation_transcript
-                .snapshot_after(0, Duration::from_secs(3))
-                .await;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let mut revision = 0;
+            loop {
+                let snapshot = cancellation_transcript
+                    .snapshot_after(
+                        revision,
+                        deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    )
+                    .await;
+                if snapshot.live_output.stdout.contains("before-cancel") {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "command should publish its sentinel before cancellation"
+                );
+                revision = snapshot.revision;
+            }
             cancellation.send_replace(true);
         });
 

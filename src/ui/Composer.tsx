@@ -13,6 +13,7 @@ import type {
   Attachment,
   ChatModelOption,
   CodexModel,
+  ModelRuntimeCapability,
   PermissionProfile,
   ReasoningEffort,
 } from "../contracts/types";
@@ -49,6 +50,11 @@ type ComposerController = Pick<
   | "updateSetting"
   | "workspace"
 >;
+
+const MODEL_RUNTIME_CAPABILITY_LABELS: Readonly<Record<ModelRuntimeCapability, string>> = {
+  codeMode: "host do Code Mode",
+  multiAgent: "execução multiagente",
+};
 
 import {
   type ChatIntelligenceSelection,
@@ -152,8 +158,23 @@ export function Composer(props: ComposerProps) {
     return option === undefined ? "Carregando" : chatOptionLabel(option);
   });
   const reasoningOptions = createMemo(() => configuredModel()?.supportedReasoningEfforts ?? []);
+  const modelUnavailableMessage = createMemo(() =>
+    mode() === "chat" || !modelIsUnavailable(selectedModel())
+      ? null
+      : unsupportedModelMessage(selectedModel()),
+  );
+  const reasoningEffortUnavailableMessage = createMemo(() =>
+    mode() === "chat" ? null : unsupportedReasoningEffortMessage(selectedModel(), effort()),
+  );
   const canSend = createMemo(
-    () => !sending() && (text().trim().length > 0 || attachments().length > 0),
+    () =>
+      !sending() &&
+      modelUnavailableMessage() === null &&
+      reasoningEffortUnavailableMessage() === null &&
+      (text().trim().length > 0 || attachments().length > 0),
+  );
+  const composerError = createMemo(
+    () => attachmentError() ?? modelUnavailableMessage() ?? reasoningEffortUnavailableMessage(),
   );
 
   createEffect(() => {
@@ -893,7 +914,7 @@ export function Composer(props: ComposerProps) {
           </div>
         </div>
       </form>
-      <Show when={attachmentError()}>
+      <Show when={composerError()}>
         {(message) => (
           <p class="composer-input-error" role="alert">
             {message()}
@@ -1030,42 +1051,68 @@ function ModelMenuOptions(props: {
       <div class="model-menu-options">
         <Show when={props.section === "model"}>
           <For each={props.models}>
-            {(entry) => (
-              <button
-                aria-checked={entry.id === props.model?.id}
-                class="model-menu-option"
-                classList={{ selected: entry.id === props.model?.id }}
-                onClick={() => props.onSelectModel(entry.id)}
-                role="menuitemradio"
-                type="button"
-              >
-                <span>{entry.displayName}</span>
-                <Show when={entry.id === props.model?.id}>
-                  <Icon name="check" size={15} />
-                </Show>
-              </button>
-            )}
+            {(entry) => {
+              const runtimeNotice = unsupportedModelMessage(entry);
+              const unavailable = modelIsUnavailable(entry);
+              return (
+                <button
+                  aria-checked={entry.id === props.model?.id}
+                  class="model-menu-option"
+                  classList={{
+                    described: runtimeNotice !== null,
+                    selected: entry.id === props.model?.id,
+                  }}
+                  disabled={unavailable}
+                  onClick={() => props.onSelectModel(entry.id)}
+                  role="menuitemradio"
+                  title={runtimeNotice ?? undefined}
+                  type="button"
+                >
+                  <span class="model-menu-option-copy">
+                    <strong>{entry.displayName}</strong>
+                    <Show when={runtimeNotice}>{(message) => <small>{message()}</small>}</Show>
+                  </span>
+                  <Show when={entry.id === props.model?.id}>
+                    <Icon name="check" size={15} />
+                  </Show>
+                </button>
+              );
+            }}
           </For>
         </Show>
         <Show when={props.section === "effort"}>
           <For each={props.model?.supportedReasoningEfforts ?? []}>
-            {(option) => (
-              <button
-                aria-checked={option.reasoningEffort === props.effort}
-                class="model-menu-option"
-                classList={{ selected: option.reasoningEffort === props.effort }}
-                onClick={() => props.onSelectEffort(option.reasoningEffort)}
-                role="menuitemradio"
-                type="button"
-              >
-                <span classList={{ "tone-ultra": option.reasoningEffort === "ultra" }}>
-                  {effortLabel(option.reasoningEffort)}
-                </span>
-                <Show when={option.reasoningEffort === props.effort}>
-                  <Icon name="check" size={15} />
-                </Show>
-              </button>
-            )}
+            {(option) => {
+              const unsupported =
+                props.model?.unsupportedReasoningEfforts.includes(option.reasoningEffort) === true;
+              return (
+                <button
+                  aria-checked={option.reasoningEffort === props.effort}
+                  class="model-menu-option"
+                  classList={{
+                    described: unsupported,
+                    selected: option.reasoningEffort === props.effort,
+                  }}
+                  disabled={unsupported}
+                  onClick={() => props.onSelectEffort(option.reasoningEffort)}
+                  role="menuitemradio"
+                  title={unsupported ? "Requer execução multiagente neste runtime." : undefined}
+                  type="button"
+                >
+                  <span class="model-menu-option-copy">
+                    <strong classList={{ "tone-ultra": option.reasoningEffort === "ultra" }}>
+                      {effortLabel(option.reasoningEffort)}
+                    </strong>
+                    <Show when={unsupported}>
+                      <small>Requer execução multiagente</small>
+                    </Show>
+                  </span>
+                  <Show when={option.reasoningEffort === props.effort}>
+                    <Icon name="check" size={15} />
+                  </Show>
+                </button>
+              );
+            }}
           </For>
         </Show>
         <Show when={props.section === "serviceTier"}>
@@ -1129,6 +1176,28 @@ function selectModel(
 ): CodexModel | undefined {
   const id = requested ?? fallback;
   return models.find((model) => model.id === id) ?? models.find((model) => model.isDefault);
+}
+
+function unsupportedModelMessage(model: CodexModel | undefined): string | null {
+  const capabilities = model?.unsupportedRuntimeCapabilities ?? [];
+  if (capabilities.length === 0) {
+    return null;
+  }
+  const labels = capabilities.map((capability) => MODEL_RUNTIME_CAPABILITY_LABELS[capability]);
+  return `Requer ${new Intl.ListFormat("pt-BR").format(labels)}, indisponível neste runtime.`;
+}
+
+function modelIsUnavailable(model: CodexModel | undefined): boolean {
+  return model?.unsupportedRuntimeCapabilities.includes("codeMode") === true;
+}
+
+function unsupportedReasoningEffortMessage(
+  model: CodexModel | undefined,
+  effort: ReasoningEffort | null,
+): string | null {
+  return effort !== null && model?.unsupportedReasoningEfforts.includes(effort) === true
+    ? `O esforço ${effortLabel(effort)} requer execução multiagente, indisponível neste runtime.`
+    : null;
 }
 
 function mergeAttachments(

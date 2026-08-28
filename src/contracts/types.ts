@@ -165,6 +165,8 @@ export interface ModelContextWindow {
   readonly maximumTokens: number | null;
 }
 
+export type ModelRuntimeCapability = "codeMode" | "multiAgent";
+
 export type ModelContextWindowPreference = "default" | "maximum";
 
 export interface CodexModel {
@@ -178,6 +180,8 @@ export interface CodexModel {
   readonly serviceTiers: readonly ModelServiceTier[];
   readonly defaultServiceTier: string | null;
   readonly contextWindow: ModelContextWindow | null;
+  readonly unsupportedRuntimeCapabilities: readonly ModelRuntimeCapability[];
+  readonly unsupportedReasoningEfforts: readonly ReasoningEffort[];
   readonly isDefault: boolean;
 }
 
@@ -215,7 +219,7 @@ export interface ChatModelListResponse {
 export type TurnStatus = "completed" | "failed" | "inProgress" | "interrupted";
 export type ActivityStatus = "completed" | "declined" | "failed" | "inProgress";
 export type MessagePhase = "commentary" | "finalAnswer";
-export type ImageDetail = "auto" | "high" | "low";
+export type ImageDetail = "auto" | "high" | "low" | "original";
 
 export type UserContent =
   | { readonly type: "localImage"; readonly path: string; readonly detail: ImageDetail | null }
