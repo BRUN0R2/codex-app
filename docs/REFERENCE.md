@@ -2,9 +2,11 @@
 
 ## Snapshot estudado
 
-O diretório local ignorado `.references/openai-codex` aponta para o commit
-`1e6185e52214a879a8b94f3743f47f57135dc64b`, de 23 de agosto de 2026, do
-repositório [openai/codex](https://github.com/openai/codex).
+O diretório local ignorado `.references/openai-codex` foi estudado até o commit
+`6be2a6ca952ac9f70676ce4dd07fda27175aa9dd`, de 28 de agosto de 2026, do
+repositório [openai/codex](https://github.com/openai/codex). A release estável
+usada como fronteira de compatibilidade foi `rust-v0.150.1`, commit
+`90854393966b21e9ebfd21b122334eb09a20c93d`, de 26 de agosto de 2026.
 
 A referência serve para confirmar protocolos e semântica. Nenhum crate, pacote,
 arquivo, banco, processo ou executável desse workspace participa do build ou do
@@ -18,7 +20,9 @@ runtime deste aplicativo.
   ChatGPT;
 - cliente de modelos: endpoint e forma autoritativa `{ "models": [...] }`;
 - cliente Responses: request, eventos SSE e itens de mensagem, raciocínio,
-  função e pesquisa web;
+  função, namespace, pesquisa web, Responses Lite e metadata de resposta;
+- catálogo de modelos: `model_messages`, protocolo de resposta, modalidades,
+  verbosity, resumo de raciocínio, truncamento e fallback de esforço Ultra;
 - cliente HTTP: allowlist de cookies de infraestrutura Cloudflare delegada ao
   `reqwest::cookie::Jar`, incluindo escopo, expiração e remoção;
 - leitura de limites da conta: endpoint e semântica das janelas de uso;
@@ -40,16 +44,16 @@ O login nativo foi validado em runtime antes desta reescrita. Essa validação
 confirma o protocolo OAuth, não autoriza dependência da CLI nem compatibilidade
 com o armazenamento dela.
 
-O cliente local conserva `0.146.0` como versão de compatibilidade do catálogo no
-parâmetro `client_version`. O checkout atualizado não apresentou evidência
-autoritativa para trocar esse valor: seus clientes atuais usam versão de pacote
-em runtime, enquanto o contrato consumer deste aplicativo permanece
-independente da versão comercial.
+O cliente local envia `0.150.1` como versão de compatibilidade do catálogo no
+parâmetro `client_version`. A versão acompanha a última release estável
+efetivamente auditada, sem vincular o build ou o runtime deste aplicativo ao
+binário oficial.
 
 ## Desktop oficial e limites do agente
 
-O aplicativo oficial para Windows foi revalidado em 23 de agosto de 2026 no
-build `26.818.5229.0`. Seu processo Electron `ChatGPT.exe` inicia o executável
+O aplicativo oficial para Windows foi revalidado em 28 de agosto de 2026 na
+instalação local build `26.818.5229.0`. Seu processo Electron `ChatGPT.exe`
+inicia o executável
 embarcado como `codex.exe -c features.code_mode_host=true app-server
 --analytics-default-enabled` e também inicia `codex-code-mode-host.exe`.
 Portanto, o Desktop usa o `app-server` e o core como engine; ele não executa o
@@ -87,14 +91,62 @@ O snapshot aberto mostra três mecanismos complementares:
   entram por escrita. Code Mode oferece uma célula JavaScript separada e um
   `wait` cancelável para compor ferramentas sem bloquear o renderer.
 
-O comportamento solicitado foi portado para o domínio próprio, sem executar ou
-redistribuir os binários oficiais. `WORK_EXECUTION_PROTOCOL` complementa as
-instruções cacheadas; o scheduler nativo já sobrepõe ferramentas independentes;
-sessões longas usam yield/poll; comandos permanecem em `item.started` até o
-terminal; polls internos não poluem a timeline; e `acceptForSession` elimina
-aprovações repetidas apenas na tarefa escolhida. O host JavaScript genérico não
-foi incorporado: para o catálogo local fechado, o batch Rust tipado mantém as
-mesmas garantias de concorrência sem adicionar um runtime de código arbitrário.
+O comportamento aplicável foi portado para o domínio próprio, sem executar ou
+redistribuir os binários oficiais. O scheduler nativo sobrepõe ferramentas
+independentes; sessões longas usam yield/poll; comandos permanecem em
+`item.started` até o terminal; polls internos não poluem a timeline; e
+`acceptForSession` elimina aprovações repetidas apenas na tarefa escolhida.
+
+O host JavaScript genérico não foi incorporado. No snapshot auditado, Code Mode
+é dividido entre `code-mode-protocol`, `code-mode-runtime`, `code-mode-host` e o
+adaptador do core. O runtime fixa `v8 150.4.0` com `v8_enable_sandbox`, cria um
+isolate novo por célula e mantém módulos assíncronos, callbacks de ferramentas,
+timers, yield/wait, cancelamento e limites de heap/tempo. O host acrescenta
+negociação de capacidades, limites de frame e backpressure das delegações.
+Portar apenas a ferramenta freeform ou executar JavaScript sem essa fronteira
+de isolamento produziria um contrato falso e violaria a previsibilidade do
+runtime. O catálogo local só anunciará esse modo quando existir um subsistema
+nativo independente e confinado, nunca por dependência de build, processo,
+armazenamento ou configuração do CLI.
+
+O catálogo atual marca Sol, Terra e Luna como `code_mode_only`, e as duas
+primeiras também como multiagente v2. Esses seletores agora são desserializados
+em enums fechados. O catálogo os mantém visíveis com requisitos explícitos, mas
+nenhum deles pode virar o padrão local, iniciar um turno ou anunciar Ultra como
+executável enquanto os subsistemas correspondentes estiverem ausentes. O
+primeiro modelo visível sem requisito bloqueante vira o padrão do runtime. Essa
+decisão segue o comportamento fail-closed do core oficial quando Code Mode Only
+não possui host e evita enviar ferramentas diretas a um modelo cujo contrato é
+outro.
+
+## Instruções, Responses Lite e cache
+
+O fluxo oficial é híbrido, não exclusivamente manual nem exclusivamente do
+servidor. O catálogo entrega `model_messages.instructions_template`, variáveis
+de personalidade/permissão/colaboração e capacidades do modelo. O cliente
+acrescenta somente contexto factual pertencente ao runtime: instruções explícitas
+do usuário, hierarquia `AGENTS.md`, permissões, modo de colaboração, workspace,
+shell, data e timezone.
+
+Este aplicativo agora segue essa separação. O antigo protocolo comportamental
+local e os nudges de navegador foram removidos por duplicarem regras já presentes
+no modelo e poderem competir com instruções mais atuais. Personalidade local só
+é acrescentada para catálogos legados que não a incorporam no template. Em
+Responses Standard, instruções e ferramentas usam os campos de topo; em
+Responses Lite, ferramentas entram em `additional_tools`, funções são agrupadas
+no namespace `functions`, e as instruções-base entram em uma mensagem developer
+com IDs UUID v5 estáveis por tarefa e payload. Imagens Lite não enviam `detail`,
+o contexto de raciocínio é `all_turns` e chamadas paralelas não são solicitadas.
+
+O catálogo fica em memória por cinco minutos. Uma resposta de stream com o
+mesmo `x-models-etag` renova esse TTL; um valor diferente invalida a entrada, e
+o primeiro acesso após invalidação ou expiração busca novamente o catálogo
+completo. A ausência desse header em um evento não altera uma entrada já
+validada. Não há cache persistente do catálogo nem importação de
+cache/configuração da CLI. O
+`prompt_cache_key` é deliberadamente o ID estável da tarefa; polls e rodadas não
+criam chaves novas. A auditoria do SQLite local executou `integrity_check`,
+validou JSON e referências e não encontrou corrupção.
 
 ## Browser Use e Computer Use no fluxo oficial
 
@@ -166,6 +218,11 @@ para permitir baixa latência explícita, sem alterar o padrão de dez segundos.
 Sessões usam UUID, pertencem à tarefa, são limitadas a 32 e concluem item mais
 saída em transação SQLite. O transcript vivo é limitado, o resultado integral
 fica no spool e polling append-only devolve somente o delta posterior ao cursor.
+O launch local precisa concluir e anexar a árvore a um Job Object antes de o
+prazo de yield começar ou a sessão entrar no registry. Cancelamento usa esse
+handle nativo e `KILL_ON_JOB_CLOSE`; `taskkill.exe` não participa do caminho.
+Essa fronteira própria elimina tanto descendentes órfãos quanto o estado falso
+“running” durante um spawn ainda bloqueado.
 Cada poll é limitado a 30 segundos. O primeiro yield mantém o item com semântica
 `started`, permitindo que os deltas continuem; só a transação terminal emite
 `completed`. Nenhum arquivo da referência participa dessa implementação.
@@ -369,7 +426,7 @@ envio e responderam `OK.`. O desktop próprio registrou `8,5k / 258k` tokens
 (3%) e o oficial indicou 8%; a diferença é esperada porque cada aplicação monta
 seu próprio contexto e conjunto de capacidades.
 
-No bundle oficial de 23 de agosto, chamadas consecutivas de visualização são
+No bundle oficial estudado, chamadas consecutivas de visualização são
 projetadas como uma única atividade com contador e lista ordenada de imagens.
 O navegador conserva abas por conversa, reutiliza hosts webview, mantém
 voltar/avançar/recarregar/endereço e restaura o estado visual ao retornar à
@@ -379,25 +436,28 @@ isolamento de capabilities para conteúdo remoto.
 
 ## Cobertura funcional
 
-A comparação do aplicativo próprio com o Codex CLI `0.146.0`, o protocolo
+A comparação do aplicativo próprio com o Codex CLI `0.150.1`, o protocolo
 `app-server` e o desktop oficial separa o núcleo do agente das superfícies de
 produto. O estado atual é:
 
 | Área | Cobertura local |
 | --- | --- |
 | Login ChatGPT, renovação, logout, uso, faturamento, recarga e resets | implementada |
-| Modelos, esforço, tier, permissões e janela de contexto | implementada |
+| Modelos, esforço, tier, permissões e janela de contexto | implementada, com incompatibilidades de runtime explícitas e bloqueadas |
 | Criar, listar, abrir, renomear e arquivar tarefas | implementada |
 | Turno incremental com raciocínio, ferramentas, aprovação e interrupção | implementada |
 | Histórico persistido, anexos, pesquisa web e falhas visíveis | implementada |
+| Visualização multimodal de PNG/JPEG/GIF/WebP local, com detalhe `high`/`original` e atividade na timeline | implementada |
 | Troca de tarefa e múltiplos turnos simultâneos em background | implementada por runtime isolado por tarefa |
 | Compactação automática e direcionamento de turno ativo | implementada |
 | Fork, arquivamento, desarquivamento e exclusão de tarefa | implementada |
 | Markdown sanitizado, scroll medido e janela de contexto | implementada |
 | Automações recorrentes, execução manual, pausa, histórico e fila de revisão | implementada |
 | Navegador interno nativo, abas por tarefa, histórico e painel responsivo | implementada |
+| Responses Lite, catálogo revalidado e contexto local hierárquico | implementada |
 | Worktrees e fluxo Git completo de diff, revisão e commit | não implementada |
 | Terminal integrado, plugins, skills e MCP | não implementada |
+| Code Mode sandboxed, Responses WebSocket e multiagente v2/Ultra | não implementada; catálogo falha fechado |
 
 O aplicativo executa o fluxo essencial moderno de um agente Codex para PC sem
 depender da CLI. As superfícies ainda ausentes não são representadas por botões
@@ -423,8 +483,8 @@ O código Shiki não foi copiado nem adicionado ao runtime. O motor local usa um
 lexer stateful próprio, módulos com no máximo 406 linhas e políticas menores
 para a viewport do WebView.
 
-O OpenAI Codex oficial foi atualizado por fast-forward de `9894a14c8` para
-`343074d42` (96 commits) em `.references/openai-codex`. O estudo do TUI mostrou
+O estudo incremental do OpenAI Codex oficial chegou ao snapshot fixado no topo
+deste documento. O estudo do TUI mostrou
 hunks destacados como bloco, estado incremental em fences Markdown, revisão de
 tema para invalidar cache e guardrails de 512 KiB, 10.000 linhas e 4 KiB por
 linha. O projeto local portou hunk-level state e fallback, mas rejeitou Syntect:

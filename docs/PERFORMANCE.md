@@ -932,6 +932,58 @@ O fluxo debug integral levou `4.649 ms`, incluindo animações deliberadas do
 cursor, guard de redirects, cinco capturas e teardown. Isso é um smoke
 funcional, não um benchmark de latência de produção.
 
+### Revalidação do agente, contexto e Ultra — 28 de agosto de 2026
+
+Depois da atualização para o catálogo `0.150.1`, Responses Lite, contexto
+hierárquico e orçamento dinâmico de saída, `pnpm measure:tokens` em release
+registrou:
+
+| Caminho | Resultado |
+| --- | ---: |
+| catálogo de 20 ferramentas | `13.976 B`, cerca de `3.494` tokens |
+| catálogo somente leitura | `2.400` tokens |
+| construção + encode do catálogo | `0,0217 ms` mediano |
+| saída `2.439.995 B → 6.372 B` | `−99,73885%` em `13,2999 ms` |
+| comando moderado `3.216 B → 414 B` | `−87,1269%` em `0,1492 ms` |
+| comando grande `6.018 B → 633 B` | `−89,4816%` em `0,5418 ms` |
+| histórico `232,169 MiB → 0,957 MiB` | `−99,588%` |
+| parse + decode do histórico | `327,258×` mais rápido |
+| heap inicial | `−99,576%` |
+| busca em 64 MiB | `65.536 B → 110 B`, `−99,832%` em `57,886 ms` |
+| oito leituras idênticas | uma execução, `−87,5%`, `1,53365×` menor latência |
+| ripgrep em corpus de 75 MiB | `259,7961 ms`, `2,03943×` o scanner anterior |
+
+O novo cenário visual ativa Ultra pela interface e valida o estado computado em
+920×640, 1280×820 e 1920×1080. Nas três medidas o rótulo foi `Ultra`, a cor
+`rgb(167, 139, 250)` (`#a78bfa`) e o overflow horizontal `0 px`. Esse gate
+protege a identificação roxa solicitada sem tratar a aparência como prova de
+capacidade: o contrato separado continua bloqueando Ultra quando o subsistema
+multiagente não existe.
+
+O gate nativo também revelou uma corrida que execuções focadas não haviam
+reproduzido: sob a suíte paralela, uma sessão podia consumir o prazo de shutdown
+enquanto `CreateProcess` ainda inicializava e falhar depois de 15 s. O launch foi
+separado da execução; `yield` e registro agora começam somente após processo,
+pipes e Job Object estarem prontos. Um teste Windows cria um descendente real,
+termina o job e espera além do trabalho atrasado para provar que o marcador não é
+gravado. Depois da correção, três suítes nativas completas e consecutivas
+produziram:
+
+| Rodada | Aprovados | Ignorados | Duração dos testes |
+| ---: | ---: | ---: | ---: |
+| 1 | 357 | 9 | `36,81 s` |
+| 2 | 357 | 9 | `38,39 s` |
+| 3 | 357 | 9 | `38,09 s` |
+
+Essas durações excluem compilação/linkedição. A evidência cobre paralelismo e
+descendentes; não usa aumento do timeout como substituto para ownership.
+
+O gate final `pnpm verify` repetiu a carga completa depois de todas as mudanças:
+360 arquivos passaram a validação UTF-8, 78 arquivos/428 testes frontend foram
+aprovados, o build Vite de produção e todos os cenários visuais concluíram, os
+benchmarks release passaram e a suíte nativa terminou com 357 testes aprovados,
+zero falhas e nove benchmarks ignorados por design em `36,76 s`.
+
 O orçamento release do catálogo foi reexecutado depois das sete ferramentas:
 
 | Caminho | Antes | Browser Use | Delta |
