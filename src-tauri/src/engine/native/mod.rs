@@ -11,6 +11,7 @@ mod diagnostics;
 mod file_diff;
 mod output;
 mod output_compaction;
+mod prompt_context;
 mod provider;
 mod provider_error;
 mod storage;
@@ -955,6 +956,7 @@ impl NativeEngine {
                 model.id()
             )));
         }
+        let provider_reasoning_effort = model.provider_reasoning_effort(reasoning_effort);
         let service_tier = model.select_service_tier(request.service_tier.as_deref())?;
         let prepared =
             agent::prepare_user_input(request.client_user_message_id, request.input).await?;
@@ -1023,8 +1025,10 @@ impl NativeEngine {
             mode: thread.mode,
             model,
             config,
-            reasoning_effort,
+            provider_reasoning_effort,
             service_tier,
+            timezone: request.timezone,
+            timezone_offset_min: request.timezone_offset_min,
             cancellation,
         };
         let task_inner = Arc::clone(&self.inner);

@@ -66,6 +66,13 @@ describe("tool output content", () => {
     expect(
       projectImageToolOutput(JSON.stringify({ image_url: "file:///C:/secret.png" })),
     ).toBeNull();
+    expect(projectImageToolOutput(JSON.stringify({ image_path: "C:\\workspace\\image.png" }))).toBe(
+      "C:\\workspace\\image.png",
+    );
+    expect(projectImageToolOutput(JSON.stringify({ image_path: "relative/image.png" }))).toBeNull();
+    expect(
+      projectImageToolOutput(JSON.stringify({ image_path: "C:\\workspace\\image.png\ninvalid" })),
+    ).toBeNull();
     expect(projectImageToolOutput(JSON.stringify({ image_url: svg, unexpected: true }))).toBeNull();
     expect(projectImageToolOutput("not JSON")).toBeNull();
   });

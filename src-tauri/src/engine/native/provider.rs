@@ -4,13 +4,14 @@ mod models;
 mod responses;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tokio::sync::{Mutex, RwLock};
 
 use self::client::ProviderClient;
-use self::models::ModelCatalog;
+pub(crate) use self::models::ModelCatalog;
 use super::auth::{AuthSession, ChatGptAuth};
 use crate::engine::AccountPlanType;
 use crate::engine::AccountRateLimitsResponse;
@@ -28,19 +29,24 @@ use crate::engine::UsageResetRedemptionResponse;
 use crate::error::AppError;
 
 pub(crate) use self::history::normalize_provider_history;
+#[cfg(test)]
+pub(crate) use self::models::ModelsWire;
 pub(crate) use self::models::SelectedModel;
+pub(crate) use self::responses::DEFAULT_FUNCTION_NAMESPACE;
 pub(crate) use self::responses::FunctionCallOutputContent;
 pub(crate) use self::responses::FunctionCallOutputPayload;
 pub(crate) use self::responses::ResponseContent;
 pub(crate) use self::responses::ResponseEvent;
 pub(crate) use self::responses::ResponseItem;
 pub(crate) use self::responses::ResponseMessagePhase;
+pub(crate) use self::responses::ResponseProtocol;
 pub(crate) use self::responses::ResponseRequest;
 pub(crate) use self::responses::ResponseRequestSettings;
 pub(crate) use self::responses::ResponseStream;
 pub(crate) use self::responses::WebSearchAction;
 
 const MAX_MODELS: usize = 100;
+const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_RATE_LIMIT_BUCKET_ID_BYTES: usize = 128;
 const MAX_RATE_LIMIT_BUCKETS: usize = 32;
 const MAX_USAGE_RESET_CREDITS: usize = 100;
@@ -80,8 +86,20 @@ const CHECKOUT_PRICING_CONFIG_BASE_URL: &str =
 #[derive(Default)]
 pub struct ChatGptCodexProvider {
     client: ProviderClient,
-    catalog: RwLock<Option<Arc<ModelCatalog>>>,
+    catalog: RwLock<Option<CachedModelCatalog>>,
     refresh_gate: Mutex<()>,
+}
+
+struct CachedModelCatalog {
+    catalog: Arc<ModelCatalog>,
+    etag: Option<String>,
+    fetched_at: Instant,
+}
+
+impl CachedModelCatalog {
+    fn get_if_fresh(&self, now: Instant) -> Option<Arc<ModelCatalog>> {
+        model_catalog_cache_is_fresh(self.fetched_at, now).then(|| Arc::clone(&self.catalog))
+    }
 }
 
 impl ChatGptCodexProvider {
@@ -112,6 +130,17 @@ impl ChatGptCodexProvider {
     ) -> Result<SelectedModel, AppError> {
         let catalog = self.catalog(app, auth).await?;
         catalog.select(requested)
+    }
+
+    pub async fn reconcile_catalog_etag(&self, incoming_etag: &str) {
+        let mut cached = self.catalog.write().await;
+        match cached.as_mut() {
+            Some(entry) if model_catalog_etag_changed(entry.etag.as_deref(), incoming_etag) => {
+                *cached = None;
+            }
+            Some(entry) => entry.fetched_at = Instant::now(),
+            None => {}
+        }
     }
 
     pub async fn start_response(
@@ -387,18 +416,43 @@ impl ChatGptCodexProvider {
         app: &AppHandle,
         auth: &ChatGptAuth,
     ) -> Result<Arc<ModelCatalog>, AppError> {
-        if let Some(catalog) = self.catalog.read().await.clone() {
+        if let Some(catalog) = self
+            .catalog
+            .read()
+            .await
+            .as_ref()
+            .and_then(|cached| cached.get_if_fresh(Instant::now()))
+        {
             return Ok(catalog);
         }
         let _refresh_guard = self.refresh_gate.lock().await;
-        if let Some(catalog) = self.catalog.read().await.clone() {
+        if let Some(catalog) = self
+            .catalog
+            .read()
+            .await
+            .as_ref()
+            .and_then(|cached| cached.get_if_fresh(Instant::now()))
+        {
             return Ok(catalog);
         }
         let session = auth.session(app).await?;
-        let catalog = Arc::new(self.client.fetch_models(&session, MAX_MODELS).await?);
-        *self.catalog.write().await = Some(Arc::clone(&catalog));
+        let (catalog, etag) = self.client.fetch_models(&session, MAX_MODELS).await?;
+        let catalog = Arc::new(catalog);
+        *self.catalog.write().await = Some(CachedModelCatalog {
+            catalog: Arc::clone(&catalog),
+            etag,
+            fetched_at: Instant::now(),
+        });
         Ok(catalog)
     }
+}
+
+fn model_catalog_cache_is_fresh(fetched_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(fetched_at) < MODEL_CATALOG_CACHE_TTL
+}
+
+fn model_catalog_etag_changed(cached: Option<&str>, incoming: &str) -> bool {
+    cached != Some(incoming)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1071,9 +1125,12 @@ impl AccountPlanTypeWire {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::{
         AccountPlanTypeWire, AutoTopUpSettingsWire, CheckoutPricingConfigWire, UsagePayload,
-        UsageResetConsumeWire, UsageResetCreditsWire,
+        UsageResetConsumeWire, UsageResetCreditsWire, model_catalog_cache_is_fresh,
+        model_catalog_etag_changed,
     };
     use crate::engine::contracts::RateLimitReachedType;
 
@@ -1081,6 +1138,30 @@ mod tests {
     fn rejects_unknown_plan_values_instead_of_falling_back() {
         let result = serde_json::from_str::<UsagePayload>(r#"{"plan_type":"future"}"#);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn model_catalog_cache_expires_after_five_minutes() {
+        let fetched_at = Instant::now();
+
+        assert!(model_catalog_cache_is_fresh(
+            fetched_at,
+            fetched_at + Duration::from_secs(299)
+        ));
+        assert!(!model_catalog_cache_is_fresh(
+            fetched_at,
+            fetched_at + Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn model_catalog_etag_only_invalidates_changed_or_unversioned_cache() {
+        assert!(!model_catalog_etag_changed(
+            Some("catalog-v1"),
+            "catalog-v1"
+        ));
+        assert!(model_catalog_etag_changed(Some("catalog-v1"), "catalog-v2"));
+        assert!(model_catalog_etag_changed(None, "catalog-v1"));
     }
 
     #[test]

@@ -82,6 +82,7 @@
   --full-access: #fb6a22;
   --full-access-soft: rgb(251 106 34 / 16%);
   --full-access-border: rgb(251 106 34 / 28%);
+  --reasoning-ultra: #a78bfa;
   --red: var(--red-400);
   --red-soft: rgb(250 66 62 / 18%);
   --diff-surface: var(--bg);
@@ -6196,8 +6197,9 @@ pre {
 
 .model-button-effort.ultra,
 .model-menu-row > small.tone-ultra,
-.model-menu-option > span.tone-ultra {
-  color: var(--text);
+.model-menu-option > span.tone-ultra,
+.model-menu-option-copy > strong.tone-ultra {
+  color: var(--reasoning-ultra);
 }
 
 .model-button:hover {

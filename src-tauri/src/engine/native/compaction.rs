@@ -13,14 +13,19 @@ use super::turn_recovery;
 use crate::engine::ThreadItem;
 use crate::error::AppError;
 
+pub(super) struct CompactionContext<'a> {
+    pub base_instructions: &'a str,
+    pub prompt_context: &'a [ResponseItem],
+    pub tools: &'a [serde_json::Value],
+}
+
 pub(super) async fn compact_context(
     inner: &NativeEngineInner,
     app: &AppHandle,
     run: &mut TurnRun,
-    instructions: &str,
     provider_state: &mut TurnProviderState,
     history: &ProviderHistorySnapshot,
-    tools: &[serde_json::Value],
+    context: CompactionContext<'_>,
 ) -> Result<bool, AppError> {
     if *run.cancellation.borrow() {
         return Ok(false);
@@ -33,8 +38,13 @@ pub(super) async fn compact_context(
     .into_iter()
     .flatten()
     .min();
-    let mut compaction_input =
-        prepare_compaction_history(instructions, &history.items, tools, compaction_limit);
+    let mut compaction_input = prepare_compaction_history(
+        context.base_instructions,
+        context.prompt_context,
+        &history.items,
+        context.tools,
+        compaction_limit,
+    );
     compaction_input.push(ResponseItem::compaction_trigger());
 
     let compaction_id = Uuid::now_v7().to_string();
@@ -54,17 +64,20 @@ pub(super) async fn compact_context(
     let checkpoint = 'request: loop {
         let request = ResponseRequest::new(
             run.model.id(),
-            instructions,
+            context.base_instructions,
+            context.prompt_context,
             &compaction_input,
-            tools,
+            context.tools,
             ResponseRequestSettings {
-                parallel_tool_calls: run.model.supports_parallel_tool_calls(),
-                reasoning_effort: run.reasoning_effort,
+                protocol: run.model.response_protocol(),
+                parallel_tool_calls: run.model.request_parallel_tool_calls(),
+                reasoning_effort: run.provider_reasoning_effort,
+                reasoning_summary: run.model.reasoning_summary(),
                 service_tier: run.service_tier.as_deref(),
                 prompt_cache_key: Some(&run.thread_id),
-                verbosity: run.config.model_verbosity,
+                verbosity: run.model.select_verbosity(run.config.model_verbosity)?,
             },
-        );
+        )?;
         let mut stream = match inner
             .provider
             .start_response(
@@ -113,7 +126,7 @@ pub(super) async fn compact_context(
             };
             transient_failure_count = 0;
             let Some(event) =
-                handle_provider_control_event(inner, app, run, provider_state, event)?
+                handle_provider_control_event(inner, app, run, provider_state, event).await?
             else {
                 continue;
             };
@@ -139,6 +152,7 @@ pub(super) async fn compact_context(
                 | ResponseEvent::ReasoningSummaryDelta { .. }
                 | ResponseEvent::ReasoningContentDelta { .. } => {}
                 ResponseEvent::ServerModel(_)
+                | ResponseEvent::ModelsEtag(_)
                 | ResponseEvent::TurnState(_)
                 | ResponseEvent::ModelVerifications(_)
                 | ResponseEvent::SafetyBuffering(_) => {

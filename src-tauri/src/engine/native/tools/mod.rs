@@ -14,14 +14,16 @@ use super::apply_patch::transaction::{PatchOutcome, commit_patch};
 use super::approval::ApprovalBroker;
 use super::file_diff::{line_stats, render_replacement_diff};
 use super::output::OutputSource;
-use super::output_compaction::{TextOutputKind, compact_command_output, compact_text};
+use super::output_compaction::{
+    ProviderOutputBudget, TextOutputKind, compact_command_output, compact_text,
+};
 use super::storage::{MAX_OUTPUT_SEARCH_QUERY_BYTES, NativeStorage};
 use super::stream_notifications::StreamNotificationBatcher;
 use super::text::truncate_utf8;
 use crate::engine::{
     ActivityStatus, ApprovalDecision, ApprovalPolicy, CommandApprovalRequest, CommandLiveOutput,
-    CommandSource, FileChange, FileChangeKind, PermissionProfile, PlanStep, PlanStepStatus,
-    SandboxMode, ThreadItem, ToolOutputPresentation,
+    CommandSource, FileChange, FileChangeKind, ImageDetail, PermissionProfile, PlanStep,
+    PlanStepStatus, SandboxMode, ThreadItem, ToolOutputPresentation,
 };
 use crate::error::AppError;
 
@@ -34,6 +36,7 @@ use self::command_sessions::{BackgroundCommandLease, BackgroundCommandStart, Com
 mod fs;
 mod read_cache;
 mod ripgrep;
+mod view_image;
 mod workspace;
 
 use self::exec::{CommandOutput, command_timeout, command_yield_time};
@@ -94,6 +97,7 @@ enum ToolOperation {
     ReadFile(ReadFileArgs),
     ListFiles(ListFilesArgs),
     SearchText(SearchTextArgs),
+    ViewImage(view_image::ViewImageArgs),
     EditFile(EditFileArgs),
     WriteFile(WriteFileArgs),
     ReadOutput(ReadOutputArgs),
@@ -117,7 +121,8 @@ pub struct ToolExecutionResult {
 #[derive(Debug)]
 pub struct ToolVisualContext {
     pub image_url: String,
-    pub description: String,
+    pub detail: ImageDetail,
+    pub model_text: Option<String>,
 }
 
 pub struct ToolExecutionContext<'a> {
@@ -133,6 +138,9 @@ pub struct ToolExecutionContext<'a> {
     pub command_sessions: &'a CommandSessionManager,
     pub stream_deltas: &'a StreamNotificationBatcher,
     pub(super) read_cache: &'a ReadToolCache,
+    pub supports_image_input: bool,
+    pub supports_original_image_detail: bool,
+    pub provider_output_budget: ProviderOutputBudget,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +273,23 @@ impl ToolRegistry {
             .as_slice()
     }
 
+    pub fn definitions_for_model(
+        &self,
+        permissions: PermissionProfile,
+        supports_image_input: bool,
+        supports_original_image_detail: bool,
+    ) -> Vec<Value> {
+        self.definitions_for(permissions)
+            .iter()
+            .filter_map(|definition| {
+                if definition["name"] != "view_image" {
+                    return Some(definition.clone());
+                }
+                supports_image_input.then(|| view_image::definition(supports_original_image_detail))
+            })
+            .collect()
+    }
+
     fn build_definitions() -> Vec<Value> {
         let mut definitions = vec![
             function_tool(
@@ -308,6 +333,7 @@ impl ToolRegistry {
                     "additionalProperties": false
                 }),
             ),
+            view_image::definition(false),
             function_tool(
                 "edit_file",
                 "Replace an exact text fragment in an existing UTF-8 workspace file.",
@@ -495,6 +521,11 @@ impl ToolRegistry {
                 let description = format!("Search {}", args.path);
                 ("search_text", description, ToolOperation::SearchText(args))
             }
+            "view_image" => {
+                let args: view_image::ViewImageArgs = decode_arguments(name, arguments)?;
+                let description = format!("View image {}", args.path);
+                ("view_image", description, ToolOperation::ViewImage(args))
+            }
             "edit_file" => {
                 let args: EditFileArgs = decode_arguments(name, arguments)?;
                 let description = format!("Edit {}", args.path);
@@ -621,6 +652,7 @@ impl PreparedTool {
             ToolOperation::ReadFile(_)
             | ToolOperation::ListFiles(_)
             | ToolOperation::SearchText(_)
+            | ToolOperation::ViewImage(_)
             | ToolOperation::ReadOutput(_)
             | ToolOperation::PollCommand(_) => true,
             ToolOperation::ExecCommand(args) => {
@@ -637,6 +669,7 @@ impl PreparedTool {
             ToolOperation::Browser(operation) if operation.presents_image() => {
                 ToolOutputPresentation::Image
             }
+            ToolOperation::ViewImage(_) => ToolOutputPresentation::Image,
             ToolOperation::ListFiles(_) => ToolOutputPresentation::FileList,
             ToolOperation::ReadFile(args) => ToolOutputPresentation::SourceFile {
                 path: args.path.clone(),
@@ -773,6 +806,16 @@ impl PreparedTool {
                 )
                 .await
                 .map(|output| ToolResult::StoredOutput(output.into_stored_output())),
+            ToolOperation::ViewImage(args) => view_image::execute(
+                &workspace,
+                context.permissions,
+                context.supports_image_input,
+                context.supports_original_image_detail,
+                args,
+                cancellation,
+            )
+            .await
+            .map(ToolResult::ViewedImage),
             ToolOperation::ReadOutput(args) => context
                 .read_cache
                 .get_or_execute(
@@ -882,6 +925,7 @@ impl PreparedTool {
                         context.turn_id.into(),
                         self.started_at_ms(),
                         command_yield_time(args)?,
+                        context.provider_output_budget,
                         cancellation,
                     )
                     .await?
@@ -917,7 +961,8 @@ impl PreparedTool {
                 let visual_context = match (output.visual_image_url, output.visual_description) {
                     (Some(image_url), Some(description)) => Some(ToolVisualContext {
                         image_url,
-                        description,
+                        detail: ImageDetail::High,
+                        model_text: Some(format!("{}\n\n{description}", output.provider_output)),
                     }),
                     (None, None) => None,
                     _ => {
@@ -937,6 +982,27 @@ impl PreparedTool {
                     display_output: output.display_output.map(OutputSource::text),
                     background_command: None,
                     visual_context,
+                })
+            }
+            Ok(ToolResult::ViewedImage(output)) => {
+                let duration = elapsed_millis(started_at)?;
+                let provider_output = format!("Viewed image at `{}`.", output.display_path);
+                let display_output = json!({ "image_path": &output.source_path }).to_string();
+                Ok(ToolExecutionResult {
+                    provider_output,
+                    completed_item: self.finish_item(
+                        &workspace,
+                        ActivityStatus::Completed,
+                        None,
+                        Some(duration),
+                    ),
+                    display_output: Some(OutputSource::text(display_output)),
+                    background_command: None,
+                    visual_context: Some(ToolVisualContext {
+                        image_url: output.data_url,
+                        detail: output.detail,
+                        model_text: None,
+                    }),
                 })
             }
             Ok(ToolResult::BackgroundCommand(session)) => {
@@ -981,8 +1047,13 @@ impl PreparedTool {
                 self.complete_mutation_confirmation(&workspace, started_at, provider_output)
             }
             Ok(ToolResult::StoredOutput(output)) => {
-                self.complete_stored_output(&workspace, started_at, output)
-                    .await
+                self.complete_stored_output(
+                    &workspace,
+                    started_at,
+                    output,
+                    context.provider_output_budget,
+                )
+                .await
             }
             Err(error) => Err(error),
         }
@@ -1014,8 +1085,9 @@ impl PreparedTool {
         workspace: &Path,
         started_at: Instant,
         output: StoredToolOutput,
+        provider_output_budget: ProviderOutputBudget,
     ) -> Result<ToolExecutionResult, AppError> {
-        let output = output.into_output().await?;
+        let output = output.into_output(provider_output_budget).await?;
         let duration = elapsed_millis(started_at)?;
         let completed_item =
             self.finish_item(workspace, output.status, output.exit_code, Some(duration));
@@ -1154,6 +1226,7 @@ enum ToolResult {
     StoredOutput(StoredToolOutput),
     MutationConfirmation(String),
     Patch(PatchOutcome),
+    ViewedImage(view_image::ViewedImage),
 }
 
 enum StoredToolOutput {
@@ -1173,10 +1246,13 @@ struct CompletedStoredOutput {
 }
 
 impl StoredToolOutput {
-    async fn into_output(self) -> Result<CompletedStoredOutput, AppError> {
+    async fn into_output(
+        self,
+        provider_output_budget: ProviderOutputBudget,
+    ) -> Result<CompletedStoredOutput, AppError> {
         match self {
             Self::Text { output, kind } => {
-                let compacted = compact_text(&output, kind);
+                let compacted = compact_text(&output, kind, provider_output_budget);
                 let source = OutputSource::text(output);
                 let provider_output =
                     source.provider_output_with_preview(&compacted.text, compacted.complete);
@@ -1208,8 +1284,12 @@ impl StoredToolOutput {
                 let (source, provider_output) = tokio::task::spawn_blocking(move || {
                     let mut stdout = output.stdout;
                     let mut stderr = output.stderr;
-                    let compacted =
-                        compact_command_output(exit_code.unwrap_or(-1), &mut stdout, &mut stderr)?;
+                    let compacted = compact_command_output(
+                        exit_code.unwrap_or(-1),
+                        &mut stdout,
+                        &mut stderr,
+                        provider_output_budget,
+                    )?;
                     let source = OutputSource::command(&header, stdout, stderr)?;
                     let mut provider_output =
                         source.provider_output_with_preview(&compacted.text, compacted.complete);
@@ -1395,7 +1475,7 @@ mod tests {
     use crate::engine::{ActivityStatus, PermissionProfile, PlanStepStatus, ThreadItem};
     use crate::error::AppError;
 
-    use super::super::output_compaction::TextOutputKind;
+    use super::super::output_compaction::{ProviderOutputBudget, TextOutputKind};
     use super::exec::CommandTermination;
     use super::fs::{atomic_write, edit_file, write_file};
     use super::workspace::resolve_write_target;
@@ -1483,7 +1563,42 @@ mod tests {
                 "read_output",
                 "search_text",
                 "update_plan",
+                "view_image",
             ])
+        );
+    }
+
+    #[test]
+    fn model_capabilities_control_the_view_image_contract() {
+        let unsupported =
+            ToolRegistry.definitions_for_model(PermissionProfile::read_only(), false, false);
+        assert!(
+            unsupported
+                .iter()
+                .all(|definition| definition["name"] != "view_image")
+        );
+
+        let high_only =
+            ToolRegistry.definitions_for_model(PermissionProfile::read_only(), true, false);
+        let high_only = high_only
+            .iter()
+            .find(|definition| definition["name"] == "view_image")
+            .expect("image-capable models should receive view_image");
+        assert!(
+            high_only["parameters"]["properties"]
+                .get("detail")
+                .is_none()
+        );
+
+        let original =
+            ToolRegistry.definitions_for_model(PermissionProfile::read_only(), true, true);
+        let original = original
+            .iter()
+            .find(|definition| definition["name"] == "view_image")
+            .expect("image-capable models should receive view_image");
+        assert_eq!(
+            original["parameters"]["properties"]["detail"]["enum"],
+            serde_json::json!(["high", "original", null])
         );
     }
 
@@ -1547,7 +1662,7 @@ mod tests {
                 stdout,
                 stderr,
             })
-            .into_output()
+            .into_output(ProviderOutputBudget::default())
             .await
             .expect("command output should assemble");
 
@@ -1573,7 +1688,7 @@ mod tests {
             output: output.clone(),
             kind: TextOutputKind::ReadFile,
         }
-        .into_output()
+        .into_output(ProviderOutputBudget::default())
         .await
         .expect("large tool output should remain available as a resource");
 
@@ -1596,7 +1711,7 @@ mod tests {
         );
 
         let output = StoredToolOutput::OutputPage(output_page.clone())
-            .into_output()
+            .into_output(ProviderOutputBudget::default())
             .await
             .expect("an output page should remain directly readable");
 

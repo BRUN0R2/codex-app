@@ -11,6 +11,7 @@ use reqwest::cookie::Jar;
 use reqwest::header::ACCEPT;
 use reqwest::header::AUTHORIZATION;
 use reqwest::header::CONTENT_TYPE;
+use reqwest::header::ETAG;
 use reqwest::header::HeaderValue;
 use reqwest::header::USER_AGENT;
 use serde::Serialize;
@@ -26,7 +27,7 @@ use crate::engine::native::auth::AuthSession;
 use crate::error::AppError;
 
 const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-const MODEL_CATALOG_COMPATIBILITY_VERSION: &str = "0.146.0";
+const MODEL_CATALOG_COMPATIBILITY_VERSION: &str = "0.150.1";
 pub const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -34,7 +35,9 @@ const MAX_REQUEST_ATTEMPTS: usize = 8;
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const RETRY_BACKOFF_BASE_MILLIS: u64 = 500;
 const MODEL_CATALOG_BODY_MAX_BYTES: usize = 4 * 1_048_576;
+const MAX_ETAG_BYTES: usize = 1_024;
 const ORIGINATOR: &str = "codex_desktop_next";
+const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
 #[derive(Default)]
 pub struct ProviderClient {
@@ -64,12 +67,18 @@ impl ProviderClient {
         &self,
         session: &AuthSession,
         maximum_models: usize,
-    ) -> Result<ModelCatalog, AppError> {
+    ) -> Result<(ModelCatalog, Option<String>), AppError> {
         let url = model_catalog_url();
-        let value: super::models::ModelsWire = self
-            .get_json(session, &url, "model catalog", MODEL_CATALOG_BODY_MAX_BYTES)
+        let response = self
+            .request_response_with_retries("model catalog", || {
+                self.authorized(Method::GET, &url, session)
+                    .map(|request| request.header(ACCEPT, "application/json"))
+            })
             .await?;
-        ModelCatalog::from_wire(value, maximum_models)
+        let etag = optional_response_header(&response, ETAG.as_str(), MAX_ETAG_BYTES)?;
+        let value: super::models::ModelsWire =
+            decode_json(response, "model catalog", MODEL_CATALOG_BODY_MAX_BYTES).await?;
+        Ok((ModelCatalog::from_wire(value, maximum_models)?, etag))
     }
 
     pub async fn get_json<T: DeserializeOwned>(
@@ -114,6 +123,17 @@ impl ProviderClient {
     where
         T: DeserializeOwned,
     {
+        let response = self
+            .request_response_with_retries(operation, build_request)
+            .await?;
+        decode_json(response, operation, maximum_bytes).await
+    }
+
+    async fn request_response_with_retries(
+        &self,
+        operation: &'static str,
+        build_request: impl Fn() -> Result<reqwest::RequestBuilder, AppError>,
+    ) -> Result<Response, AppError> {
         let mut last_error = None;
         for attempt in 0..MAX_REQUEST_ATTEMPTS {
             let request = build_request()?;
@@ -151,7 +171,7 @@ impl ProviderClient {
                 }
                 return Err(failure.error);
             }
-            return decode_json(response, operation, maximum_bytes).await;
+            return Ok(response);
         }
         Err(AppError::Transport(last_error.unwrap_or_else(|| {
             format!("{operation} failed without a diagnostic")
@@ -168,6 +188,7 @@ impl ProviderClient {
     ) -> Result<ResponseStream, AppError> {
         let url = format!("{CODEX_BASE_URL}/responses");
         let request_id = Uuid::now_v7().to_string();
+        let uses_responses_lite = request.uses_responses_lite();
         for attempt in 0..MAX_REQUEST_ATTEMPTS {
             if *cancellation.borrow() {
                 return Err(AppError::Cancelled(
@@ -183,6 +204,9 @@ impl ProviderClient {
                 .header("x-client-request-id", &request_id);
             if let Some(turn_state) = turn_state {
                 request_builder = request_builder.header("x-codex-turn-state", turn_state);
+            }
+            if uses_responses_lite {
+                request_builder = request_builder.header(RESPONSES_LITE_HEADER, "true");
             }
             let send = tokio::time::timeout(REQUEST_TIMEOUT, request_builder.json(&request).send());
             let response = tokio::select! {
@@ -269,6 +293,26 @@ impl ProviderClient {
         state.cookies.clear();
         Ok(())
     }
+}
+
+fn optional_response_header(
+    response: &Response,
+    name: &str,
+    maximum_bytes: usize,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = response.headers().get(name) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| AppError::Provider(format!("provider header `{name}` is not valid UTF-8")))?;
+    let value = value.trim();
+    if value.is_empty() || value.len() > maximum_bytes {
+        return Err(AppError::Provider(format!(
+            "provider header `{name}` must contain between 1 and {maximum_bytes} bytes"
+        )));
+    }
+    Ok(Some(value.to_string()))
 }
 
 fn open_response_stream(response: Response) -> Result<ResponseStream, AppError> {

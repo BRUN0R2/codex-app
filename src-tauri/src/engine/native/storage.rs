@@ -5151,6 +5151,7 @@ mod tests {
                         text: "response before steer".into(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             )
             .await
@@ -5286,6 +5287,7 @@ mod tests {
                         text: "partial response".into(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             )
             .await
@@ -5383,6 +5385,7 @@ mod tests {
                         text: "response before restart".into(),
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             )
             .await

@@ -42,6 +42,8 @@ function modelFixture() {
       usablePercent: 95,
       maximumTokens: 400_000,
     },
+    unsupportedRuntimeCapabilities: [],
+    unsupportedReasoningEfforts: [],
     isDefault: true,
   };
 }
@@ -477,11 +479,52 @@ describe("decodificação dos contratos nativos", () => {
     const decoded = decodeModelListResponse({ data: [modelFixture()] });
     expect(decoded.data[0]?.defaultServiceTier).toBe("priority");
 
+    expect(
+      decodeModelListResponse({
+        data: [
+          {
+            ...modelFixture(),
+            defaultReasoningEffort: null,
+            supportedReasoningEfforts: [],
+          },
+        ],
+      }).data[0]?.supportedReasoningEfforts,
+    ).toEqual([]);
+
     expect(() =>
       decodeModelListResponse({
         data: [{ ...modelFixture(), defaultReasoningEffort: "high" }],
       }),
     ).toThrow("must be one of the supported reasoning efforts");
+
+    expect(() =>
+      decodeModelListResponse({
+        data: [
+          {
+            ...modelFixture(),
+            unsupportedRuntimeCapabilities: ["codeMode", "codeMode"],
+          },
+        ],
+      }),
+    ).toThrow("must contain unique runtime capabilities");
+
+    expect(() =>
+      decodeModelListResponse({
+        data: [{ ...modelFixture(), unsupportedRuntimeCapabilities: ["codeMode"] }],
+      }),
+    ).toThrow("runtime-compatible default model");
+
+    expect(() =>
+      decodeModelListResponse({
+        data: [{ ...modelFixture(), unsupportedReasoningEfforts: ["high"] }],
+      }),
+    ).toThrow("unique advertised reasoning efforts");
+
+    expect(() =>
+      decodeModelListResponse({
+        data: [{ ...modelFixture(), unsupportedReasoningEfforts: ["medium"] }],
+      }),
+    ).toThrow("runtime-compatible default model");
   });
 
   it("mantém presets Pro do Chat como model + thinkingEffort", () => {

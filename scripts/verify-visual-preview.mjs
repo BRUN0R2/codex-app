@@ -54,6 +54,51 @@ const SCENARIOS = [
     validate: validateComposerFastModeMetrics,
   },
   {
+    id: "composer-ultra-effort",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `document.querySelector(".model-button") instanceof HTMLButtonElement`,
+    prepareExpression: `(() => {
+      const modelButton = document.querySelector(".model-button");
+      if (!(modelButton instanceof HTMLButtonElement)) {
+        throw new Error("O seletor do modelo está ausente.");
+      }
+      modelButton.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const effortRow = [...document.querySelectorAll(".model-menu-row")].find(
+          (button) => button.textContent?.includes("Esforço"),
+        );
+        if (!(effortRow instanceof HTMLButtonElement)) {
+          throw new Error("A seção de esforço está ausente.");
+        }
+        effortRow.click();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const ultraOption = [...document.querySelectorAll(".model-menu-option")].find(
+            (button) => button.textContent?.trim() === "Ultra",
+          );
+          if (!(ultraOption instanceof HTMLButtonElement)) {
+            throw new Error("A opção Ultra está ausente.");
+          }
+          ultraOption.click();
+        }));
+      }));
+    })()`,
+    readyExpression: `document.querySelector(".model-button-effort.ultra") instanceof HTMLElement`,
+    auditExpression: () => `(() => {
+      const effort = document.querySelector(".model-button-effort.ultra");
+      if (!(effort instanceof HTMLElement)) {
+        throw new Error("O esforço Ultra ativo está ausente.");
+      }
+      const rootStyle = getComputedStyle(document.documentElement);
+      return {
+        color: getComputedStyle(effort).color,
+        expectedColor: rootStyle.getPropertyValue("--reasoning-ultra").trim(),
+        text: effort.textContent?.trim() ?? null,
+        horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      };
+    })()`,
+    validate: validateComposerUltraEffortMetrics,
+  },
+  {
     id: "active-activity-reflection",
     url: HOME_PREVIEW_URL,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
@@ -5902,6 +5947,13 @@ function validateComposerFastModeMetrics(metrics, viewport) {
   assert(metrics.projectIconColor === "rgb(74, 222, 128)", "a cor do ícone do projeto não foi aplicada");
   assert(metrics.diffAddedColor === "#4ade80", "adições não usam o verde-limão semântico");
   assert(metrics.diffDeletedColor === "#ff6764", "remoções não usam o vermelho semântico");
+}
+
+function validateComposerUltraEffortMetrics(metrics) {
+  assert(metrics.horizontalOverflow <= 1, "o rótulo Ultra criou overflow horizontal");
+  assert(metrics.text === "Ultra", "o esforço ativo perdeu o rótulo Ultra");
+  assert(metrics.expectedColor === "#a78bfa", "o token semântico de Ultra foi alterado");
+  assert(metrics.color === "rgb(167, 139, 250)", "o esforço Ultra ativo deixou de ser roxo");
 }
 
 function validateActiveActivityReflectionMetrics(metrics, viewport) {

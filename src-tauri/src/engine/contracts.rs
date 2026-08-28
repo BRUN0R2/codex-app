@@ -539,6 +539,13 @@ pub struct ModelServiceTier {
     pub description: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelRuntimeCapability {
+    CodeMode,
+    MultiAgent,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelContextWindow {
@@ -568,6 +575,8 @@ pub struct CodexModel {
     pub service_tiers: Vec<ModelServiceTier>,
     pub default_service_tier: Option<String>,
     pub context_window: Option<ModelContextWindow>,
+    pub unsupported_runtime_capabilities: Vec<ModelRuntimeCapability>,
+    pub unsupported_reasoning_efforts: Vec<ReasoningEffort>,
     pub is_default: bool,
 }
 
@@ -728,6 +737,7 @@ pub enum ImageDetail {
     Auto,
     Low,
     High,
+    Original,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,10 +8,14 @@ import { SyntaxLineTokenizer } from "./syntax/tokenizer";
 const MAX_SOURCE_HIGHLIGHT_BYTES: number = 256 * 1_024;
 const MAX_SOURCE_LINE_CHARACTERS: number = 4 * 1_024;
 const MAX_IMAGE_TOOL_SOURCE_BYTES: number = 16 * 1_048_576;
+const MAX_IMAGE_TOOL_PATH_BYTES: number = 32 * 1_024;
+const LAST_C0_CONTROL_CODE_UNIT: number = 0x1f;
+const DELETE_CONTROL_CODE_UNIT: number = 0x7f;
 const IMAGE_TOOL_DATA_URL = new RegExp(
   `${SAFE_IMAGE_DATA_MIME_PATTERN}(?:;base64)?,[^\\s]+$`,
   "iu",
 );
+const ABSOLUTE_IMAGE_PATH = /^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$)|\/)/u;
 
 export interface SourceOutputLine {
   readonly content: string;
@@ -131,15 +135,27 @@ export function projectImageToolOutput(text: string): string | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
-  const object = value as { readonly image_url?: unknown };
-  if (Object.keys(object).length !== 1 || typeof object.image_url !== "string") {
+  const object = value as {
+    readonly image_path?: unknown;
+    readonly image_url?: unknown;
+  };
+  if (Object.keys(object).length !== 1) {
+    return null;
+  }
+  if (typeof object.image_path === "string") {
+    const path = object.image_path;
+    return path.length > 0 &&
+      utf8ByteLength(path) <= MAX_IMAGE_TOOL_PATH_BYTES &&
+      !hasControlCharacter(path) &&
+      ABSOLUTE_IMAGE_PATH.test(path)
+      ? path
+      : null;
+  }
+  if (typeof object.image_url !== "string") {
     return null;
   }
   const source = object.image_url;
-  if (
-    source.length === 0 ||
-    new TextEncoder().encode(source).length > MAX_IMAGE_TOOL_SOURCE_BYTES
-  ) {
+  if (source.length === 0 || utf8ByteLength(source) > MAX_IMAGE_TOOL_SOURCE_BYTES) {
     return null;
   }
   if (IMAGE_TOOL_DATA_URL.test(source)) {
@@ -155,6 +171,16 @@ export function projectImageToolOutput(text: string): string | null {
   } catch {
     return null;
   }
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit <= LAST_C0_CONTROL_CODE_UNIT || codeUnit === DELETE_CONTROL_CODE_UNIT) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function splitOutputLines(text: string): readonly string[] {

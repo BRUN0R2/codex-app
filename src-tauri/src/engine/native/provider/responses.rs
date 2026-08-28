@@ -1,11 +1,14 @@
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde::Serialize;
+use serde::ser::SerializeSeq as _;
 use serde_json::Value;
 use tokio::sync::watch;
 use tokio::time::Instant;
+use uuid::Uuid;
 
 use crate::engine::ImageDetail;
 use crate::engine::ModelVerbosity;
@@ -24,13 +27,33 @@ const MAX_METADATA_STRING_BYTES: usize = 1_024;
 const MAX_SERVER_MODEL_NAME_BYTES: usize = 256;
 const MAX_USAGE_TOKENS: u64 = 1_000_000_000;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const DEFAULT_FUNCTION_NAMESPACE: &str = "functions";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResponseProtocol {
+    #[default]
+    Standard,
+    Lite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSummarySetting {
+    #[default]
+    Auto,
+    Concise,
+    Detailed,
+    None,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ResponseRequest<'a> {
     pub model: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
     pub instructions: &'a str,
-    pub input: &'a [ResponseItem],
-    pub tools: &'a [Value],
+    pub input: ResponseRequestInput<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<&'a [Value]>,
     pub tool_choice: &'static str,
     pub parallel_tool_calls: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,8 +71,10 @@ pub struct ResponseRequest<'a> {
 
 #[derive(Debug, Clone, Default)]
 pub struct ResponseRequestSettings<'a> {
+    pub protocol: ResponseProtocol,
     pub parallel_tool_calls: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_summary: Option<ReasoningSummarySetting>,
     pub service_tier: Option<&'a str>,
     pub prompt_cache_key: Option<&'a str>,
     pub verbosity: Option<ModelVerbosity>,
@@ -58,22 +83,45 @@ pub struct ResponseRequestSettings<'a> {
 impl<'a> ResponseRequest<'a> {
     pub fn new(
         model: &'a str,
-        instructions: &'a str,
+        base_instructions: &'a str,
+        context: &'a [ResponseItem],
         input: &'a [ResponseItem],
         tools: &'a [Value],
         settings: ResponseRequestSettings<'a>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, AppError> {
+        let lite_prefix = match settings.protocol {
+            ResponseProtocol::Standard => None,
+            ResponseProtocol::Lite => Some(LitePrefix::new(
+                settings.prompt_cache_key.ok_or_else(|| {
+                    AppError::Protocol("Responses Lite requires a stable prompt cache key".into())
+                })?,
+                base_instructions,
+                tools,
+            )?),
+        };
+        let reasoning = ReasoningOptions {
+            effort: settings.reasoning_effort,
+            summary: settings.reasoning_summary,
+            context: (settings.protocol == ResponseProtocol::Lite)
+                .then_some(ReasoningContext::AllTurns),
+        };
+        Ok(Self {
             model,
-            instructions,
-            input,
-            tools,
+            instructions: match settings.protocol {
+                ResponseProtocol::Standard => base_instructions,
+                ResponseProtocol::Lite => "",
+            },
+            input: ResponseRequestInput {
+                lite_prefix,
+                context,
+                history: input,
+                strip_image_detail: settings.protocol == ResponseProtocol::Lite,
+            },
+            tools: (settings.protocol == ResponseProtocol::Standard).then_some(tools),
             tool_choice: "auto",
-            parallel_tool_calls: settings.parallel_tool_calls,
-            reasoning: settings.reasoning_effort.map(|effort| ReasoningOptions {
-                effort,
-                summary: "auto",
-            }),
+            parallel_tool_calls: settings.parallel_tool_calls
+                && settings.protocol == ResponseProtocol::Standard,
+            reasoning: reasoning.has_values().then_some(reasoning),
             store: false,
             stream: true,
             include: ["reasoning.encrypted_content"],
@@ -82,19 +130,277 @@ impl<'a> ResponseRequest<'a> {
             text: settings
                 .verbosity
                 .map(|verbosity| TextOptions { verbosity }),
-        }
+        })
+    }
+
+    pub const fn uses_responses_lite(&self) -> bool {
+        self.input.lite_prefix.is_some()
     }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReasoningOptions {
-    effort: ReasoningEffort,
-    summary: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<ReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<ReasoningSummarySetting>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<ReasoningContext>,
+}
+
+impl ReasoningOptions {
+    const fn has_values(&self) -> bool {
+        self.effort.is_some() || self.summary.is_some() || self.context.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReasoningContext {
+    AllTurns,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TextOptions {
     verbosity: ModelVerbosity,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResponseRequestInput<'a> {
+    lite_prefix: Option<LitePrefix<'a>>,
+    context: &'a [ResponseItem],
+    history: &'a [ResponseItem],
+    strip_image_detail: bool,
+}
+
+impl Serialize for ResponseRequestInput<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let prefix_len = self
+            .lite_prefix
+            .as_ref()
+            .map_or(0, LitePrefix::serialized_item_count);
+        let mut sequence = serializer.serialize_seq(Some(
+            prefix_len
+                .saturating_add(self.context.len())
+                .saturating_add(self.history.len()),
+        ))?;
+        if let Some(prefix) = &self.lite_prefix {
+            sequence.serialize_element(&prefix.additional_tools)?;
+            if let Some(base_instructions) = &prefix.base_instructions {
+                sequence.serialize_element(base_instructions)?;
+            }
+        }
+        for item in self.context.iter().chain(self.history) {
+            sequence.serialize_element(&RequestResponseItem {
+                item,
+                strip_image_detail: self.strip_image_detail,
+            })?;
+        }
+        sequence.end()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LitePrefix<'a> {
+    additional_tools: AdditionalTools,
+    base_instructions: Option<BaseInstructions<'a>>,
+}
+
+impl<'a> LitePrefix<'a> {
+    fn new(
+        prompt_cache_key: &str,
+        base_instructions: &'a str,
+        tools: &[Value],
+    ) -> Result<Self, AppError> {
+        let namespace = Uuid::new_v5(&Uuid::NAMESPACE_OID, prompt_cache_key.as_bytes());
+        let tools = tools_for_responses_lite(tools)?;
+        let encoded_tools = serde_json::to_vec(&tools).map_err(|error| {
+            AppError::Protocol(format!("tool definitions could not be encoded: {error}"))
+        })?;
+        let additional_tools = AdditionalTools::new(
+            format!("at_{}", Uuid::new_v5(&namespace, &encoded_tools)),
+            tools,
+        );
+        let base_instructions = (!base_instructions.is_empty()).then(|| BaseInstructions {
+            kind: "message",
+            id: format!(
+                "msg_{}",
+                Uuid::new_v5(&namespace, base_instructions.as_bytes())
+            ),
+            role: "developer",
+            content: [ResponseContentRef::InputText {
+                text: base_instructions,
+            }],
+            internal_chat_message_metadata_passthrough: ContentItemKinds::single(
+                "model.base_instructions",
+            ),
+        });
+        Ok(Self {
+            additional_tools,
+            base_instructions,
+        })
+    }
+
+    fn serialized_item_count(&self) -> usize {
+        1 + usize::from(self.base_instructions.is_some())
+    }
+}
+
+fn tools_for_responses_lite(tools: &[Value]) -> Result<Vec<Value>, AppError> {
+    let mut functions = Vec::new();
+    let mut functions_description = String::new();
+    let mut functions_index = None;
+    let mut converted = Vec::with_capacity(tools.len());
+
+    for tool in tools {
+        let object = tool
+            .as_object()
+            .ok_or_else(|| AppError::Protocol("tool definition must be a JSON object".into()))?;
+        let kind = object.get("type").and_then(Value::as_str).ok_or_else(|| {
+            AppError::Protocol("tool definition must contain a string `type`".into())
+        })?;
+        match kind {
+            "function" | "custom" => {
+                functions_index.get_or_insert(converted.len());
+                functions.push(tool.clone());
+            }
+            "namespace" => {
+                let name = object.get("name").and_then(Value::as_str).ok_or_else(|| {
+                    AppError::Protocol("tool namespace must contain a string `name`".into())
+                })?;
+                if name != DEFAULT_FUNCTION_NAMESPACE {
+                    return Err(AppError::Protocol(format!(
+                        "Responses Lite cannot advertise the unexecutable `{name}` tool namespace"
+                    )));
+                }
+                functions_index.get_or_insert(converted.len());
+                if let Some(description) = object.get("description").and_then(Value::as_str)
+                    && !description.trim().is_empty()
+                {
+                    functions_description = description.to_string();
+                }
+                let children = object
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        AppError::Protocol(
+                            "default tool namespace must contain a `tools` array".into(),
+                        )
+                    })?;
+                for child in children {
+                    let child_kind = child
+                        .as_object()
+                        .and_then(|child| child.get("type"))
+                        .and_then(Value::as_str);
+                    if !matches!(child_kind, Some("function" | "custom")) {
+                        return Err(AppError::Protocol(
+                            "default tool namespace contains an unsupported tool".into(),
+                        ));
+                    }
+                    functions.push(child.clone());
+                }
+            }
+            "tool_search" => {
+                return Err(AppError::Protocol(
+                    "Responses Lite cannot advertise tool search without a local namespace loader"
+                        .into(),
+                ));
+            }
+            "web_search" | "image_generation" => {
+                return Err(AppError::Protocol(format!(
+                    "Responses Lite does not accept hosted `{kind}` tools"
+                )));
+            }
+            _ => {
+                return Err(AppError::Protocol(format!(
+                    "Responses Lite does not support tool type `{kind}`"
+                )));
+            }
+        }
+    }
+
+    if let Some(index) = functions_index
+        && !functions.is_empty()
+    {
+        converted.insert(
+            index,
+            serde_json::json!({
+                "type": "namespace",
+                "name": DEFAULT_FUNCTION_NAMESPACE,
+                "description": functions_description,
+                "tools": functions,
+            }),
+        );
+    }
+    Ok(converted)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AdditionalTools {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: String,
+    role: &'static str,
+    tools: Vec<Value>,
+}
+
+impl AdditionalTools {
+    fn new(id: String, tools: Vec<Value>) -> Self {
+        Self {
+            kind: "additional_tools",
+            id,
+            role: "developer",
+            tools,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BaseInstructions<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: String,
+    role: &'static str,
+    content: [ResponseContentRef<'a>; 1],
+    internal_chat_message_metadata_passthrough: ContentItemKinds<'static>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResponseContentRef<'a> {
+    InputText { text: &'a str },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ContentItemKinds<'a> {
+    content_item_kinds: [&'a str; 1],
+}
+
+impl<'a> ContentItemKinds<'a> {
+    const fn single(kind: &'a str) -> Self {
+        Self {
+            content_item_kinds: [kind],
+        }
+    }
+}
+
+struct RequestResponseItem<'a> {
+    item: &'a ResponseItem,
+    strip_image_detail: bool,
+}
+
+impl Serialize for RequestResponseItem<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.item
+            .for_request(self.strip_image_detail)
+            .serialize(serializer)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +413,8 @@ pub enum ResponseItem {
         content: Vec<ResponseContent>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         phase: Option<ResponseMessagePhase>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
     },
     Reasoning {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,6 +429,8 @@ pub enum ResponseItem {
     FunctionCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
         name: String,
         arguments: String,
         call_id: String,
@@ -132,6 +442,8 @@ pub enum ResponseItem {
     CustomToolCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
         call_id: String,
         name: String,
         input: String,
@@ -195,6 +507,29 @@ pub enum FunctionCallOutputContent {
 pub(crate) struct InternalChatMessageMetadataPassthrough {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_item_kinds: Option<Vec<String>>,
+}
+
+impl InternalChatMessageMetadataPassthrough {
+    pub(in crate::engine::native) fn retaining_content_indices(
+        &self,
+        original_content_len: usize,
+        retained_indices: &[usize],
+    ) -> Option<Self> {
+        let mut retained = self.clone();
+        let Some(kinds) = retained.content_item_kinds.as_mut() else {
+            return Some(retained);
+        };
+        if kinds.len() != original_content_len {
+            return None;
+        }
+        *kinds = retained_indices
+            .iter()
+            .map(|index| kinds[*index].clone())
+            .collect();
+        Some(retained)
+    }
 }
 
 impl ResponseItem {
@@ -204,6 +539,22 @@ impl ResponseItem {
             role: "user".into(),
             content,
             phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    pub fn context_text(role: impl Into<String>, text: String, content_kind: &str) -> Self {
+        Self::Message {
+            id: None,
+            role: role.into(),
+            content: vec![ResponseContent::InputText { text }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    turn_id: None,
+                    content_item_kinds: Some(vec![content_kind.into()]),
+                },
+            ),
         }
     }
 
@@ -216,16 +567,18 @@ impl ResponseItem {
 
     pub fn function_output_with_image(
         call_id: String,
-        output: String,
+        text: Option<String>,
         image_url: String,
         detail: Option<ImageDetail>,
     ) -> Self {
+        let mut output = Vec::with_capacity(2);
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            output.push(FunctionCallOutputContent::InputText { text });
+        }
+        output.push(FunctionCallOutputContent::InputImage { image_url, detail });
         Self::FunctionCallOutput {
             call_id,
-            output: FunctionCallOutputPayload::Content(vec![
-                FunctionCallOutputContent::InputText { text: output },
-                FunctionCallOutputContent::InputImage { image_url, detail },
-            ]),
+            output: FunctionCallOutputPayload::Content(output),
         }
     }
 
@@ -307,6 +660,60 @@ impl ResponseItem {
                 .as_ref()
                 .and_then(|metadata| metadata.turn_id.as_deref()),
         ))
+    }
+
+    fn for_request(&self, strip_image_detail: bool) -> Cow<'_, Self> {
+        if !strip_image_detail || !self.has_image_detail() {
+            return Cow::Borrowed(self);
+        }
+        let mut item = self.clone();
+        match &mut item {
+            Self::Message { content, .. } => {
+                for part in content {
+                    if let ResponseContent::InputImage { detail, .. } = part {
+                        *detail = None;
+                    }
+                }
+            }
+            Self::FunctionCallOutput {
+                output: FunctionCallOutputPayload::Content(content),
+                ..
+            } => {
+                for part in content {
+                    if let FunctionCallOutputContent::InputImage { detail, .. } = part {
+                        *detail = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Cow::Owned(item)
+    }
+
+    fn has_image_detail(&self) -> bool {
+        match self {
+            Self::Message { content, .. } => content.iter().any(|part| {
+                matches!(
+                    part,
+                    ResponseContent::InputImage {
+                        detail: Some(_),
+                        ..
+                    }
+                )
+            }),
+            Self::FunctionCallOutput { output, .. } => output.content().is_some_and(|content| {
+                content.iter().any(|part| {
+                    matches!(
+                        part,
+                        FunctionCallOutputContent::InputImage {
+                            detail: Some(_),
+                            ..
+                        }
+                    )
+                })
+            }),
+            _ => false,
+        }
     }
 }
 
@@ -410,6 +817,7 @@ pub enum ResponseEvent {
         delta: String,
     },
     ServerModel(String),
+    ModelsEtag(String),
     TurnState(String),
     ModelVerifications(Vec<ModelVerification>),
     SafetyBuffering(SafetyBuffering),
@@ -439,6 +847,9 @@ impl ResponseStream {
             response_header(&response, "openai-model", MAX_SERVER_MODEL_NAME_BYTES)?
         {
             pending.push_back(ResponseEvent::ServerModel(model));
+        }
+        if let Some(etag) = response_header(&response, "x-models-etag", MAX_HEADER_VALUE_BYTES)? {
+            pending.push_back(ResponseEvent::ModelsEtag(etag));
         }
         if let Some(turn_state) =
             response_header(&response, "x-codex-turn-state", MAX_HEADER_VALUE_BYTES)?
@@ -799,6 +1210,17 @@ fn emit_metadata_events(
     }
 
     if event.kind == "response.metadata" {
+        if let Some(etag) = event
+            .headers
+            .as_ref()
+            .and_then(|headers| json_header(headers, &["x-models-etag"]))
+        {
+            output.push_back(ResponseEvent::ModelsEtag(validated_metadata_text(
+                etag,
+                "models ETag",
+                MAX_HEADER_VALUE_BYTES,
+            )?));
+        }
         if let Some(turn_state) = event
             .headers
             .as_ref()
@@ -1056,9 +1478,13 @@ mod tests {
     use crate::engine::ModelVerification;
     use crate::engine::ReasoningEffort;
 
+    use super::DEFAULT_FUNCTION_NAMESPACE;
+    use super::ReasoningSummarySetting;
+    use super::ResponseContent;
     use super::ResponseEvent;
     use super::ResponseItem;
     use super::ResponseMessagePhase;
+    use super::ResponseProtocol;
     use super::ResponseRequest;
     use super::ResponseRequestSettings;
     use super::SseParser;
@@ -1080,7 +1506,7 @@ mod tests {
     fn function_tool_output_can_return_text_and_image_content() {
         let value = serde_json::to_value(ResponseItem::function_output_with_image(
             "call-1".into(),
-            "browser snapshot".into(),
+            Some("browser snapshot".into()),
             "data:image/jpeg;base64,AA==".into(),
             Some(ImageDetail::High),
         ))
@@ -1096,6 +1522,21 @@ mod tests {
             "data:image/jpeg;base64,AA=="
         );
         assert_eq!(value["output"][1]["detail"], "high");
+    }
+
+    #[test]
+    fn view_image_output_can_return_only_multimodal_image_content() {
+        let value = serde_json::to_value(ResponseItem::function_output_with_image(
+            "call-view-image".into(),
+            None,
+            "data:image/png;base64,AA==".into(),
+            Some(ImageDetail::Original),
+        ))
+        .expect("image-only function output should serialize");
+
+        assert_eq!(value["output"].as_array().map(Vec::len), Some(1));
+        assert_eq!(value["output"][0]["type"], "input_image");
+        assert_eq!(value["output"][0]["detail"], "original");
     }
 
     #[test]
@@ -1247,7 +1688,7 @@ mod tests {
         let mut events = VecDeque::new();
         parser
             .push(
-                br#"data: {"type":"response.metadata","headers":{"OpenAI-Model":"gpt-fallback","x-codex-turn-state":"route-1"},"metadata":{"openai_verification_recommendation":["trusted_access_for_cyber","trusted_access_for_cyber"],"openai_chatgpt_moderation_metadata":{"presentation":"inline"}}}
+                br#"data: {"type":"response.metadata","headers":{"OpenAI-Model":"gpt-fallback","x-models-etag":"catalog-v2","x-codex-turn-state":"route-1"},"metadata":{"openai_verification_recommendation":["trusted_access_for_cyber","trusted_access_for_cyber"],"openai_chatgpt_moderation_metadata":{"presentation":"inline"}}}
 
 "#,
                 &mut events,
@@ -1257,6 +1698,10 @@ mod tests {
         assert!(matches!(
             events.pop_front(),
             Some(ResponseEvent::ServerModel(model)) if model == "gpt-fallback"
+        ));
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::ModelsEtag(etag)) if etag == "catalog-v2"
         ));
         assert!(matches!(
             events.pop_front(),
@@ -1360,8 +1805,10 @@ mod tests {
             "Be useful.",
             &[],
             &[],
+            &[],
             ResponseRequestSettings::default(),
-        );
+        )
+        .expect("request should build");
         let encoded = serde_json::to_value(request).expect("request should serialize");
 
         assert!(encoded.get("reasoning").is_none());
@@ -1374,11 +1821,14 @@ mod tests {
             "Be useful.",
             &[],
             &[],
+            &[],
             ResponseRequestSettings {
                 reasoning_effort: Some(ReasoningEffort::XHigh),
+                reasoning_summary: Some(ReasoningSummarySetting::Auto),
                 ..ResponseRequestSettings::default()
             },
-        );
+        )
+        .expect("request should build");
         let encoded = serde_json::to_value(request).expect("request should serialize");
 
         assert_eq!(encoded["reasoning"]["effort"], "xhigh");
@@ -1393,8 +1843,10 @@ mod tests {
             "Be useful.",
             &[],
             &[],
+            &[],
             ResponseRequestSettings::default(),
-        );
+        )
+        .expect("request should build");
         let encoded = serde_json::to_value(request).expect("request should serialize");
 
         assert!(encoded.get("text").is_none());
@@ -1407,11 +1859,13 @@ mod tests {
             "Be useful.",
             &[],
             &[],
+            &[],
             ResponseRequestSettings {
                 verbosity: Some(ModelVerbosity::Low),
                 ..ResponseRequestSettings::default()
             },
-        );
+        )
+        .expect("request should build");
         let encoded = serde_json::to_value(request).expect("request should serialize");
 
         assert_eq!(encoded["text"]["verbosity"], "low");
@@ -1423,16 +1877,299 @@ mod tests {
         let request = ResponseRequest::new(
             "gpt-test",
             "Be useful.",
+            &[],
             &input,
             &[],
             ResponseRequestSettings::default(),
-        );
+        )
+        .expect("request should build");
         let encoded = serde_json::to_value(request).expect("request should serialize");
 
         assert_eq!(encoded["parallel_tool_calls"], false);
         assert_eq!(encoded["input"][0]["type"], "compaction_trigger");
         assert_eq!(encoded["stream"], true);
         assert_eq!(encoded["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn responses_lite_moves_tools_and_base_instructions_into_stable_prefix_items() {
+        let tools = [serde_json::json!({
+            "type": "function",
+            "name": "read_file",
+            "parameters": {"type": "object"}
+        })];
+        let context = [ResponseItem::context_text(
+            "user",
+            "<environment_context />".into(),
+            "environments.environment_context",
+        )];
+        let history = [ResponseItem::user_content(vec![
+            ResponseContent::InputImage {
+                image_url: "data:image/png;base64,AA==".into(),
+                detail: Some(ImageDetail::High),
+            },
+        ])];
+        let settings = ResponseRequestSettings {
+            protocol: ResponseProtocol::Lite,
+            parallel_tool_calls: true,
+            reasoning_effort: Some(ReasoningEffort::Ultra),
+            reasoning_summary: None,
+            prompt_cache_key: Some("thread-1"),
+            ..ResponseRequestSettings::default()
+        };
+        let first = ResponseRequest::new(
+            "gpt-5.6-sol",
+            "Base instructions",
+            &context,
+            &history,
+            &tools,
+            settings.clone(),
+        )
+        .expect("Lite request should build");
+        let second = ResponseRequest::new(
+            "gpt-5.6-sol",
+            "Base instructions",
+            &context,
+            &history,
+            &tools,
+            settings.clone(),
+        )
+        .expect("repeated Lite request should build");
+        let changed_instructions = ResponseRequest::new(
+            "gpt-5.6-sol",
+            "Updated base instructions",
+            &context,
+            &history,
+            &tools,
+            settings.clone(),
+        )
+        .expect("updated Lite instructions should build");
+        let changed_tools = [serde_json::json!({
+            "type": "function",
+            "name": "read_file",
+            "description": "Read one file",
+            "parameters": {"type": "object"}
+        })];
+        let changed_tool_request = ResponseRequest::new(
+            "gpt-5.6-sol",
+            "Base instructions",
+            &context,
+            &history,
+            &changed_tools,
+            settings.clone(),
+        )
+        .expect("updated Lite tools should build");
+        let independent_thread = ResponseRequest::new(
+            "gpt-5.6-sol",
+            "Base instructions",
+            &context,
+            &history,
+            &tools,
+            ResponseRequestSettings {
+                prompt_cache_key: Some("thread-2"),
+                ..settings
+            },
+        )
+        .expect("Lite request for an independent thread should build");
+        let first = serde_json::to_value(first).expect("Lite request should serialize");
+        let second = serde_json::to_value(second).expect("Lite request should serialize");
+        let changed_instructions = serde_json::to_value(changed_instructions)
+            .expect("updated Lite instructions should serialize");
+        let changed_tool_request = serde_json::to_value(changed_tool_request)
+            .expect("updated Lite tools should serialize");
+        let independent_thread = serde_json::to_value(independent_thread)
+            .expect("independent Lite request should serialize");
+
+        assert!(first.get("instructions").is_none());
+        assert!(first.get("tools").is_none());
+        assert_eq!(first["parallel_tool_calls"], false);
+        assert_eq!(first["reasoning"]["context"], "all_turns");
+        assert!(first["reasoning"].get("summary").is_none());
+        assert_eq!(first["input"][0]["type"], "additional_tools");
+        assert_eq!(first["input"][0]["role"], "developer");
+        assert_eq!(first["input"][0]["tools"][0]["type"], "namespace");
+        assert_eq!(first["input"][0]["tools"][0]["name"], "functions");
+        assert_eq!(first["input"][0]["tools"][0]["description"], "");
+        assert_eq!(
+            first["input"][0]["tools"][0]["tools"],
+            serde_json::json!(tools)
+        );
+        assert_eq!(first["input"][1]["type"], "message");
+        assert_eq!(first["input"][1]["role"], "developer");
+        assert_eq!(first["input"][1]["content"][0]["text"], "Base instructions");
+        assert_eq!(
+            first["input"][1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                [0],
+            "model.base_instructions"
+        );
+        assert_eq!(
+            first["input"][2]["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                [0],
+            "environments.environment_context"
+        );
+        assert!(first["input"][3]["content"][0].get("detail").is_none());
+        assert_eq!(first["input"][0]["id"], second["input"][0]["id"]);
+        assert_eq!(first["input"][1]["id"], second["input"][1]["id"]);
+        assert!(
+            first["input"][0]["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("at_"))
+        );
+        assert!(
+            first["input"][1]["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("msg_"))
+        );
+        assert_eq!(
+            changed_instructions["input"][0]["id"],
+            first["input"][0]["id"]
+        );
+        assert_ne!(
+            changed_instructions["input"][1]["id"],
+            first["input"][1]["id"]
+        );
+        assert_ne!(
+            changed_tool_request["input"][0]["id"],
+            first["input"][0]["id"]
+        );
+        assert_eq!(
+            changed_tool_request["input"][1]["id"],
+            first["input"][1]["id"]
+        );
+        assert_ne!(
+            independent_thread["input"][0]["id"],
+            first["input"][0]["id"]
+        );
+        assert_ne!(
+            independent_thread["input"][1]["id"],
+            first["input"][1]["id"]
+        );
+    }
+
+    #[test]
+    fn standard_responses_keep_top_level_contract_and_image_detail() {
+        let tools = [serde_json::json!({"type": "web_search"})];
+        let history = [ResponseItem::user_content(vec![
+            ResponseContent::InputImage {
+                image_url: "data:image/png;base64,AA==".into(),
+                detail: Some(ImageDetail::High),
+            },
+        ])];
+        let request = ResponseRequest::new(
+            "gpt-standard",
+            "Base instructions",
+            &[],
+            &history,
+            &tools,
+            ResponseRequestSettings {
+                protocol: ResponseProtocol::Standard,
+                parallel_tool_calls: true,
+                prompt_cache_key: Some("thread-1"),
+                ..ResponseRequestSettings::default()
+            },
+        )
+        .expect("standard request should build");
+        let encoded = serde_json::to_value(request).expect("request should serialize");
+
+        assert_eq!(encoded["instructions"], "Base instructions");
+        assert_eq!(encoded["tools"], serde_json::json!(tools));
+        assert_eq!(encoded["parallel_tool_calls"], true);
+        assert_eq!(encoded["input"][0]["content"][0]["detail"], "high");
+        assert!(encoded.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn responses_lite_rejects_an_unstable_request_identity() {
+        let error = ResponseRequest::new(
+            "gpt-lite",
+            "Base instructions",
+            &[],
+            &[],
+            &[],
+            ResponseRequestSettings {
+                protocol: ResponseProtocol::Lite,
+                ..ResponseRequestSettings::default()
+            },
+        )
+        .expect_err("Lite requests require a cache identity");
+
+        assert!(error.to_string().contains("stable prompt cache key"));
+    }
+
+    #[test]
+    fn responses_lite_rejects_hosted_tools_before_sending_a_request() {
+        let tools = [serde_json::json!({"type": "web_search"})];
+        let error = ResponseRequest::new(
+            "gpt-lite",
+            "Base instructions",
+            &[],
+            &[],
+            &tools,
+            ResponseRequestSettings {
+                protocol: ResponseProtocol::Lite,
+                prompt_cache_key: Some("thread-1"),
+                ..ResponseRequestSettings::default()
+            },
+        )
+        .expect_err("Lite requests must reject hosted tools");
+
+        assert!(error.to_string().contains("hosted `web_search`"));
+    }
+
+    #[test]
+    fn responses_lite_rejects_tools_the_local_runtime_cannot_execute() {
+        for (tool, expected) in [
+            (
+                serde_json::json!({
+                    "type": "namespace",
+                    "name": "remote",
+                    "description": "Unavailable remote tools",
+                    "tools": []
+                }),
+                "unexecutable `remote` tool namespace",
+            ),
+            (
+                serde_json::json!({
+                    "type": "tool_search",
+                    "execution": "client"
+                }),
+                "without a local namespace loader",
+            ),
+        ] {
+            let error = ResponseRequest::new(
+                "gpt-lite",
+                "Base instructions",
+                &[],
+                &[],
+                &[tool],
+                ResponseRequestSettings {
+                    protocol: ResponseProtocol::Lite,
+                    prompt_cache_key: Some("thread-1"),
+                    ..ResponseRequestSettings::default()
+                },
+            )
+            .expect_err("unexecutable Lite tools must be rejected before transport");
+
+            assert!(error.to_string().contains(expected));
+        }
+    }
+
+    #[test]
+    fn function_call_namespace_survives_provider_history_round_trips() {
+        let item: ResponseItem = serde_json::from_str(
+            r#"{"type":"function_call","id":"item-1","namespace":"functions","name":"read_file","arguments":"{}","call_id":"call-1"}"#,
+        )
+        .expect("namespaced function call should decode");
+        let encoded = serde_json::to_value(&item).expect("function call should serialize");
+
+        assert_eq!(encoded["namespace"], DEFAULT_FUNCTION_NAMESPACE);
+        assert!(matches!(
+            item,
+            ResponseItem::FunctionCall {
+                namespace: Some(namespace),
+                ..
+            } if namespace == DEFAULT_FUNCTION_NAMESPACE
+        ));
     }
 
     #[test]

@@ -147,6 +147,7 @@ mod tests {
         let normalized = normalize_provider_history(vec![
             ResponseItem::FunctionCall {
                 id: Some("function-item".into()),
+                namespace: None,
                 name: "read_file".into(),
                 arguments: "{}".into(),
                 call_id: "function-call".into(),
@@ -157,6 +158,7 @@ mod tests {
             },
             ResponseItem::CustomToolCall {
                 id: Some("custom-item".into()),
+                namespace: None,
                 call_id: "custom-call".into(),
                 name: "custom".into(),
                 input: "{}".into(),
@@ -184,6 +186,7 @@ mod tests {
         let normalized = normalize_provider_history(vec![
             ResponseItem::FunctionCall {
                 id: None,
+                namespace: None,
                 name: "read_file".into(),
                 arguments: "{}".into(),
                 call_id: "complete".into(),
@@ -204,12 +207,14 @@ mod tests {
         let duplicate_calls = normalize_provider_history(vec![
             ResponseItem::FunctionCall {
                 id: None,
+                namespace: None,
                 name: "first".into(),
                 arguments: "{}".into(),
                 call_id: "duplicate".into(),
             },
             ResponseItem::FunctionCall {
                 id: None,
+                namespace: None,
                 name: "second".into(),
                 arguments: "{}".into(),
                 call_id: "duplicate".into(),

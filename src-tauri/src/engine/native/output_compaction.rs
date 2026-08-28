@@ -1,24 +1,70 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::num::NonZeroUsize;
 
 use super::text::truncate_utf8;
 
 mod semantic;
 
-pub(super) const MAX_PROVIDER_PREVIEW_BYTES: usize = 10 * 1_024;
-const TEXT_HEAD_BYTES: usize = 3 * 1_024;
-const TEXT_TAIL_BYTES: usize = 3 * 1_024;
-const TEXT_PRIORITY_BYTES: usize = 2 * 1_024;
+const DEFAULT_PROVIDER_OUTPUT_BYTES: usize = 10_000;
+const MIN_PROVIDER_OUTPUT_BYTES: usize = 1_024;
+const MAX_PROVIDER_OUTPUT_BYTES: usize = 1_048_576;
+const APPROX_BYTES_PER_TOKEN: usize = 4;
 const MAX_PRIORITY_LINES_PER_EDGE: usize = 8;
 const MAX_PRIORITY_LINE_BYTES: usize = 480;
-const COMMAND_SUCCESS_STDOUT_BYTES: usize = 6 * 1_024;
-const COMMAND_SUCCESS_STDERR_BYTES: usize = 3 * 1_024;
-const COMMAND_FAILURE_STDOUT_BYTES: usize = 4 * 1_024;
-const COMMAND_FAILURE_STDERR_BYTES: usize = 5 * 1_024;
 const MIN_SEMANTIC_COMMAND_BYTES: usize = 2 * 1_024;
 const MIN_SEMANTIC_SAVINGS_BYTES: usize = 512;
 const MAX_SEMANTIC_SIZE_PERCENT: usize = 80;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ProviderOutputBudget(NonZeroUsize);
+
+impl ProviderOutputBudget {
+    pub fn from_bytes(bytes: usize) -> Option<Self> {
+        if !(MIN_PROVIDER_OUTPUT_BYTES..=MAX_PROVIDER_OUTPUT_BYTES).contains(&bytes) {
+            return None;
+        }
+        NonZeroUsize::new(bytes).map(Self)
+    }
+
+    pub fn from_tokens(tokens: usize) -> Option<Self> {
+        tokens
+            .checked_mul(APPROX_BYTES_PER_TOKEN)
+            .and_then(Self::from_bytes)
+    }
+
+    pub const fn bytes(self) -> usize {
+        self.0.get()
+    }
+
+    fn text_budgets(self) -> (usize, usize, usize) {
+        (
+            percentage(self.bytes(), 30),
+            percentage(self.bytes(), 30),
+            percentage(self.bytes(), 20),
+        )
+    }
+
+    fn command_stream_budgets(self, succeeded: bool) -> (usize, usize) {
+        if succeeded {
+            (percentage(self.bytes(), 60), percentage(self.bytes(), 30))
+        } else {
+            (percentage(self.bytes(), 40), percentage(self.bytes(), 50))
+        }
+    }
+}
+
+impl Default for ProviderOutputBudget {
+    fn default() -> Self {
+        Self::from_bytes(DEFAULT_PROVIDER_OUTPUT_BYTES)
+            .expect("default provider output budget must be valid")
+    }
+}
+
+const fn percentage(value: usize, percent: usize) -> usize {
+    value.saturating_mul(percent) / 100
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum TextOutputKind {
@@ -45,26 +91,32 @@ pub(super) struct CompactedOutput {
     pub complete: bool,
 }
 
-pub(super) fn compact_text(value: &str, kind: TextOutputKind) -> CompactedOutput {
+pub(super) fn compact_text(
+    value: &str,
+    kind: TextOutputKind,
+    budget: ProviderOutputBudget,
+) -> CompactedOutput {
+    let maximum_bytes = budget.bytes();
     let original_bytes = value.len();
     let original_lines = line_count(value);
-    if original_bytes <= MAX_PROVIDER_PREVIEW_BYTES {
+    if original_bytes <= maximum_bytes {
         return CompactedOutput {
             text: value.to_string(),
             complete: true,
         };
     }
 
-    let head_end = prefix_boundary(value, TEXT_HEAD_BYTES);
-    let tail_start = suffix_boundary(value, TEXT_TAIL_BYTES).max(head_end);
+    let (head_budget, tail_budget, priority_budget) = budget.text_budgets();
+    let head_end = prefix_boundary(value, head_budget);
+    let tail_start = suffix_boundary(value, tail_budget).max(head_end);
     let head = &value[..head_end];
     let tail = &value[tail_start..];
     let head_lines = line_count(head);
     let tail_lines = line_count(tail);
     let priority = priority_lines(value, head_lines, original_lines.saturating_sub(tail_lines));
-    let priority = render_priority_lines(&priority, TEXT_PRIORITY_BYTES);
+    let priority = render_priority_lines(&priority, priority_budget);
 
-    let mut text = String::with_capacity(MAX_PROVIDER_PREVIEW_BYTES);
+    let mut text = String::with_capacity(maximum_bytes);
     push_section(&mut text, head);
     push_section(
         &mut text,
@@ -79,8 +131,8 @@ pub(super) fn compact_text(value: &str, kind: TextOutputKind) -> CompactedOutput
     }
     push_section(&mut text, "[Tail of output]");
     push_section(&mut text, tail);
-    if text.len() > MAX_PROVIDER_PREVIEW_BYTES {
-        text = truncate_utf8(&text, MAX_PROVIDER_PREVIEW_BYTES - 32);
+    if text.len() > maximum_bytes {
+        text = truncate_utf8(&text, maximum_bytes.saturating_sub(32));
         text.push_str("\n[provider preview truncated]");
     }
 
@@ -94,6 +146,7 @@ pub(super) fn compact_command_output(
     exit_code: i32,
     stdout: &mut File,
     stderr: &mut File,
+    budget: ProviderOutputBudget,
 ) -> io::Result<CompactedOutput> {
     let stdout_bytes = usize::try_from(stdout.metadata()?.len()).map_err(io::Error::other)?;
     let stderr_bytes = usize::try_from(stderr.metadata()?.len()).map_err(io::Error::other)?;
@@ -106,40 +159,41 @@ pub(super) fn compact_command_output(
     if exit_code == 0
         && original_bytes >= MIN_SEMANTIC_COMMAND_BYTES
         && let Some(compacted) =
-            compact_successful_command_semantically(stdout, stderr, original_bytes)?
+            compact_successful_command_semantically(stdout, stderr, original_bytes, budget)?
     {
         return Ok(compacted);
     }
-    compact_command_output_generically(exit_code, stdout, stderr, original_bytes)
+    compact_command_output_generically(exit_code, stdout, stderr, original_bytes, budget)
 }
 
 fn compact_successful_command_semantically(
     stdout: &mut File,
     stderr: &mut File,
     original_bytes: usize,
+    budget: ProviderOutputBudget,
 ) -> io::Result<Option<CompactedOutput>> {
-    let stdout_semantic =
-        semantic::compact_success_stream(stdout, COMMAND_SUCCESS_STDOUT_BYTES, "stdout")?;
-    let stderr_semantic =
-        semantic::compact_success_stream(stderr, COMMAND_SUCCESS_STDERR_BYTES, "stderr")?;
+    let maximum_bytes = budget.bytes();
+    let (stdout_budget, stderr_budget) = budget.command_stream_budgets(true);
+    let stdout_semantic = semantic::compact_success_stream(stdout, stdout_budget, "stdout")?;
+    let stderr_semantic = semantic::compact_success_stream(stderr, stderr_budget, "stderr")?;
     if stdout_semantic.is_none() && stderr_semantic.is_none() {
         return Ok(None);
     }
 
     let stdout_preview = match stdout_semantic {
         Some(preview) => preview,
-        None => read_or_compact_stream(stdout, COMMAND_SUCCESS_STDOUT_BYTES, "stdout")?,
+        None => read_or_compact_stream(stdout, stdout_budget, "stdout")?,
     };
     let stderr_preview = match stderr_semantic {
         Some(preview) => preview,
-        None => read_or_compact_stream(stderr, COMMAND_SUCCESS_STDERR_BYTES, "stderr")?,
+        None => read_or_compact_stream(stderr, stderr_budget, "stderr")?,
     };
     let mut text = format!("exit_code: 0\nstdout:\n{stdout_preview}\nstderr:\n{stderr_preview}");
     text.push_str(&format!(
         "\n[... command output semantically compacted locally: {original_bytes} UTF-8 bytes total ...]"
     ));
-    if text.len() > MAX_PROVIDER_PREVIEW_BYTES {
-        text = truncate_utf8(&text, MAX_PROVIDER_PREVIEW_BYTES - 32);
+    if text.len() > maximum_bytes {
+        text = truncate_utf8(&text, maximum_bytes.saturating_sub(32));
         text.push_str("\n[provider preview truncated]");
     }
 
@@ -158,8 +212,10 @@ fn compact_command_output_generically(
     stdout: &mut File,
     stderr: &mut File,
     original_bytes: usize,
+    budget: ProviderOutputBudget,
 ) -> io::Result<CompactedOutput> {
-    if original_bytes <= MAX_PROVIDER_PREVIEW_BYTES {
+    let maximum_bytes = budget.bytes();
+    if original_bytes <= maximum_bytes {
         let stdout = read_complete_utf8(stdout)?;
         let stderr = read_complete_utf8(stderr)?;
         let text = format!("exit_code: {exit_code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
@@ -169,11 +225,7 @@ fn compact_command_output_generically(
         });
     }
 
-    let (stdout_budget, stderr_budget) = if exit_code == 0 {
-        (COMMAND_SUCCESS_STDOUT_BYTES, COMMAND_SUCCESS_STDERR_BYTES)
-    } else {
-        (COMMAND_FAILURE_STDOUT_BYTES, COMMAND_FAILURE_STDERR_BYTES)
-    };
+    let (stdout_budget, stderr_budget) = budget.command_stream_budgets(exit_code == 0);
     let stdout_preview = compact_file_edges(stdout, stdout_budget, "stdout")?;
     let stderr_preview = compact_file_edges(stderr, stderr_budget, "stderr")?;
     let mut text =
@@ -181,8 +233,8 @@ fn compact_command_output_generically(
     text.push_str(&format!(
         "\n[... command output compacted locally: {original_bytes} UTF-8 bytes total ...]"
     ));
-    if text.len() > MAX_PROVIDER_PREVIEW_BYTES {
-        text = truncate_utf8(&text, MAX_PROVIDER_PREVIEW_BYTES - 32);
+    if text.len() > maximum_bytes {
+        text = truncate_utf8(&text, maximum_bytes.saturating_sub(32));
         text.push_str("\n[provider preview truncated]");
     }
     Ok(CompactedOutput {
@@ -403,14 +455,18 @@ mod tests {
 
     use super::super::output::OutputSource;
     use super::{
-        MAX_PROVIDER_PREVIEW_BYTES, TextOutputKind, compact_command_output,
+        ProviderOutputBudget, TextOutputKind, compact_command_output,
         compact_command_output_generically, compact_text,
     };
 
     #[test]
     fn short_text_is_preserved_exactly() {
         let output = "a.txt\nb.txt\n";
-        let compacted = compact_text(output, TextOutputKind::ListFiles);
+        let compacted = compact_text(
+            output,
+            TextOutputKind::ListFiles,
+            ProviderOutputBudget::default(),
+        );
 
         assert!(compacted.complete);
         assert_eq!(compacted.text, output);
@@ -428,10 +484,11 @@ mod tests {
         }
         output.push_str("END\n");
 
-        let compacted = compact_text(&output, TextOutputKind::ReadFile);
+        let budget = ProviderOutputBudget::default();
+        let compacted = compact_text(&output, TextOutputKind::ReadFile, budget);
 
         assert!(!compacted.complete);
-        assert!(compacted.text.len() <= MAX_PROVIDER_PREVIEW_BYTES);
+        assert!(compacted.text.len() <= budget.bytes());
         assert!(compacted.text.contains("BEGIN"));
         assert!(compacted.text.contains("important middle failure"));
         assert!(compacted.text.contains("END"));
@@ -455,11 +512,12 @@ mod tests {
             .seek(SeekFrom::Start(0))
             .expect("stderr should rewind");
 
-        let compacted =
-            compact_command_output(1, &mut stdout, &mut stderr).expect("command should compact");
+        let budget = ProviderOutputBudget::default();
+        let compacted = compact_command_output(1, &mut stdout, &mut stderr, budget)
+            .expect("command should compact");
 
         assert!(!compacted.complete);
-        assert!(compacted.text.len() <= MAX_PROVIDER_PREVIEW_BYTES);
+        assert!(compacted.text.len() <= budget.bytes());
         assert!(compacted.text.contains("exit_code: 1"));
         assert!(compacted.text.contains("stdout-start"));
         assert!(compacted.text.contains("stdout-end"));
@@ -470,11 +528,12 @@ mod tests {
     #[test]
     fn successful_test_output_is_compacted_even_below_the_generic_threshold() {
         let output = rust_test_output(96);
-        assert!(output.len() < MAX_PROVIDER_PREVIEW_BYTES);
+        let budget = ProviderOutputBudget::default();
+        assert!(output.len() < budget.bytes());
         let (mut stdout, mut stderr) = command_streams(&output, "");
 
-        let compacted =
-            compact_command_output(0, &mut stdout, &mut stderr).expect("command should compact");
+        let compacted = compact_command_output(0, &mut stdout, &mut stderr, budget)
+            .expect("command should compact");
 
         assert!(!compacted.complete);
         assert!(compacted.text.contains("96 Rust test success lines"));
@@ -491,7 +550,8 @@ mod tests {
         let (mut stdout, mut stderr) = command_streams(&output, "");
 
         let compacted =
-            compact_command_output(0, &mut stdout, &mut stderr).expect("command should assemble");
+            compact_command_output(0, &mut stdout, &mut stderr, ProviderOutputBudget::default())
+                .expect("command should assemble");
 
         assert!(compacted.complete);
         assert_eq!(
@@ -501,12 +561,27 @@ mod tests {
     }
 
     #[test]
+    fn command_envelope_is_included_in_the_provider_budget() {
+        let budget = ProviderOutputBudget::from_bytes(1_024).expect("budget should be valid");
+        let output = "x".repeat(budget.bytes().saturating_sub(8));
+        let (mut stdout, mut stderr) = command_streams(&output, "");
+
+        let compacted = compact_command_output(1, &mut stdout, &mut stderr, budget)
+            .expect("command should compact");
+
+        assert!(!compacted.complete);
+        assert!(compacted.text.len() <= budget.bytes());
+        assert!(compacted.text.contains("command output compacted locally"));
+    }
+
+    #[test]
     fn failed_commands_never_apply_success_noise_filters() {
         let output = rust_test_output(96);
         let (mut stdout, mut stderr) = command_streams(&output, "fatal test harness failure\n");
 
         let compacted =
-            compact_command_output(1, &mut stdout, &mut stderr).expect("command should assemble");
+            compact_command_output(1, &mut stdout, &mut stderr, ProviderOutputBudget::default())
+                .expect("command should assemble");
 
         assert!(compacted.complete);
         assert!(compacted.text.contains("case_048"));
@@ -523,9 +598,10 @@ mod tests {
         let (mut first_stdout, mut first_stderr) = command_streams(&output, "");
         let (mut second_stdout, mut second_stderr) = command_streams(&output, "");
 
-        let first = compact_command_output(0, &mut first_stdout, &mut first_stderr)
+        let budget = ProviderOutputBudget::default();
+        let first = compact_command_output(0, &mut first_stdout, &mut first_stderr, budget)
             .expect("first command should compact");
-        let second = compact_command_output(0, &mut second_stdout, &mut second_stderr)
+        let second = compact_command_output(0, &mut second_stdout, &mut second_stderr, budget)
             .expect("second command should compact");
 
         assert_eq!(first.text, second.text);
@@ -548,7 +624,11 @@ mod tests {
         let original_bytes = output.len();
         let original_lines = super::line_count(&output);
         let started_at = Instant::now();
-        let compacted = compact_text(&output, TextOutputKind::ReadFile);
+        let compacted = compact_text(
+            &output,
+            TextOutputKind::ReadFile,
+            ProviderOutputBudget::default(),
+        );
         let source = OutputSource::text(output);
         let provider_output =
             source.provider_output_with_preview(&compacted.text, compacted.complete);
@@ -625,12 +705,19 @@ mod tests {
             let (mut stdout, mut stderr) = command_streams(output, "");
             let original_bytes = "exit_code: 0\nstdout:\n\nstderr:\n".len() + output.len();
             let started_at = Instant::now();
+            let budget = ProviderOutputBudget::default();
             let compacted = if semantic {
-                compact_command_output(0, &mut stdout, &mut stderr)
+                compact_command_output(0, &mut stdout, &mut stderr, budget)
                     .expect("semantic command should compact")
             } else {
-                compact_command_output_generically(0, &mut stdout, &mut stderr, original_bytes)
-                    .expect("generic command should compact")
+                compact_command_output_generically(
+                    0,
+                    &mut stdout,
+                    &mut stderr,
+                    original_bytes,
+                    budget,
+                )
+                .expect("generic command should compact")
             };
             durations.push(started_at.elapsed().as_secs_f64() * 1_000.0);
             preview = compacted.text;

@@ -24,6 +24,8 @@ const MODEL: CodexModel = {
     usablePercent: 95,
     maximumTokens: 872_000,
   },
+  unsupportedRuntimeCapabilities: [],
+  unsupportedReasoningEfforts: [],
   isDefault: true,
 };
 
