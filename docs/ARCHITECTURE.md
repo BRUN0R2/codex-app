@@ -35,13 +35,16 @@ O engine nativo divide ownership assim:
   conversa do ChatGPT;
 - `provider/`: catálogo Codex, Responses, cookies Cloudflare restritos com
   semântica completa de expiração/escopo e stream do agente;
-- `agent.rs`: composição das instruções, rodadas e ciclo das ferramentas;
+- `prompt_context.rs`: contexto factual do runtime, instruções explícitas,
+  hierarquia `AGENTS.md`, permissões e colaboração;
+- `agent.rs`: rodadas, compactação e ciclo das ferramentas;
 - `automation.rs`: agenda, limites e transições determinísticas das Automações;
 - `tools/`: contratos e orquestração das ferramentas (`mod.rs`), operações de
   arquivo (`fs.rs`), resolução do `ripgrep` embarcado (`ripgrep.rs`), execução e
   árvore de processos (`exec.rs`), transcript incremental
   (`command_output_stream.rs`), sessões longas e polling
-  (`command_sessions.rs`) e confinamento de paths no workspace (`workspace.rs`);
+  (`command_sessions.rs`), visualização multimodal local (`view_image.rs`) e
+  confinamento de paths no workspace (`workspace.rs`);
 - `approval.rs`: solicitações que aguardam decisão ou cancelamento explícito;
   comandos podem receber autorização limitada à tarefa durante a sessão atual;
 - `storage.rs`: schema SQLite próprio, transações e configuração versionada;
@@ -76,13 +79,19 @@ long tasks. Cliques que tentam atravessar uma origem não aprovada são bloquead
 no callback síncrono, convertidos em uma transição pendente e retomados somente
 depois da decisão explícita.
 
-O loop recompõe um protocolo de execução curto junto das instruções cacheadas do
-modelo. Ele define autonomia para mudanças locais autorizadas, commentary apenas
-com resultado concreto e próximo passo, atualização antes/depois de esperas
-longas, plano para trabalho realmente multifásico, paralelismo somente entre
-operações independentes e promoção rápida de comandos previsivelmente longos.
-O `prompt_cache_key` continua sendo o identificador da tarefa, portanto esse
-prefixo estável não vira contexto novo a cada poll.
+O loop mantém as instruções-base autoritativas do catálogo separadas do contexto
+local. `prompt_context.rs` acrescenta somente fatos e regras que pertencem a esta
+execução; não existe um segundo protocolo comportamental universal nem uma
+instrução manual para preferir navegador. O `prompt_cache_key` é o identificador
+estável da tarefa, portanto polls e rodadas reutilizam a mesma identidade de
+cache sem compartilhar contexto entre tarefas.
+
+O catálogo traduz `tool_mode`, `multi_agent_version` e esforços indisponíveis
+para capacidades de runtime tipadas. Code Mode ausente bloqueia seleção e envio
+antes de qualquer escrita de turno; multiagente ausente bloqueia Ultra antes da
+rede. A UI recebe a mesma incompatibilidade no contrato, desabilita a opção e
+explica o requisito. O padrão local é sempre o primeiro modelo visível cujo
+modo e esforço padrão são executáveis por este engine.
 
 Cada ação visual devolve texto e screenshot no mesmo
 `function_call_output.output` multimodal. Storage grava essa saída e o item da
@@ -94,7 +103,8 @@ Comandos longos permanecem no domínio do engine:
 ```mermaid
 flowchart LR
     Agent["Agente chama exec_command"] --> Manager["CommandSessionManager"]
-    Manager --> Process["Processo + spool integral"]
+    Manager --> Launch["Launch + pipes + ownership nativo"]
+    Launch --> Process["Processo + spool integral"]
     Process --> Transcript["Transcript limitado + deltas da timeline"]
     Manager -->|termina antes do yield| Result["Resultado direto"]
     Manager -->|ultrapassa o yield| Session["Sessão persistida inProgress"]
@@ -116,6 +126,15 @@ drena seus dois pipes, persiste os itens terminais e remove todas as sessões
 daquele `turnId`. O evento `turn.completed` é publicado somente depois dessa
 barreira. Deltas carregam `turnId`, portanto nenhuma atualização pode migrar para
 outro turno durante a execução.
+
+O prazo de `yield` começa somente depois que o launch terminou, os dois pipes
+foram capturados e a árvore já possui ownership. No Windows, cada launch entra
+imediatamente em um Job Object com `KILL_ON_JOB_CLOSE`; cancelamento termina o
+job pelo handle nativo e o fechamento do owner continua sendo a garantia final
+contra descendentes órfãos. Falha ao criar ou configurar esse owner encerra o
+filho direto e falha antes de anunciar uma sessão. O runtime não depende de
+`taskkill.exe` nem publica `status: running` para um `CreateProcess` ainda em
+andamento.
 
 Um turno só se torna ativo após persistência e aquisição exclusiva do
 `thread_id`. Falha ao publicar seus eventos iniciais executa rollback antes de a
@@ -262,9 +281,11 @@ visual. Cada alteração carrega `lineStats` autoritativo calculado antes de
 truncar o preview; históricos internos anteriores ao campo derivam a estatística
 do diff persistido.
 
-Resultados `view_image` usam a apresentação contratual `image`. O frontend
-aceita somente o envelope fechado `{ image_url }`, MIME de imagem seguro em data
-URL ou HTTP(S) sem credenciais, e nunca imprime o payload bruto. Chamadas
+Resultados `view_image` usam a apresentação contratual `image`. O provider
+recebe a imagem decodificada como conteúdo multimodal e a timeline persiste
+somente o envelope fechado `{ image_path }` com path absoluto canônico. Saídas
+visuais do Browser Use conservam `{ image_url }`; ambos os envelopes são
+validados antes da renderização e o payload bruto nunca vira texto. Chamadas
 consecutivas são projetadas como uma unidade “Visualizou N imagens”, preservando
 uma miniatura por chamada e a identidade do primeiro item, como no fluxo oficial.
 

@@ -3,7 +3,9 @@
 ## Dependências diretas
 
 Toda dependência direta tem escopo isolado e substituição custosa; nenhuma fica
-ociosa. As versões exatas estão travadas em `package.json` e `src-tauri/Cargo.toml`.
+ociosa. Os requisitos diretos estão declarados em `package.json` e
+`src-tauri/Cargo.toml`; as resoluções exatas de ambos os grafos ficam travadas
+nos respectivos lockfiles.
 
 ### Interface (`package.json`)
 
@@ -25,26 +27,48 @@ Ferramentas de desenvolvimento: `vite` + `vite-plugin-solid` (build),
 | Grupo | Crates | Papel |
 | --- | --- | --- |
 | Shell | `tauri`, `tauri-plugin-dialog`, `tauri-plugin-opener`, `tauri-plugin-autostart`, `tauri-plugin-single-instance`, `tauri-build` | Janela nativa, integrações do SO e build |
-| Browser Windows | `webview2-com`, `windows` | Callback assíncrono de `ExecuteScript`, métodos CDP fechados e tipos COM usados pelo Browser Use no child WebView2 |
+| Windows nativo | `webview2-com`, `windows` | Callback assíncrono de `ExecuteScript`, métodos CDP fechados, tipos COM do child WebView2 e Job Objects que possuem árvores de comandos |
 | Async | `tokio`, `futures-util` | Runtime de tarefas e streaming SSE incremental |
 | HTTP | `reqwest` (rustls, cookies, stream), `url` | HTTPS do provider sem OpenSSL e validação de URLs |
 | Persistência | `rusqlite` (bundled), `r2d2`, `r2d2_sqlite` | SQLite WAL transacional com pool dimensionado |
 | Credenciais | `age`, `keyring-core`, `windows-native-keyring-store`, `zeroize`, `rand`, `sha2` | Envelope cifrado, chave no Credential Manager, PKCE e hashing |
-| Serialização | `serde`, `serde_json`, `base64` | Contratos IPC fechados e codificações de envelope |
-| Domínio | `chrono`, `uuid` (v7), `thiserror`, `tempfile`, `parking_lot` | Carimbos de tempo ordenáveis, ids, taxonomia de erros, spool de saídas em disco e locks |
+| Serialização e imagem | `serde`, `serde_json`, `base64`, `image` | Contratos IPC fechados, codificações de envelope e decode limitado de PNG/JPEG/GIF/WebP |
+| Domínio | `chrono`, `uuid` (v5/v7), `thiserror`, `tempfile`, `parking_lot` | Carimbos de tempo ordenáveis, ids persistentes, identidades estáveis do prefixo Lite, taxonomia de erros, spool de saídas em disco e locks |
 
 A política de atualização é contínua: versões modernas e estáveis, mudanças
 revisadas pelo Dependabot e gates de lockfile em `pnpm verify`.
 
+## Rust estável
+
+O toolchain, o MSRV do crate e o CI estão fixados em Rust 1.98.0, release estável
+de 20 de agosto de 2026. `.cargo/config.toml` usa o `build.warnings = "deny"`
+estabilizado no ciclo anterior para que todo comando Cargo falhe em warnings dos
+crates locais, não apenas a etapa separada de Clippy.
+
+As novidades de 1.98 foram avaliadas contra o código real. Os novos lints
+encontraram APIs com argumentos demais, um cache com tipo excessivamente
+aninhado, um `div_ceil` manual e uma normalização de enum redundante; todos foram
+refatorados sem `allow`. `String::from_utf16le`, `NumBuffer` e os métodos de float
+algebraicos não foram introduzidos porque não simplificam nenhum caminho atual;
+os últimos ainda permitem reordenação não determinística, incompatível com a
+política deste projeto.
+
+Fontes primárias:
+
+- [anúncio do Rust 1.98.0](https://blog.rust-lang.org/2026/08/20/Rust-1.98.0/);
+- [notas completas do Rust 1.98.0](https://doc.rust-lang.org/releases.html#version-1980-2026-08-20);
+- [configuração `build.warnings`](https://doc.rust-lang.org/cargo/reference/config.html#buildwarnings).
+
 ## Referências de estudo
 
 `.references/` é ignorado pelo Git e nunca participa de build, runtime, bundle,
-configuração ou armazenamento do aplicativo. Em 23 de agosto de 2026 ele contém:
+configuração ou armazenamento do aplicativo. Em 28 de agosto de 2026 ele contém:
 
 - `shiki`, revisão `48cd2cc695ed2e3357c3f9c370578ea843d6d9a3`
   (`v4.4.3`);
 - `openai-codex`, revisão
-  `1e6185e52214a879a8b94f3743f47f57135dc64b`;
+  `6be2a6ca952ac9f70676ce4dd07fda27175aa9dd` (release estável auditada
+  `rust-v0.150.1`, revisão `90854393966b21e9ebfd21b122334eb09a20c93d`);
 - módulos selecionados de perfil, uso, navegador e execução de comandos extraídos do
   `app.asar` do Codex Desktop `26.818.5229.0` em
   `codex-desktop-26.818.5229.0/`.
@@ -65,7 +89,8 @@ O navegador interno habilita a feature `unstable` do `tauri` para
 agente tornou diretas duas dependências que já estavam no grafo transitivo do
 Tauri: `webview2-com 0.38.2` e `windows 0.61.3`. Isso permite nomear e testar o
 contrato WebView2 usado por `ExecuteScript` e
-`CallDevToolsProtocolMethod`; nenhuma versão adicional entrou no lockfile. O
+`CallDevToolsProtocolMethod` e o contrato de Job Objects usado para encerrar
+árvores de comandos sem `taskkill`; nenhuma versão adicional entrou no lockfile. O
 modelo não recebe COM nem CDP genérico: somente operações fechadas do módulo
 `browser/automation.rs`.
 

@@ -136,8 +136,9 @@ contrato, não um payload alternativo inferido pela interface.
 
 A versão IPC 18 adiciona a apresentação `image` para resultados de ferramenta.
 O payload continua armazenado como recurso paginado, mas a interface valida o
-envelope `{ image_url }` e renderiza uma prévia segura em vez de expor a data URL
-como texto. Registros anteriores de `view_image` com `plainText` recebem a mesma
+envelope remoto `{ image_url }` ou o path local canônico `{ image_path }` e
+renderiza uma prévia segura em vez de expor a data URL como texto. Registros
+anteriores de `view_image` com `plainText` recebem a mesma
 apresentação por uma migração determinística baseada no nome fechado da
 ferramenta, nunca por heurística sobre a descrição ou o conteúdo.
 
@@ -228,6 +229,30 @@ Para Work local e Codex:
 - respostas em `https://chatgpt.com/backend-api/codex/responses`;
 - perfil em `https://chatgpt.com/backend-api/wham/profiles/me`;
 - uso em `https://chatgpt.com/backend-api/wham/usage`;
+
+O catálogo Codex é mantido em memória por cinco minutos. O ETag recebido no
+stream renova a validade quando continua igual e invalida imediatamente a
+entrada quando muda; a leitura seguinte busca o catálogo autoritativo. Não
+existe cache de catálogo persistido. O parser seleciona Responses Standard ou Lite, resumo de
+raciocínio, verbosity, modalidades, detalhe original e orçamento de saída a
+partir dos campos tipados do modelo. Esforço `ultra` usa o override multiagente
+do catálogo, depois `max`, depois o maior esforço simples disponível e, sem
+alternativa, o fallback wire `medium`; `ultra` nunca é enviado como literal ao
+provider. Como este runtime ainda não possui execução multiagente, o catálogo
+marca `ultra` como esforço indisponível e o rejeita antes da rede; a tradução
+wire permanece testada para entrar em uso somente junto do subsistema completo.
+
+`tool_mode` e `multi_agent_version` também são enums fechados. Modelos que
+exigem Code Mode ou capacidades multiagente permanecem identificáveis na UI.
+Code Mode é bloqueante: o modelo não pode ser padrão nem iniciar um turno sem o
+host isolado. A ausência dessa capacidade nunca é reinterpretada como suporte a
+funções diretas.
+
+As instruções-base vêm de `model_messages.instructions_template` quando esse
+contrato existe, com `base_instructions` apenas para catálogos legados. O runtime
+acrescenta instruções explícitas, `AGENTS.md`, permissões, colaboração e ambiente
+como itens separados e limitados. Nenhum protocolo comportamental redundante é
+injetado localmente.
 - redefinições em `/backend-api/wham/rate-limit-reset-credits` e
   `/backend-api/wham/rate-limit-reset-credits/consume`;
 - recarga automática em `/backend-api/subscriptions/auto_top_up/*`;
@@ -384,17 +409,16 @@ persistido; política, recuperação e atomicidade pertencem integralmente ao Ru
 
 ## Ferramentas e permissão
 
-Codex e Work recebem um protocolo de trabalho contínuo junto das instruções do
-modelo: atualização commentary antes da primeira ferramenta, novos updates
-somente quando há descoberta, fase, plano ou blocker concreto, aviso antes e
-depois de espera longa, autonomia sobre mudanças locais já solicitadas e final
-somente após validações necessárias. Comandos reconhecidamente longos usam yield
-curto, liberam a próxima rodada e deixam trabalho independente preceder o poll.
+Codex e Work recebem as instruções-base publicadas para o modelo e o contexto
+local tipado da execução. Regras de estilo e comportamento não são duplicadas
+por um prompt universal do aplicativo. Comandos longos continuam usando yield,
+liberam a rodada e permitem trabalho independente antes do poll.
 
 | Ferramenta | Somente leitura | Projeto | Acesso total |
 | --- | ---: | ---: | ---: |
 | `read_file`, `list_files`, `search_text` | sim | sim | sim |
 | `read_output` | sim | sim | sim |
+| `view_image` | sim | sim | sim |
 | `edit_file`, `write_file` | não | sim | sim |
 | `apply_patch` | não | sim | sim |
 | `exec_command` | não | aprovação | sem aprovação |
@@ -432,7 +456,9 @@ comando completo permanece dentro do disclosure.
 
 `yield_time_ms` controla por quanto tempo `exec_command` aguarda a conclusão em
 primeiro plano. O padrão é dez segundos e o intervalo fechado permitido é de
-250 ms a 30 s. Se o processo ultrapassa esse prazo, a chamada retorna
+250 ms a 30 s. A contagem começa somente quando launch, captura dos pipes e
+ownership da árvore terminaram; falhas de spawn nunca viram uma sessão
+aparentemente ativa. Se o processo ultrapassa esse prazo, a chamada retorna
 `session_id`, `cursor`, tempo decorrido e o snapshot disponível, enquanto o
 processo continua sob ownership do `NativeEngine` e do turno que o criou. O item permanece
 `inProgress`, continua recebendo `stdout`/`stderr` em tempo real e o agente pode
@@ -511,6 +537,13 @@ turnos. O histórico aponta para esse snapshot imutável, não para o arquivo
 externo original. Históricos antigos cujo arquivo já desapareceu degradam apenas
 a miniatura correspondente; o restante do turno continua renderizável.
 
+Imagens anexadas e abertas por `view_image` são completamente decodificadas em
+uma tarefa bloqueante limitada, não aceitas apenas pela assinatura. PNG, JPEG,
+GIF e WebP têm limite de dimensão de 16.384 px e alocação decodificada de 256
+MiB; `view_image` também limita o arquivo a 10 MiB, respeita sandbox/cancelamento
+e só anuncia `original` quando o modelo declara essa capacidade. A conclusão
+persiste path canônico para a miniatura e envia data URL apenas ao provider.
+
 `search_text` usa o `ripgrep` embarcado com correspondência literal,
 sensibilidade de caixa explícita, regras `.gitignore`, leitura incremental,
 limite global de resultados, timeout e cancelamento. Consultas com quebra de
@@ -536,6 +569,13 @@ fazem parte do contrato de `exec_command`. Mesmo quando uma ferramenta ignora o
 modo sem cor, o engine remove sequências ANSI e normaliza controles de terminal
 antes de persistir ou publicar a saída. Bytes visíveis fora de UTF-8 são
 rejeitados com erro explícito; nunca são convertidos silenciosamente em `�`.
+
+Cada processo também é anexado a um Job Object do Windows configurado com
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` antes de a sessão entrar no registry. O
+cancelamento usa o próprio handle do job, aguarda o filho direto e drena os
+pipes; o `Drop` do handle elimina qualquer descendente restante se o owner async
+for abandonado. Não existe subprocesso auxiliar `taskkill`, e um job que não
+pode ser criado, configurado ou anexado causa falha explícita do launch.
 
 O build Windows contém exatamente um manifesto de aplicação. `build.rs` pede ao
 `tauri-build` que gere ícone e metadados sem seu manifesto embutido e fornece ao

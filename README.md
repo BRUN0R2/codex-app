@@ -29,7 +29,8 @@ alterar estado.
 - execução simultânea de tarefas em segundo plano, direcionamento do turno
   ativo, compactação, fork, arquivamento e exclusão confirmada;
 - ferramentas nativas fechadas para leitura, listagem, busca, edição, escrita e
-  comandos, incluindo saída ao vivo, yield de processos longos e polling por
+  comandos, incluindo visualização multimodal de imagens locais, saída ao vivo,
+  yield de processos longos, ownership da árvore por Job Object e polling por
   cursor enquanto o agente executa trabalho independente;
 - Browser Use nativo no child WebView2 visível, com abertura/seleção/fechamento
   de abas, navegação, histórico, cursor próprio do agente, mouse, teclado,
@@ -49,7 +50,7 @@ alterar estado.
 | Camada | Tecnologia |
 | --- | --- |
 | Shell | Tauri 2.11 |
-| Backend | Rust 1.97.1, edition 2024, Tokio |
+| Backend | Rust 1.98.0, edition 2024, Tokio |
 | HTTP | reqwest 0.13, rustls e SSE incremental |
 | Persistência | SQLite via rusqlite 0.40 |
 | Credenciais | age+scrypt e Windows Credential Manager |
@@ -65,7 +66,7 @@ As versões diretas são fixadas em `package.json`, `Cargo.toml` e
 - conta ChatGPT com acesso ao Codex;
 - PowerShell 7 ou superior (`pwsh`) para o executor de comandos UTF-8;
 - Node.js 26 ou superior e pnpm 11.22 ou superior;
-- Rust 1.97.1 e toolchain MSVC para desenvolvimento nativo.
+- Rust 1.98.0 e toolchain MSVC para desenvolvimento nativo.
 
 O Codex CLI não é pré-requisito.
 

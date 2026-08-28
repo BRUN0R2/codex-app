@@ -1,5 +1,16 @@
 # TODO
 
+- [ ] Implementar Code Mode como subsistema próprio e isolado — runtime
+  JavaScript sandboxed, protocolo tipado, limites de heap/tempo, delegação,
+  yield/wait e cancelamento — antes de honrar catálogos `code_mode_only`; não
+  depender de build, processo, armazenamento ou configuração do Codex CLI.
+- [ ] Projetar multiagente v2 e orçamento de tokens como subsistemas nativos com
+  ownership, cancelamento, persistência e testes de fronteira antes de anunciar
+  Ultra real ao usuário.
+- [ ] Avaliar o transporte Responses WebSocket em módulo isolado e adotá-lo
+  somente com equivalência comprovada de SSE, reconexão, ordenação e
+  cancelamento.
+
 - [ ] Após a renovação da cota indicada pelo provider (`HTTP 429`,
   `usage_limit_reached`), medir a latência do primeiro delta e validar uma
   decisão de aprovação ao vivo em uma tarefa descartável já autorizada. Não
