@@ -1,74 +1,44 @@
 # Codex Desktop Next
 
-Aplicativo desktop nativo e independente para alternar entre ChatGPT Chat,
-ChatGPT Work local e um agente Codex usando uma conta ChatGPT. O produto não
-inicia, empacota, importa nem exige o Codex CLI.
-O repositório aberto `openai/codex` é usado somente como referência de protocolo
-e comportamento.
+Cliente Windows nativo e independente para ChatGPT Chat, ChatGPT Work local e
+um agente Codex. O aplicativo usa a conta ChatGPT, mas não inicia, empacota nem
+depende do Codex CLI. O repositório público `openai/codex` serve apenas como
+referência de protocolo e comportamento.
 
-O backend Rust possui autenticação, provider HTTPS/SSE, composição do agente,
-ferramentas, aprovações e persistência. A interface SolidJS recebe apenas
-contratos Tauri fechados e valida toda resposta ou evento em runtime antes de
-alterar estado.
+## O que o aplicativo oferece
 
-## Capacidades
+- OAuth ChatGPT com PKCE, renovação, revogação e cancelamento;
+- Chat e Codex com catálogos próprios, streaming HTTPS/SSE e histórico isolado;
+- tarefas simultâneas, direcionamento, interrupção, compactação, fork e arquivo;
+- agente nativo com ferramentas de arquivos, comandos, planos, imagens e browser;
+- três perfis explícitos: somente leitura, escrita no projeto e acesso total;
+- processos longos em segundo plano, saída incremental e encerramento da árvore;
+- SQLite local com WAL e credenciais protegidas pelo Windows Credential Manager;
+- limites, aprovações e contratos Tauri validados nas duas fronteiras;
+- interface SolidJS para tarefas, modelos, uso, automações e configurações.
 
-- OAuth ChatGPT oficial com PKCE, callback local, renovação, revogação e
-  cancelamento;
-- seletor persistente `ChatGPT | Codex`, modo `Chat | Work`, restauração do
-  último destino e históricos segregados por produto;
-- credenciais em envelope `age` privado do aplicativo; a chave fica no Windows
-  Credential Manager e tokens nunca atravessam o IPC ou o SQLite;
-- catálogos separados para o Chat consumidor e para o Codex, obtidos diretamente
-  da sessão OAuth da conta ChatGPT, sem chave da API Platform;
-- Chat via `/backend-api/f/conversation` com presets `model + thinking_effort` e
-  Codex via Responses, ambos com streaming HTTPS/SSE;
-- tarefas e histórico locais em SQLite com WAL, transações e concorrência
-  otimista de configuração, incluindo reparo explícito de pares chamada/saída
-  deixados incompletos por interrupção;
-- execução simultânea de tarefas em segundo plano, direcionamento do turno
-  ativo, compactação, fork, arquivamento e exclusão confirmada;
-- ferramentas nativas fechadas para leitura, listagem, busca, edição, escrita e
-  comandos, incluindo visualização multimodal de imagens locais, saída ao vivo,
-  yield de processos longos, ownership da árvore por Job Object e polling por
-  cursor enquanto o agente executa trabalho independente;
-- Browser Use nativo no child WebView2 visível, com abertura/seleção/fechamento
-  de abas, navegação, histórico, cursor próprio do agente, mouse, teclado,
-  digitação, rolagem, drag, snapshot DOM/acessível, screenshot multimodal,
-  aprovação por origem e métricas de QA;
-- três perfis de permissão sem combinações implícitas: somente leitura, projeto
-  com aprovação de comando e acesso total;
-- limites explícitos para entrada, anexos, arquivos, resultados, processos,
-  streams, histórico, paginação e encerramento;
-- UI enxuta para projetos, tarefas, timeline, aprovações, anexos, modelos,
-  configurações, perfil, atividade, uso da conta e diagnósticos;
-- Uso e faturamento com preço localizado do plano, saldo, limites gerais e por
-  modelo, recarga automática e consumo idempotente de redefinições disponíveis.
+## Arquitetura
 
-## Stack
-
-| Camada | Tecnologia |
+| Camada | Responsabilidade |
 | --- | --- |
-| Shell | Tauri 2.11 |
-| Backend | Rust 1.98.0, edition 2024, Tokio |
-| HTTP | reqwest 0.13, rustls e SSE incremental |
-| Persistência | SQLite via rusqlite 0.40 |
-| Credenciais | age+scrypt e Windows Credential Manager |
-| Interface | SolidJS 1.9.15 e TypeScript 7.0.2 estrito |
-| Build e qualidade | Vite 8.2, Biome 2.5, Vitest 4.1, pnpm 11.22 |
+| Rust/Tauri | autenticação, provider, agente, ferramentas, browser e persistência |
+| TypeScript/SolidJS | contratos decodificados, estado da interface e apresentação |
+| SQLite | tarefas, eventos, configurações e metadados não secretos |
+| Windows Credential Manager | chave usada para proteger credenciais locais |
 
-As versões diretas são fixadas em `package.json`, `Cargo.toml` e
-`rust-toolchain.toml`; os grafos completos ficam travados nos lockfiles.
+As versões e o grafo de dependências são definidos pelos manifestos e lockfiles.
+Consulte [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) para os limites entre
+módulos e [docs/ENGINE.md](docs/ENGINE.md) para o contrato do agente.
 
-## Pré-requisitos
+## Requisitos
 
 - Windows 10 ou 11 com WebView2;
-- conta ChatGPT com acesso ao Codex;
-- PowerShell 7 ou superior (`pwsh`) para o executor de comandos UTF-8;
+- conta ChatGPT com acesso aos recursos usados;
+- PowerShell 7 (`pwsh`);
 - Node.js 26 ou superior e pnpm 11.22 ou superior;
-- Rust 1.98.0 e toolchain MSVC para desenvolvimento nativo.
+- Rust 1.98.0 com toolchain MSVC.
 
-O Codex CLI não é pré-requisito.
+O Codex CLI não é necessário.
 
 ## Desenvolvimento
 
@@ -77,27 +47,17 @@ pnpm install --frozen-lockfile
 pnpm dev:launch
 ```
 
-Quando não há uma sessão ativa, **Entrar com ChatGPT** abre a autorização no navegador.
-A sessão é criada no diretório de dados deste aplicativo; credenciais existentes
-da CLI não são lidas ou migradas.
+O primeiro comando instala exatamente o lockfile. O segundo inicia Vite e o
+shell Tauri em um perfil de desenvolvimento separado.
 
-Para validar somente a interface no navegador interno, inicie o Vite e abra o
-preview explícito:
+Para trabalhar apenas na interface:
 
 ```powershell
 pnpm dev
 ```
 
-`http://127.0.0.1:1420/?preview=1`
-
-Esse modo existe apenas em desenvolvimento, usa contratos determinísticos pelo
-mock oficial do Tauri e rejeita comandos que dependem do engine nativo. O módulo
-de preview é removido do build de produção.
-
-Dois arquivos auxiliares ficam na raiz sem participar do build: o launcher
-interativo `codex-app.bat` para uso manual no Windows e
-`assets/app-icon.svg`, fonte vetorial dos ícones empacotados em
-`src-tauri/icons/`.
+Abra `http://127.0.0.1:1420/?preview=1`. O preview usa contratos determinísticos,
+rejeita operações nativas e não entra no bundle de produção.
 
 ## Verificação
 
@@ -105,42 +65,29 @@ interativo `codex-app.bat` para uso manual no Windows e
 pnpm verify
 ```
 
-O gate valida UTF-8 sem BOM em todos os arquivos de texto versionados, executa
-lint, testes TypeScript, tipagem, build de produção, auditoria da exceção
-transitiva conhecida, `cargo check`, `rustfmt`, Clippy com warnings como erros e
-testes Rust.
+Esse é o gate completo: encoding, lint, tipagem, testes, benchmarks de regressão,
+QA visual, build de produção, dependências transitivas, `cargo check`, formato,
+Clippy e testes Rust.
 
-Para gerar o instalador NSIS:
-
-```powershell
-pnpm tauri build
-```
-
-O smoke explícito de desenvolvimento valida o fluxo real do child WebView2 sem
-conta nem provider:
+Comandos úteis:
 
 ```powershell
-pnpm smoke:browser
+pnpm smoke:browser   # fluxo real do child WebView2 sem conta
+pnpm measure:tokens  # orçamento de contexto e compactação
+pnpm tauri build     # bundle NSIS local
 ```
 
-Ele sobe uma página HTTP local descartável, captura, clica, digita, navega,
-fecha os WebViews e grava o relatório em
-`%APPDATA%\dev.codexapp.desktop\logs\browser-smoke.json`.
+Releases oficiais seguem [docs/RELEASE.md](docs/RELEASE.md).
 
-Publicações oficiais usam somente o pipeline assinado descrito em
-[docs/RELEASE.md](docs/RELEASE.md). O baseline local do executável otimizado é
-coletado conforme [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+## Estrutura
 
-## Organização
-
-- `src/contracts`: domínio TypeScript e decoders de fronteira;
+- `src/contracts`: tipos e decoders de fronteira;
 - `src/infrastructure`: comandos e eventos Tauri;
-- `src/state`: ownership reativo e reduções determinísticas;
-- `src/ui`: componentes sem acesso direto ao IPC;
-- `src-tauri/src/engine/native`: agente, auth, provider, storage, ferramentas e
-  aprovações;
-- `docs`: regras, arquitetura, contrato do engine e estudo da referência.
+- `src/state`: estado reativo e reduções determinísticas;
+- `src/ui`: apresentação sem acesso direto ao IPC;
+- `src-tauri/src/engine/native`: agente, auth, provider, storage e ferramentas;
+- `scripts`: gates, medições e automação local;
+- `docs`: contrato, arquitetura, referência, desempenho e release.
 
-Consulte [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
-[docs/ENGINE.md](docs/ENGINE.md), [docs/REFERENCE.md](docs/REFERENCE.md),
-[docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) e [docs/RULES.md](docs/RULES.md).
+Antes de alterar o projeto, leia [docs/RULES.md](docs/RULES.md). O backlog ativo
+fica em [docs/TODO.md](docs/TODO.md).
