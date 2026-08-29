@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{FunctionCallOutputPayload, ResponseItem};
+use super::ResponseItem;
 use crate::error::AppError;
 
 const ABORTED_TOOL_OUTPUT: &str = "aborted";
@@ -72,10 +72,10 @@ pub(crate) fn normalize_provider_history(
                 let output_is_missing = outputs.get(&call_id) != Some(&CallKind::Function);
                 normalized.push(item);
                 if output_is_missing {
-                    normalized.push(ResponseItem::FunctionCallOutput {
+                    normalized.push(ResponseItem::function_output(
                         call_id,
-                        output: FunctionCallOutputPayload::text(ABORTED_TOOL_OUTPUT),
-                    });
+                        ABORTED_TOOL_OUTPUT.into(),
+                    ));
                     inserted_aborted_outputs += 1;
                 }
             }
@@ -84,10 +84,10 @@ pub(crate) fn normalize_provider_history(
                 let output_is_missing = outputs.get(&call_id) != Some(&CallKind::Custom);
                 normalized.push(item);
                 if output_is_missing {
-                    normalized.push(ResponseItem::CustomToolCallOutput {
+                    normalized.push(ResponseItem::custom_output(
                         call_id,
-                        output: ABORTED_TOOL_OUTPUT.into(),
-                    });
+                        ABORTED_TOOL_OUTPUT.into(),
+                    ));
                     inserted_aborted_outputs += 1;
                 }
             }
@@ -152,10 +152,7 @@ mod tests {
                 arguments: "{}".into(),
                 call_id: "function-call".into(),
             },
-            ResponseItem::CustomToolCallOutput {
-                call_id: "orphan".into(),
-                output: "ignored".into(),
-            },
+            ResponseItem::custom_output("orphan".into(), "ignored".into()),
             ResponseItem::CustomToolCall {
                 id: Some("custom-item".into()),
                 namespace: None,
@@ -170,14 +167,15 @@ mod tests {
         assert_eq!(normalized.removed_orphan_outputs, 1);
         assert!(matches!(
             &normalized.items[1],
-            ResponseItem::FunctionCallOutput { call_id, output }
+            ResponseItem::FunctionCallOutput { call_id, output, .. }
                 if call_id == "function-call"
                     && matches!(output, FunctionCallOutputPayload::Text(text) if text == "aborted")
         ));
         assert!(matches!(
             &normalized.items[3],
-            ResponseItem::CustomToolCallOutput { call_id, output }
-                if call_id == "custom-call" && output == "aborted"
+            ResponseItem::CustomToolCallOutput { call_id, output, .. }
+                if call_id == "custom-call"
+                    && matches!(output, FunctionCallOutputPayload::Text(text) if text == "aborted")
         ));
     }
 
@@ -191,10 +189,7 @@ mod tests {
                 arguments: "{}".into(),
                 call_id: "complete".into(),
             },
-            ResponseItem::FunctionCallOutput {
-                call_id: "complete".into(),
-                output: FunctionCallOutputPayload::text("ok"),
-            },
+            ResponseItem::function_output("complete".into(), "ok".into()),
         ])
         .expect("history should normalize");
 
@@ -223,14 +218,8 @@ mod tests {
         assert!(duplicate_calls.is_err());
 
         let duplicate_outputs = normalize_provider_history(vec![
-            ResponseItem::FunctionCallOutput {
-                call_id: "duplicate".into(),
-                output: FunctionCallOutputPayload::text("first"),
-            },
-            ResponseItem::FunctionCallOutput {
-                call_id: "duplicate".into(),
-                output: FunctionCallOutputPayload::text("second"),
-            },
+            ResponseItem::function_output("duplicate".into(), "first".into()),
+            ResponseItem::function_output("duplicate".into(), "second".into()),
         ]);
         assert!(duplicate_outputs.is_err());
     }

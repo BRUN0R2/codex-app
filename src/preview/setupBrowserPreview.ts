@@ -214,7 +214,7 @@ const PREVIEW_ENGINE = {
       "scheduledAutomations",
     ],
   },
-  schemaVersion: 19,
+  schemaVersion: 20,
   config: PREVIEW_CONFIG,
   diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
   permissionProfiles: [
@@ -245,12 +245,9 @@ const PREVIEW_MODEL_CATALOG = {
 const PREVIEW_RUNTIME_RESTRICTED_MODEL_CATALOG = {
   data: PREVIEW_MODELS.map((model) => ({
     ...model,
-    unsupportedRuntimeCapabilities:
-      model.id === PREVIEW_MODEL_ID
-        ? (["codeMode", "multiAgent"] as const)
-        : (["multiAgent"] as const),
+    unsupportedRuntimeCapabilities: ["multiAgent"] as const,
     unsupportedReasoningEfforts: ["ultra"] as const,
-    isDefault: model.id === "gpt-5.5",
+    isDefault: model.id === PREVIEW_MODEL_ID,
   })),
 } satisfies ModelListResponse;
 

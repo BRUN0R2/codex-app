@@ -1,12 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use base64::{Engine as _, prelude::BASE64_STANDARD};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use super::workspace::{ensure_inside_workspace, relative_display, resolve_existing_file};
-use crate::attachments::{ImageContentError, validate_image_content};
+use crate::attachments::{ImageContentError, ValidatedImageContent};
 use crate::engine::{ImageDetail, PermissionProfile, SandboxMode};
 use crate::error::AppError;
 
@@ -29,10 +28,9 @@ enum ViewImageDetail {
 
 #[derive(Debug)]
 pub(super) struct ViewedImage {
-    pub data_url: String,
+    pub image: ValidatedImageContent,
     pub detail: ImageDetail,
     pub display_path: String,
-    pub source_path: String,
 }
 
 pub(super) fn definition(supports_original_detail: bool) -> Value {
@@ -43,27 +41,25 @@ pub(super) fn definition(supports_original_detail: bool) -> Value {
             "description": "Local filesystem path to an image file. Relative paths resolve from the workspace root."
         }),
     )]);
-    let mut required = vec!["path"];
     if supports_original_detail {
         properties.insert(
             "detail".into(),
             json!({
-                "type": ["string", "null"],
-                "enum": ["high", "original", null],
-                "description": "Image detail level. Use null for the default high detail or original to preserve exact resolution."
+                "type": "string",
+                "enum": ["high", "original"],
+                "description": "Image detail level. Defaults to high; use original to preserve exact resolution."
             }),
         );
-        required.push("detail");
     }
     json!({
         "type": "function",
         "name": "view_image",
         "description": "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.",
-        "strict": true,
+        "strict": false,
         "parameters": {
             "type": "object",
             "properties": properties,
-            "required": required,
+            "required": ["path"],
             "additionalProperties": false
         }
     })
@@ -130,11 +126,9 @@ pub(super) async fn execute(
     }
 
     let path_for_decode = path.clone();
-    let (bytes, media_type) = tokio::task::spawn_blocking(move || {
-        validate_image_bytes(&path_for_decode, &bytes).map(|media_type| (bytes, media_type))
-    })
-    .await
-    .map_err(|error| AppError::State(format!("image decoder task failed: {error}")))??;
+    let image = tokio::task::spawn_blocking(move || validate_image_bytes(&path_for_decode, bytes))
+        .await
+        .map_err(|error| AppError::State(format!("image decoder task failed: {error}")))??;
     if *cancellation.borrow() {
         return Err(AppError::Cancelled(
             "the image view was cancelled while the image was being decoded".into(),
@@ -142,13 +136,11 @@ pub(super) async fn execute(
     }
     let display_path =
         relative_display(workspace, &path).unwrap_or_else(|_| path.to_string_lossy().into_owned());
-    let source_path = path.to_string_lossy().into_owned();
 
     Ok(ViewedImage {
-        data_url: format!("data:{media_type};base64,{}", BASE64_STANDARD.encode(bytes)),
+        image,
         detail,
         display_path,
-        source_path,
     })
 }
 
@@ -170,8 +162,8 @@ async fn resolve_image_path(
     Ok(canonical)
 }
 
-fn validate_image_bytes(path: &Path, bytes: &[u8]) -> Result<&'static str, AppError> {
-    validate_image_content(bytes).map_err(|error| match error {
+fn validate_image_bytes(path: &Path, bytes: Vec<u8>) -> Result<ValidatedImageContent, AppError> {
+    ValidatedImageContent::decode(bytes).map_err(|error| match error {
         ImageContentError::UnsupportedFormat => AppError::Tool(format!(
             "file `{}` is not a supported PNG, JPEG, GIF, or WebP image",
             path.display()
@@ -208,23 +200,26 @@ mod tests {
         assert!(high["parameters"]["properties"].get("detail").is_none());
         assert_eq!(
             original["parameters"]["properties"]["detail"]["enum"],
-            json!(["high", "original", null])
+            json!(["high", "original"])
         );
-        assert_eq!(
-            original["parameters"]["required"],
-            json!(["path", "detail"])
-        );
+        assert_eq!(original["parameters"]["required"], json!(["path"]));
+        assert_eq!(original["strict"], false);
     }
 
     #[test]
     fn validates_real_image_content_instead_of_only_a_signature() {
-        assert_eq!(
-            validate_image_bytes(Path::new("image.png"), &tiny_png())
-                .expect("valid PNG should decode"),
-            "image/png"
+        assert!(
+            validate_image_bytes(Path::new("image.png"), tiny_png())
+                .expect("valid PNG should decode")
+                .data_url()
+                .starts_with("data:image/png;base64,")
         );
         assert!(
-            validate_image_bytes(Path::new("fake.png"), b"\x89PNG\r\n\x1a\nnot-an-image").is_err()
+            validate_image_bytes(
+                Path::new("fake.png"),
+                b"\x89PNG\r\n\x1a\nnot-an-image".to_vec()
+            )
+            .is_err()
         );
     }
 
@@ -236,7 +231,7 @@ mod tests {
             .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .expect("oversized test image should encode");
 
-        assert!(validate_image_bytes(Path::new("too-wide.png"), &bytes).is_err());
+        assert!(validate_image_bytes(Path::new("too-wide.png"), bytes).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -264,11 +259,12 @@ mod tests {
         .expect("workspace image should be viewable");
 
         assert_eq!(viewed.display_path, "image.png");
-        assert_eq!(
-            Path::new(&viewed.source_path),
-            canonical_workspace.join("image.png")
+        assert!(
+            viewed
+                .image
+                .data_url()
+                .starts_with("data:image/png;base64,")
         );
-        assert!(viewed.data_url.starts_with("data:image/png;base64,"));
         assert!(matches!(viewed.detail, ImageDetail::High));
     }
 

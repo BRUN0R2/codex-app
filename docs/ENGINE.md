@@ -5,8 +5,8 @@ SQLite sem executar ou importar dados do Codex CLI.
 
 | Contrato | Valor atual |
 | --- | --- |
-| schema IPC | `19` |
-| schema SQLite | `4` |
+| schema IPC | `20` |
+| schema SQLite | `5` |
 | provider Codex | ChatGPT Codex Responses |
 | transporte | HTTPS/SSE |
 | sidecar | `rg.exe` 15.2.0 validado por hash |
@@ -71,11 +71,14 @@ As instruções-base vêm de `model_messages.instructions_template`, com
 separados e limitados, instruções do repositório, permissões, colaboração e
 ambiente. Não existe prompt universal local duplicando o protocolo do modelo.
 
-`tool_mode` e `multi_agent_version` são enums fechados. Um modelo
-`code_mode_only` é bloqueado enquanto o host Code Mode não existir. Ultra é
-bloqueado enquanto multiagente v2 não existir; o literal `ultra` nunca é enviado
-ao provider. Catálogo e capabilities, não nomes comerciais codificados na UI,
-definem esforços, tiers, modalidades, detalhe de imagem e janela de contexto.
+`tool_mode` desconhecido falha na fronteira. Uma versão futura desconhecida de
+`multi_agent_version` permanece decodificável, mas desativa MultiAgent e Ultra
+até que o runtime implemente explicitamente esse contrato. `direct`, `code_mode`
+e `code_mode_only` selecionam contratos próprios.
+Ultra só fica disponível com multiagente v2 e seu requisito aparece apenas na
+opção do seletor; o literal `ultra` nunca é enviado ao provider. Catálogo e
+capabilities, não nomes comerciais codificados na UI, definem esforço efetivo,
+tiers, modalidades, detalhe de imagem e janela de contexto.
 
 Antes de cada amostragem, o engine mede o request real e aplica margem de 12%.
 Quando o limite do catálogo é alcançado, Remote Compaction V2 instala um único
@@ -102,7 +105,9 @@ limitado a oito e os resultados voltam ao provider na ordem das chamadas.
 
 ## Ferramentas
 
-O catálogo completo atual possui 20 definições:
+O catálogo base possui 20 definições. Code Mode acrescenta `exec` e `wait` ou,
+em `code_mode_only`, substitui as ferramentas diretas por elas. Multiagente v2
+acrescenta seis ferramentas diretas quando habilitado:
 
 | Grupo | Ferramentas |
 | --- | --- |
@@ -110,6 +115,8 @@ O catálogo completo atual possui 20 definições:
 | execução | `exec_command`, `poll_command` |
 | patch freeform | `apply_patch` |
 | browser | `browser_manage`, `browser_snapshot`, `browser_screenshot`, `browser_viewport`, `browser_pointer`, `browser_type`, `browser_key`, `browser_wait`, `browser_metrics` |
+| Code Mode | `exec`, `wait` |
+| colaboração | `spawn_agent`, `send_message`, `followup_task`, `interrupt_agent`, `list_agents`, `wait_agent` |
 
 | Ferramenta | Somente leitura | Projeto | Acesso total |
 | --- | ---: | ---: | ---: |
@@ -154,13 +161,48 @@ O transcript integral é persistido em chunks e consultado por `read_output` ou
 `engine_output_read`. Conclusão do turno, exclusão e shutdown cancelam e drenam
 todas as sessões antes do evento terminal.
 
+### Code Mode
+
+`exec` avalia JavaScript em um isolate V8 sem Node.js, rede, filesystem ou APIs
+do host. O manifesto expõe apenas ferramentas já filtradas por permissão e
+capability; colaboração é sempre direta e não pode ser invocada de dentro do
+isolate. `wait` retoma ou encerra uma célula que cedeu o controle.
+
+| Limite | Valor |
+| --- | ---: |
+| source por execução | 1 MiB |
+| ferramentas aninhadas | 64 |
+| células ativas | 8 |
+| runtime por célula | 10 min |
+| output por célula | 4 MiB ou 256 itens |
+| valores persistidos | 128 entradas de até 1 MiB |
+| callbacks pendentes | 64 |
+
+O isolate é inicializado uma vez por processo e aquecido dentro da mesma
+barreira, evitando corrida entre testes, tarefas e runtimes concorrentes.
+Callbacks preservam cancelamento e backpressure; mutações serializam a célula e
+invalidam o cache de leitura antes da próxima chamada.
+
+### Multiagente v2
+
+As seis ferramentas de colaboração operam sobre uma árvore persistida. Há no
+máximo quatro agentes ativos, incluindo a raiz, e 64 tarefas por árvore. Spawn e
+mensagens são transacionais; `followup_task` acorda um agente ocioso,
+`send_message` apenas enfileira, e direcionamento do usuário acorda `wait_agent`.
+
+`fork_turns=all` herda modelo e esforço e rejeita overrides; `none` não herda
+contexto e um número positivo aceita até 1.000 turnos. A espera usa mínimo de
+10 s, padrão de 30 s e máximo de 1 h. Conclusão e interrupção publicam estados
+tipados e não dependem de polling do frontend.
+
 ### Imagens
 
 `view_image` é a única ferramenta de inspeção visual de arquivo local. Ela
 valida sandbox e cancelamento, decodifica PNG, JPEG, GIF ou WebP, limita arquivo
 a 10 MiB, dimensão a 16.384 px e alocação decodificada a 256 MiB. O provider
-recebe data URL; a timeline persiste apenas o path canônico e apresenta a
-atividade de imagem. O browser não participa desse fluxo.
+recebe data URL e a timeline referencia um snapshot gerenciado dos mesmos bytes
+validados, portanto alteração ou remoção posterior do original não muda o
+histórico. A atividade é “Visualizou uma imagem”; o browser não participa.
 
 ### Browser Use
 
@@ -178,7 +220,8 @@ Screenshot entra como conteúdo multimodal do tool output. Nova origem exige
 SQLite usa WAL e transações para alterações compostas. Calls sem output deixadas
 por interrupção recebem `aborted`; outputs órfãos são removidos. Turnos ativos no
 boot são recuperados para estado terminal explícito e comandos antigos nunca são
-reativados.
+reativados. A versão 5 adiciona identidades e mailboxes multiagente com migração
+cumulativa e validação exata das tabelas e colunas.
 
 `engine_turn_steer` persiste mensagem e entrada causal na mesma transação. A fila
 é promovida apenas depois da resposta que não a observou, preservando ordem mesmo

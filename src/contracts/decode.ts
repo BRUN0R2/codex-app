@@ -131,7 +131,7 @@ const REASONING_EFFORTS = [
   "ultra",
   "xhigh",
 ] as const;
-const MODEL_RUNTIME_CAPABILITIES = ["codeMode", "multiAgent"] as const;
+const MODEL_RUNTIME_CAPABILITIES = ["multiAgent"] as const;
 const CHAT_THINKING_EFFORTS = [
   "extended",
   "max",
@@ -207,7 +207,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [19] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [20] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -471,7 +471,6 @@ export function decodeModelListResponse(value: unknown): ModelListResponse {
   if (
     defaults.length !== 1 ||
     defaults[0]?.hidden === true ||
-    defaults[0]?.unsupportedRuntimeCapabilities.includes("codeMode") === true ||
     (defaults[0]?.defaultReasoningEffort !== null &&
       defaults[0]?.unsupportedReasoningEfforts.includes(defaults[0].defaultReasoningEffort) ===
         true)

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use serde::Deserialize;
+use serde::Deserializer;
 
 use crate::engine::CodexModel;
 use crate::engine::ConversationMode;
@@ -18,6 +19,7 @@ use crate::error::AppError;
 use super::super::output_compaction::ProviderOutputBudget;
 use super::responses::ReasoningSummarySetting;
 use super::responses::ResponseProtocol;
+use crate::engine::native::multi_agent::MultiAgentVersion;
 
 const MAX_MODEL_ID_BYTES: usize = 128;
 const MAX_MODEL_TEXT_BYTES: usize = 16_384;
@@ -75,8 +77,8 @@ struct ModelWire {
     multi_agent_reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     tool_mode: Option<ToolModeWire>,
-    #[serde(default)]
-    multi_agent_version: Option<MultiAgentVersionWire>,
+    #[serde(default, deserialize_with = "deserialize_multi_agent_version")]
+    multi_agent_version: Option<MultiAgentVersion>,
     #[serde(default)]
     truncation_policy: Option<TruncationPolicyWire>,
     #[serde(default)]
@@ -97,6 +99,28 @@ struct ModelMessagesWire {
     collaboration_modes: Option<CollaborationModeMessagesWire>,
     #[serde(default)]
     permissions: Option<PermissionMessagesWire>,
+    #[serde(default)]
+    multi_agent: Option<MultiAgentMessagesWire>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MultiAgentMessagesWire {
+    #[serde(default)]
+    role: Option<MultiAgentRoleMessagesWire>,
+    #[serde(default)]
+    mode: Option<MultiAgentModeMessagesWire>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MultiAgentRoleMessagesWire {
+    root: Option<String>,
+    subagent: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MultiAgentModeMessagesWire {
+    explicit: Option<String>,
+    hint_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -148,12 +172,37 @@ enum ToolModeWire {
     CodeModeOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum MultiAgentVersionWire {
-    Disabled,
-    V1,
-    V2,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ModelToolMode {
+    #[default]
+    Direct,
+    CodeMode,
+    CodeModeOnly,
+}
+
+impl From<ToolModeWire> for ModelToolMode {
+    fn from(value: ToolModeWire) -> Self {
+        match value {
+            ToolModeWire::Direct => Self::Direct,
+            ToolModeWire::CodeMode => Self::CodeMode,
+            ToolModeWire::CodeModeOnly => Self::CodeModeOnly,
+        }
+    }
+}
+
+fn deserialize_multi_agent_version<'de, D>(
+    deserializer: D,
+) -> Result<Option<MultiAgentVersion>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(match value.as_deref() {
+        Some("disabled") => Some(MultiAgentVersion::Disabled),
+        Some("v1") => Some(MultiAgentVersion::V1),
+        Some("v2") => Some(MultiAgentVersion::V2),
+        Some(_) | None => None,
+    })
 }
 
 impl ModelInstructionsVariablesWire {
@@ -223,9 +272,10 @@ pub struct SelectedModel {
     supports_image_input: bool,
     supports_image_detail_original: bool,
     web_search_tool_type: WebSearchToolType,
+    tool_mode: ModelToolMode,
+    multi_agent_version: MultiAgentVersion,
     multi_agent_reasoning_effort: Option<ReasoningEffort>,
     provider_output_budget: ProviderOutputBudget,
-    unsupported_runtime_capabilities: Vec<ModelRuntimeCapability>,
 }
 
 impl SelectedModel {
@@ -392,6 +442,58 @@ impl SelectedModel {
         matches!(self.web_search_tool_type, WebSearchToolType::TextAndImage)
     }
 
+    pub const fn tool_mode(&self) -> ModelToolMode {
+        self.tool_mode
+    }
+
+    pub const fn multi_agent_version(&self) -> MultiAgentVersion {
+        self.multi_agent_version
+    }
+
+    pub fn multi_agent_root_instructions(&self) -> Option<&str> {
+        self.model_messages
+            .as_ref()?
+            .multi_agent
+            .as_ref()?
+            .role
+            .as_ref()?
+            .root
+            .as_deref()
+    }
+
+    pub fn multi_agent_subagent_instructions(&self) -> Option<&str> {
+        self.model_messages
+            .as_ref()?
+            .multi_agent
+            .as_ref()?
+            .role
+            .as_ref()?
+            .subagent
+            .as_deref()
+    }
+
+    pub fn multi_agent_explicit_mode_instructions(&self) -> Option<&str> {
+        self.model_messages
+            .as_ref()?
+            .multi_agent
+            .as_ref()?
+            .mode
+            .as_ref()?
+            .explicit
+            .as_deref()
+    }
+
+    pub fn multi_agent_mode_hint(&self) -> Option<&str> {
+        self.model_messages
+            .as_ref()?
+            .multi_agent
+            .as_ref()?
+            .mode
+            .as_ref()?
+            .hint_text
+            .as_deref()
+    }
+
     pub const fn provider_output_budget(&self) -> ProviderOutputBudget {
         self.provider_output_budget
     }
@@ -432,28 +534,6 @@ impl SelectedModel {
                 .supported_reasoning_efforts
                 .iter()
                 .any(|option| option.reasoning_effort == effort)
-    }
-
-    fn ensure_runtime_supported(&self) -> Result<(), AppError> {
-        if !self
-            .unsupported_runtime_capabilities
-            .contains(&ModelRuntimeCapability::CodeMode)
-        {
-            return Ok(());
-        }
-        let requirements = self
-            .unsupported_runtime_capabilities
-            .iter()
-            .map(|capability| match capability {
-                ModelRuntimeCapability::CodeMode => "Code Mode",
-                ModelRuntimeCapability::MultiAgent => "multi-agent execution",
-            })
-            .collect::<Vec<_>>()
-            .join(" and ");
-        Err(AppError::Protocol(format!(
-            "model `{}` requires {requirements}, which this native runtime does not implement",
-            self.id()
-        )))
     }
 
     pub fn provider_reasoning_effort(
@@ -521,9 +601,8 @@ impl ModelCatalog {
             .iter()
             .find(|model| {
                 model.visibility == ModelVisibility::List
-                    && !unsupported_runtime_capabilities(model)
-                        .contains(&ModelRuntimeCapability::CodeMode)
-                    && model.default_reasoning_level != Some(ReasoningEffort::Ultra)
+                    && !(model.default_reasoning_level == Some(ReasoningEffort::Ultra)
+                        && model.multi_agent_version != Some(MultiAgentVersion::V2))
             })
             .map(|model| model.slug.clone())
             .ok_or_else(|| {
@@ -611,13 +690,15 @@ impl ModelCatalog {
             let auto_compact_token_limit = decode_auto_compact_token_limit(&model)?;
             let provider_output_budget = decode_provider_output_budget(&model)?;
             let unsupported_runtime_capabilities = unsupported_runtime_capabilities(&model);
-            let unsupported_reasoning_efforts = model
-                .supported_reasoning_levels
-                .iter()
-                .any(|preset| preset.effort == ReasoningEffort::Ultra)
-                .then_some(ReasoningEffort::Ultra)
-                .into_iter()
-                .collect();
+            let unsupported_reasoning_efforts = (model.multi_agent_version
+                != Some(MultiAgentVersion::V2)
+                && model
+                    .supported_reasoning_levels
+                    .iter()
+                    .any(|preset| preset.effort == ReasoningEffort::Ultra))
+            .then_some(ReasoningEffort::Ultra)
+            .into_iter()
+            .collect();
             let supported_reasoning_efforts = model
                 .supported_reasoning_levels
                 .into_iter()
@@ -699,9 +780,10 @@ impl ModelCatalog {
                 supports_image_input: model.input_modalities.contains(&InputModality::Image),
                 supports_image_detail_original: model.supports_image_detail_original,
                 web_search_tool_type: model.web_search_tool_type,
+                tool_mode: model.tool_mode.map(Into::into).unwrap_or_default(),
+                multi_agent_version: model.multi_agent_version.unwrap_or_default(),
                 multi_agent_reasoning_effort: model.multi_agent_reasoning_effort,
                 provider_output_budget,
-                unsupported_runtime_capabilities,
             });
         }
         Ok(Self { models })
@@ -709,6 +791,15 @@ impl ModelCatalog {
 
     pub fn models(&self) -> &[SelectedModel] {
         &self.models
+    }
+
+    pub fn multi_agent_models(&self) -> Vec<CodexModel> {
+        self.models
+            .iter()
+            .filter(|model| model.multi_agent_version == MultiAgentVersion::V2)
+            .map(SelectedModel::summary)
+            .filter(|model| !model.hidden)
+            .collect()
     }
 
     pub fn select(&self, requested: Option<&str>) -> Result<SelectedModel, AppError> {
@@ -722,27 +813,13 @@ impl ModelCatalog {
                 None => "the current model catalog has no default".into(),
             })
         })?;
-        selected.ensure_runtime_supported()?;
         Ok(selected)
     }
 }
 
 fn unsupported_runtime_capabilities(model: &ModelWire) -> Vec<ModelRuntimeCapability> {
-    let mut capabilities = Vec::with_capacity(2);
-    if matches!(
-        model.tool_mode,
-        Some(ToolModeWire::CodeMode | ToolModeWire::CodeModeOnly)
-    ) {
-        capabilities.push(ModelRuntimeCapability::CodeMode);
-    }
-    if matches!(
-        model.multi_agent_version,
-        Some(MultiAgentVersionWire::V1 | MultiAgentVersionWire::V2)
-    ) || model
-        .supported_reasoning_levels
-        .iter()
-        .any(|preset| preset.effort == ReasoningEffort::Ultra)
-    {
+    let mut capabilities = Vec::with_capacity(1);
+    if matches!(model.multi_agent_version, Some(MultiAgentVersion::V1)) {
         capabilities.push(ModelRuntimeCapability::MultiAgent);
     }
     capabilities
@@ -1013,8 +1090,7 @@ mod tests {
     use super::ModelsWire;
     use super::ResponseProtocol;
     use crate::engine::{
-        ConversationMode, ModelRuntimeCapability, ModelVerbosity, PermissionProfile, Personality,
-        ReasoningEffort,
+        ConversationMode, ModelVerbosity, PermissionProfile, Personality, ReasoningEffort,
     };
 
     #[test]
@@ -1088,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_fails_closed_for_models_that_require_unimplemented_runtime_capabilities() {
+    fn catalog_enables_code_mode_and_v2_ultra_models() {
         let wire: ModelsWire = serde_json::from_str(
             r#"{
                 "models": [
@@ -1132,26 +1208,69 @@ mod tests {
         let catalog = ModelCatalog::from_wire(wire, 2).expect("catalog should validate");
         let code_mode = catalog.models()[0].summary();
 
-        assert_eq!(
-            code_mode.unsupported_runtime_capabilities,
-            vec![
-                ModelRuntimeCapability::CodeMode,
-                ModelRuntimeCapability::MultiAgent,
-            ]
-        );
-        assert!(!code_mode.is_default);
+        assert!(code_mode.unsupported_runtime_capabilities.is_empty());
+        assert!(code_mode.unsupported_reasoning_efforts.is_empty());
+        assert!(code_mode.is_default);
         assert_eq!(
             catalog
                 .select(None)
                 .expect("the supported default should resolve")
                 .id(),
-            "gpt-direct"
+            "gpt-code-mode"
         );
-        let error = catalog
+        let selected = catalog
             .select(Some("gpt-code-mode"))
-            .expect_err("an incompatible explicit selection must fail closed");
-        assert!(error.to_string().contains("Code Mode"));
-        assert!(error.to_string().contains("multi-agent execution"));
+            .expect("a Code Mode model must be executable without enabling Ultra");
+        assert_eq!(selected.id(), "gpt-code-mode");
+        assert_eq!(selected.tool_mode(), super::ModelToolMode::CodeModeOnly);
+        assert_eq!(
+            catalog
+                .multi_agent_models()
+                .into_iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>(),
+            ["gpt-code-mode"]
+        );
+    }
+
+    #[test]
+    fn unknown_multi_agent_versions_fail_closed() {
+        let wire: ModelsWire = serde_json::from_str(
+            r#"{
+                "models": [{
+                    "slug": "gpt-future-runtime",
+                    "display_name": "GPT Future Runtime",
+                    "description": null,
+                    "default_reasoning_level": "high",
+                    "supported_reasoning_levels": [
+                        {"effort":"high","description":"deep"},
+                        {"effort":"ultra","description":"delegated"}
+                    ],
+                    "visibility": "list",
+                    "priority": 0,
+                    "service_tiers": [],
+                    "default_service_tier": null,
+                    "multi_agent_version": "v3",
+                    "base_instructions": "Be useful."
+                }]
+            }"#,
+        )
+        .expect("future runtime fixture should decode without enabling it");
+        let model = ModelCatalog::from_wire(wire, 1)
+            .expect("future runtime fixture should validate")
+            .select(None)
+            .expect("non-Ultra model default should remain usable");
+
+        assert_eq!(
+            model.multi_agent_version(),
+            super::MultiAgentVersion::Disabled
+        );
+        assert!(
+            model
+                .summary()
+                .unsupported_reasoning_efforts
+                .contains(&ReasoningEffort::Ultra)
+        );
     }
 
     #[test]
@@ -1183,6 +1302,62 @@ mod tests {
             catalog.models()[0]
                 .select_verbosity(Some(ModelVerbosity::High))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn catalog_never_selects_an_unavailable_ultra_default() {
+        let wire: ModelsWire = serde_json::from_str(
+            r#"{
+                "models": [
+                    {
+                        "slug": "gpt-legacy-ultra",
+                        "display_name": "GPT Legacy Ultra",
+                        "description": null,
+                        "default_reasoning_level": "ultra",
+                        "supported_reasoning_levels": [
+                            {"effort":"ultra","description":"delegated"}
+                        ],
+                        "visibility": "list",
+                        "priority": 0,
+                        "service_tiers": [],
+                        "default_service_tier": null,
+                        "multi_agent_version": "v1",
+                        "base_instructions": "Be useful."
+                    },
+                    {
+                        "slug": "gpt-native-default",
+                        "display_name": "GPT Native Default",
+                        "description": null,
+                        "default_reasoning_level": "medium",
+                        "supported_reasoning_levels": [
+                            {"effort":"medium","description":"balanced"}
+                        ],
+                        "visibility": "list",
+                        "priority": 1,
+                        "service_tiers": [],
+                        "default_service_tier": null,
+                        "base_instructions": "Be useful."
+                    }
+                ]
+            }"#,
+        )
+        .expect("unavailable Ultra fixture should decode");
+        let catalog = ModelCatalog::from_wire(wire, 2).expect("catalog should validate");
+
+        assert_eq!(
+            catalog
+                .select(None)
+                .expect("runtime-compatible default should resolve")
+                .id(),
+            "gpt-native-default"
+        );
+        assert!(
+            !catalog
+                .select(Some("gpt-legacy-ultra"))
+                .expect("legacy model remains selectable")
+                .summary()
+                .is_default
         );
     }
 

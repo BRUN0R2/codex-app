@@ -436,6 +436,8 @@ pub enum ResponseItem {
         call_id: String,
     },
     FunctionCallOutput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         call_id: String,
         output: FunctionCallOutputPayload,
     },
@@ -449,8 +451,12 @@ pub enum ResponseItem {
         input: String,
     },
     CustomToolCallOutput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         call_id: String,
-        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        output: FunctionCallOutputPayload,
     },
     WebSearchCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -478,10 +484,6 @@ pub enum FunctionCallOutputPayload {
 }
 
 impl FunctionCallOutputPayload {
-    pub(crate) fn text(value: impl Into<String>) -> Self {
-        Self::Text(value.into())
-    }
-
     pub(crate) fn content(&self) -> Option<&[FunctionCallOutputContent]> {
         match self {
             Self::Text(_) => None,
@@ -492,6 +494,10 @@ impl FunctionCallOutputPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "Responses API wire names are input_text, input_image, and input_audio"
+)]
 pub enum FunctionCallOutputContent {
     InputText {
         text: String,
@@ -500,6 +506,9 @@ pub enum FunctionCallOutputContent {
         image_url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<ImageDetail>,
+    },
+    InputAudio {
+        audio_url: String,
     },
 }
 
@@ -533,6 +542,7 @@ impl InternalChatMessageMetadataPassthrough {
 }
 
 impl ResponseItem {
+    #[cfg(test)]
     pub fn user_content(content: Vec<ResponseContent>) -> Self {
         Self::Message {
             id: None,
@@ -543,10 +553,48 @@ impl ResponseItem {
         }
     }
 
-    pub fn context_text(role: impl Into<String>, text: String, content_kind: &str) -> Self {
+    pub fn user_content_with_id(stable_seed: &str, content: Vec<ResponseContent>) -> Self {
         Self::Message {
-            id: None,
-            role: role.into(),
+            id: Some(stable_item_id("msg", [stable_seed])),
+            role: "user".into(),
+            content,
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    pub fn context_text(role: impl Into<String>, text: String, content_kind: &str) -> Self {
+        let role = role.into();
+        Self::Message {
+            id: Some(stable_item_id(
+                "msg",
+                [role.as_str(), content_kind, text.as_str()],
+            )),
+            role,
+            content: vec![ResponseContent::InputText { text }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    turn_id: None,
+                    content_item_kinds: Some(vec![content_kind.into()]),
+                },
+            ),
+        }
+    }
+
+    pub fn context_text_with_seed(
+        role: impl Into<String>,
+        text: String,
+        content_kind: &str,
+        stable_seed: &str,
+    ) -> Self {
+        let role = role.into();
+        Self::Message {
+            id: Some(stable_item_id(
+                "msg",
+                [role.as_str(), content_kind, stable_seed, text.as_str()],
+            )),
+            role,
             content: vec![ResponseContent::InputText { text }],
             phase: None,
             internal_chat_message_metadata_passthrough: Some(
@@ -559,9 +607,15 @@ impl ResponseItem {
     }
 
     pub fn function_output(call_id: String, output: String) -> Self {
+        Self::function_output_payload(call_id, FunctionCallOutputPayload::Text(output))
+    }
+
+    pub fn function_output_payload(call_id: String, output: FunctionCallOutputPayload) -> Self {
+        let id = stable_item_id("fco", [call_id.as_str()]);
         Self::FunctionCallOutput {
+            id: Some(id),
             call_id,
-            output: FunctionCallOutputPayload::Text(output),
+            output,
         }
     }
 
@@ -576,14 +630,26 @@ impl ResponseItem {
             output.push(FunctionCallOutputContent::InputText { text });
         }
         output.push(FunctionCallOutputContent::InputImage { image_url, detail });
+        let id = stable_item_id("fco", [call_id.as_str()]);
         Self::FunctionCallOutput {
+            id: Some(id),
             call_id,
             output: FunctionCallOutputPayload::Content(output),
         }
     }
 
     pub fn custom_output(call_id: String, output: String) -> Self {
-        Self::CustomToolCallOutput { call_id, output }
+        Self::custom_output_payload(call_id, FunctionCallOutputPayload::Text(output))
+    }
+
+    pub fn custom_output_payload(call_id: String, output: FunctionCallOutputPayload) -> Self {
+        let id = stable_item_id("ctco", [call_id.as_str()]);
+        Self::CustomToolCallOutput {
+            id: Some(id),
+            call_id,
+            name: None,
+            output,
+        }
     }
 
     pub fn compaction_trigger() -> Self {
@@ -597,10 +663,10 @@ impl ResponseItem {
             | Self::FunctionCall { id, .. }
             | Self::CustomToolCall { id, .. }
             | Self::WebSearchCall { id, .. }
-            | Self::Compaction { id, .. } => id.as_deref(),
-            Self::FunctionCallOutput { .. }
-            | Self::CustomToolCallOutput { .. }
-            | Self::CompactionTrigger { .. } => None,
+            | Self::Compaction { id, .. }
+            | Self::FunctionCallOutput { id, .. }
+            | Self::CustomToolCallOutput { id, .. } => id.as_deref(),
+            Self::CompactionTrigger { .. } => None,
         }
     }
 
@@ -715,6 +781,15 @@ impl ResponseItem {
             _ => false,
         }
     }
+}
+
+fn stable_item_id<'a>(prefix: &str, segments: impl IntoIterator<Item = &'a str>) -> String {
+    let namespace = segments
+        .into_iter()
+        .fold(Uuid::NAMESPACE_OID, |namespace, segment| {
+            Uuid::new_v5(&namespace, segment.as_bytes())
+        });
+    format!("{prefix}_{namespace}")
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1479,6 +1554,8 @@ mod tests {
     use crate::engine::ReasoningEffort;
 
     use super::DEFAULT_FUNCTION_NAMESPACE;
+    use super::FunctionCallOutputContent;
+    use super::FunctionCallOutputPayload;
     use super::ReasoningSummarySetting;
     use super::ResponseContent;
     use super::ResponseEvent;
@@ -1498,8 +1575,44 @@ mod tests {
         .expect("custom output should serialize");
 
         assert_eq!(value["type"], "custom_tool_call_output");
+        assert!(
+            value["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("ctco_"))
+        );
         assert_eq!(value["call_id"], "call-1");
         assert_eq!(value["output"], "patch applied");
+    }
+
+    #[test]
+    fn custom_tool_output_supports_structured_code_mode_content() {
+        let output = FunctionCallOutputPayload::Content(vec![
+            FunctionCallOutputContent::InputText {
+                text: "preview".into(),
+            },
+            FunctionCallOutputContent::InputImage {
+                image_url: "data:image/png;base64,AA==".into(),
+                detail: Some(ImageDetail::High),
+            },
+            FunctionCallOutputContent::InputAudio {
+                audio_url: "data:audio/wav;base64,AA==".into(),
+            },
+        ]);
+        let first = serde_json::to_value(ResponseItem::custom_output_payload(
+            "call-code".into(),
+            output.clone(),
+        ))
+        .expect("structured custom output should serialize");
+        let retried = serde_json::to_value(ResponseItem::custom_output_payload(
+            "call-code".into(),
+            output,
+        ))
+        .expect("retried custom output should serialize");
+
+        assert_eq!(first["id"], retried["id"]);
+        assert_eq!(first["output"][0]["type"], "input_text");
+        assert_eq!(first["output"][1]["type"], "input_image");
+        assert_eq!(first["output"][2]["type"], "input_audio");
     }
 
     #[test]
@@ -1513,6 +1626,11 @@ mod tests {
         .expect("multimodal function output should serialize");
 
         assert_eq!(value["type"], "function_call_output");
+        assert!(
+            value["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("fco_"))
+        );
         assert_eq!(value["call_id"], "call-1");
         assert_eq!(value["output"][0]["type"], "input_text");
         assert_eq!(value["output"][0]["text"], "browser snapshot");
@@ -1812,6 +1930,38 @@ mod tests {
         let encoded = serde_json::to_value(request).expect("request should serialize");
 
         assert!(encoded.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn locally_generated_messages_keep_stable_prefixed_ids() {
+        let first = ResponseItem::user_content_with_id(
+            "client-message-1",
+            vec![ResponseContent::InputText {
+                text: "hello".into(),
+            }],
+        );
+        let retried = ResponseItem::user_content_with_id(
+            "client-message-1",
+            vec![ResponseContent::InputText {
+                text: "hello".into(),
+            }],
+        );
+        let other = ResponseItem::user_content_with_id(
+            "client-message-2",
+            vec![ResponseContent::InputText {
+                text: "hello".into(),
+            }],
+        );
+        let context = ResponseItem::context_text("developer", "context".into(), "context.kind");
+        let rebuilt_context =
+            ResponseItem::context_text("developer", "context".into(), "context.kind");
+
+        assert_eq!(first.id(), retried.id());
+        assert_ne!(first.id(), other.id());
+        assert_eq!(context.id(), rebuilt_context.id());
+        for id in [first.id(), other.id(), context.id()] {
+            assert!(id.is_some_and(|id| id.starts_with("msg_")));
+        }
     }
 
     #[test]

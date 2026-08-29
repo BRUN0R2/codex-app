@@ -15,9 +15,9 @@ use crate::engine::{
     CancelLoginResponse, ChatModelListResponse, ConfigUpdate, ConfigUpdateResponse,
     ConversationMode, CreateAutomation, EngineManager, EngineStartResponse, LoginResponse,
     LogoutResponse, ModelListResponse, OperationAck, OutputReadResponse, ReasoningEffort,
-    RuntimeDiagnosticSubsystem, ServerResponse, StartTurn, SteerTurn, ThreadForkResponse,
-    ThreadListResponse, ThreadReadResponse, ThreadResumeResponse, ThreadStartResponse,
-    ThreadUnarchiveResponse, TurnInput, TurnStartResponse, UpdateAutomation,
+    RuntimeDiagnosticSubsystem, ServerResponse, StartTurn, StartTurnContent, SteerTurn,
+    ThreadForkResponse, ThreadListResponse, ThreadReadResponse, ThreadResumeResponse,
+    ThreadStartResponse, ThreadUnarchiveResponse, TurnInput, TurnStartResponse, UpdateAutomation,
     UsageResetCreditsResponse, UsageResetRedemptionResponse,
 };
 use crate::error::{AppError, CommandError, CommandResult};
@@ -539,8 +539,10 @@ pub async fn engine_turn_start(
             &app,
             StartTurn {
                 thread_id: request.thread_id,
-                client_user_message_id: request.client_user_message_id,
-                input,
+                content: StartTurnContent::User {
+                    client_user_message_id: request.client_user_message_id,
+                    input,
+                },
                 model,
                 effort: request.effort,
                 service_tier: request.service_tier.into_option()?,

@@ -4,11 +4,13 @@ mod approval;
 pub(crate) mod auth;
 mod automation;
 mod chat;
+mod code_mode;
 mod compaction;
 mod content_references;
 mod context_window;
 mod diagnostics;
 mod file_diff;
+mod multi_agent;
 mod output;
 mod output_compaction;
 mod prompt_context;
@@ -40,7 +42,9 @@ use self::automation::{
     AutomationDraft, AutomationUpdate, ClaimedAutomationRun, MAX_CONCURRENT_AUTOMATION_RUNS,
 };
 use self::chat::ChatGptConsumerProvider;
+use self::code_mode::CodeModeSessionRegistry;
 use self::diagnostics::RuntimeDiagnostics;
+use self::multi_agent::{AgentStatus, MultiAgentManager};
 use self::provider::ChatGptCodexProvider;
 use self::storage::NativeStorage;
 use self::tools::{CommandSessionManager, Ripgrep, ToolRegistry};
@@ -61,7 +65,7 @@ use crate::engine::{
 };
 use crate::error::AppError;
 
-pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 19;
+pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 20;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTOMATION_SCHEDULER_MAX_SLEEP: Duration = Duration::from_secs(15 * 60);
@@ -69,13 +73,20 @@ const AUTOMATION_SCHEDULER_RETRY_DELAY: Duration = Duration::from_secs(15);
 
 pub struct StartTurn {
     pub thread_id: String,
-    pub client_user_message_id: String,
-    pub input: Vec<TurnInput>,
+    pub content: StartTurnContent,
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
     pub service_tier: Option<String>,
     pub timezone: String,
     pub timezone_offset_min: i32,
+}
+
+pub enum StartTurnContent {
+    User {
+        client_user_message_id: String,
+        input: Vec<TurnInput>,
+    },
+    AgentMailbox,
 }
 
 pub struct SteerTurn {
@@ -187,6 +198,8 @@ pub(super) struct NativeEngineInner {
     tools: ToolRegistry,
     ripgrep: Ripgrep,
     command_sessions: CommandSessionManager,
+    code_mode_sessions: CodeModeSessionRegistry,
+    multi_agents: MultiAgentManager,
     approvals: ApprovalBroker,
     diagnostics: Arc<RuntimeDiagnostics>,
     active_turns: Mutex<HashMap<String, ActiveTurn>>,
@@ -220,6 +233,8 @@ impl NativeEngine {
                 tools: ToolRegistry,
                 ripgrep: Ripgrep::default(),
                 command_sessions: CommandSessionManager::default(),
+                code_mode_sessions: CodeModeSessionRegistry::default(),
+                multi_agents: MultiAgentManager::default(),
                 approvals: ApprovalBroker::default(),
                 diagnostics,
                 active_turns: Mutex::new(HashMap::new()),
@@ -432,8 +447,10 @@ impl NativeEngine {
                     app,
                     StartTurn {
                         thread_id: thread.thread.id.clone(),
-                        client_user_message_id: Uuid::now_v7().to_string(),
-                        input: vec![TurnInput::Text(claim.automation.prompt.clone())],
+                        content: StartTurnContent::User {
+                            client_user_message_id: Uuid::now_v7().to_string(),
+                            input: vec![TurnInput::Text(claim.automation.prompt.clone())],
+                        },
                         model: None,
                         effort: None,
                         service_tier: None,
@@ -788,6 +805,7 @@ impl NativeEngine {
             ));
         }
         let response = self.inner.storage.archive_thread(thread_id.clone()).await?;
+        self.inner.code_mode_sessions.close(&thread_id).await;
         self.inner.emit_notification(
             app,
             EngineNotification::ThreadArchived(ThreadArchivedNotification { thread_id }),
@@ -842,6 +860,8 @@ impl NativeEngine {
             drop(active_turns);
             let Some(pending) = pending else {
                 let response = self.inner.storage.delete_thread(thread_id.clone()).await?;
+                self.inner.code_mode_sessions.close(&thread_id).await;
+                self.inner.multi_agents.forget_tree(&thread_id).await;
                 drop(lifecycle_guard);
                 self.inner.emit_notification(
                     app,
@@ -958,22 +978,46 @@ impl NativeEngine {
         }
         let provider_reasoning_effort = model.provider_reasoning_effort(reasoning_effort);
         let service_tier = model.select_service_tier(request.service_tier.as_deref())?;
-        let prepared =
-            agent::prepare_user_input(request.client_user_message_id, request.input).await?;
-        let user_item = prepared.user_item.clone();
         let lifecycle_guard = self.inner.thread_lifecycle_gate.lock().await;
-        let turn = self
-            .inner
-            .storage
-            .begin_turn(
-                request.thread_id.clone(),
-                model.id().into(),
-                reasoning_effort.map(|effort| effort.as_str().to_string()),
-                prepared.user_item,
-                prepared.provider_item,
-                prepared.preview,
-            )
-            .await?;
+        let (turn, user_item) = match request.content {
+            StartTurnContent::User {
+                client_user_message_id,
+                input,
+            } => {
+                let prepared = agent::prepare_user_input(client_user_message_id, input).await?;
+                let user_item = prepared.user_item.clone();
+                let turn = self
+                    .inner
+                    .storage
+                    .begin_turn(
+                        request.thread_id.clone(),
+                        model.id().into(),
+                        reasoning_effort.map(|effort| effort.as_str().to_string()),
+                        prepared.user_item,
+                        prepared.provider_item,
+                        prepared.preview,
+                    )
+                    .await?;
+                (turn, Some(user_item))
+            }
+            StartTurnContent::AgentMailbox => {
+                if automation_run_id.is_some() {
+                    return Err(AppError::State(
+                        "automation runs require explicit user input".into(),
+                    ));
+                }
+                let turn = self
+                    .inner
+                    .storage
+                    .begin_agent_turn(
+                        request.thread_id.clone(),
+                        model.id().into(),
+                        reasoning_effort.map(|effort| effort.as_str().to_string()),
+                    )
+                    .await?;
+                (turn, None)
+            }
+        };
         let cancellation = self
             .inner
             .claim_active_turn(&request.thread_id, &turn, true)
@@ -1014,7 +1058,7 @@ impl NativeEngine {
         };
 
         self.inner
-            .announce_turn_start(app, &request.thread_id, &turn, Some(user_item))
+            .announce_turn_start(app, &request.thread_id, &turn, user_item)
             .await?;
 
         let task_thread_id = request.thread_id.clone();
@@ -1025,6 +1069,7 @@ impl NativeEngine {
             mode: thread.mode,
             model,
             config,
+            selected_reasoning_effort: reasoning_effort,
             provider_reasoning_effort,
             service_tier,
             timezone: request.timezone,
@@ -1058,9 +1103,16 @@ impl NativeEngine {
             .chat
             .select_model(app, &self.inner.auth, request.model.as_deref())
             .await?;
-        let prepared =
-            agent::prepare_user_input(request.client_user_message_id.clone(), request.input)
-                .await?;
+        let StartTurnContent::User {
+            client_user_message_id,
+            input,
+        } = request.content
+        else {
+            return Err(AppError::State(
+                "Chat threads cannot consume agent mailbox input".into(),
+            ));
+        };
+        let prepared = agent::prepare_user_input(client_user_message_id.clone(), input).await?;
         let prompt = chat::prompt_from_prepared_turn(&prepared)?;
         let user_item = prepared.user_item.clone();
         let lifecycle_guard = self.inner.thread_lifecycle_gate.lock().await;
@@ -1091,7 +1143,7 @@ impl NativeEngine {
         let run = chat::ChatTurnRun {
             thread_id: request.thread_id,
             turn_id: turn.id.clone(),
-            user_message_id: request.client_user_message_id,
+            user_message_id: client_user_message_id,
             prompt,
             model,
             timezone: request.timezone,
@@ -1156,6 +1208,10 @@ impl NativeEngine {
                 .await?;
             active.record_steer(pending_sequence);
         }
+        self.inner
+            .multi_agents
+            .notify_steer(&request.thread_id)
+            .await;
 
         if let Err(error) = self.inner.emit_notification(
             app,
@@ -1407,6 +1463,7 @@ impl NativeEngine {
         for cancellation in cancellations {
             let _receiver_already_closed = cancellation.send(true);
         }
+        self.inner.code_mode_sessions.shutdown().await;
         if let Err(error) = self.inner.command_sessions.shutdown().await {
             self.inner.emit_diagnostic(
                 app,
@@ -1648,9 +1705,12 @@ impl NativeEngineInner {
                     .await
             };
             self.active_turns.lock().await.remove(&thread_id);
+            self.multi_agents.notify_turn_settled(&thread_id).await;
             drop(lifecycle_guard);
             match deletion {
                 Ok(response) => {
+                    self.code_mode_sessions.close(&thread_id).await;
+                    self.multi_agents.forget_tree(&thread_id).await;
                     if let Ok(settlement) = &completion
                         && let Some(run) = settlement.automation_run.clone()
                     {
@@ -1683,10 +1743,37 @@ impl NativeEngineInner {
                 }
             }
         } else {
+            self.multi_agents.notify_turn_settled(&thread_id).await;
             drop(lifecycle_guard);
         }
 
         let settlement = completion?;
+        let agent_status = match status {
+            TurnStatus::Completed => AgentStatus::Completed(
+                self.storage
+                    .latest_agent_message_for_turn(turn_id.to_string())
+                    .await?,
+            ),
+            TurnStatus::Failed => AgentStatus::Errored(
+                failure
+                    .as_ref()
+                    .map(|failure| failure.message.clone())
+                    .unwrap_or_else(|| "agent turn failed".into()),
+            ),
+            TurnStatus::Interrupted => AgentStatus::Interrupted,
+            TurnStatus::InProgress => {
+                return Err(AppError::State(
+                    "an in-progress turn cannot enter settlement delivery".into(),
+                ));
+            }
+        };
+        if let Err(error) = multi_agent::deliver_completion(self, &thread_id, agent_status).await {
+            self.emit_diagnostic(
+                app,
+                DiagnosticStream::Runtime,
+                format!("could not deliver agent completion for `{thread_id}`: {error}"),
+            );
+        }
         if let Some(run) = settlement.automation_run {
             if let Err(error) = self.emit_notification(
                 app,

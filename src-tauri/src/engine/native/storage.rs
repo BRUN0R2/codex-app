@@ -17,6 +17,10 @@ use super::automation::{
     MAX_CONCURRENT_AUTOMATION_RUNS, advance_due_run, next_run_from_now, validate_interval,
 };
 use super::context_window::ContextUsageSnapshot;
+use super::multi_agent::{
+    AgentIdentity, AgentMessageState, AgentPath, AgentStatus, AgentThreadDraft, ForkTurns,
+    MAX_AGENT_THREADS_PER_TREE,
+};
 use super::output::{OUTPUT_CHUNK_BYTES, OutputSource};
 use super::provider::ResponseItem;
 use super::terminal_output::normalize_terminal_bytes;
@@ -26,8 +30,8 @@ use crate::engine::{
     ActivityStatus, AppConfig, Automation, AutomationListResponse, AutomationRun,
     AutomationRunStatus, AutomationRunTrigger, CompletedTurn, ConfigReadResponse, ConfigUpdate,
     ConfigUpdateResponse, ConversationMode, DesktopPreferences, ModelContextWindowPreference,
-    OperationAck, OutputReadResponse, ThreadActiveFlag, ThreadItem, ThreadListResponse,
-    ThreadOutput, ThreadStatus, ThreadSummary, TurnStatus, TurnSummary,
+    OperationAck, OutputReadResponse, ReasoningEffort, ThreadActiveFlag, ThreadItem,
+    ThreadListResponse, ThreadOutput, ThreadStatus, ThreadSummary, TurnStatus, TurnSummary,
 };
 use crate::error::AppError;
 
@@ -42,12 +46,13 @@ use self::output_search::OutputSearcher;
 pub(super) use self::output_search::{MAX_OUTPUT_SEARCH_QUERY_BYTES, OutputSearchResponse};
 
 const DATABASE_FILE_NAME: &str = "native-state-profile-v2.sqlite3";
-const DATABASE_SCHEMA_VERSION: i64 = 4;
+const DATABASE_SCHEMA_VERSION: i64 = 5;
 const FIRST_SCHEMA_VERSION: i64 = 1;
 const SCHEMA_VERSION_WITH_OUTPUT_RESOURCES: i64 = 2;
 const SCHEMA_VERSION_WITH_AUTOMATIONS: i64 = 3;
+const SCHEMA_VERSION_WITH_PENDING_TURN_INPUTS: i64 = 4;
 const DATABASE_APPLICATION_ID: i64 = 1_128_552_527;
-const DATABASE_TABLES: &str = "app_config,automation_runs,automations,chat_conversations,output_chunks,output_resources,pending_turn_inputs,provider_items,thread_items,threads,turns";
+const DATABASE_TABLES: &str = "agent_messages,agent_threads,app_config,automation_runs,automations,chat_conversations,output_chunks,output_resources,pending_turn_inputs,provider_items,thread_items,threads,turns";
 // Every lineage version below DATABASE_SCHEMA_VERSION must have a cumulative
 // entry; the pre-migration validator rejects unknown source versions.
 const SCHEMA_BASELINE_TABLES: &[(i64, &[&str])] = &[
@@ -90,11 +95,29 @@ const SCHEMA_BASELINE_TABLES: &[(i64, &[&str])] = &[
             "turns",
         ],
     ),
+    (
+        SCHEMA_VERSION_WITH_PENDING_TURN_INPUTS,
+        &[
+            "app_config",
+            "automation_runs",
+            "automations",
+            "chat_conversations",
+            "output_chunks",
+            "output_resources",
+            "pending_turn_inputs",
+            "provider_items",
+            "thread_items",
+            "threads",
+            "turns",
+        ],
+    ),
 ];
 const THREAD_COLUMNS: &str = "id,cwd,name,preview,archived,created_at,updated_at,project_path,mode";
 const TURN_COLUMNS: &str =
     "id,thread_id,owner_id,status,model,reasoning_effort,error,created_at,updated_at";
 const PENDING_TURN_INPUT_COLUMNS: &str = "sequence,turn_id,item_id,payload";
+const AGENT_THREAD_COLUMNS: &str = "thread_id,root_thread_id,parent_thread_id,agent_path,task_name,model,reasoning_effort,service_tier,created_at,updated_at";
+const AGENT_MESSAGE_COLUMNS: &str = "sequence,id,root_thread_id,sender_thread_id,recipient_thread_id,payload,created_at,delivered_at";
 const AUTOMATION_COLUMNS: &str = "id,name,prompt,project_path,enabled,interval_minutes,timezone,timezone_offset_min,next_run_at,last_run_at,version,created_at,updated_at";
 const AUTOMATION_RUN_COLUMNS: &str = "id,automation_id,trigger,status,thread_id,turn_id,error,reviewed,created_at,started_at,completed_at";
 const THREAD_PAGE_SIZE: usize = 50;
@@ -173,6 +196,39 @@ const PENDING_TURN_INPUT_SCHEMA_SQL: &str = "
     );
     CREATE INDEX pending_turn_inputs_turn_sequence
         ON pending_turn_inputs(turn_id, sequence);
+";
+const MULTI_AGENT_SCHEMA_SQL: &str = "
+    CREATE TABLE agent_threads (
+        thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+        root_thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        parent_thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        agent_path TEXT NOT NULL,
+        task_name TEXT NOT NULL,
+        model TEXT NOT NULL,
+        reasoning_effort TEXT,
+        service_tier TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(root_thread_id, agent_path),
+        CHECK (thread_id != root_thread_id),
+        CHECK (agent_path LIKE '/root/%')
+    );
+    CREATE INDEX agent_threads_root_path
+        ON agent_threads(root_thread_id, agent_path);
+    CREATE INDEX agent_threads_parent
+        ON agent_threads(parent_thread_id, created_at, thread_id);
+    CREATE TABLE agent_messages (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        root_thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        sender_thread_id TEXT REFERENCES threads(id) ON DELETE SET NULL,
+        recipient_thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        payload TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        delivered_at INTEGER
+    );
+    CREATE INDEX agent_messages_recipient_delivery
+        ON agent_messages(recipient_thread_id, delivered_at, sequence);
 ";
 
 type SqlitePool = Pool<SqliteConnectionManager>;
@@ -305,6 +361,10 @@ impl NativeStorage {
                 }
                 if current_version == SCHEMA_VERSION_WITH_AUTOMATIONS {
                     migrate_database_v3_to_v4(&mut connection)?;
+                    current_version = SCHEMA_VERSION_WITH_PENDING_TURN_INPUTS;
+                }
+                if current_version == SCHEMA_VERSION_WITH_PENDING_TURN_INPUTS {
+                    migrate_database_v4_to_v5(&mut connection)?;
                 }
                 let migrated_version: i64 = connection
                     .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -403,6 +463,9 @@ impl NativeStorage {
                             EXISTS(SELECT 1 FROM turns WHERE thread_id = threads.id AND status = 'inProgress')
                      FROM threads
                      WHERE archived = ?3
+                       AND NOT EXISTS(
+                           SELECT 1 FROM agent_threads WHERE agent_threads.thread_id = threads.id
+                       )
                      ORDER BY updated_at DESC, id DESC
                      LIMIT ?1 OFFSET ?2",
                 )
@@ -739,6 +802,33 @@ impl NativeStorage {
                     ));
                 }
             }
+            let active_descendants: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM agent_threads
+                         JOIN turns ON turns.thread_id = agent_threads.thread_id
+                         WHERE agent_threads.root_thread_id = ?1
+                           AND turns.status = 'inProgress'
+                     )",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if active_descendants {
+                return Err(AppError::State(
+                    "an agent tree cannot be deleted while a sub-agent is active".into(),
+                ));
+            }
+            transaction
+                .execute(
+                    "DELETE FROM threads
+                     WHERE id IN (
+                         SELECT thread_id FROM agent_threads WHERE root_thread_id = ?1
+                     )",
+                    [&thread_id],
+                )
+                .map_err(storage_error)?;
             let changed = transaction
                 .execute("DELETE FROM threads WHERE id = ?1", [&thread_id])
                 .map_err(storage_error)?;
@@ -874,6 +964,415 @@ impl NativeStorage {
                 .map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
             load_thread_page(&connection, &fork_id, None)
+        })
+        .await
+    }
+
+    pub(super) async fn create_agent_thread(
+        &self,
+        draft: AgentThreadDraft,
+    ) -> Result<AgentIdentity, AppError> {
+        let preview = truncate_utf8(draft.preview.trim(), MAX_PREVIEW_BYTES);
+        let initial_message_id = draft
+            .initial_message
+            .id()
+            .ok_or_else(|| AppError::State("initial agent task is missing its provider id".into()))?
+            .to_string();
+        let initial_message_payload =
+            encode_provider_item(&draft.initial_message, "initial agent task")?;
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
+            require_readable_thread(&transaction, &draft.parent.thread_id)?;
+            require_readable_thread(&transaction, &draft.parent.root_thread_id)?;
+            validate_agent_parent(&transaction, &draft.parent)?;
+
+            let (cwd, project_path, mode): (String, Option<String>, String) = transaction
+                .query_row(
+                    "SELECT cwd, project_path, mode FROM threads WHERE id = ?1",
+                    [&draft.parent.thread_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(storage_error)?;
+            if mode == ConversationMode::Chat.as_str() {
+                return Err(AppError::State(
+                    "sub-agents cannot be spawned from Chat threads".into(),
+                ));
+            }
+            let agent_count: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_threads WHERE root_thread_id = ?1",
+                    [&draft.parent.root_thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            let agent_count = usize::try_from(agent_count).map_err(|error| {
+                AppError::Storage(format!("stored agent count is invalid: {error}"))
+            })?;
+            if agent_count >= MAX_AGENT_THREADS_PER_TREE {
+                return Err(AppError::Tool(format!(
+                    "agent tree reached its {MAX_AGENT_THREADS_PER_TREE}-thread lifetime limit"
+                )));
+            }
+            let duplicate: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM agent_threads
+                         WHERE root_thread_id = ?1 AND agent_path = ?2
+                     )",
+                    params![draft.parent.root_thread_id, draft.path.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if duplicate {
+                return Err(AppError::Tool(format!(
+                    "agent path `{}` already exists",
+                    draft.path
+                )));
+            }
+
+            let thread_id = Uuid::now_v7().to_string();
+            let now = unix_timestamp()?;
+            transaction
+                .execute(
+                    "INSERT INTO threads
+                         (id, cwd, project_path, mode, name, preview, archived, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, NULL, ?5, 0, ?6, ?6)",
+                    params![thread_id, cwd, project_path, mode, preview, now],
+                )
+                .map_err(storage_error)?;
+            copy_agent_provider_history(
+                &transaction,
+                &draft.parent.thread_id,
+                &thread_id,
+                draft.fork_turns,
+                &draft.parent_spawn_call_id,
+            )?;
+            transaction
+                .execute(
+                    "INSERT INTO agent_threads
+                         (thread_id, root_thread_id, parent_thread_id, agent_path, task_name,
+                          model, reasoning_effort, service_tier, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                    params![
+                        thread_id,
+                        draft.parent.root_thread_id,
+                        draft.parent.thread_id,
+                        draft.path.as_str(),
+                        draft.task_name,
+                        draft.model,
+                        draft.reasoning_effort.map(ReasoningEffort::as_str),
+                        draft.service_tier,
+                        now
+                    ],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO agent_messages
+                         (id, root_thread_id, sender_thread_id, recipient_thread_id, payload,
+                          created_at, delivered_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+                    params![
+                        initial_message_id,
+                        draft.parent.root_thread_id,
+                        draft.parent.thread_id,
+                        thread_id,
+                        initial_message_payload,
+                        now
+                    ],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(AgentIdentity {
+                thread_id,
+                root_thread_id: draft.parent.root_thread_id,
+                parent_thread_id: Some(draft.parent.thread_id),
+                path: draft.path,
+                model: Some(draft.model),
+                reasoning_effort: draft.reasoning_effort,
+                service_tier: draft.service_tier,
+            })
+        })
+        .await
+    }
+
+    pub(super) async fn read_agent_identity(
+        &self,
+        thread_id: String,
+    ) -> Result<Option<AgentIdentity>, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            read_agent_identity_row(&connection, &thread_id)
+        })
+        .await
+    }
+
+    pub(super) async fn find_agent_by_path(
+        &self,
+        root_thread_id: String,
+        agent_path: String,
+    ) -> Result<Option<AgentIdentity>, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let row = connection
+                .query_row(
+                    "SELECT thread_id, root_thread_id, parent_thread_id, agent_path,
+                            model, reasoning_effort, service_tier
+                     FROM agent_threads
+                     WHERE root_thread_id = ?1 AND agent_path = ?2",
+                    params![root_thread_id, agent_path],
+                    decode_agent_identity,
+                )
+                .optional()
+                .map_err(storage_error)?;
+            row.map(decode_agent_reasoning_effort).transpose()
+        })
+        .await
+    }
+
+    pub(super) async fn list_agent_identities(
+        &self,
+        root_thread_id: String,
+    ) -> Result<Vec<AgentIdentity>, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let mut statement = connection
+                .prepare(
+                    "SELECT thread_id, root_thread_id, parent_thread_id, agent_path,
+                            model, reasoning_effort, service_tier
+                     FROM agent_threads
+                     WHERE root_thread_id = ?1
+                     ORDER BY agent_path",
+                )
+                .map_err(storage_error)?;
+            statement
+                .query_map([root_thread_id], decode_agent_identity)
+                .map_err(storage_error)?
+                .map(|row| {
+                    row.map_err(storage_error)
+                        .and_then(decode_agent_reasoning_effort)
+                })
+                .collect()
+        })
+        .await
+    }
+
+    pub(super) async fn delete_agent_thread(&self, thread_id: String) -> Result<(), AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let changed = connection
+                .execute(
+                    "DELETE FROM threads
+                     WHERE id = ?1
+                       AND EXISTS(
+                           SELECT 1 FROM agent_threads WHERE agent_threads.thread_id = threads.id
+                       )",
+                    [thread_id],
+                )
+                .map_err(storage_error)?;
+            require_changed(changed, "agent thread")
+        })
+        .await
+    }
+
+    pub(super) async fn queue_agent_message(
+        &self,
+        root_thread_id: String,
+        sender_thread_id: String,
+        recipient_thread_id: String,
+        item: &ResponseItem,
+    ) -> Result<(), AppError> {
+        let id = item
+            .id()
+            .ok_or_else(|| AppError::State("agent message is missing its provider id".into()))?
+            .to_string();
+        let payload = encode_provider_item(item, "agent message")?;
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
+            validate_agent_tree_member(&transaction, &root_thread_id, &sender_thread_id)?;
+            validate_agent_tree_member(&transaction, &root_thread_id, &recipient_thread_id)?;
+            transaction
+                .execute(
+                    "INSERT INTO agent_messages
+                         (id, root_thread_id, sender_thread_id, recipient_thread_id, payload,
+                          created_at, delivered_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+                    params![
+                        id,
+                        root_thread_id,
+                        sender_thread_id,
+                        recipient_thread_id,
+                        payload,
+                        unix_timestamp()?
+                    ],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)
+        })
+        .await
+    }
+
+    pub(super) async fn agent_message_state(
+        &self,
+        recipient_thread_id: String,
+        message_id: String,
+    ) -> Result<AgentMessageState, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let state: i64 = connection
+                .query_row(
+                    "SELECT CASE
+                         WHEN EXISTS(
+                             SELECT 1 FROM agent_messages
+                             WHERE id = ?1
+                               AND recipient_thread_id = ?2
+                               AND delivered_at IS NULL
+                         ) THEN 1
+                         WHEN EXISTS(
+                             SELECT 1 FROM provider_items
+                             WHERE thread_id = ?2
+                               AND json_extract(payload, '$.id') = ?1
+                         ) THEN 2
+                         ELSE 0
+                     END",
+                    params![message_id, recipient_thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            match state {
+                0 => Ok(AgentMessageState::Missing),
+                1 => Ok(AgentMessageState::Pending),
+                2 => Ok(AgentMessageState::Delivered),
+                _ => Err(AppError::Storage(
+                    "stored agent message has an invalid delivery state".into(),
+                )),
+            }
+        })
+        .await
+    }
+
+    pub(super) async fn append_agent_turn_input(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        item: &ResponseItem,
+    ) -> Result<i64, AppError> {
+        let item_id = item
+            .id()
+            .ok_or_else(|| AppError::State("agent message is missing its provider id".into()))?
+            .to_string();
+        let payload = encode_provider_item(item, "active agent message")?;
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = begin_write_transaction(&mut connection)?;
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM turns
+                         JOIN threads ON threads.id = turns.thread_id
+                         WHERE turns.id = ?1
+                           AND turns.thread_id = ?2
+                           AND turns.status = 'inProgress'
+                           AND threads.archived = 0
+                     )",
+                    params![turn_id, thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !active {
+                return Err(AppError::State(
+                    "agent turn is no longer active or does not belong to its thread".into(),
+                ));
+            }
+            transaction
+                .execute(
+                    "INSERT INTO pending_turn_inputs (turn_id, item_id, payload)
+                     VALUES (?1, ?2, ?3)",
+                    params![turn_id, item_id, payload],
+                )
+                .map_err(storage_error)?;
+            let pending_sequence = transaction.last_insert_rowid();
+            transaction.commit().map_err(storage_error)?;
+            Ok(pending_sequence)
+        })
+        .await
+    }
+
+    pub(super) async fn agent_status(&self, thread_id: String) -> Result<AgentStatus, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let archived = connection
+                .query_row(
+                    "SELECT archived FROM threads WHERE id = ?1",
+                    [&thread_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()
+                .map_err(storage_error)?;
+            let Some(archived) = archived else {
+                return Ok(AgentStatus::NotFound);
+            };
+            if archived {
+                return Ok(AgentStatus::Shutdown);
+            }
+            let turn = connection
+                .query_row(
+                    "SELECT id, status, error
+                     FROM turns
+                     WHERE thread_id = ?1
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT 1",
+                    [&thread_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(storage_error)?;
+            let Some((turn_id, status, error)) = turn else {
+                return Ok(AgentStatus::PendingInit);
+            };
+            match status.as_str() {
+                "inProgress" => Ok(AgentStatus::Running),
+                "interrupted" => Ok(AgentStatus::Interrupted),
+                "failed" => Ok(AgentStatus::Errored(
+                    error.unwrap_or_else(|| "agent turn failed".into()),
+                )),
+                "completed" => Ok(AgentStatus::Completed(latest_agent_message(
+                    &connection,
+                    &turn_id,
+                )?)),
+                other => Err(AppError::Storage(format!(
+                    "stored agent turn has unsupported status `{other}`"
+                ))),
+            }
+        })
+        .await
+    }
+
+    pub(super) async fn latest_agent_message_for_turn(
+        &self,
+        turn_id: String,
+    ) -> Result<Option<String>, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            latest_agent_message(&connection, &turn_id)
         })
         .await
     }
@@ -1087,6 +1586,7 @@ impl NativeStorage {
             }
             let turn_id = Uuid::now_v7().to_string();
             let now = unix_timestamp()?;
+            promote_pending_agent_messages(&transaction, &thread_id, now)?;
             transaction
                 .execute(
                     "INSERT INTO turns
@@ -1114,6 +1614,91 @@ impl NativeStorage {
                          updated_at = ?2
                      WHERE id = ?3",
                     params![preview, now, thread_id],
+                )
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)?;
+            Ok(TurnSummary {
+                id: turn_id,
+                status: TurnStatus::InProgress,
+                created_at: now,
+                updated_at: now,
+            })
+        })
+        .await
+    }
+
+    pub(super) async fn begin_agent_turn(
+        &self,
+        thread_id: String,
+        model: String,
+        reasoning_effort: Option<String>,
+    ) -> Result<TurnSummary, AppError> {
+        let owner_id = self.owner_id.clone();
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
+            require_readable_thread(&transaction, &thread_id)?;
+            let spawned_agent: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM agent_threads WHERE thread_id = ?1
+                     )",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !spawned_agent {
+                return Err(AppError::State(
+                    "only a spawned agent can start a turn from its mailbox".into(),
+                ));
+            }
+            let active: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM turns
+                         WHERE thread_id = ?1 AND status = 'inProgress'
+                     )",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if active {
+                return Err(AppError::State("the thread already has an active turn".into()));
+            }
+            let pending_message: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM agent_messages
+                         WHERE recipient_thread_id = ?1 AND delivered_at IS NULL
+                     )",
+                    [&thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !pending_message {
+                return Err(AppError::State(
+                    "agent mailbox has no pending message to start a turn".into(),
+                ));
+            }
+
+            let turn_id = Uuid::now_v7().to_string();
+            let now = unix_timestamp()?;
+            promote_pending_agent_messages(&transaction, &thread_id, now)?;
+            transaction
+                .execute(
+                    "INSERT INTO turns
+                         (id, thread_id, owner_id, status, model, reasoning_effort, error, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'inProgress', ?4, ?5, NULL, ?6, ?6)",
+                    params![turn_id, thread_id, owner_id, model, reasoning_effort, now],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "UPDATE threads SET updated_at = ?1 WHERE id = ?2",
+                    params![now, thread_id],
                 )
                 .map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
@@ -2505,6 +3090,353 @@ fn promote_pending_turn_inputs_rows(
     Ok(Some(latest_sequence))
 }
 
+fn promote_pending_agent_messages(
+    transaction: &Transaction<'_>,
+    thread_id: &str,
+    delivered_at: i64,
+) -> Result<(), AppError> {
+    transaction
+        .execute(
+            "INSERT INTO provider_items (thread_id, payload)
+             SELECT ?1, payload
+             FROM agent_messages
+             WHERE recipient_thread_id = ?1 AND delivered_at IS NULL
+             ORDER BY sequence",
+            [thread_id],
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "UPDATE agent_messages
+             SET delivered_at = ?1
+             WHERE recipient_thread_id = ?2 AND delivered_at IS NULL",
+            params![delivered_at, thread_id],
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "DELETE FROM agent_messages
+             WHERE recipient_thread_id = ?1 AND delivered_at IS NOT NULL",
+            [thread_id],
+        )
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+type StoredAgentIdentity = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+fn decode_agent_identity(row: &Row<'_>) -> rusqlite::Result<StoredAgentIdentity> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
+}
+
+fn decode_agent_reasoning_effort(stored: StoredAgentIdentity) -> Result<AgentIdentity, AppError> {
+    let reasoning_effort = stored
+        .5
+        .as_deref()
+        .map(|value| {
+            crate::engine::ReasoningEffort::from_wire_name(value).ok_or_else(|| {
+                AppError::Storage(format!(
+                    "stored agent has unsupported reasoning effort `{value}`"
+                ))
+            })
+        })
+        .transpose()?;
+    Ok(AgentIdentity {
+        thread_id: stored.0,
+        root_thread_id: stored.1,
+        parent_thread_id: Some(stored.2),
+        path: AgentPath::try_from(stored.3).map_err(AppError::Storage)?,
+        model: Some(stored.4),
+        reasoning_effort,
+        service_tier: stored.6,
+    })
+}
+
+fn read_agent_identity_row(
+    connection: &Connection,
+    thread_id: &str,
+) -> Result<Option<AgentIdentity>, AppError> {
+    connection
+        .query_row(
+            "SELECT thread_id, root_thread_id, parent_thread_id, agent_path,
+                    model, reasoning_effort, service_tier
+             FROM agent_threads
+             WHERE thread_id = ?1",
+            [thread_id],
+            decode_agent_identity,
+        )
+        .optional()
+        .map_err(storage_error)?
+        .map(decode_agent_reasoning_effort)
+        .transpose()
+}
+
+fn validate_agent_parent(
+    transaction: &Transaction<'_>,
+    parent: &AgentIdentity,
+) -> Result<(), AppError> {
+    if parent.path.is_root() {
+        if parent.thread_id != parent.root_thread_id || parent.parent_thread_id.is_some() {
+            return Err(AppError::State(
+                "root agent identity is inconsistent".into(),
+            ));
+        }
+        return Ok(());
+    }
+    let valid: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM agent_threads
+                 WHERE thread_id = ?1 AND root_thread_id = ?2 AND agent_path = ?3
+             )",
+            params![
+                parent.thread_id,
+                parent.root_thread_id,
+                parent.path.as_str()
+            ],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::State(
+            "parent agent no longer belongs to its recorded tree".into(),
+        ))
+    }
+}
+
+fn validate_agent_tree_member(
+    transaction: &Transaction<'_>,
+    root_thread_id: &str,
+    thread_id: &str,
+) -> Result<(), AppError> {
+    let valid = if thread_id == root_thread_id {
+        transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1 AND archived = 0)",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?
+    } else {
+        transaction
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM agent_threads
+                     JOIN threads ON threads.id = agent_threads.thread_id
+                     WHERE agent_threads.thread_id = ?1
+                       AND agent_threads.root_thread_id = ?2
+                       AND threads.archived = 0
+                 )",
+                params![thread_id, root_thread_id],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::State(
+            "agent message target does not belong to the current live tree".into(),
+        ))
+    }
+}
+
+fn copy_agent_provider_history(
+    transaction: &Transaction<'_>,
+    parent_thread_id: &str,
+    child_thread_id: &str,
+    fork_turns: ForkTurns,
+    parent_spawn_call_id: &str,
+) -> Result<(), AppError> {
+    if fork_turns == ForkTurns::None {
+        return Ok(());
+    }
+    let mut statement = transaction
+        .prepare("SELECT payload FROM provider_items WHERE thread_id = ?1 ORDER BY sequence")
+        .map_err(storage_error)?;
+    let payloads = statement
+        .query_map([parent_thread_id], |row| row.get::<_, String>(0))
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    drop(statement);
+    let items = payloads
+        .iter()
+        .map(|payload| decode_provider_item(payload, "parent agent history"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let start = match fork_turns {
+        ForkTurns::None => items.len(),
+        ForkTurns::All => 0,
+        ForkTurns::Last(turns) => {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT json_extract(first_item.payload, '$.id')
+                     FROM turns
+                     JOIN thread_items AS first_item
+                       ON first_item.sequence = (
+                           SELECT MIN(candidate.sequence)
+                           FROM thread_items AS candidate
+                           WHERE candidate.turn_id = turns.id
+                             AND json_extract(candidate.payload, '$.type') = 'userMessage'
+                       )
+                     WHERE turns.thread_id = ?1
+                     ORDER BY turns.created_at DESC, turns.id DESC
+                     LIMIT ?2",
+                )
+                .map_err(storage_error)?;
+            let limit =
+                i64::try_from(turns).map_err(|error| AppError::Storage(error.to_string()))?;
+            let user_ids = statement
+                .query_map(params![parent_thread_id, limit], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(storage_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage_error)?;
+            let Some(oldest_user_id) = user_ids.last() else {
+                return Ok(());
+            };
+            items
+                .iter()
+                .position(|item| item.id() == Some(oldest_user_id.as_str()))
+                .ok_or_else(|| {
+                    AppError::Storage("agent fork boundary is missing from provider history".into())
+                })?
+        }
+    };
+    let active_user_id = transaction
+        .query_row(
+            "SELECT json_extract(thread_items.payload, '$.id')
+             FROM turns
+             JOIN thread_items ON thread_items.turn_id = turns.id
+             WHERE turns.thread_id = ?1
+               AND turns.status = 'inProgress'
+               AND json_extract(thread_items.payload, '$.type') = 'userMessage'
+             ORDER BY thread_items.sequence
+             LIMIT 1",
+            [parent_thread_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(storage_error)?;
+    let active_start = active_user_id
+        .as_deref()
+        .and_then(|id| items.iter().position(|item| item.id() == Some(id)));
+
+    let retained = items
+        .into_iter()
+        .enumerate()
+        .skip(start)
+        .filter_map(|(index, item)| {
+            (!agent_fork_item_is_transient(
+                &item,
+                active_start.is_some_and(|active_start| index >= active_start),
+                parent_spawn_call_id,
+            ))
+            .then_some(item)
+        })
+        .collect::<Vec<_>>();
+    if retained.len() > MAX_HISTORY_ITEMS {
+        return Err(AppError::Storage(format!(
+            "forked agent history exceeds {MAX_HISTORY_ITEMS} items"
+        )));
+    }
+    let payloads = retained
+        .iter()
+        .map(|item| encode_provider_item(item, "forked agent history"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let total_bytes = payloads.iter().try_fold(0usize, |total, payload| {
+        total
+            .checked_add(payload.len())
+            .ok_or_else(|| AppError::Storage("forked agent history size overflowed".into()))
+    })?;
+    if total_bytes > MAX_HISTORY_BYTES {
+        return Err(AppError::Storage(format!(
+            "forked agent history exceeds {MAX_HISTORY_BYTES} bytes"
+        )));
+    }
+    for payload in payloads {
+        transaction
+            .execute(
+                "INSERT INTO provider_items (thread_id, payload) VALUES (?1, ?2)",
+                params![child_thread_id, payload],
+            )
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+fn agent_fork_item_is_transient(
+    item: &ResponseItem,
+    belongs_to_active_turn: bool,
+    parent_spawn_call_id: &str,
+) -> bool {
+    let matches_spawn_call = match item {
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::FunctionCallOutput { call_id, .. }
+        | ResponseItem::CustomToolCall { call_id, .. }
+        | ResponseItem::CustomToolCallOutput { call_id, .. } => call_id == parent_spawn_call_id,
+        _ => false,
+    };
+    matches_spawn_call
+        || (belongs_to_active_turn
+            && matches!(
+                item,
+                ResponseItem::FunctionCall { .. }
+                    | ResponseItem::FunctionCallOutput { .. }
+                    | ResponseItem::CustomToolCall { .. }
+                    | ResponseItem::CustomToolCallOutput { .. }
+                    | ResponseItem::WebSearchCall { .. }
+                    | ResponseItem::CompactionTrigger {}
+            ))
+}
+
+fn latest_agent_message(
+    connection: &Connection,
+    turn_id: &str,
+) -> Result<Option<String>, AppError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT payload FROM thread_items
+             WHERE turn_id = ?1
+               AND json_extract(payload, '$.type') = 'agentMessage'
+             ORDER BY sequence DESC",
+        )
+        .map_err(storage_error)?;
+    let payloads = statement
+        .query_map([turn_id], |row| row.get::<_, String>(0))
+        .map_err(storage_error)?;
+    for payload in payloads {
+        let item: ThreadItem = decode_bounded(
+            &payload.map_err(storage_error)?,
+            MAX_ITEM_BYTES,
+            "agent completion item",
+        )?;
+        if let ThreadItem::AgentMessage { text, .. } = item {
+            return Ok(Some(text));
+        }
+    }
+    Ok(None)
+}
+
 fn promote_all_pending_turn_inputs(transaction: &Transaction<'_>) -> Result<(), AppError> {
     let pending_turns = {
         let mut statement = transaction
@@ -3387,6 +4319,9 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
         .execute_batch(PENDING_TURN_INPUT_SCHEMA_SQL)
         .map_err(storage_error)?;
     transaction
+        .execute_batch(MULTI_AGENT_SCHEMA_SQL)
+        .map_err(storage_error)?;
+    transaction
         .execute(
             "INSERT INTO app_config (singleton, version, payload) VALUES (1, 1, ?1)",
             [default_payload],
@@ -3514,6 +4449,21 @@ fn migrate_database_v3_to_v4(connection: &mut Connection) -> Result<(), AppError
         .execute_batch(PENDING_TURN_INPUT_SCHEMA_SQL)
         .map_err(storage_error)?;
     transaction
+        .pragma_update(
+            None,
+            "user_version",
+            SCHEMA_VERSION_WITH_PENDING_TURN_INPUTS,
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_database_v4_to_v5(connection: &mut Connection) -> Result<(), AppError> {
+    let transaction = begin_write_transaction(connection)?;
+    transaction
+        .execute_batch(MULTI_AGENT_SCHEMA_SQL)
+        .map_err(storage_error)?;
+    transaction
         .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
         .map_err(storage_error)?;
     transaction.commit().map_err(storage_error)
@@ -3589,6 +4539,18 @@ fn validate_database(
             "pending turn input columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
         )));
     }
+    let columns = table_columns(connection, "agent_threads")?;
+    if columns != AGENT_THREAD_COLUMNS {
+        return Err(AppError::Storage(format!(
+            "agent thread columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
+        )));
+    }
+    let columns = table_columns(connection, "agent_messages")?;
+    if columns != AGENT_MESSAGE_COLUMNS {
+        return Err(AppError::Storage(format!(
+            "agent message columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
+        )));
+    }
     let integrity: String = connection
         .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
         .map_err(storage_error)?;
@@ -3651,10 +4613,22 @@ fn turn_columns(connection: &Connection) -> Result<String, AppError> {
 }
 
 fn pending_turn_input_columns(connection: &Connection) -> Result<String, AppError> {
+    table_columns(connection, "pending_turn_inputs")
+}
+
+fn table_columns(connection: &Connection, table: &str) -> Result<String, AppError> {
+    if !table
+        .chars()
+        .all(|character| character.is_ascii_lowercase() || character == '_')
+    {
+        return Err(AppError::State("invalid internal table name".into()));
+    }
     connection
         .query_row(
-            "SELECT COALESCE(group_concat(name, ','), '')
-             FROM (SELECT name FROM pragma_table_info('pending_turn_inputs') ORDER BY cid)",
+            &format!(
+                "SELECT COALESCE(group_concat(name, ','), '')
+                 FROM (SELECT name FROM pragma_table_info('{table}') ORDER BY cid)"
+            ),
             [],
             |row| row.get(0),
         )
@@ -3741,6 +4715,10 @@ mod tests {
         open_database_connection,
     };
     use crate::engine::native::automation::{AutomationDraft, AutomationUpdate};
+    use crate::engine::native::multi_agent::{
+        AgentIdentity, AgentMessageState, AgentPath, AgentThreadDraft, ForkTurns,
+        MAX_AGENT_THREADS_PER_TREE,
+    };
     use crate::engine::native::output::OutputSource;
     use crate::engine::native::provider::{ResponseContent, ResponseItem};
     use crate::engine::{
@@ -3880,6 +4858,183 @@ mod tests {
         let failed_turn = loaded.turns.first().expect("failed turn should be present");
         assert_eq!(failed_turn.status, TurnStatus::Failed);
         assert_eq!(failed_turn.error.as_deref(), Some("provider stream failed"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn starts_spawned_agent_turns_from_typed_persistent_mailbox_messages() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("agent-mailbox.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let project_path = directory.path().display().to_string();
+        let root = storage
+            .create_thread(
+                project_path.clone(),
+                Some(project_path),
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("root thread should persist");
+        let message = ResponseItem::context_text_with_seed(
+            "assistant",
+            "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\ncontinue"
+                .into(),
+            "multi_agent.inter_agent_message",
+            "initial-task-message",
+        );
+        let child = storage
+            .create_agent_thread(AgentThreadDraft {
+                parent: AgentIdentity::root(root.id.clone()),
+                path: AgentPath::try_from("/root/worker").expect("agent path should be valid"),
+                task_name: "worker".into(),
+                initial_message: message.clone(),
+                model: "gpt-test".into(),
+                reasoning_effort: None,
+                service_tier: None,
+                fork_turns: ForkTurns::None,
+                parent_spawn_call_id: "spawn-call".into(),
+                preview: "inspect the project".into(),
+            })
+            .await
+            .expect("child thread should persist");
+        let message_id = message.id().expect("message should have an id").to_string();
+        assert_eq!(
+            storage
+                .agent_message_state(child.thread_id.clone(), message_id.clone())
+                .await
+                .expect("pending state should load"),
+            AgentMessageState::Pending
+        );
+
+        let turn = storage
+            .begin_agent_turn(child.thread_id.clone(), "gpt-test".into(), None)
+            .await
+            .expect("mailbox turn should start");
+        assert_eq!(
+            storage
+                .agent_message_state(child.thread_id.clone(), message_id)
+                .await
+                .expect("delivered state should load"),
+            AgentMessageState::Delivered
+        );
+        let history = storage
+            .provider_history(child.thread_id.clone())
+            .await
+            .expect("agent provider history should load");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            encode_provider_item(&history[0], "delivered agent message")
+                .expect("delivered message should encode"),
+            encode_provider_item(&message, "expected agent message")
+                .expect("expected message should encode")
+        );
+        let loaded = storage
+            .read_thread(child.thread_id.clone())
+            .await
+            .expect("agent thread should load");
+        assert_eq!(loaded.turns.len(), 1);
+        assert!(loaded.turns[0].items.is_empty());
+
+        storage
+            .complete_turn(
+                child.thread_id.clone(),
+                turn.id,
+                TurnStatus::Completed,
+                None,
+            )
+            .await
+            .expect("agent turn should complete");
+        assert!(
+            storage
+                .begin_agent_turn(child.thread_id, "gpt-test".into(), None)
+                .await
+                .expect_err("an empty mailbox must not create a synthetic turn")
+                .to_string()
+                .contains("no pending message")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_tree_lifetime_limit_rejects_growth_without_orphaning_threads() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("agent-limit.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let project_path = directory.path().display().to_string();
+        let root = storage
+            .create_thread(
+                project_path.clone(),
+                Some(project_path),
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("root thread should persist");
+        let parent = AgentIdentity::root(root.id.clone());
+
+        for index in 0..MAX_AGENT_THREADS_PER_TREE {
+            let task_name = format!("worker_{index}");
+            storage
+                .create_agent_thread(AgentThreadDraft {
+                    parent: parent.clone(),
+                    path: parent
+                        .path
+                        .join(&task_name)
+                        .expect("generated agent path should be valid"),
+                    task_name,
+                    initial_message: ResponseItem::context_text_with_seed(
+                        "assistant",
+                        "bounded task".into(),
+                        "multi_agent.inter_agent_message",
+                        &format!("initial-task-{index}"),
+                    ),
+                    model: "gpt-test".into(),
+                    reasoning_effort: None,
+                    service_tier: None,
+                    fork_turns: ForkTurns::None,
+                    parent_spawn_call_id: format!("spawn-call-{index}"),
+                    preview: "bounded task".into(),
+                })
+                .await
+                .expect("agent within the lifetime limit should persist");
+        }
+
+        let rejected = storage
+            .create_agent_thread(AgentThreadDraft {
+                parent: parent.clone(),
+                path: parent
+                    .path
+                    .join("one_too_many")
+                    .expect("generated agent path should be valid"),
+                task_name: "one_too_many".into(),
+                initial_message: ResponseItem::context_text_with_seed(
+                    "assistant",
+                    "must fail".into(),
+                    "multi_agent.inter_agent_message",
+                    "rejected-initial-task",
+                ),
+                model: "gpt-test".into(),
+                reasoning_effort: None,
+                service_tier: None,
+                fork_turns: ForkTurns::None,
+                parent_spawn_call_id: "rejected-spawn-call".into(),
+                preview: "must fail".into(),
+            })
+            .await
+            .expect_err("agent beyond the lifetime limit must be rejected");
+
+        assert!(rejected.to_string().contains("lifetime limit"));
+        assert_eq!(
+            storage
+                .list_agent_identities(root.id.clone())
+                .await
+                .expect("persisted agent identities should load")
+                .len(),
+            MAX_AGENT_THREADS_PER_TREE
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4453,6 +5608,8 @@ mod tests {
                 "DROP TABLE automation_runs;
                  DROP TABLE automations;
                  DROP TABLE pending_turn_inputs;
+                 DROP TABLE agent_messages;
+                 DROP TABLE agent_threads;
                  PRAGMA user_version = 2;",
             )
             .expect("fixture should become schema two");
@@ -4495,6 +5652,8 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE pending_turn_inputs;
+                 DROP TABLE agent_messages;
+                 DROP TABLE agent_threads;
                  PRAGMA user_version = 3;",
             )
             .expect("fixture should become schema three");
@@ -4522,6 +5681,43 @@ mod tests {
             .expect("pending input table should be readable");
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
         assert!(pending_table_exists);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn migrates_schema_four_to_persistent_multi_agent_state() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("schema-four.sqlite3");
+        let mut connection = Connection::open(&database_path).expect("database should open");
+        initialize_database(&mut connection).expect("current fixture should initialize");
+        connection
+            .execute_batch(
+                "DROP TABLE agent_messages;
+                 DROP TABLE agent_threads;
+                 PRAGMA user_version = 4;",
+            )
+            .expect("fixture should become schema four");
+        drop(connection);
+
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(database_path.clone())
+            .await
+            .expect("schema four should migrate");
+
+        let connection = Connection::open(database_path).expect("database should reopen");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version should be readable");
+        let agent_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name IN ('agent_threads', 'agent_messages')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("agent tables should be readable");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+        assert_eq!(agent_tables, 2);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4611,6 +5807,8 @@ mod tests {
                 "DROP TABLE automation_runs;
                  DROP TABLE automations;
                  DROP TABLE pending_turn_inputs;
+                 DROP TABLE agent_messages;
+                 DROP TABLE agent_threads;
                  DROP TABLE output_chunks;
                  DROP TABLE output_resources;
                  PRAGMA user_version = 1;",

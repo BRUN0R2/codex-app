@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{FixedOffset, Utc};
 
+use super::multi_agent::MultiAgentPromptContext;
 use super::provider::{ResponseItem, SelectedModel};
 use crate::engine::{AppConfig, ApprovalPolicy, ConversationMode, Personality, SandboxMode};
 use crate::error::AppError;
@@ -27,6 +28,7 @@ pub(super) async fn compose_prompt_context(
     config: &AppConfig,
     mode: ConversationMode,
     model: &SelectedModel,
+    multi_agent: Option<&MultiAgentPromptContext>,
     timezone: &str,
     timezone_offset_min: i32,
 ) -> Result<PromptContext, AppError> {
@@ -87,6 +89,22 @@ pub(super) async fn compose_prompt_context(
             format!("<collaboration_mode>\n{collaboration}\n</collaboration_mode>"),
             "collaboration_mode.instructions",
         )?;
+    }
+    if let Some(multi_agent) = multi_agent {
+        if let Some(role_instructions) = multi_agent.rendered_role_instructions() {
+            builder.push(
+                "developer",
+                role_instructions,
+                "multi_agent.role_instructions",
+            )?;
+        }
+        if let Some(mode_instructions) = multi_agent.mode_instructions.as_ref() {
+            builder.push(
+                "developer",
+                format!("<multi_agent_mode>{mode_instructions}</multi_agent_mode>"),
+                "multi_agent.mode_instructions",
+            )?;
+        }
     }
     let shell_version = crate::process::shell_version().await;
     builder.push(
@@ -477,6 +495,7 @@ mod tests {
             &AppConfig::default(),
             ConversationMode::Codex,
             &test_model(),
+            None,
             "UTC",
             0,
         )
@@ -500,6 +519,7 @@ mod tests {
             &AppConfig::default(),
             ConversationMode::Codex,
             &modern_model_without_instruction_variables(),
+            None,
             "UTC",
             0,
         )

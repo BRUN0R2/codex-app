@@ -1,2 +1,12 @@
 [build]
 warnings = "deny"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "target-feature=+crt-static", "-C", "link-arg=/arm64hazardfree"]
+
+[env]
+RUSTY_V8_ARCHIVE = { value = ".tools/v8/current/rusty_v8.lib.gz", relative = true }
+RUSTY_V8_SRC_BINDING_PATH = { value = ".tools/v8/current/src_binding.rs", relative = true }

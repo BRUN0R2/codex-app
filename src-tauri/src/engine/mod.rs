@@ -348,4 +348,4 @@ impl EngineManager {
     }
 }
 
-pub use native::{CreateAutomation, StartTurn, SteerTurn, UpdateAutomation};
+pub use native::{CreateAutomation, StartTurn, StartTurnContent, SteerTurn, UpdateAutomation};

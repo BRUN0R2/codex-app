@@ -371,7 +371,7 @@ describe("decodificação dos contratos nativos", () => {
           "scheduledAutomations",
         ],
       },
-      schemaVersion: 19,
+      schemaVersion: 20,
       config: configFixture(),
       diagnosticLogPath: "C:\\Users\\Developer\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
@@ -398,7 +398,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 19,
+        schemaVersion: 20,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",
@@ -502,17 +502,17 @@ describe("decodificação dos contratos nativos", () => {
         data: [
           {
             ...modelFixture(),
-            unsupportedRuntimeCapabilities: ["codeMode", "codeMode"],
+            unsupportedRuntimeCapabilities: ["multiAgent", "multiAgent"],
           },
         ],
       }),
-    ).toThrow("must contain unique runtime capabilities");
+    ).toThrow("array exceeds 1 entries");
 
     expect(() =>
       decodeModelListResponse({
         data: [{ ...modelFixture(), unsupportedRuntimeCapabilities: ["codeMode"] }],
       }),
-    ).toThrow("runtime-compatible default model");
+    ).toThrow("expected one of multiAgent");
 
     expect(() =>
       decodeModelListResponse({

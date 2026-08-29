@@ -1,5 +1,26 @@
 Set-StrictMode -Version Latest
 
+function Get-ProjectWindowsTarget {
+  $requestedTarget = [Environment]::GetEnvironmentVariable("CARGO_BUILD_TARGET")
+  if (-not [string]::IsNullOrWhiteSpace($requestedTarget)) {
+    $target = $requestedTarget.Trim()
+    if ($target -notin @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")) {
+      throw "Target Windows não suportado pelas ferramentas locais: $target."
+    }
+    return $target
+  }
+
+  $runtimeArchitecture =
+    [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+  switch ($runtimeArchitecture) {
+    "X64" { return "x86_64-pc-windows-msvc" }
+    "Arm64" { return "aarch64-pc-windows-msvc" }
+    default {
+      throw "Arquitetura Windows não suportada pelas ferramentas locais: $runtimeArchitecture."
+    }
+  }
+}
+
 function Get-ProjectRipgrepManifest {
   param(
     [Parameter(Mandatory)]
@@ -25,15 +46,7 @@ function Get-ProjectRipgrepDefinition {
   )
 
   $manifest = Get-ProjectRipgrepManifest -ProjectRoot $ProjectRoot
-  $runtimeArchitecture =
-    [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-  $target = switch ($runtimeArchitecture) {
-    "X64" { "x86_64-pc-windows-msvc" }
-    "Arm64" { "aarch64-pc-windows-msvc" }
-    default {
-      throw "Arquitetura Windows não suportada para o ripgrep local: $runtimeArchitecture."
-    }
-  }
+  $target = Get-ProjectWindowsTarget
   $definition = $manifest.targets.PSObject.Properties[$target].Value
   if ($null -eq $definition) {
     throw "O manifesto do ripgrep não define o alvo $target."
@@ -168,6 +181,153 @@ function Install-ProjectRipgrep {
       throw
     }
     return Get-ProjectRipgrepPath -ProjectRoot $resolvedProjectRoot
+  } finally {
+    if (Test-Path -LiteralPath $stagingDirectory) {
+      Remove-Item -LiteralPath $stagingDirectory -Recurse -Force
+    }
+  }
+}
+
+function Get-ProjectV8Definition {
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  $manifestPath = Join-Path $ProjectRoot "scripts\v8-manifest.json"
+  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "Manifesto do V8 ausente: $manifestPath"
+  }
+  $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
+    ConvertFrom-Json -Depth 10
+  if (
+    $manifest.schemaVersion -ne 1 -or
+    [string]::IsNullOrWhiteSpace($manifest.version) -or
+    [string]::IsNullOrWhiteSpace($manifest.releaseBaseUrl)
+  ) {
+    throw "Manifesto do V8 inválido: $manifestPath"
+  }
+
+  $target = Get-ProjectWindowsTarget
+  $targetDefinition = $manifest.targets.PSObject.Properties[$target].Value
+  if (
+    $null -eq $targetDefinition -or
+    [string]::IsNullOrWhiteSpace($targetDefinition.archiveAssetName) -or
+    [string]::IsNullOrWhiteSpace($targetDefinition.archiveSha256) -or
+    [string]::IsNullOrWhiteSpace($targetDefinition.bindingAssetName) -or
+    [string]::IsNullOrWhiteSpace($targetDefinition.bindingSha256)
+  ) {
+    throw "O manifesto do V8 não define completamente o alvo $target."
+  }
+
+  return [pscustomobject]@{
+    Version = [string]$manifest.version
+    ReleaseBaseUrl = [string]$manifest.releaseBaseUrl
+    Target = $target
+    ArchiveAssetName = [string]$targetDefinition.archiveAssetName
+    ArchiveSha256 = [string]$targetDefinition.archiveSha256
+    BindingAssetName = [string]$targetDefinition.bindingAssetName
+    BindingSha256 = [string]$targetDefinition.bindingSha256
+  }
+}
+
+function Get-ProjectV8Paths {
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  $root = Join-Path $ProjectRoot ".tools\v8\current"
+  return [pscustomobject]@{
+    Root = $root
+    Archive = Join-Path $root "rusty_v8.lib.gz"
+    Binding = Join-Path $root "src_binding.rs"
+  }
+}
+
+function Test-ProjectV8 {
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  $definition = Get-ProjectV8Definition -ProjectRoot $ProjectRoot
+  $paths = Get-ProjectV8Paths -ProjectRoot $ProjectRoot
+  if (
+    -not (Test-Path -LiteralPath $paths.Archive -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $paths.Binding -PathType Leaf)
+  ) {
+    return $false
+  }
+  return (
+    (Get-ProjectToolSha256 -Path $paths.Archive) -eq $definition.ArchiveSha256 -and
+    (Get-ProjectToolSha256 -Path $paths.Binding) -eq $definition.BindingSha256
+  )
+}
+
+function Install-ProjectV8 {
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  $resolvedProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
+  if (Test-ProjectV8 -ProjectRoot $resolvedProjectRoot) {
+    return Get-ProjectV8Paths -ProjectRoot $resolvedProjectRoot
+  }
+
+  $definition = Get-ProjectV8Definition -ProjectRoot $resolvedProjectRoot
+  $paths = Get-ProjectV8Paths -ProjectRoot $resolvedProjectRoot
+  $toolsRoot = Join-Path $resolvedProjectRoot ".tools\v8"
+  $stagingDirectory = Join-Path $toolsRoot (".staging-{0}" -f [System.Guid]::NewGuid().ToString("N"))
+  $stagingArchive = Join-Path $stagingDirectory "rusty_v8.lib.gz"
+  $stagingBinding = Join-Path $stagingDirectory "src_binding.rs"
+  $archiveUrl = "$($definition.ReleaseBaseUrl)/$($definition.ArchiveAssetName)"
+  $bindingUrl = "$($definition.ReleaseBaseUrl)/$($definition.BindingAssetName)"
+  $backupDirectory = $null
+
+  New-Item -ItemType Directory -Path $stagingDirectory -Force | Out-Null
+  try {
+    $previousProgressPreference = $ProgressPreference
+    try {
+      $ProgressPreference = "SilentlyContinue"
+      Invoke-WebRequest -Uri $archiveUrl -OutFile $stagingArchive -ErrorAction Stop
+      Invoke-WebRequest -Uri $bindingUrl -OutFile $stagingBinding -ErrorAction Stop
+    } finally {
+      $ProgressPreference = $previousProgressPreference
+    }
+
+    $archiveSha256 = Get-ProjectToolSha256 -Path $stagingArchive
+    if ($archiveSha256 -ne $definition.ArchiveSha256) {
+      throw "SHA-256 inválido para $($definition.ArchiveAssetName): esperado $($definition.ArchiveSha256), recebido $archiveSha256."
+    }
+    $bindingSha256 = Get-ProjectToolSha256 -Path $stagingBinding
+    if ($bindingSha256 -ne $definition.BindingSha256) {
+      throw "SHA-256 inválido para $($definition.BindingAssetName): esperado $($definition.BindingSha256), recebido $bindingSha256."
+    }
+
+    if (Test-Path -LiteralPath $paths.Root) {
+      $backupDirectory = "$($paths.Root).invalid-$([System.Guid]::NewGuid().ToString("N"))"
+      Move-Item -LiteralPath $paths.Root -Destination $backupDirectory
+    }
+    try {
+      Move-Item -LiteralPath $stagingDirectory -Destination $paths.Root
+      if (-not (Test-ProjectV8 -ProjectRoot $resolvedProjectRoot)) {
+        throw "A instalação concluída do runtime V8 não passou na validação final."
+      }
+      if ($null -ne $backupDirectory -and (Test-Path -LiteralPath $backupDirectory)) {
+        Remove-Item -LiteralPath $backupDirectory -Recurse -Force
+      }
+    } catch {
+      if (Test-Path -LiteralPath $paths.Root) {
+        Remove-Item -LiteralPath $paths.Root -Recurse -Force
+      }
+      if ($null -ne $backupDirectory -and (Test-Path -LiteralPath $backupDirectory)) {
+        Move-Item -LiteralPath $backupDirectory -Destination $paths.Root
+      }
+      throw
+    }
+    return Get-ProjectV8Paths -ProjectRoot $resolvedProjectRoot
   } finally {
     if (Test-Path -LiteralPath $stagingDirectory) {
       Remove-Item -LiteralPath $stagingDirectory -Recurse -Force

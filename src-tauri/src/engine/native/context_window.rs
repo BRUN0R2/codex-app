@@ -8,9 +8,9 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-use super::provider::{
-    FunctionCallOutputContent, FunctionCallOutputPayload, ResponseContent, ResponseItem,
-};
+#[cfg(test)]
+use super::provider::FunctionCallOutputPayload;
+use super::provider::{FunctionCallOutputContent, ResponseContent, ResponseItem};
 use super::text::truncate_utf8;
 use crate::engine::{ImageDetail, ModelContextWindow, TokenUsage};
 
@@ -131,15 +131,11 @@ pub(super) fn prepare_compaction_history(
             break;
         }
         let replacement = match &prepared[index] {
-            ResponseItem::FunctionCallOutput { call_id, .. } => ResponseItem::FunctionCallOutput {
-                call_id: call_id.clone(),
-                output: FunctionCallOutputPayload::text(COMPACTION_OUTPUT_TRUNCATION),
-            },
+            ResponseItem::FunctionCallOutput { call_id, .. } => {
+                ResponseItem::function_output(call_id.clone(), COMPACTION_OUTPUT_TRUNCATION.into())
+            }
             ResponseItem::CustomToolCallOutput { call_id, .. } => {
-                ResponseItem::CustomToolCallOutput {
-                    call_id: call_id.clone(),
-                    output: COMPACTION_OUTPUT_TRUNCATION.into(),
-                }
+                ResponseItem::custom_output(call_id.clone(), COMPACTION_OUTPUT_TRUNCATION.into())
             }
             _ => continue,
         };
@@ -638,10 +634,7 @@ mod tests {
                 arguments: "{}".into(),
                 call_id: "call-1".into(),
             },
-            ResponseItem::FunctionCallOutput {
-                call_id: "call-1".into(),
-                output: FunctionCallOutputPayload::text("x".repeat(400)),
-            },
+            ResponseItem::function_output("call-1".into(), "x".repeat(400)),
         ];
         let snapshot = ContextUsageSnapshot {
             model: "gpt-test".into(),
@@ -720,10 +713,7 @@ mod tests {
     fn rewrites_tool_outputs_when_compaction_needs_headroom() {
         let history = vec![
             text("user", "keep"),
-            ResponseItem::FunctionCallOutput {
-                call_id: "call-1".into(),
-                output: FunctionCallOutputPayload::text("x".repeat(4_000)),
-            },
+            ResponseItem::function_output("call-1".into(), "x".repeat(4_000)),
         ];
         let prepared = prepare_compaction_history("", &[], &history, &[], Some(200));
 
@@ -745,10 +735,7 @@ mod tests {
     #[test]
     fn rewrites_older_tool_outputs_past_non_output_items() {
         let history = vec![
-            ResponseItem::FunctionCallOutput {
-                call_id: "call-1".into(),
-                output: FunctionCallOutputPayload::text("x".repeat(4_000)),
-            },
+            ResponseItem::function_output("call-1".into(), "x".repeat(4_000)),
             text("user", "newest"),
         ];
         let prepared = prepare_compaction_history("", &[], &history, &[], Some(200));

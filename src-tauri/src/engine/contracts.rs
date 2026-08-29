@@ -522,6 +522,20 @@ impl ReasoningEffort {
             Self::Ultra => "ultra",
         }
     }
+
+    pub const fn from_wire_name(value: &str) -> Option<Self> {
+        match value.as_bytes() {
+            b"none" => Some(Self::None),
+            b"minimal" => Some(Self::Minimal),
+            b"low" => Some(Self::Low),
+            b"medium" => Some(Self::Medium),
+            b"high" => Some(Self::High),
+            b"xhigh" => Some(Self::XHigh),
+            b"max" => Some(Self::Max),
+            b"ultra" => Some(Self::Ultra),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -542,7 +556,6 @@ pub struct ModelServiceTier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ModelRuntimeCapability {
-    CodeMode,
     MultiAgent,
 }
 
