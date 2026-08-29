@@ -50,13 +50,13 @@ evidência desta execução, não garantias universais.
 
 | Cenário | Resultado |
 | --- | ---: |
-| streaming de texto batched | 204,532× o caminho sequencial |
-| streaming de comando framed | 69,563× o caminho sequencial |
-| diff de 150.001 linhas | 45 linhas montadas; janela em 0,289 ms |
-| terminal incremental de 64 MiB | 1.389,65 ms; 46,1 MiB/s |
-| comando após yield | resposta em 261 ms; trabalho independente em 503 ms |
+| streaming de texto batched | 195,684× o caminho sequencial |
+| streaming de comando framed | 63,229× o caminho sequencial |
+| diff de 150.001 linhas | 45 linhas montadas; janela em 0,320 ms |
+| terminal incremental de 64 MiB | 1.368,10 ms; 46,8 MiB/s |
+| comando após yield | resposta em 262 ms; trabalho independente em 499 ms |
 | polling incremental | 146 B contra snapshot de 16.513 B |
-| 4 comandos independentes | 733,20 ms paralelo contra 2.886,78 ms sequencial |
+| 4 comandos independentes | 749,72 ms paralelo contra 2.900,67 ms sequencial |
 
 O QA visual passou em 920×640, 1280×820 e 1920×1080 sem overflow horizontal.
 Ultra foi apresentado em `rgb(167, 139, 250)` (`#a78bfa`); aparência não altera
@@ -70,7 +70,7 @@ o bloqueio de capability no engine.
 | frontend | 80 arquivos; 449 testes aprovados |
 | bundle principal JS | 442,45 kB; 134,41 kB gzip |
 | CSS | 144,20 kB; 25,82 kB gzip |
-| Rust | 417 aprovados; 9 benchmarks ignorados; 0 falhas |
+| Rust | 418 aprovados; 9 benchmarks ignorados; 0 falhas |
 | Cargo, formato e Clippy | aprovados sem warnings |
 
 ## Proteções contra regressão

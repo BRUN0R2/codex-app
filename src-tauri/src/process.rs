@@ -1,5 +1,8 @@
 use std::ffi::OsStr;
 #[cfg(windows)]
+#[cfg(windows)]
+use std::future::Future;
+#[cfg(windows)]
 use std::process::Stdio;
 #[cfg(windows)]
 use std::time::Duration;
@@ -20,7 +23,7 @@ const WINDOWS_POWERSHELL_EXECUTABLE: &str = "pwsh.exe";
 #[cfg(windows)]
 const POWERSHELL_VERSION_MAX_BYTES: usize = 64;
 #[cfg(windows)]
-const POWERSHELL_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
+const POWERSHELL_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const WINDOWS_POWERSHELL_SESSION_SETUP: &str = concat!(
     "$__codexUtf8NoBom = [System.Text.UTF8Encoding]::new($false); ",
@@ -33,7 +36,7 @@ const WINDOWS_POWERSHELL_SESSION_SETUP: &str = concat!(
 );
 
 #[cfg(windows)]
-static POWERSHELL_VERSION: OnceCell<Option<String>> = OnceCell::const_new();
+static POWERSHELL_VERSION: OnceCell<String> = OnceCell::const_new();
 
 pub(crate) fn headless_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
@@ -48,10 +51,7 @@ pub(crate) const fn shell_name() -> &'static str {
 
 #[cfg(windows)]
 pub(crate) async fn shell_version() -> Option<String> {
-    POWERSHELL_VERSION
-        .get_or_init(detect_powershell_version)
-        .await
-        .clone()
+    cached_powershell_version(&POWERSHELL_VERSION, detect_powershell_version).await
 }
 
 #[cfg(not(windows))]
@@ -79,6 +79,19 @@ async fn detect_powershell_version() -> Option<String> {
         .and_then(Result::ok)
         .filter(|output| output.status.success())
         .and_then(|output| parse_powershell_version(&output.stdout))
+}
+
+#[cfg(windows)]
+async fn cached_powershell_version<F, Fut>(cache: &OnceCell<String>, detect: F) -> Option<String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
+    cache
+        .get_or_try_init(|| async { detect().await.ok_or(()) })
+        .await
+        .ok()
+        .cloned()
 }
 
 #[cfg(windows)]
@@ -118,10 +131,17 @@ mod tests {
     #[cfg(windows)]
     use std::path::Path;
     #[cfg(windows)]
+    #[cfg(windows)]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(windows)]
     use std::time::{Duration, Instant};
+    #[cfg(windows)]
+    use tokio::sync::OnceCell;
 
     #[cfg(windows)]
-    use super::{headless_shell_command, parse_powershell_version, shell_version};
+    use super::{
+        cached_powershell_version, headless_shell_command, parse_powershell_version, shell_version,
+    };
 
     #[cfg(windows)]
     #[test]
@@ -132,6 +152,41 @@ mod tests {
         );
         assert_eq!(parse_powershell_version(b"not-a-version"), None);
         assert_eq!(parse_powershell_version(&[b'7'; 65]), None);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn powershell_version_cache_retries_transient_detection_failure() {
+        let cache = OnceCell::new();
+        let attempts = AtomicUsize::new(0);
+
+        assert_eq!(
+            cached_powershell_version(&cache, || async {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                None
+            })
+            .await,
+            None
+        );
+        assert_eq!(
+            cached_powershell_version(&cache, || async {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                Some("7.6".into())
+            })
+            .await
+            .as_deref(),
+            Some("7.6")
+        );
+        assert_eq!(
+            cached_powershell_version(&cache, || async {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                Some("unexpected".into())
+            })
+            .await
+            .as_deref(),
+            Some("7.6")
+        );
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
     }
 
     #[cfg(windows)]
