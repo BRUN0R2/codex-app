@@ -62,13 +62,7 @@ pub(super) struct ContextWindowEvaluation<'a> {
 pub(super) fn evaluate_context_window(
     evaluation: ContextWindowEvaluation<'_>,
 ) -> ContextWindowStatus {
-    let estimated_request = add_request_estimate_headroom(estimate_request_tokens(
-        evaluation.base_instructions,
-        evaluation.prompt_context,
-        evaluation.history,
-        evaluation.tools,
-    ));
-    let measured_with_local_delta = evaluation
+    let active_tokens = evaluation
         .snapshot
         .filter(|snapshot| snapshot.model == evaluation.model_id)
         .map(|snapshot| {
@@ -84,8 +78,15 @@ pub(super) fn evaluate_context_window(
                 })
                 .unwrap_or_default();
             snapshot.usage.total_tokens.saturating_add(local_tokens)
+        })
+        .unwrap_or_else(|| {
+            add_request_estimate_headroom(estimate_request_tokens(
+                evaluation.base_instructions,
+                evaluation.prompt_context,
+                evaluation.history,
+                evaluation.tools,
+            ))
         });
-    let active_tokens = measured_with_local_delta.unwrap_or(estimated_request);
     let should_compact = evaluation
         .auto_compact_limit
         .is_some_and(|limit| active_tokens >= limit)
@@ -949,5 +950,89 @@ mod tests {
         });
 
         assert!(status.should_compact);
+    }
+
+    #[test]
+    #[ignore = "performance benchmark; run through `pnpm measure:context-window`"]
+    fn benchmark_confirmed_context_preflight() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const HISTORY_ITEMS: usize = 96;
+        const ITEM_BYTES: usize = 32 * 1_024;
+        const SAMPLES: u32 = 40;
+
+        let mut history = Vec::with_capacity(HISTORY_ITEMS + 2);
+        history.push(text("user", "initial request"));
+        history.extend((0..HISTORY_ITEMS).map(|index| {
+            ResponseItem::function_output(format!("call-{index}"), "x".repeat(ITEM_BYTES))
+        }));
+        history.push(text("assistant", "completed response"));
+        history.push(text("user", "small local continuation"));
+        let snapshot = ContextUsageSnapshot {
+            model: "gpt-benchmark".into(),
+            usage: usage(180_000),
+        };
+        let expected_active_tokens =
+            snapshot
+                .usage
+                .total_tokens
+                .saturating_add(estimate_item_tokens(
+                    history
+                        .last()
+                        .expect("benchmark history should not be empty"),
+                ));
+
+        let started_at = Instant::now();
+        let mut optimized_checksum = 0_u64;
+        for _ in 0..SAMPLES {
+            let status = black_box(evaluate_context_window(ContextWindowEvaluation {
+                model_id: "gpt-benchmark",
+                base_instructions: black_box("system instructions"),
+                prompt_context: &[],
+                history: black_box(&history),
+                tools: &[],
+                snapshot: Some(&snapshot),
+                auto_compact_limit: Some(244_800),
+                context_window: None,
+            }));
+            optimized_checksum = optimized_checksum.saturating_add(status.active_tokens);
+        }
+        let optimized_elapsed = started_at.elapsed();
+
+        let full_estimate_started_at = Instant::now();
+        let mut full_estimate_checksum = 0_u64;
+        for _ in 0..SAMPLES {
+            full_estimate_checksum = full_estimate_checksum.saturating_add(black_box(
+                add_request_estimate_headroom(estimate_request_tokens(
+                    black_box("system instructions"),
+                    &[],
+                    black_box(&history),
+                    &[],
+                )),
+            ));
+        }
+        let full_estimate_elapsed = full_estimate_started_at.elapsed();
+        let optimized_per_evaluation_micros =
+            optimized_elapsed.as_secs_f64() * 1_000_000.0 / f64::from(SAMPLES);
+        let full_estimate_per_evaluation_micros =
+            full_estimate_elapsed.as_secs_f64() * 1_000_000.0 / f64::from(SAMPLES);
+        let speedup = full_estimate_per_evaluation_micros / optimized_per_evaluation_micros;
+
+        assert_eq!(
+            optimized_checksum,
+            expected_active_tokens.saturating_mul(u64::from(SAMPLES)),
+        );
+        assert!(full_estimate_checksum > optimized_checksum);
+        assert!(
+            speedup > 10.0,
+            "context preflight speedup was only {speedup:.2}x"
+        );
+        println!(
+            "confirmed_context_preflight history_mib={:.3} samples={SAMPLES} optimized_total_ms={:.3} optimized_per_evaluation_us={optimized_per_evaluation_micros:.3} full_estimate_total_ms={:.3} full_estimate_per_evaluation_us={full_estimate_per_evaluation_micros:.3} speedup={speedup:.2}x",
+            (HISTORY_ITEMS * ITEM_BYTES) as f64 / (1_024.0 * 1_024.0),
+            optimized_elapsed.as_secs_f64() * 1_000.0,
+            full_estimate_elapsed.as_secs_f64() * 1_000.0,
+        );
     }
 }

@@ -208,6 +208,7 @@ pub(super) struct NativeEngineInner {
     automation_wake: Notify,
     start_gate: Mutex<()>,
     code_mode_warmup_started: AtomicBool,
+    agent_startup_prewarm_started: AtomicBool,
     started: AtomicBool,
 }
 
@@ -244,6 +245,7 @@ impl NativeEngine {
                 automation_wake: Notify::new(),
                 start_gate: Mutex::new(()),
                 code_mode_warmup_started: AtomicBool::new(false),
+                agent_startup_prewarm_started: AtomicBool::new(false),
                 started: AtomicBool::new(false),
             }),
         }
@@ -288,6 +290,32 @@ impl NativeEngine {
                     &app_handle,
                     DiagnosticStream::Runtime,
                     format!("could not warm the Code Mode runtime: {error}"),
+                );
+            }
+        });
+    }
+
+    async fn spawn_agent_startup_prewarm(&self, app: &AppHandle) {
+        if self
+            .inner
+            .agent_startup_prewarm_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        let app_handle = app.clone();
+        self.inner.tasks.lock().await.spawn(async move {
+            let (_, auth_result) = tokio::join!(
+                crate::process::shell_version(),
+                inner.auth.prewarm(&app_handle),
+            );
+            if let Err(error) = auth_result {
+                inner.emit_diagnostic(
+                    &app_handle,
+                    DiagnosticStream::Runtime,
+                    format!("could not prewarm ChatGPT credentials: {error}"),
                 );
             }
         });
@@ -530,6 +558,7 @@ impl NativeEngine {
         let _start_guard = self.inner.start_gate.lock().await;
         if !self.inner.started.load(Ordering::Acquire) {
             self.spawn_code_mode_warmup(app).await;
+            self.spawn_agent_startup_prewarm(app).await;
             let result = async {
                 tokio::try_join!(
                     self.inner.storage.initialize(app),

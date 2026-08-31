@@ -40,6 +40,8 @@
     "verify:version": "node scripts/verify-version.mjs",
     "measure:release": "pwsh -File scripts/measure-release.ps1",
     "measure:command-output": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::output_compaction::tests::benchmark_semantic_command_output_reduction -- --ignored --nocapture --test-threads=1",
+    "measure:context-window": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::context_window::tests::benchmark_confirmed_context_preflight -- --ignored --nocapture --test-threads=1",
+    "measure:credentials": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::auth::storage::vault::tests::benchmark_cached_credential_load -- --ignored --nocapture --test-threads=1",
     "measure:code-mode-warmup": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::code_mode::tests::benchmark_code_mode_runtime_warmup -- --ignored --nocapture --test-threads=1",
     "measure:command-stream": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::terminal_output::stream::tests::benchmark_incremental_terminal_stream -- --ignored --nocapture --test-threads=1",
     "measure:background-command": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::tools::command_sessions::tests::benchmark_background_command_yield_and_incremental_polling -- --ignored --nocapture --test-threads=1",
