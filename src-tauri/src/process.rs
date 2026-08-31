@@ -1,6 +1,5 @@
 use std::ffi::OsStr;
 #[cfg(windows)]
-#[cfg(windows)]
 use std::future::Future;
 #[cfg(windows)]
 use std::process::Stdio;

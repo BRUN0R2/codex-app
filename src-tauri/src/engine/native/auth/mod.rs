@@ -132,6 +132,15 @@ impl ChatGptAuth {
             .map_err(Into::into)
     }
 
+    pub(super) async fn prewarm(&self, app: &AppHandle) -> Result<(), AppError> {
+        let context = self.inner.context(app).await?;
+        let _operation_guard = context.operation_gate.lock().await;
+        load_cached_record(app, context, &self.inner.diagnostics)
+            .await
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     pub async fn read_account(&self, app: &AppHandle) -> Result<AccountReadResponse, AppError> {
         self.inner.read_account(app).await.map_err(Into::into)
     }

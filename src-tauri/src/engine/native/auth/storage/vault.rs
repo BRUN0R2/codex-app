@@ -219,6 +219,7 @@ fn storage_error(message: impl Into<String>) -> AuthError {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use chrono::Utc;
@@ -229,10 +230,12 @@ mod tests {
     #[derive(Default)]
     struct MemoryKeyring {
         values: Mutex<HashMap<(String, String), String>>,
+        loads: AtomicUsize,
     }
 
     impl KeyringStore for MemoryKeyring {
         fn load(&self, service: &str, account: &str) -> Result<Option<String>, AuthError> {
+            self.loads.fetch_add(1, Ordering::Relaxed);
             let values = self
                 .values
                 .lock()
@@ -403,5 +406,96 @@ mod tests {
                 .is_some()
         );
         assert_ne!(release.namespace.service, development.namespace.service);
+    }
+
+    #[tokio::test]
+    async fn credential_storage_decrypts_the_vault_only_once_per_process() {
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary credential directory should exist: {error}"));
+        let keyring = Arc::new(MemoryKeyring::default());
+        let vault = test_vault(
+            directory.path().to_path_buf(),
+            keyring.clone(),
+            "dev.codexapp.desktop.cache-test",
+        );
+        let record = large_record();
+        vault
+            .save(record.clone())
+            .unwrap_or_else(|error| panic!("credential fixture should persist: {error}"));
+        keyring.loads.store(0, Ordering::Relaxed);
+        let storage = super::super::CredentialStorage::from_vault(vault);
+
+        let first = storage
+            .load()
+            .await
+            .unwrap_or_else(|error| panic!("first credential load should succeed: {error}"));
+        let second = storage
+            .load()
+            .await
+            .unwrap_or_else(|error| panic!("cached credential load should succeed: {error}"));
+
+        assert!(first.is_some());
+        assert_eq!(
+            serde_json::to_value(first)
+                .unwrap_or_else(|error| panic!("first credential should serialize: {error}")),
+            serde_json::to_value(second)
+                .unwrap_or_else(|error| panic!("cached credential should serialize: {error}")),
+        );
+        assert_eq!(keyring.loads.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "performance benchmark; run through `pnpm measure:credentials`"]
+    async fn benchmark_cached_credential_load() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SAMPLES: u32 = 100;
+
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary credential directory should exist: {error}"));
+        let keyring = Arc::new(MemoryKeyring::default());
+        let vault = test_vault(
+            directory.path().to_path_buf(),
+            keyring.clone(),
+            "dev.codexapp.desktop.cache-benchmark",
+        );
+        vault
+            .save(large_record())
+            .unwrap_or_else(|error| panic!("credential fixture should persist: {error}"));
+        keyring.loads.store(0, Ordering::Relaxed);
+        let storage = super::super::CredentialStorage::from_vault(vault);
+
+        let cold_started_at = Instant::now();
+        black_box(
+            storage
+                .load()
+                .await
+                .unwrap_or_else(|error| panic!("cold credential load should succeed: {error}")),
+        );
+        let cold = cold_started_at.elapsed();
+        let warm_started_at = Instant::now();
+        for _ in 0..SAMPLES {
+            black_box(
+                storage.load().await.unwrap_or_else(|error| {
+                    panic!("cached credential load should succeed: {error}")
+                }),
+            );
+        }
+        let warm = warm_started_at.elapsed();
+        let warm_per_load = warm.as_secs_f64() / f64::from(SAMPLES);
+        let speedup = cold.as_secs_f64() / warm_per_load;
+
+        assert_eq!(keyring.loads.load(Ordering::Relaxed), 1);
+        assert!(
+            speedup > 10.0,
+            "credential cache speedup was only {speedup:.2}x"
+        );
+        println!(
+            "credential_cache cold_ms={:.3} warm_total_ms={:.3} warm_per_load_us={:.3} speedup={speedup:.2}x samples={SAMPLES}",
+            cold.as_secs_f64() * 1_000.0,
+            warm.as_secs_f64() * 1_000.0,
+            warm_per_load * 1_000_000.0,
+        );
     }
 }

@@ -1,10 +1,12 @@
 mod keyring;
 mod vault;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::AppHandle;
 use tauri::Manager as _;
+use tokio::sync::Mutex;
 
 use self::keyring::system_keyring;
 use self::vault::{CredentialNamespace, CredentialVault};
@@ -21,6 +23,14 @@ const CREDENTIALS_DIRECTORY_NAME: &str = "credentials-v2";
 #[derive(Clone)]
 pub(super) struct CredentialStorage {
     vault: CredentialVault,
+    cache: Arc<Mutex<CredentialCache>>,
+}
+
+#[derive(Default)]
+enum CredentialCache {
+    #[default]
+    Uninitialized,
+    Loaded(Option<AuthRecord>),
 }
 
 impl CredentialStorage {
@@ -35,37 +45,59 @@ impl CredentialStorage {
                 ))
             })?
             .join(CREDENTIALS_DIRECTORY_NAME);
-        Ok(Self {
-            vault: CredentialVault::new(credentials_directory, system_keyring(), namespace),
-        })
+        Ok(Self::from_vault(CredentialVault::new(
+            credentials_directory,
+            system_keyring(),
+            namespace,
+        )))
     }
 
-    pub async fn load(&self) -> Result<Option<AuthRecord>, AuthError> {
-        let vault = self.vault.clone();
-        let handle = tokio::task::spawn_blocking(move || vault.load());
-        match tokio::time::timeout(CREDENTIAL_OPERATION_TIMEOUT, handle).await {
-            Ok(result) => result.map_err(|error| AuthError::Task(error.to_string()))?,
-            Err(_) => Err(credential_operation_timeout("loading")),
+    fn from_vault(vault: CredentialVault) -> Self {
+        Self {
+            vault,
+            cache: Arc::new(Mutex::new(CredentialCache::Uninitialized)),
         }
     }
 
+    pub async fn load(&self) -> Result<Option<AuthRecord>, AuthError> {
+        let mut cache = self.cache.lock().await;
+        if let CredentialCache::Loaded(record) = &*cache {
+            return Ok(record.clone());
+        }
+        let vault = self.vault.clone();
+        let handle = tokio::task::spawn_blocking(move || vault.load());
+        let record = match tokio::time::timeout(CREDENTIAL_OPERATION_TIMEOUT, handle).await {
+            Ok(result) => result.map_err(|error| AuthError::Task(error.to_string()))?,
+            Err(_) => Err(credential_operation_timeout("loading")),
+        }?;
+        *cache = CredentialCache::Loaded(record.clone());
+        Ok(record)
+    }
+
     pub async fn save(&self, record: &AuthRecord) -> Result<(), AuthError> {
+        let mut cache = self.cache.lock().await;
         let vault = self.vault.clone();
         let record = record.clone();
+        let cached_record = record.clone();
         let handle = tokio::task::spawn_blocking(move || vault.save(record));
         match tokio::time::timeout(CREDENTIAL_OPERATION_TIMEOUT, handle).await {
             Ok(result) => result.map_err(|error| AuthError::Task(error.to_string()))?,
             Err(_) => Err(credential_operation_timeout("saving")),
-        }
+        }?;
+        *cache = CredentialCache::Loaded(Some(cached_record));
+        Ok(())
     }
 
     pub async fn delete(&self) -> Result<bool, AuthError> {
+        let mut cache = self.cache.lock().await;
         let vault = self.vault.clone();
         let handle = tokio::task::spawn_blocking(move || vault.delete());
-        match tokio::time::timeout(CREDENTIAL_OPERATION_TIMEOUT, handle).await {
+        let removed = match tokio::time::timeout(CREDENTIAL_OPERATION_TIMEOUT, handle).await {
             Ok(result) => result.map_err(|error| AuthError::Task(error.to_string()))?,
             Err(_) => Err(credential_operation_timeout("deleting")),
-        }
+        }?;
+        *cache = CredentialCache::Loaded(None);
+        Ok(removed)
     }
 }
 
