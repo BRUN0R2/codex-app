@@ -10,10 +10,12 @@ use std::time::Duration;
 use std::time::Instant;
 
 use futures_util::future::join_all;
+use parking_lot::Mutex as SyncMutex;
 use tauri::AppHandle;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::watch;
+use tokio::task::AbortHandle;
 use uuid::Uuid;
 
 use super::ExecCommandArgs;
@@ -45,13 +47,25 @@ const DELIVERY_BACKGROUND: u8 = 1;
 const DELIVERY_CONSUMED: u8 = 2;
 const MAX_COMMAND_SESSIONS: usize = 32;
 const MAX_POLL_PREVIEW_BYTES: usize = 32 * 1_024;
-// Windows tree termination can spend five seconds invoking taskkill and another five
-// reaping the direct child. The owner deadline must strictly dominate that nested budget.
-const SESSION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+// Cooperative Windows tree termination can spend five seconds reaping the direct child.
+// The graceful owner budget strictly dominates it; forced abort then drops the Job Object.
+const SESSION_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
+const SESSION_FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub(in crate::engine::native) struct CommandSessionManager {
     sessions: Mutex<HashMap<String, Arc<CommandSession>>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::engine::native) struct CommandSessionSettlement {
+    forced_abort_count: usize,
+}
+
+impl CommandSessionSettlement {
+    pub(in crate::engine::native) fn forced_abort_count(self) -> usize {
+        self.forced_abort_count
+    }
 }
 
 pub(super) enum CommandStartOutcome {
@@ -101,7 +115,9 @@ struct CommandSession {
     persisted: AtomicBool,
     discarded: AtomicBool,
     finalizer_started: AtomicBool,
+    forced_abort_requested: AtomicBool,
     delivery: AtomicU8,
+    execution_abort: SyncMutex<Option<AbortHandle>>,
     finished_notify: Notify,
     persisted_notify: Notify,
     terminal_notify: Notify,
@@ -204,21 +220,25 @@ impl CommandSessionManager {
             persisted: AtomicBool::new(false),
             discarded: AtomicBool::new(false),
             finalizer_started: AtomicBool::new(false),
+            forced_abort_requested: AtomicBool::new(false),
             delivery: AtomicU8::new(DELIVERY_FOREGROUND),
+            execution_abort: SyncMutex::new(None),
             finished_notify: Notify::new(),
             persisted_notify: Notify::new(),
             terminal_notify: Notify::new(),
         });
         self.insert(Arc::clone(&session)).await?;
 
+        let execution = tokio::spawn(async move {
+            execute_spawned_command(command, &mut cancellation_receiver).await
+        });
+        *session.execution_abort.lock() = Some(execution.abort_handle());
         let worker_session = Arc::clone(&session);
         tokio::spawn(async move {
-            let execution = tokio::spawn(async move {
-                execute_spawned_command(command, &mut cancellation_receiver).await
-            })
-            .await
-            .map_err(|error| AppError::Tool(format!("command task failed: {error}")))
-            .and_then(std::convert::identity);
+            let execution = execution
+                .await
+                .map_err(|error| AppError::Tool(format!("command task failed: {error}")))
+                .and_then(std::convert::identity);
             let result = match flush_emitter.flush().await {
                 Ok(()) => execution,
                 Err(error) if execution.is_ok() => Err(error),
@@ -323,32 +343,27 @@ impl CommandSessionManager {
     pub(in crate::engine::native) async fn cancel_thread(
         &self,
         thread_id: &str,
-    ) -> Result<(), AppError> {
+    ) -> Result<CommandSessionSettlement, AppError> {
         let sessions = self.sessions_for_thread(thread_id).await;
         self.close_and_remove_sessions(sessions).await
     }
 
-    pub(in crate::engine::native) async fn cancel_turn(
+    pub(in crate::engine::native) async fn request_turn_cancellation(
         &self,
         thread_id: &str,
         turn_id: &str,
-    ) -> Result<(), AppError> {
+    ) {
         let sessions = self.sessions_for_turn(thread_id, turn_id).await;
-        for session in &sessions {
+        for session in sessions {
             session.cancel();
         }
-        let background_sessions = sessions
-            .into_iter()
-            .filter(|session| session.delivery.load(Ordering::Acquire) == DELIVERY_BACKGROUND)
-            .collect();
-        self.wait_for_sessions(background_sessions).await
     }
 
     pub(in crate::engine::native) async fn settle_turn(
         &self,
         thread_id: &str,
         turn_id: &str,
-    ) -> Result<(), AppError> {
+    ) -> Result<CommandSessionSettlement, AppError> {
         let sessions = self.sessions_for_turn(thread_id, turn_id).await;
         self.close_and_remove_sessions(sessions).await
     }
@@ -359,7 +374,9 @@ impl CommandSessionManager {
         })
     }
 
-    pub(in crate::engine::native) async fn shutdown(&self) -> Result<(), AppError> {
+    pub(in crate::engine::native) async fn shutdown(
+        &self,
+    ) -> Result<CommandSessionSettlement, AppError> {
         let sessions = self
             .sessions
             .lock()
@@ -446,31 +463,52 @@ impl CommandSessionManager {
     async fn close_and_remove_sessions(
         &self,
         sessions: Vec<Arc<CommandSession>>,
-    ) -> Result<(), AppError> {
-        self.close_and_remove_sessions_with_timeout(sessions, SESSION_SHUTDOWN_TIMEOUT)
-            .await
+    ) -> Result<CommandSessionSettlement, AppError> {
+        self.close_and_remove_sessions_with_timeouts(
+            sessions,
+            SESSION_GRACEFUL_SHUTDOWN_TIMEOUT,
+            SESSION_FORCED_SHUTDOWN_TIMEOUT,
+        )
+        .await
     }
 
-    async fn close_and_remove_sessions_with_timeout(
+    async fn close_and_remove_sessions_with_timeouts(
         &self,
         sessions: Vec<Arc<CommandSession>>,
-        timeout: Duration,
-    ) -> Result<(), AppError> {
+        graceful_timeout: Duration,
+        forced_timeout: Duration,
+    ) -> Result<CommandSessionSettlement, AppError> {
         for session in &sessions {
             session.close_with_owner();
         }
-        self.wait_for_sessions_with_timeout(sessions.clone(), timeout)
-            .await?;
+        let forced_abort_count = match self
+            .wait_for_sessions_with_timeout(sessions.clone(), graceful_timeout)
+            .await
+        {
+            Ok(()) => 0,
+            Err(graceful_error) => {
+                let forced_abort_count = sessions
+                    .iter()
+                    .filter(|session| session.abort_execution())
+                    .count();
+                if forced_abort_count == 0 {
+                    return Err(graceful_error);
+                }
+                self.wait_for_sessions_with_timeout(sessions.clone(), forced_timeout)
+                    .await
+                    .map_err(|forced_error| {
+                        AppError::Tool(format!(
+                            "command cleanup remained incomplete after graceful shutdown ({graceful_error}) and {forced_abort_count} forced abort(s) ({forced_error})"
+                        ))
+                    })?;
+                forced_abort_count
+            }
+        };
         let mut registered = self.sessions.lock().await;
         for session in sessions {
             registered.remove(&session.id);
         }
-        Ok(())
-    }
-
-    async fn wait_for_sessions(&self, sessions: Vec<Arc<CommandSession>>) -> Result<(), AppError> {
-        self.wait_for_sessions_with_timeout(sessions, SESSION_SHUTDOWN_TIMEOUT)
-            .await
+        Ok(CommandSessionSettlement { forced_abort_count })
     }
 
     async fn wait_for_sessions_with_timeout(
@@ -485,9 +523,13 @@ impl CommandSessionManager {
         tokio::time::timeout(timeout, join_all(waits))
             .await
             .map_err(|_| {
+                let unfinished = sessions
+                    .iter()
+                    .filter(|session| !session.terminal_ready.load(Ordering::Acquire))
+                    .count();
                 AppError::Tool(format!(
                     "{} command session(s) did not terminate within {} seconds",
-                    sessions.len(),
+                    unfinished,
                     timeout.as_secs_f64()
                 ))
             })?;
@@ -516,6 +558,7 @@ impl CommandSession {
     }
 
     async fn finish(self: &Arc<Self>, result: Result<CommandOutput, AppError>) {
+        self.execution_abort.lock().take();
         *self.result.lock().await = Some(result);
         self.finished.store(true, Ordering::Release);
         self.finished_notify.notify_waiters();
@@ -781,6 +824,20 @@ impl CommandSession {
         self.cancellation.send_replace(true);
     }
 
+    fn abort_execution(&self) -> bool {
+        if self.terminal_ready.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(abort) = self.execution_abort.lock().as_ref().cloned() else {
+            return false;
+        };
+        if abort.is_finished() || self.forced_abort_requested.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        abort.abort();
+        true
+    }
+
     fn elapsed_millis(&self) -> u64 {
         u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
@@ -934,6 +991,7 @@ mod tests {
     use std::time::Duration;
     use std::time::Instant;
 
+    use parking_lot::Mutex as SyncMutex;
     use tempfile::TempDir;
     use tokio::sync::Mutex;
     use tokio::sync::Notify;
@@ -1133,11 +1191,9 @@ mod tests {
             .await;
         let lease = BackgroundCommandLease::new(Arc::clone(&session));
 
-        let cancellation = manager.cancel_turn("thread-a", "turn-a").await;
-        assert!(
-            cancellation.is_ok(),
-            "external cancellation should reach the terminal session: {cancellation:?}"
-        );
+        manager
+            .request_turn_cancellation("thread-a", "turn-a")
+            .await;
         assert!(!session.persisted.load(Ordering::Acquire));
         assert!(!session.discarded.load(Ordering::Acquire));
 
@@ -1174,11 +1230,9 @@ mod tests {
             })
             .await;
 
-        let cancellation = manager.cancel_turn("thread-a", "turn-a").await;
-        assert!(
-            cancellation.is_ok(),
-            "turn cancellation should complete: {cancellation:?}"
-        );
+        manager
+            .request_turn_cancellation("thread-a", "turn-a")
+            .await;
 
         assert!(*selected.cancellation.subscribe().borrow());
         assert!(*selected_foreground.cancellation.subscribe().borrow());
@@ -1207,7 +1261,11 @@ mod tests {
         let started_at = Instant::now();
 
         let result = manager
-            .close_and_remove_sessions_with_timeout(sessions.clone(), shutdown_budget)
+            .close_and_remove_sessions_with_timeouts(
+                sessions.clone(),
+                shutdown_budget,
+                shutdown_budget,
+            )
             .await;
         assert!(
             matches!(
@@ -1230,6 +1288,46 @@ mod tests {
                 .iter()
                 .all(|session| *session.cancellation.subscribe().borrow())
         );
+    }
+
+    #[tokio::test]
+    async fn forced_abort_releases_a_stuck_execution_and_its_session() {
+        let manager = CommandSessionManager::default();
+        let session = test_session("session-stuck", "thread-a");
+        let execution = tokio::spawn(std::future::pending::<()>());
+        *session.execution_abort.lock() = Some(execution.abort_handle());
+        let terminal_session = Arc::clone(&session);
+        tokio::spawn(async move {
+            let result = execution.await;
+            assert!(result.is_err(), "the execution should be force-aborted");
+            terminal_session
+                .publish_terminal(CommandTerminal {
+                    status: ActivityStatus::Failed,
+                    exit_code: None,
+                    duration_ms: 1,
+                    output: None,
+                    summary: "force-aborted".into(),
+                })
+                .await;
+        });
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), Arc::clone(&session));
+
+        let settlement = manager
+            .close_and_remove_sessions_with_timeouts(
+                vec![Arc::clone(&session)],
+                Duration::from_millis(20),
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("forced abort should reach a terminal state");
+
+        assert_eq!(settlement.forced_abort_count(), 1);
+        assert!(session.forced_abort_requested.load(Ordering::Acquire));
+        assert!(manager.sessions.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -1751,7 +1849,9 @@ mod tests {
             persisted: AtomicBool::new(true),
             discarded: AtomicBool::new(false),
             finalizer_started: AtomicBool::new(false),
+            forced_abort_requested: AtomicBool::new(false),
             delivery: AtomicU8::new(DELIVERY_BACKGROUND),
+            execution_abort: SyncMutex::new(None),
             finished_notify: Notify::new(),
             persisted_notify: Notify::new(),
             terminal_notify: Notify::new(),

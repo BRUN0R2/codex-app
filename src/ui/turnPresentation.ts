@@ -38,9 +38,7 @@ export class TurnPresentationStore {
     const nextBlocksByKey = new Map<string, TurnPresentationBlock>();
     const blocks = projected.blocks.map((block) => {
       if (nextBlocksByKey.has(block.key)) {
-        throw new Error(
-          `A projeção do turno produziu a chave duplicada ${JSON.stringify(block.key)}.`,
-        );
+        throw new Error(`The turn projection produced duplicate key ${JSON.stringify(block.key)}.`);
       }
       const previous = this.#blocksByKey.get(block.key);
       const stable =

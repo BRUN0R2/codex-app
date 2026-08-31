@@ -5,6 +5,7 @@ import type { IconName } from "../contracts/iconNames";
 export type { IconName };
 
 export interface IconProps {
+  readonly color?: string;
   readonly name: IconName;
   readonly size?: number;
   readonly strokeWidth?: number;
@@ -24,6 +25,7 @@ export function Icon(props: IconProps): JSX.Element {
       stroke-linecap={isFilledReadIcon() ? undefined : "round"}
       stroke-linejoin={isFilledReadIcon() ? undefined : "round"}
       stroke-width={isFilledReadIcon() ? undefined : (props.strokeWidth ?? 2)}
+      style={props.color === undefined ? undefined : { color: props.color }}
       viewBox={isFilledReadIcon() ? "0 0 20 20" : "0 0 24 24"}
       width={props.size ?? 18}
       xmlns="http://www.w3.org/2000/svg"

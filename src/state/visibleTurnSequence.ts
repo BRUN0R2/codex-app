@@ -1,6 +1,7 @@
 import type { ThreadTurn, VisibleThreadItem } from "../contracts/types";
 
 export interface VisibleThreadTurn extends Omit<ThreadTurn, "items"> {
+  readonly confirmedOutputTokens: number;
   readonly items: readonly VisibleThreadItem[];
 }
 

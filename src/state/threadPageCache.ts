@@ -11,7 +11,7 @@ export class ThreadPageCache {
 
   public constructor(capacity: number) {
     if (!Number.isInteger(capacity) || capacity < 1) {
-      throw new Error("A cache de conversas exige uma capacidade inteira positiva.");
+      throw new Error("The thread cache requires a positive integer capacity.");
     }
     this.#capacity = capacity;
   }
@@ -28,7 +28,7 @@ export class ThreadPageCache {
   public write(page: CachedThreadPage): void {
     const threadId = page.thread.id;
     if (threadId.length === 0) {
-      throw new Error("A cache de conversas não aceita um identificador vazio.");
+      throw new Error("The thread cache does not accept an empty identifier.");
     }
     this.#touch(threadId, page);
     if (this.#pages.size <= this.#capacity) {
@@ -36,7 +36,7 @@ export class ThreadPageCache {
     }
     const oldestThreadId = this.#pages.keys().next().value;
     if (oldestThreadId === undefined) {
-      throw new Error("A cache de conversas perdeu o candidato à expulsão.");
+      throw new Error("The thread cache lost its eviction candidate.");
     }
     this.#pages.delete(oldestThreadId);
   }
@@ -48,7 +48,7 @@ export class ThreadPageCache {
     }
     const next = update(current);
     if (next.thread.id !== threadId) {
-      throw new Error("Uma atualização da cache tentou trocar o identificador da conversa.");
+      throw new Error("A cache update attempted to change the thread identifier.");
     }
     this.write(next);
   }

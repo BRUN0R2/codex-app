@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
 
+import { findCatalog, translationCatalogs } from "../i18n/catalog";
 import {
   isBrowserTool,
   isExplorationTool,
   isFileReadTool,
   isWebSearchTool,
+  toolLabel as rawToolLabel,
   toolIconName,
-  toolLabel,
 } from "./activityLabels";
+
+const messages = findCatalog(translationCatalogs, "pt-BR")?.messages.timeline;
+if (messages === undefined) throw new Error("The Brazilian Portuguese catalog is unavailable.");
+const toolLabel = (name: string) => rawToolLabel(name, messages);
 
 describe("activity labels", () => {
   it("assigns the open-book glyph exclusively to file reads", () => {

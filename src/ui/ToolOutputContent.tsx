@@ -1,6 +1,7 @@
 import { createMemo, For, Match, Switch } from "solid-js";
 
 import type { ThreadOutput, ToolOutputPresentation } from "../contracts/types";
+import { useI18n } from "../i18n/context";
 import { activityContentProjectionCache } from "./activityContentProjectionCache";
 import { ImagePreview } from "./ImagePreview";
 import { PlainTextOutput } from "./PlainTextOutput";
@@ -17,6 +18,7 @@ export function ToolOutputContent(props: {
   readonly presentation: ToolOutputPresentation;
   readonly text: string;
 }) {
+  const i18n = useI18n();
   const sourceProjection = createMemo(() =>
     props.presentation.type === "sourceFile"
       ? activityContentProjectionCache.sourceProjection(
@@ -44,14 +46,18 @@ export function ToolOutputContent(props: {
       <Match when={props.presentation.type === "image"}>
         <div class="tool-image-output">
           <Switch
-            fallback={<span class="tool-image-output-error">Prévia de imagem indisponível.</span>}
+            fallback={
+              <span class="tool-image-output-error">
+                {i18n.messages().toolOutput.imageUnavailable}
+              </span>
+            }
           >
             <Match when={imageSource()}>
               {(source) => (
                 <ImagePreview
-                  alt="Imagem visualizada pela ferramenta"
+                  alt={i18n.messages().toolOutput.viewedImageAlt}
                   class="tool-image-preview"
-                  name="Imagem visualizada"
+                  name={i18n.messages().toolOutput.viewedImageName}
                   source={source()}
                 />
               )}
@@ -64,7 +70,7 @@ export function ToolOutputContent(props: {
       </Match>
       <Match when={props.presentation.type === "searchResults" && searchLines()}>
         {(lines) => (
-          <table aria-label="Resultados da busca no projeto" class="tool-search-output">
+          <table aria-label={i18n.messages().toolOutput.searchResults} class="tool-search-output">
             <tbody>
               <For each={lines()}>
                 {(line) => (
@@ -101,7 +107,7 @@ export function ToolOutputContent(props: {
         )}
       </Match>
       <Match when={props.presentation.type === "fileList"}>
-        <ul aria-label="Arquivos encontrados" class="tool-file-list-output">
+        <ul aria-label={i18n.messages().toolOutput.foundFiles} class="tool-file-list-output">
           <For each={filePaths()}>
             {(path) => (
               <li>

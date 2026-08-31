@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -13,8 +14,8 @@ use super::workspace::{
 };
 use super::{
     EditFileArgs, ListFilesArgs, MAX_EDIT_OCCURRENCES, MAX_FILE_BYTES, MAX_LIST_DEPTH,
-    MAX_LIST_RESULTS, MAX_READ_LINES, MAX_SEARCH_LINE_BYTES, MAX_SEARCH_QUERY_BYTES,
-    MAX_SEARCH_RESULTS, MAX_TOOL_PATH_BYTES, ReadFileArgs, SearchTextArgs, WriteFileArgs,
+    MAX_LIST_RESULTS, MAX_SEARCH_LINE_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
+    MAX_TOOL_PATH_BYTES, ReadFileArgs, SearchTextArgs, WriteFileArgs,
 };
 use crate::error::AppError;
 use crate::process::headless_command;
@@ -37,30 +38,46 @@ fn search_query_variants(query: &str) -> Vec<String> {
 }
 
 pub(super) async fn read_file(workspace: &Path, args: &ReadFileArgs) -> Result<String, AppError> {
-    let start =
-        usize::try_from(args.start_line).map_err(|error| AppError::Tool(error.to_string()))?;
-    let end = usize::try_from(args.end_line).map_err(|error| AppError::Tool(error.to_string()))?;
-    if start == 0 || end < start || end - start + 1 > MAX_READ_LINES {
-        return Err(AppError::Tool(format!(
-            "line range must contain between 1 and {MAX_READ_LINES} lines"
-        )));
+    let start = usize::try_from(args.start_line.unwrap_or(1))
+        .map_err(|error| AppError::Tool(error.to_string()))?;
+    let requested_end = args
+        .end_line
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|error| AppError::Tool(error.to_string()))?;
+    if start == 0 || requested_end == Some(0) {
+        return Err(AppError::Tool("line numbers must start at 1".into()));
+    }
+    if requested_end.is_some_and(|end| end < start) {
+        return Err(AppError::Tool(
+            "end_line must be greater than or equal to start_line".into(),
+        ));
     }
     let path = resolve_existing_file(workspace, &args.path).await?;
     let bytes = read_file_bounded(&path).await?;
     let text = String::from_utf8(bytes)
         .map_err(|_| AppError::Tool("read_file supports UTF-8 text only".into()))?;
-    let lines = text
-        .lines()
-        .enumerate()
-        .filter(|(index, _)| *index + 1 >= start && *index < end)
-        .map(|(index, line)| format!("{}: {line}", index + 1))
-        .collect::<Vec<_>>();
-    if lines.is_empty() {
-        return Err(AppError::Tool(
-            "requested line range is outside the file".into(),
+    let line_count = text.lines().count();
+    if start > line_count {
+        return Ok(format!(
+            "[EOF: requested start line {start}; file contains {line_count} lines]"
         ));
     }
-    Ok(lines.join("\n"))
+    let end = requested_end.unwrap_or(line_count).min(line_count);
+    let mut output = String::with_capacity(text.len());
+    for (index, line) in text
+        .lines()
+        .enumerate()
+        .skip(start - 1)
+        .take(end - start + 1)
+    {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        write!(output, "{}: {line}", index + 1)
+            .map_err(|error| AppError::Tool(format!("could not format file output: {error}")))?;
+    }
+    Ok(output)
 }
 
 pub(super) async fn list_files(workspace: &Path, args: &ListFilesArgs) -> Result<String, AppError> {
@@ -475,10 +492,93 @@ mod tests {
 
     use super::super::ToolRegistry;
     use super::super::read_cache::{CachedReadOutput, ReadToolCache, ReadToolCacheKey};
-    use super::{SearchTextArgs, search_text};
+    use super::{ReadFileArgs, SearchTextArgs, read_file, search_text};
     use crate::engine::native::output_compaction::TextOutputKind;
     use crate::engine::native::tools::ripgrep::Ripgrep;
     use crate::error::AppError;
+
+    #[tokio::test]
+    async fn read_file_accepts_more_than_two_thousand_lines_without_an_arbitrary_window() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let workspace_path =
+            std::fs::canonicalize(workspace.path()).expect("workspace should canonicalize");
+        let content = (1..=2_501)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(workspace.path().join("large.txt"), content)
+            .expect("large text fixture should be written");
+
+        let output = read_file(
+            &workspace_path,
+            &ReadFileArgs {
+                path: "large.txt".into(),
+                start_line: None,
+                end_line: None,
+            },
+        )
+        .await
+        .expect("an unbounded read should succeed");
+
+        assert_eq!(output.lines().count(), 2_501);
+        assert!(output.starts_with("1: line 1\n"));
+        assert!(output.ends_with("2501: line 2501"));
+    }
+
+    #[tokio::test]
+    async fn read_file_clamps_the_end_and_reports_eof_as_a_successful_result() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let workspace_path =
+            std::fs::canonicalize(workspace.path()).expect("workspace should canonicalize");
+        std::fs::write(workspace.path().join("short.txt"), "alpha\nbeta\ngamma\n")
+            .expect("short text fixture should be written");
+
+        let clamped = read_file(
+            &workspace_path,
+            &ReadFileArgs {
+                path: "short.txt".into(),
+                start_line: Some(2),
+                end_line: Some(20_000),
+            },
+        )
+        .await
+        .expect("an end past EOF should be clamped");
+        let eof = read_file(
+            &workspace_path,
+            &ReadFileArgs {
+                path: "short.txt".into(),
+                start_line: Some(4),
+                end_line: None,
+            },
+        )
+        .await
+        .expect("a start at EOF should remain an observable successful read");
+
+        assert_eq!(clamped, "2: beta\n3: gamma");
+        assert_eq!(eof, "[EOF: requested start line 4; file contains 3 lines]");
+    }
+
+    #[tokio::test]
+    async fn read_file_rejects_a_reversed_range_explicitly() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let workspace_path =
+            std::fs::canonicalize(workspace.path()).expect("workspace should canonicalize");
+        std::fs::write(workspace.path().join("short.txt"), "alpha\n")
+            .expect("short text fixture should be written");
+
+        let error = read_file(
+            &workspace_path,
+            &ReadFileArgs {
+                path: "short.txt".into(),
+                start_line: Some(3),
+                end_line: Some(2),
+            },
+        )
+        .await
+        .expect_err("a reversed range must fail");
+
+        assert!(error.to_string().contains("end_line must be greater"));
+    }
 
     #[tokio::test]
     async fn ripgrep_search_is_literal_case_aware_hidden_and_ignore_aware() {

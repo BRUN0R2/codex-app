@@ -351,7 +351,7 @@ const activityProjectionMilliseconds = duration(() => {
       {
         type: "reasoning",
         id: "projection-reasoning",
-        summary: [`Análise ${index}`],
+        summary: [`Analysis ${index}`],
         content: [],
       },
       ...projectionSuffix,

@@ -11,10 +11,10 @@ export class WeightedRecentCache<Key, Value extends object> {
 
   constructor(maximumEntries: number, maximumWeight: number) {
     if (!Number.isSafeInteger(maximumEntries) || maximumEntries < 1) {
-      throw new Error("A cache exige uma quantidade máxima inteira e positiva de entradas.");
+      throw new Error("The cache requires a positive integer maximum entry count.");
     }
     if (!Number.isSafeInteger(maximumWeight) || maximumWeight < 1) {
-      throw new Error("A cache exige um peso máximo inteiro e positivo.");
+      throw new Error("The cache requires a positive integer maximum weight.");
     }
     this.#maximumEntries = maximumEntries;
     this.#maximumWeight = maximumWeight;
@@ -40,7 +40,7 @@ export class WeightedRecentCache<Key, Value extends object> {
 
   write(key: Key, value: Value, weight: number): boolean {
     if (!Number.isSafeInteger(weight) || weight < 1) {
-      throw new Error("O peso de uma entrada da cache deve ser um inteiro positivo.");
+      throw new Error("A cache entry weight must be a positive integer.");
     }
     const previous = this.#entries.get(key);
     if (previous !== undefined) {
@@ -65,7 +65,7 @@ export class WeightedRecentCache<Key, Value extends object> {
     while (this.#entries.size > this.#maximumEntries || this.#weight > this.#maximumWeight) {
       const oldestKey = this.#entries.keys().next().value;
       if (oldestKey === undefined) {
-        throw new Error("A cache ponderada perdeu o candidato à expulsão.");
+        throw new Error("The weighted cache lost its eviction candidate.");
       }
       const oldest = this.#entries.get(oldestKey);
       this.#entries.delete(oldestKey);

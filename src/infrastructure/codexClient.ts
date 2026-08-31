@@ -104,9 +104,7 @@ export async function subscribeToEvents(handlers: EventHandlers): Promise<() => 
   const unlisteners: UnlistenFn[] = [];
   try {
     unlisteners.push(
-      await listen<unknown>(NOTIFICATION_EVENT, (event) => {
-        decodeEvent(event.payload, decodeEngineNotification, handlers.onNotification, handlers);
-      }),
+      await listenEngineNotifications(handlers.onNotification, handlers.onContractError),
     );
     unlisteners.push(
       await listen<unknown>(SERVER_REQUEST_EVENT, (event) => {
@@ -127,13 +125,30 @@ export async function subscribeToEvents(handlers: EventHandlers): Promise<() => 
     for (const unlisten of unlisteners) {
       unlisten();
     }
-    throw asError(reason, "Não foi possível registrar os eventos do engine.");
+    throw asError(reason, "Engine events could not be registered.");
   }
   return () => {
     for (const unlisten of unlisteners) {
       unlisten();
     }
   };
+}
+
+export async function listenEngineNotifications(
+  onNotification: (notification: EngineNotification) => void,
+  onError: (error: Error) => void,
+): Promise<UnlistenFn> {
+  try {
+    return await listen<unknown>(NOTIFICATION_EVENT, (event) => {
+      try {
+        onNotification(decodeEngineNotification(event.payload));
+      } catch (reason) {
+        onError(asError(reason, "An invalid event was received from the engine."));
+      }
+    });
+  } catch (reason) {
+    throw asError(reason, "Engine notifications could not be registered.");
+  }
 }
 
 export function startEngine(): Promise<EngineStartResponse> {
@@ -504,7 +519,7 @@ function decodeEvent<T>(
   try {
     handler(decoder(payload));
   } catch (reason) {
-    handlers.onContractError(asError(reason, "Evento inválido recebido do engine."));
+    handlers.onContractError(asError(reason, "An invalid event was received from the engine."));
   }
 }
 

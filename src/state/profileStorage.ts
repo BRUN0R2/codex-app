@@ -2,6 +2,7 @@ export const PROFILE_STORAGE_KEYS = {
   browserTabs: "codex-desktop.profile-v2.browser-tabs",
   chatIntelligence: "codex-desktop.profile-v2.chat-intelligence",
   followUpBehavior: "codex-desktop.profile-v2.follow-up-behavior",
+  locale: "codex-desktop.profile-v2.locale",
   messageQueuePrefix: "codex-desktop.profile-v2.message-queue.",
   pinnedProjects: "codex-desktop.profile-v2.pinned-projects",
   pinnedThreads: "codex-desktop.profile-v2.pinned-threads",

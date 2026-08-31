@@ -11,6 +11,8 @@ import {
 import { Portal } from "solid-js/web";
 
 import type { ProjectRecord, ThreadSummary } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage } from "../i18n/messages";
 import type { AppController } from "../state/appController";
 import {
   hexToHsv,
@@ -89,6 +91,8 @@ export interface SidebarProps {
 }
 
 export function Sidebar(props: SidebarProps) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().sidebar;
   const [renamingId, setRenamingId] = createSignal<string | null>(null);
   const [renameValue, setRenameValue] = createSignal("");
   const [pinnedExpanded, setPinnedExpanded] = createSignal(true);
@@ -100,7 +104,9 @@ export function Sidebar(props: SidebarProps) {
   const [searchQuery, setSearchQuery] = createSignal("");
   let sidebarElement: HTMLElement | undefined;
   let searchInput: HTMLInputElement | undefined;
-  const normalizedSearchQuery = createMemo(() => searchQuery().trim().toLocaleLowerCase("pt-BR"));
+  const normalizedSearchQuery = createMemo(() =>
+    searchQuery().trim().toLocaleLowerCase(i18n.locale()),
+  );
   const projectPartition = createMemo(() =>
     partitionProjectsByPinnedPaths(
       props.controller.projects(),
@@ -112,6 +118,8 @@ export function Sidebar(props: SidebarProps) {
       projectPartition().unpinnedProjects,
       props.controller.threads(),
       normalizedSearchQuery(),
+      i18n.locale(),
+      messages().newTask,
     ),
   );
   const collapsedProjectGroups = createMemo(() =>
@@ -119,6 +127,8 @@ export function Sidebar(props: SidebarProps) {
       props.controller.projects(),
       props.controller.threads(),
       normalizedSearchQuery(),
+      i18n.locale(),
+      messages().newTask,
     ),
   );
   const pinnedProjectGroups = createMemo(() =>
@@ -126,6 +136,8 @@ export function Sidebar(props: SidebarProps) {
       projectPartition().pinnedProjects,
       props.controller.threads(),
       normalizedSearchQuery(),
+      i18n.locale(),
+      messages().newTask,
     ),
   );
   const projectSectionGroups = createMemo(() =>
@@ -141,7 +153,8 @@ export function Sidebar(props: SidebarProps) {
     threadsWithoutConfiguredProject(props.controller.threads(), props.controller.projects())
       .filter(
         (thread) =>
-          normalizedSearchQuery().length === 0 || matchesThread(thread, normalizedSearchQuery()),
+          normalizedSearchQuery().length === 0 ||
+          matchesThread(thread, normalizedSearchQuery(), i18n.locale(), messages().newTask),
       )
       .sort((left, right) => right.updatedAt - left.updatedAt)
       .slice(0, MAX_UNGROUPED_RECENT_THREADS),
@@ -153,7 +166,8 @@ export function Sidebar(props: SidebarProps) {
       .filter((thread) => pinned.has(thread.id))
       .filter(
         (thread) =>
-          normalizedSearchQuery().length === 0 || matchesThread(thread, normalizedSearchQuery()),
+          normalizedSearchQuery().length === 0 ||
+          matchesThread(thread, normalizedSearchQuery(), i18n.locale(), messages().newTask),
       )
       .sort((left, right) => right.updatedAt - left.updatedAt);
   });
@@ -221,7 +235,7 @@ export function Sidebar(props: SidebarProps) {
 
   function beginRename(thread: ThreadSummary): void {
     setRenamingId(thread.id);
-    setRenameValue(threadTitle(thread));
+    setRenameValue(threadTitle(thread, messages().newTask));
   }
 
   async function submitRename(event: SubmitEvent): Promise<void> {
@@ -243,7 +257,7 @@ export function Sidebar(props: SidebarProps) {
 
   return (
     <aside
-      aria-label="Navegação principal"
+      aria-label={messages().mainNavigation}
       class="sidebar"
       classList={{ collapsed: props.collapsed }}
       inert={props.inert}
@@ -269,7 +283,7 @@ export function Sidebar(props: SidebarProps) {
               <Icon name="chevronDown" size={12} />
             </button>
             <Show when={brandMenuOpen()}>
-              <div aria-label="Alternar produto" class="brand-menu" role="menu">
+              <div aria-label={messages().switchProduct} class="brand-menu" role="menu">
                 <button
                   aria-checked={props.controller.product() === "chatgpt"}
                   class="brand-menu-item"
@@ -284,7 +298,7 @@ export function Sidebar(props: SidebarProps) {
                 >
                   <div class="brand-menu-item-text">
                     <strong>ChatGPT</strong>
-                    <small>Criar, aprender e explorar</small>
+                    <small>{messages().chatGptDescription}</small>
                   </div>
                   <Show when={props.controller.product() === "chatgpt"}>
                     <Icon name="check" size={14} />
@@ -304,7 +318,7 @@ export function Sidebar(props: SidebarProps) {
                 >
                   <div class="brand-menu-item-text">
                     <strong>Codex</strong>
-                    <small>Criar, depurar e publicar</small>
+                    <small>{messages().codexDescription}</small>
                   </div>
                   <Show when={props.controller.product() === "codex"}>
                     <Icon name="check" size={14} />
@@ -316,18 +330,18 @@ export function Sidebar(props: SidebarProps) {
         </Show>
       </header>
 
-      <nav aria-label="Ações principais" class="sidebar-primary-nav">
+      <nav aria-label={messages().primaryActions} class="sidebar-primary-nav">
         <button
           class="new-thread-button"
           onClick={() => startNewThread()}
-          title="Novo chat"
+          title={messages().newChat}
           type="button"
         >
           <span class="sidebar-item-icon">
             <Icon name="newChat" size={16} />
           </span>
           <Show when={!props.collapsed}>
-            <span class="sidebar-row-label">Novo chat</span>
+            <span class="sidebar-row-label">{messages().newChat}</span>
           </Show>
         </button>
         <button
@@ -335,14 +349,14 @@ export function Sidebar(props: SidebarProps) {
           class="automation-nav-button"
           classList={{ active: props.automationsActive }}
           onClick={props.onOpenAutomations}
-          title="Automações"
+          title={messages().automations}
           type="button"
         >
           <span class="sidebar-item-icon">
             <Icon name="calendar" size={16} />
           </span>
           <Show when={!props.collapsed}>
-            <span class="sidebar-row-label">Automações</span>
+            <span class="sidebar-row-label">{messages().automations}</span>
           </Show>
           <Show when={props.controller.unreadAutomationRuns().length > 0}>
             <span class="sidebar-automation-badge">
@@ -359,15 +373,15 @@ export function Sidebar(props: SidebarProps) {
         <label class="sidebar-search">
           <Icon name="search" size={15} />
           <input
-            aria-label="Pesquisar projetos e tarefas"
+            aria-label={messages().searchLabel}
             onInput={(event) => setSearchQuery(event.currentTarget.value)}
-            placeholder="Pesquisar"
+            placeholder={messages().searchPlaceholder}
             ref={searchInput}
             type="search"
             value={searchQuery()}
           />
           <button
-            aria-label="Fechar pesquisa"
+            aria-label={messages().closeSearch}
             onClick={() => {
               setSearchOpen(false);
               setSearchQuery("");
@@ -387,7 +401,7 @@ export function Sidebar(props: SidebarProps) {
         >
           <SidebarSectionHeading
             expanded={pinnedExpanded() || normalizedSearchQuery().length > 0}
-            label="Fixados"
+            label={messages().pinned}
             onToggle={() => setPinnedExpanded((value) => !value)}
           />
           <Show when={pinnedExpanded() || normalizedSearchQuery().length > 0}>
@@ -443,13 +457,13 @@ export function Sidebar(props: SidebarProps) {
             expanded={
               props.controller.projectSectionExpanded() || normalizedSearchQuery().length > 0
             }
-            label="Projetos"
+            label={messages().projects}
             onToggle={props.controller.toggleProjectSection}
           >
             <button
-              aria-label="Adicionar projeto"
+              aria-label={messages().addProject}
               onClick={() => void props.controller.chooseWorkspace()}
-              title="Adicionar projeto"
+              title={messages().addProject}
               type="button"
             >
               <Icon name="plus" size={14} />
@@ -470,7 +484,7 @@ export function Sidebar(props: SidebarProps) {
               <Show
                 when={normalizedSearchQuery().length === 0 && pinnedProjectGroups().length === 0}
               >
-                <p class="sidebar-empty">Nenhum projeto</p>
+                <p class="sidebar-empty">{messages().noProjects}</p>
               </Show>
             }
           >
@@ -514,7 +528,7 @@ export function Sidebar(props: SidebarProps) {
                   onClick={() => setShowAllProjects((value) => !value)}
                   type="button"
                 >
-                  <span>{showAllProjects() ? "Mostrar menos" : "Mostrar mais"}</span>
+                  <span>{showAllProjects() ? messages().showLess : messages().showMore}</span>
                   <Icon name={showAllProjects() ? "chevronDown" : "chevronRight"} size={12} />
                 </button>
               </Show>
@@ -525,13 +539,13 @@ export function Sidebar(props: SidebarProps) {
         <Show when={!props.collapsed}>
           <SidebarSectionHeading
             expanded={recentsExpanded() || normalizedSearchQuery().length > 0}
-            label="Recentes"
+            label={messages().recents}
             onToggle={() => setRecentsExpanded((value) => !value)}
           >
             <button
-              aria-label="Novo chat sem projeto"
+              aria-label={messages().newChatWithoutProject}
               onClick={() => startNewThread()}
-              title="Novo chat"
+              title={messages().newChat}
               type="button"
             >
               <Icon name="newChat" size={16} />
@@ -542,7 +556,7 @@ export function Sidebar(props: SidebarProps) {
               when={ungrouped().length > 0}
               fallback={
                 <Show when={normalizedSearchQuery().length === 0}>
-                  <p class="sidebar-empty">Nenhum chat</p>
+                  <p class="sidebar-empty">{messages().noChats}</p>
                 </Show>
               }
             >
@@ -577,7 +591,7 @@ export function Sidebar(props: SidebarProps) {
                 onClick={() => void props.controller.loadMoreThreads()}
                 type="button"
               >
-                Carregar mais
+                {messages().loadMore}
               </button>
             </Show>
           </Show>
@@ -591,13 +605,13 @@ export function Sidebar(props: SidebarProps) {
             ungrouped().length === 0
           }
         >
-          <p class="sidebar-search-empty">Nenhum projeto ou tarefa encontrado.</p>
+          <p class="sidebar-search-empty">{messages().noSearchResults}</p>
         </Show>
       </div>
 
       <footer class="sidebar-footer">
         <Show when={!props.collapsed && accountMenuOpen()}>
-          <div aria-label="Conta" class="account-menu" id="account-menu" role="menu">
+          <div aria-label={messages().account} class="account-menu" id="account-menu" role="menu">
             <div class="account-menu-identity" role="presentation">
               <AccountAvatar account={props.controller.account()?.account} />
               <strong>{accountLabel(props.controller)}</strong>
@@ -612,7 +626,7 @@ export function Sidebar(props: SidebarProps) {
               type="button"
             >
               <Icon name="creditCard" size={15} />
-              <span>Uso restante</span>
+              <span>{messages().remainingUsage}</span>
               <small class="usage-badge">{remainingUsageLabel(props.controller)}</small>
               <Icon name="chevronRight" size={13} />
             </button>
@@ -625,7 +639,7 @@ export function Sidebar(props: SidebarProps) {
               type="button"
             >
               <Icon name="settings" size={15} />
-              <span>Configurações</span>
+              <span>{messages().settings}</span>
               <kbd>Ctrl+,</kbd>
             </button>
             <button
@@ -637,7 +651,7 @@ export function Sidebar(props: SidebarProps) {
               type="button"
             >
               <Icon name="logout" size={15} />
-              <span>Sair</span>
+              <span>{messages().signOut}</span>
             </button>
           </div>
         </Show>
@@ -660,7 +674,7 @@ export function Sidebar(props: SidebarProps) {
                 void props.controller.refreshRateLimitsIfStale();
               }
             }}
-            title="Conta"
+            title={messages().account}
             type="button"
           >
             <AccountAvatar account={props.controller.account()?.account} />
@@ -719,6 +733,8 @@ interface ProjectGroupProps {
 }
 
 function ProjectGroup(props: ProjectGroupProps) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().sidebar;
   let menu: HTMLDetailsElement | undefined;
   const [editingProject, setEditingProject] = createSignal(false);
   const isPinned = () =>
@@ -765,19 +781,22 @@ function ProjectGroup(props: ProjectGroupProps) {
         <Show when={!props.collapsed}>
           <div class="row-actions">
             <button
-              aria-label={`Novo chat em ${props.project.name}`}
+              aria-label={formatMessage(messages().newChatIn, { project: props.project.name })}
               class="project-new-chat-button"
               onClick={() => {
                 props.onShowChat();
                 props.controller.newThread(props.project.path);
               }}
-              title="Novo chat"
+              title={messages().newChat}
               type="button"
             >
               <Icon name="newChat" size={16} />
             </button>
             <details class="thread-menu-control" ref={menu}>
-              <summary aria-label={`Ações de ${props.project.name}`} title="Mais ações">
+              <summary
+                aria-label={formatMessage(messages().actionsFor, { name: props.project.name })}
+                title={messages().moreActions}
+              >
                 <Icon name="more" size={14} />
               </summary>
               <div class="thread-context-menu project-context-menu" role="menu">
@@ -792,7 +811,7 @@ function ProjectGroup(props: ProjectGroupProps) {
                   type="button"
                 >
                   <Icon name="pin" size={14} />
-                  <span>{isPinned() ? "Desfixar projeto" : "Fixar projeto"}</span>
+                  <span>{isPinned() ? messages().unpinProject : messages().pinProject}</span>
                 </button>
                 <button
                   onClick={() => {
@@ -805,7 +824,7 @@ function ProjectGroup(props: ProjectGroupProps) {
                   type="button"
                 >
                   <Icon name="folder" size={14} />
-                  <span>Abrir no Explorador de Arquivos</span>
+                  <span>{messages().openExplorer}</span>
                 </button>
                 <button
                   onClick={() => {
@@ -818,7 +837,7 @@ function ProjectGroup(props: ProjectGroupProps) {
                   type="button"
                 >
                   <Icon name="settings" size={14} />
-                  <span>Editar projeto</span>
+                  <span>{messages().editProject}</span>
                 </button>
                 <button
                   onClick={() => {
@@ -833,7 +852,7 @@ function ProjectGroup(props: ProjectGroupProps) {
                   type="button"
                 >
                   <Icon name="archive" size={14} />
-                  <span>Arquivar chats</span>
+                  <span>{messages().archiveChats}</span>
                 </button>
                 <button
                   onClick={() => {
@@ -846,7 +865,7 @@ function ProjectGroup(props: ProjectGroupProps) {
                   type="button"
                 >
                   <Icon name="close" size={14} />
-                  <span>Remover</span>
+                  <span>{messages().remove}</span>
                 </button>
               </div>
             </details>
@@ -881,7 +900,7 @@ function ProjectGroup(props: ProjectGroupProps) {
             )}
           </For>
           <Show when={props.threads.length === 0}>
-            <p class="no-threads">Nenhuma tarefa</p>
+            <p class="no-threads">{messages().noTasks}</p>
           </Show>
           <Show when={props.threads.length > MAX_INLINE_PROJECT_THREADS}>
             <button
@@ -891,8 +910,10 @@ function ProjectGroup(props: ProjectGroupProps) {
               type="button"
             >
               {props.threadListExpanded
-                ? "Mostrar menos"
-                : `Mostrar mais (${props.threads.length - MAX_INLINE_PROJECT_THREADS})`}
+                ? messages().showLess
+                : formatMessage(messages().showMoreCount, {
+                    count: props.threads.length - MAX_INLINE_PROJECT_THREADS,
+                  })}
             </button>
           </Show>
         </div>
@@ -915,6 +936,8 @@ interface ThreadButtonProps {
 }
 
 function ThreadButton(props: ThreadButtonProps) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().sidebar;
   let menu: HTMLDetailsElement | undefined;
 
   function closeMenu(): void {
@@ -961,20 +984,20 @@ function ThreadButton(props: ThreadButtonProps) {
               menu.open = !menu.open;
             }
           }}
-          title={threadTitle(props.thread)}
+          title={threadTitle(props.thread, messages().newTask)}
           type="button"
         >
-          <span>{threadTitle(props.thread)}</span>
+          <span>{threadTitle(props.thread, messages().newTask)}</span>
           <Show when={props.controller.isThreadActive(props.thread.id)}>
             <i class="active-dot" />
           </Show>
         </button>
         <div class="thread-actions">
           <details class="thread-menu-control" ref={menu}>
-            <summary aria-label="Ações da tarefa" title="Mais ações">
+            <summary aria-label={messages().taskActions} title={messages().moreActions}>
               <Icon name="more" size={14} />
             </summary>
-            <div aria-label="Ações da tarefa" class="thread-context-menu" role="menu">
+            <div aria-label={messages().taskActions} class="thread-context-menu" role="menu">
               <button
                 onClick={() => {
                   closeMenu();
@@ -983,7 +1006,7 @@ function ThreadButton(props: ThreadButtonProps) {
                 role="menuitem"
                 type="button"
               >
-                <Icon name="pin" size={14} /> {props.pinned ? "Desafixar" : "Fixar"}
+                <Icon name="pin" size={14} /> {props.pinned ? messages().unpin : messages().pin}
               </button>
               <button
                 onClick={() => {
@@ -993,7 +1016,7 @@ function ThreadButton(props: ThreadButtonProps) {
                 role="menuitem"
                 type="button"
               >
-                <Icon name="edit" size={14} /> Renomear
+                <Icon name="edit" size={14} /> {messages().rename}
               </button>
               <button
                 disabled={props.controller.isThreadActive(props.thread.id)}
@@ -1004,7 +1027,7 @@ function ThreadButton(props: ThreadButtonProps) {
                 role="menuitem"
                 type="button"
               >
-                <Icon name="layers" size={14} /> Criar fork
+                <Icon name="layers" size={14} /> {messages().fork}
               </button>
               <button
                 disabled={props.controller.isThreadActive(props.thread.id)}
@@ -1015,7 +1038,7 @@ function ThreadButton(props: ThreadButtonProps) {
                 role="menuitem"
                 type="button"
               >
-                <Icon name="archive" size={14} /> Arquivar
+                <Icon name="archive" size={14} /> {messages().archive}
               </button>
               <button
                 class="danger"
@@ -1023,7 +1046,7 @@ function ThreadButton(props: ThreadButtonProps) {
                 role="menuitem"
                 type="button"
               >
-                <Icon name="close" size={14} /> Excluir
+                <Icon name="close" size={14} /> {messages().delete}
               </button>
             </div>
           </details>
@@ -1033,34 +1056,43 @@ function ThreadButton(props: ThreadButtonProps) {
   );
 }
 
-export function threadTitle(thread: ThreadSummary): string {
-  return (thread.name ?? thread.preview) || "Nova tarefa";
+export function threadTitle(thread: ThreadSummary, fallback: string): string {
+  return (thread.name ?? thread.preview) || fallback;
 }
 
 function createSidebarProjectGroups(
   projects: readonly ProjectRecord[],
   allThreads: readonly ThreadSummary[],
   query: string,
+  locale: string,
+  threadTitleFallback: string,
 ): readonly SidebarProjectGroup[] {
   return projects.flatMap((project) => {
     const threads = allThreads
       .filter((thread) => pathsEqual(thread.projectPath, project.path))
       .sort((left, right) => right.updatedAt - left.updatedAt);
-    if (query.length === 0 || matchesProject(project, query)) {
+    if (query.length === 0 || matchesProject(project, query, locale)) {
       return [{ project, threads }];
     }
-    const matchingThreads = threads.filter((thread) => matchesThread(thread, query));
+    const matchingThreads = threads.filter((thread) =>
+      matchesThread(thread, query, locale, threadTitleFallback),
+    );
     return matchingThreads.length > 0 ? [{ project, threads: matchingThreads }] : [];
   });
 }
 
-function matchesProject(project: ProjectRecord, query: string): boolean {
-  return `${project.name}\n${project.path}`.toLocaleLowerCase("pt-BR").includes(query);
+function matchesProject(project: ProjectRecord, query: string, locale: string): boolean {
+  return `${project.name}\n${project.path}`.toLocaleLowerCase(locale).includes(query);
 }
 
-function matchesThread(thread: ThreadSummary, query: string): boolean {
-  return `${threadTitle(thread)}\n${thread.projectPath ?? ""}`
-    .toLocaleLowerCase("pt-BR")
+function matchesThread(
+  thread: ThreadSummary,
+  query: string,
+  locale: string,
+  titleFallback: string,
+): boolean {
+  return `${threadTitle(thread, titleFallback)}\n${thread.projectPath ?? ""}`
+    .toLocaleLowerCase(locale)
     .includes(query);
 }
 
@@ -1081,6 +1113,8 @@ function ProjectEditModal(props: {
   readonly onSave: (name: string, icon?: IconName, color?: string) => void;
   readonly project: ProjectRecord;
 }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().sidebar;
   const [name, setName] = createSignal(props.project.name);
   const [icon, setIcon] = createSignal<IconName | undefined>(
     (props.project.icon as IconName | undefined) ?? "folder",
@@ -1113,11 +1147,15 @@ function ProjectEditModal(props: {
           onKeyDown={(event) => event.stopPropagation()}
           role="dialog"
         >
-          {/* Modal Principal de Edição */}
           <div class="project-edit-modal">
             <header class="project-edit-header">
-              <h3>Editar projeto</h3>
-              <button class="icon-button" onClick={props.onClose} title="Fechar" type="button">
+              <h3>{messages().editProject}</h3>
+              <button
+                class="icon-button"
+                onClick={props.onClose}
+                title={messages().close}
+                type="button"
+              >
                 <Icon name="close" size={14} />
               </button>
             </header>
@@ -1130,14 +1168,14 @@ function ProjectEditModal(props: {
                 <input
                   class="project-name-input"
                   onInput={(event) => setName(event.currentTarget.value)}
-                  placeholder="Nome do projeto"
+                  placeholder={messages().projectName}
                   type="text"
                   value={name()}
                 />
               </div>
 
               <div class="icon-picker-section">
-                <span class="picker-label">Ícone</span>
+                <span class="picker-label">{messages().icon}</span>
                 <div class="icons-grid">
                   <For each={SELECTABLE_ICONS_LIST}>
                     {(item) => (
@@ -1159,7 +1197,7 @@ function ProjectEditModal(props: {
 
             <footer class="project-edit-footer">
               <button class="project-edit-cancel" onClick={props.onClose} type="button">
-                Cancelar
+                {messages().cancel}
               </button>
               <button
                 class="project-edit-save"
@@ -1169,14 +1207,14 @@ function ProjectEditModal(props: {
                 }}
                 type="button"
               >
-                Salvar
+                {messages().save}
               </button>
             </footer>
           </div>
 
           <div class="project-color-side-panel">
             <header class="side-panel-header">
-              <span class="picker-label">Cor do projeto</span>
+              <span class="picker-label">{messages().projectColor}</span>
               <div class="color-hex-badge" style={{ background: color() }}>
                 <span>{color().toUpperCase()}</span>
               </div>

@@ -35,10 +35,10 @@ export function applyTurnStarted(thread: CodexThread, turn: TurnSummary): CodexT
     ) {
       return thread;
     }
-    throw new Error(`O turno ${JSON.stringify(turn.id)} foi iniciado com dados conflitantes.`);
+    throw new Error(`Turn ${JSON.stringify(turn.id)} was started with conflicting data.`);
   }
   if (turn.status !== "inProgress") {
-    throw new Error(`O novo turno ${JSON.stringify(turn.id)} não está em progresso.`);
+    throw new Error(`New turn ${JSON.stringify(turn.id)} is not in progress.`);
   }
   return {
     ...thread,
@@ -55,22 +55,28 @@ export function applyTurnStarted(thread: CodexThread, turn: TurnSummary): CodexT
   };
 }
 
-export function applyTurnItem(thread: CodexThread, turnId: string, item: ThreadItem): CodexThread {
+export function applyTurnItem(
+  thread: CodexThread,
+  turnId: string,
+  item: ThreadItem,
+  causalOrder: readonly string[] = [],
+): CodexThread {
   const turnIndex = thread.turns.findIndex((turn) => turn.id === turnId);
   if (turnIndex < 0) {
-    throw new Error(`O item ${JSON.stringify(item.id)} não pertence a um turno carregado.`);
+    throw new Error(`Item ${JSON.stringify(item.id)} does not belong to a loaded turn.`);
   }
   const turn = thread.turns[turnIndex];
   if (turn === undefined) {
-    throw new Error("A posição do turno que recebeu um item ficou inconsistente.");
+    throw new Error("The position of the turn that received an item became inconsistent.");
   }
   const itemIndex = turn.items.findIndex((entry) => entry.id === item.id);
   if (itemIndex >= 0 && turn.items[itemIndex]?.type !== item.type) {
-    throw new Error(`O item ${JSON.stringify(item.id)} mudou de tipo durante o turno.`);
+    throw new Error(`Item ${JSON.stringify(item.id)} changed type during the turn.`);
   }
   const items = turn.items.slice();
   if (itemIndex < 0) {
-    items.push(item);
+    const insertionIndex = causalInsertionIndex(items, item.id, causalOrder);
+    items.splice(insertionIndex, 0, item);
   } else {
     items[itemIndex] = item;
   }
@@ -79,14 +85,37 @@ export function applyTurnItem(thread: CodexThread, turnId: string, item: ThreadI
   return { ...thread, turns };
 }
 
+function causalInsertionIndex(
+  items: readonly ThreadItem[],
+  itemId: string,
+  causalOrder: readonly string[],
+): number {
+  if (causalOrder.length === 0) {
+    return items.length;
+  }
+  const orderById = new Map(causalOrder.map((id, index) => [id, index]));
+  if (orderById.size !== causalOrder.length) {
+    throw new Error("The turn causal order contains duplicate identifiers.");
+  }
+  const incomingOrder = orderById.get(itemId);
+  if (incomingOrder === undefined) {
+    throw new Error(`Item ${JSON.stringify(itemId)} does not belong to the turn causal order.`);
+  }
+  const nextItemIndex = items.findIndex((existing) => {
+    const existingOrder = orderById.get(existing.id);
+    return existingOrder !== undefined && existingOrder > incomingOrder;
+  });
+  return nextItemIndex < 0 ? items.length : nextItemIndex;
+}
+
 export function applyTurnCompletion(thread: CodexThread, completion: CompletedTurn): CodexThread {
   const turnIndex = thread.turns.findIndex((turn) => turn.id === completion.id);
   if (turnIndex < 0) {
-    throw new Error(`O turno terminal ${JSON.stringify(completion.id)} não pertence à tarefa.`);
+    throw new Error(`Terminal turn ${JSON.stringify(completion.id)} does not belong to the task.`);
   }
   const current = thread.turns[turnIndex];
   if (current === undefined) {
-    throw new Error("A posição do turno terminal ficou inconsistente.");
+    throw new Error("The terminal turn position became inconsistent.");
   }
   if (current.status !== "inProgress") {
     if (
@@ -96,10 +125,10 @@ export function applyTurnCompletion(thread: CodexThread, completion: CompletedTu
     ) {
       return thread;
     }
-    throw new Error(`O turno ${JSON.stringify(completion.id)} recebeu conclusões conflitantes.`);
+    throw new Error(`Turn ${JSON.stringify(completion.id)} received conflicting completions.`);
   }
   if (completion.updatedAt < current.createdAt) {
-    throw new Error(`O turno ${JSON.stringify(completion.id)} terminou antes de ser criado.`);
+    throw new Error(`Turn ${JSON.stringify(completion.id)} completed before it was created.`);
   }
 
   const turns = thread.turns.slice();

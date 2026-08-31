@@ -24,12 +24,12 @@ function describeErrorAt(reason: unknown, ancestors: Set<Error>, depth: number):
       nextAncestors.add(reason);
       return describeErrorAt(reason.cause, nextAncestors, depth + 1);
     }
-    return message || "Ocorreu um erro inesperado.";
+    return message || "An unexpected error occurred.";
   }
   if (typeof reason === "string" && reason.length > 0) {
     return reason;
   }
-  return "Ocorreu um erro inesperado.";
+  return "An unexpected error occurred.";
 }
 
 export function describeDiagnosticError(reason: unknown): string {
@@ -57,7 +57,8 @@ function formatDiagnosticReason(reason: unknown, ancestors: Set<Error>, depth: n
   }
 
   const detail =
-    reason.stack?.trim() || `${reason.name || "Error"}: ${reason.message || "Erro sem mensagem"}`;
+    reason.stack?.trim() ||
+    `${reason.name || "Error"}: ${reason.message || "Error without a message"}`;
   if (reason.cause === undefined || depth >= MAX_DIAGNOSTIC_CAUSE_DEPTH) {
     return detail;
   }

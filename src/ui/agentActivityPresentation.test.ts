@@ -1,17 +1,37 @@
 import { describe, expect, it } from "vitest";
 
 import type { FileChange, VisibleThreadItem } from "../contracts/types";
+import { findCatalog, translationCatalogs } from "../i18n/catalog";
 import {
   type AgentActivityItem,
   AgentActivityProjectionStore,
-  activeAgentActivity,
   agentActivityRenderUnitIdentity,
-  agentActivitySummaryLabel,
+  canAgentActivityOwnHeadline,
+  activeAgentActivity as rawActiveAgentActivity,
+  agentActivityHeadlineLabel as rawAgentActivityHeadlineLabel,
+  agentActivitySummaryLabel as rawAgentActivitySummaryLabel,
+  summarizeAgentActivity as rawSummarizeAgentActivity,
+  webSearchActivityTitle as rawWebSearchActivityTitle,
   shouldRenderAgentActivityGroup,
   splitAgentActivityUnits,
-  summarizeAgentActivity,
-  webSearchActivityTitle,
 } from "./agentActivityPresentation";
+
+const messages = findCatalog(translationCatalogs, "pt-BR")?.messages.timeline;
+if (messages === undefined) throw new Error("The Brazilian Portuguese catalog is unavailable.");
+
+const activeAgentActivity = (items: readonly AgentActivityItem[]) =>
+  rawActiveAgentActivity(items, messages);
+const agentActivityHeadlineLabel = (
+  items: readonly AgentActivityItem[],
+  isCurrent: boolean,
+  reasoningHeading: string | null,
+) => rawAgentActivityHeadlineLabel(items, isCurrent, reasoningHeading, messages, "pt-BR");
+const agentActivitySummaryLabel = (items: readonly AgentActivityItem[]) =>
+  rawAgentActivitySummaryLabel(items, messages, "pt-BR");
+const summarizeAgentActivity = (items: readonly AgentActivityItem[]) =>
+  rawSummarizeAgentActivity(items, messages);
+const webSearchActivityTitle = (description: string, status: AgentActivityItem["status"]) =>
+  rawWebSearchActivityTitle(description, status, messages);
 
 describe("agent activity presentation", () => {
   it("uses the official semantic priority instead of chronological category order", () => {
@@ -91,7 +111,7 @@ describe("agent activity presentation", () => {
     ];
 
     expect(agentActivitySummaryLabel(items)).toBe(
-      "Chamou uma ferramenta, editou um arquivo, executou leitura de um arquivo, executou um comando e pesquisou na web",
+      "Chamou uma ferramenta, editou um arquivo, leu um arquivo, executou um comando e pesquisou na web",
     );
   });
 
@@ -106,9 +126,7 @@ describe("agent activity presentation", () => {
       status: "inProgress" as const,
     }));
 
-    expect(agentActivitySummaryLabel(completed)).toBe(
-      "Executou leitura de 2 arquivos e explorou arquivos",
-    );
+    expect(agentActivitySummaryLabel(completed)).toBe("Leu arquivos e explorou arquivos");
     expect(summarizeAgentActivity(completed).map(({ kind }) => kind)).toEqual([
       "fileReads",
       "exploration",
@@ -159,6 +177,53 @@ describe("agent activity presentation", () => {
       "command-1",
       "search-1",
     ]);
+  });
+
+  it("keeps Code Mode orchestration private while preserving its semantic tool trace", () => {
+    const units = splitAgentActivityUnits([
+      {
+        ...tool("code-exec", "exec", "Run JavaScript in Code Mode"),
+        status: "inProgress",
+      },
+      command("command-1"),
+      tool("code-wait", "wait", "Wait for Code Mode cell 4"),
+      tool("read-1", "read_file", "Read src/App.tsx"),
+    ]);
+
+    expect(units).toHaveLength(1);
+    expect(units[0]?.kind === "activityGroup" ? units[0].items.map(({ id }) => id) : []).toEqual([
+      "command-1",
+      "read-1",
+    ]);
+    expect(
+      units[0]?.kind === "activityGroup" ? agentActivitySummaryLabel(units[0].items) : null,
+    ).toBe("Leu um arquivo e executou um comando");
+    expect(
+      units[0]?.kind === "activityGroup" ? activeAgentActivity(units[0].items) : null,
+    ).toBeNull();
+  });
+
+  it("keeps the latest semantic group as the live headline host while reasoning continues", () => {
+    const completedRead = tool("read-completed", "read_file", "Read src/App.tsx");
+    const orchestration = {
+      ...tool("code-exec", "exec", "Run JavaScript in Code Mode"),
+      status: "inProgress" as const,
+    };
+
+    expect(canAgentActivityOwnHeadline([completedRead, orchestration])).toBe(true);
+    expect(canAgentActivityOwnHeadline([orchestration])).toBe(false);
+    expect(
+      agentActivityHeadlineLabel([completedRead], true, "Validando o cabeçalho refletivo"),
+    ).toBe("Validando o cabeçalho refletivo");
+  });
+
+  it("keeps the parent command headline concise while the child row owns elapsed time", () => {
+    const runningCommand = { ...command("command-running"), status: "inProgress" as const };
+
+    expect(agentActivityHeadlineLabel([runningCommand], true, null)).toBe("Executando comando");
+    expect(agentActivityHeadlineLabel([command("command-completed")], false, null)).toBe(
+      "Executou um comando",
+    );
   });
 
   it("keeps a group's identity stable when new activities are appended", () => {

@@ -29,6 +29,7 @@ const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u8 = 95;
 const AUTO_COMPACT_CONTEXT_WINDOW_PERCENT: u64 = 90;
 const PERCENT_SCALE: u64 = 100;
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
+const DESKTOP_REASONING_SUMMARY: ReasoningSummarySetting = ReasoningSummarySetting::Auto;
 
 #[derive(Debug, Deserialize)]
 pub struct ModelsWire {
@@ -266,7 +267,7 @@ pub struct SelectedModel {
     auto_compact_token_limit: Option<u64>,
     response_protocol: ResponseProtocol,
     supports_parallel_tool_calls: bool,
-    reasoning_summary: Option<ReasoningSummarySetting>,
+    reasoning_summary_capability: Option<ReasoningSummarySetting>,
     supports_verbosity: bool,
     default_verbosity: Option<ModelVerbosity>,
     supports_image_input: bool,
@@ -426,8 +427,11 @@ impl SelectedModel {
         self.response_protocol
     }
 
-    pub const fn reasoning_summary(&self) -> Option<ReasoningSummarySetting> {
-        self.reasoning_summary
+    pub const fn requested_reasoning_summary(&self) -> Option<ReasoningSummarySetting> {
+        match self.reasoning_summary_capability {
+            Some(_) => Some(DESKTOP_REASONING_SUMMARY),
+            None => None,
+        }
     }
 
     pub const fn supports_image_input(&self) -> bool {
@@ -746,8 +750,8 @@ impl ModelCatalog {
                     model.slug
                 )));
             }
-            let reasoning_summary = (model.supports_reasoning_summary_parameter
-                && model.default_reasoning_summary != ReasoningSummarySetting::None)
+            let reasoning_summary_capability = model
+                .supports_reasoning_summary_parameter
                 .then_some(model.default_reasoning_summary);
             models.push(SelectedModel {
                 summary: CodexModel {
@@ -774,7 +778,7 @@ impl ModelCatalog {
                     ResponseProtocol::Standard
                 },
                 supports_parallel_tool_calls: model.supports_parallel_tool_calls,
-                reasoning_summary,
+                reasoning_summary_capability,
                 supports_verbosity: model.support_verbosity,
                 default_verbosity: model.default_verbosity,
                 supports_image_input: model.input_modalities.contains(&InputModality::Image),
@@ -1088,6 +1092,7 @@ fn validate_optional_text(
 mod tests {
     use super::ModelCatalog;
     use super::ModelsWire;
+    use super::ReasoningSummarySetting;
     use super::ResponseProtocol;
     use crate::engine::{
         ConversationMode, ModelVerbosity, PermissionProfile, Personality, ReasoningEffort,
@@ -1154,13 +1159,47 @@ mod tests {
         assert!(maximum.supports_image_detail_original());
         assert!(maximum.web_search_includes_images());
         assert_eq!(maximum.provider_output_budget().bytes(), 40_000);
-        assert_eq!(maximum.reasoning_summary(), None);
+        assert_eq!(
+            maximum.reasoning_summary_capability,
+            Some(ReasoningSummarySetting::None)
+        );
+        assert_eq!(
+            maximum.requested_reasoning_summary(),
+            Some(ReasoningSummarySetting::Auto)
+        );
         assert_eq!(
             maximum
                 .select_verbosity(None)
                 .expect("default verbosity should resolve"),
             Some(ModelVerbosity::Low)
         );
+    }
+
+    #[test]
+    fn desktop_requests_auto_summaries_only_when_the_model_supports_them() {
+        let wire: ModelsWire = serde_json::from_str(
+            r#"{
+                "models": [{
+                    "slug": "gpt-no-summary",
+                    "display_name": "GPT No Summary",
+                    "description": null,
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [{"effort":"medium","description":"balanced"}],
+                    "visibility": "list",
+                    "priority": 0,
+                    "default_service_tier": null,
+                    "supports_reasoning_summary_parameter": false,
+                    "default_reasoning_summary": "detailed",
+                    "base_instructions": "Be useful."
+                }]
+            }"#,
+        )
+        .expect("fixture should decode");
+        let catalog = ModelCatalog::from_wire(wire, 100).expect("catalog should validate");
+        let model = catalog.models().first().expect("model should exist");
+
+        assert_eq!(model.reasoning_summary_capability, None);
+        assert_eq!(model.requested_reasoning_summary(), None);
     }
 
     #[test]

@@ -60,6 +60,33 @@ describe("browser persistence", () => {
     expect(decodePersistedBrowserState(state)).toEqual(state);
   });
 
+  it("bounds tabs per conversation without treating persisted tasks as live WebViews", () => {
+    const conversations = Array.from({ length: 17 }, (_, index) => ({
+      conversationId: `thread-${index}`,
+      activeBrowserTabId: `tab-${index}`,
+      tabs: [{ browserTabId: `tab-${index}`, url: "about:blank" }],
+    }));
+
+    expect(decodePersistedBrowserState({ version: 1, conversations }).conversations).toHaveLength(
+      17,
+    );
+    expect(() =>
+      decodePersistedBrowserState({
+        version: 1,
+        conversations: [
+          {
+            conversationId: "thread-overflow",
+            activeBrowserTabId: "overflow-tab-0",
+            tabs: Array.from({ length: 17 }, (_, index) => ({
+              browserTabId: `overflow-tab-${index}`,
+              url: "about:blank",
+            })),
+          },
+        ],
+      }),
+    ).toThrow("per-conversation");
+  });
+
   it("rejects privileged URLs, duplicate ids, and unknown fields", () => {
     expect(() =>
       decodePersistedBrowserState({

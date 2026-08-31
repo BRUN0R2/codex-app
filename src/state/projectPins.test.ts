@@ -80,30 +80,30 @@ describe("project pins", () => {
     });
   });
 
-  it("rejeita payloads corrompidos ou incompatíveis", () => {
+  it("rejects corrupt or incompatible payloads", () => {
     localStorage.setItem("codex-desktop.profile-v2.pinned-projects", "{not json");
-    expect(() => loadPinnedProjectPaths()).toThrow("JSON inválido");
+    expect(() => loadPinnedProjectPaths()).toThrow("invalid JSON");
 
     localStorage.setItem(
       "codex-desktop.profile-v2.pinned-projects",
       JSON.stringify({ version: 2, projectPaths: [] }),
     );
-    expect(() => loadPinnedProjectPaths()).toThrow("não é suportada");
+    expect(() => loadPinnedProjectPaths()).toThrow("unsupported");
 
     localStorage.setItem(
       "codex-desktop.profile-v2.pinned-projects",
       JSON.stringify({ version: 1, projectPaths: ["C:\\P"], extra: true }),
     );
-    expect(() => loadPinnedProjectPaths()).toThrow("campos incompatíveis");
+    expect(() => loadPinnedProjectPaths()).toThrow("incompatible fields");
   });
 
-  it("rejeita caminhos duplicados após normalização", () => {
-    expect(() => savePinnedProjectPaths(["C:\\Projetos\\Codex", "c:/projetos/codex"])).toThrow(
-      "duplicado",
+  it("rejects paths duplicated after normalization", () => {
+    expect(() => savePinnedProjectPaths(["C:\\Projects\\Codex", "c:/projects/codex"])).toThrow(
+      "duplicated",
     );
   });
 
-  it("rejeita caminhos que não são absolutos no Windows", () => {
-    expect(() => togglePinnedProjectPath([], "projetos/codex")).toThrow("absoluto");
+  it("rejects paths that are not absolute on Windows", () => {
+    expect(() => togglePinnedProjectPath([], "projects/codex")).toThrow("absolute");
   });
 });

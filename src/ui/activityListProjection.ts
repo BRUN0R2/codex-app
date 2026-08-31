@@ -93,7 +93,7 @@ export function createActivityListProjection(
             start: count,
           };
     if (segmentsByKeyPrefix.has(key)) {
-      throw new Error(`A projeção de atividade produziu a chave duplicada ${JSON.stringify(key)}.`);
+      throw new Error(`The activity projection produced duplicate key ${JSON.stringify(key)}.`);
     }
     segments.push(segment);
     segmentsByKeyPrefix.set(key, segment);
@@ -159,7 +159,7 @@ export function createActivityListProjection(
     entryAt,
     estimatedOffsetOf(index) {
       if (!Number.isInteger(index) || index < 0 || index > count) {
-        throw new Error("O deslocamento virtual de atividade é inválido.");
+        throw new Error("The virtual activity offset is invalid.");
       }
       if (index === count) {
         return collapsedSize;
@@ -181,7 +181,7 @@ export function createActivityListProjection(
       assertExpectedActivityListKey(index, count, keyAt, expectedKey);
       const segment = segmentAt(segments, index);
       if (segment.kind !== "fileChange") {
-        throw new Error("A entrada virtualizada não contém uma alteração de arquivo.");
+        throw new Error("The virtual entry does not contain a file change.");
       }
       return readFileChange(segment, index - segment.start);
     },
@@ -213,7 +213,7 @@ export function createActivityListProjection(
       assertExpectedActivityListKey(index, count, keyAt, expectedKey);
       const segment = segmentAt(segments, index);
       if (segment.kind !== "item") {
-        throw new Error("A entrada virtualizada não contém uma atividade executável.");
+        throw new Error("The virtual entry does not contain an executable activity.");
       }
       return segment.item;
     },
@@ -329,7 +329,7 @@ function activityItemReuseGroup(
 
 function assertActivityListIndex(index: number, count: number): void {
   if (!Number.isInteger(index) || index < 0 || index >= count) {
-    throw new Error("O índice da entrada virtual de atividade é inválido.");
+    throw new Error("The virtual activity entry index is invalid.");
   }
 }
 
@@ -362,7 +362,7 @@ function segmentAt(segments: readonly ActivityListSegment[], index: number): Act
       return segment;
     }
   }
-  throw new Error("A projeção virtual de atividade não contém o índice solicitado.");
+  throw new Error("The virtual activity projection does not contain the requested index.");
 }
 
 function readFileChange(
@@ -371,7 +371,7 @@ function readFileChange(
 ): FileChange {
   const change = segment.item.changes[localIndex];
   if (change === undefined) {
-    throw new Error("A projeção virtual perdeu uma alteração de arquivo.");
+    throw new Error("The virtual projection lost a file change.");
   }
   return change;
 }
@@ -460,5 +460,5 @@ function cacheProjectionValue(
 }
 
 function activityListPositionError(key: string): Error {
-  return new Error(`A entrada virtual de atividade ${JSON.stringify(key)} perdeu sua posição.`);
+  return new Error(`Virtual activity entry ${JSON.stringify(key)} lost its position.`);
 }

@@ -18,7 +18,7 @@ export function loadPinnedThreadIds(): readonly string[] {
   try {
     value = JSON.parse(raw);
   } catch (reason) {
-    throw new Error(`A lista de tarefas fixadas contém JSON inválido: ${describe(reason)}`);
+    throw new Error(`The pinned-task list contains invalid JSON: ${describe(reason)}`);
   }
   return decodePins(value).threadIds;
 }
@@ -37,7 +37,7 @@ export function togglePinnedThreadId(
     return threadIds.filter((entry) => entry !== id);
   }
   if (threadIds.length >= MAX_PINNED_THREADS) {
-    throw new Error(`O aplicativo aceita no máximo ${MAX_PINNED_THREADS} tarefas fixadas.`);
+    throw new Error(`The application accepts at most ${MAX_PINNED_THREADS} pinned tasks.`);
   }
   return [id, ...threadIds];
 }
@@ -51,15 +51,15 @@ export function removePinnedThreadId(
 
 function decodePins(value: unknown): StoredPins {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("A lista de tarefas fixadas não é um objeto.");
+    throw new Error("The pinned-task list is not an object.");
   }
   const object = value as Record<"threadIds" | "version", unknown>;
   const keys = Object.keys(object).sort();
   if (keys.length !== 2 || keys[0] !== "threadIds" || keys[1] !== "version") {
-    throw new Error("A lista de tarefas fixadas possui campos incompatíveis.");
+    throw new Error("The pinned-task list has incompatible fields.");
   }
   if (object.version !== 1 || !Array.isArray(object.threadIds)) {
-    throw new Error("A versão da lista de tarefas fixadas não é suportada.");
+    throw new Error("The pinned-task list version is unsupported.");
   }
   if (object.threadIds.length > MAX_PINNED_THREADS) {
     throw new Error(`A lista excede ${MAX_PINNED_THREADS} tarefas fixadas.`);
@@ -68,7 +68,7 @@ function decodePins(value: unknown): StoredPins {
   const threadIds = object.threadIds.map((entry, index) => {
     const id = validateId(entry);
     if (seen.has(id)) {
-      throw new Error(`A tarefa fixada ${index + 1} está duplicada.`);
+      throw new Error(`Pinned task ${index + 1} is duplicated.`);
     }
     seen.add(id);
     return id;
@@ -83,11 +83,11 @@ function validateId(value: unknown): string {
     value.length > MAX_ID_CHARACTERS ||
     /\p{Cc}/u.test(value)
   ) {
-    throw new Error("O identificador da tarefa fixada é inválido.");
+    throw new Error("The pinned-task identifier is invalid.");
   }
   return value;
 }
 
 function describe(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "erro desconhecido";
+  return reason instanceof Error ? reason.message : "unknown error";
 }

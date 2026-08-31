@@ -6,6 +6,8 @@ import type {
   AutomationRun,
   AutomationRunStatus,
 } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage, type TranslationMessages } from "../i18n/messages";
 import type { AppController } from "../state/appController";
 import { pathsEqual } from "../state/projects";
 import { Icon } from "./Icon";
@@ -29,6 +31,7 @@ export function AutomationsView(props: {
   readonly onOpenSettings: () => void;
   readonly onShowChat: () => void;
 }) {
+  const i18n = useI18n();
   const [editor, setEditor] = createSignal<AutomationEditorState | null>(null);
   const [name, setName] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
@@ -132,14 +135,14 @@ export function AutomationsView(props: {
     const normalizedPrompt = prompt().trim();
     const intervalMinutes = intervalValue() * intervalFactor(intervalUnit());
     if (normalizedName.length === 0 || utf8Length(normalizedName) > MAX_AUTOMATION_NAME_BYTES) {
-      setFormError("Informe um nome de até 160 bytes.");
+      setFormError(i18n.messages().automations.nameValidation);
       return null;
     }
     if (
       normalizedPrompt.length === 0 ||
       utf8Length(normalizedPrompt) > MAX_AUTOMATION_PROMPT_BYTES
     ) {
-      setFormError("Informe instruções de até 256 KiB.");
+      setFormError(i18n.messages().automations.instructionsValidation);
       return null;
     }
     if (
@@ -147,7 +150,7 @@ export function AutomationsView(props: {
       intervalMinutes < MIN_INTERVAL_MINUTES ||
       intervalMinutes > MAX_INTERVAL_MINUTES
     ) {
-      setFormError("O intervalo deve ficar entre 5 minutos e 7 dias.");
+      setFormError(i18n.messages().automations.intervalValidation);
       return null;
     }
     setFormError(null);
@@ -185,28 +188,25 @@ export function AutomationsView(props: {
         <div>
           <span class="automations-eyebrow">
             <Icon name="calendar" size={14} />
-            Engine local
+            {i18n.messages().automations.engineLocal}
           </span>
-          <h1 id="automations-title">Automações</h1>
-          <p>
-            Agende instruções recorrentes, acompanhe as execuções e revise os resultados como
-            conversas normais do Codex.
-          </p>
+          <h1 id="automations-title">{i18n.messages().automations.title}</h1>
+          <p>{i18n.messages().automations.description}</p>
         </div>
         <div class="automations-header-actions">
           <button
-            aria-label="Atualizar automações"
+            aria-label={i18n.messages().automations.refresh}
             class="automation-icon-button"
             disabled={props.controller.automationsLoading()}
             onClick={() => void props.controller.refreshAutomations()}
-            title="Atualizar"
+            title={i18n.messages().automations.refreshTitle}
             type="button"
           >
             <Icon name="syncCheck" size={16} />
           </button>
           <button class="automation-primary-button" onClick={beginCreate} type="button">
             <Icon name="plus" size={15} />
-            Nova automação
+            {i18n.messages().automations.newAutomation}
           </button>
         </div>
       </header>
@@ -216,14 +216,11 @@ export function AutomationsView(props: {
           <Icon name="computer" size={17} />
         </span>
         <div>
-          <strong>Execução confiável em segundo plano</strong>
-          <p>
-            O agendador roda enquanto o aplicativo estiver aberto ou na bandeja. Inicialização com o
-            Windows e fechamento para a bandeja mantêm as tarefas locais disponíveis.
-          </p>
+          <strong>{i18n.messages().automations.reliableBackgroundTitle}</strong>
+          <p>{i18n.messages().automations.reliableBackgroundDescription}</p>
         </div>
         <button onClick={props.onOpenSettings} type="button">
-          Configurar
+          {i18n.messages().automations.configure}
         </button>
       </aside>
 
@@ -231,8 +228,8 @@ export function AutomationsView(props: {
         <section aria-labelledby="automation-inbox-title" class="automation-section">
           <div class="automation-section-heading">
             <div>
-              <h2 id="automation-inbox-title">Caixa de entrada</h2>
-              <p>Resultados novos aguardando sua revisão.</p>
+              <h2 id="automation-inbox-title">{i18n.messages().automations.inbox}</h2>
+              <p>{i18n.messages().automations.inboxDescription}</p>
             </div>
             <span class="automation-count-badge">{unreadRuns().length}</span>
           </div>
@@ -255,15 +252,12 @@ export function AutomationsView(props: {
         <section aria-labelledby="automation-list-title" class="automation-section">
           <div class="automation-section-heading">
             <div>
-              <h2 id="automation-list-title">Agendamentos</h2>
-              <p>
-                Até duas execuções podem trabalhar em paralelo; a mesma automação nunca sobrepõe uma
-                execução própria.
-              </p>
+              <h2 id="automation-list-title">{i18n.messages().automations.schedules}</h2>
+              <p>{i18n.messages().automations.schedulesDescription}</p>
             </div>
             <Show when={props.controller.automationsLoading()}>
               <span class="automation-loading" role="status">
-                Atualizando…
+                {i18n.messages().automations.updating}
               </span>
             </Show>
           </div>
@@ -275,10 +269,10 @@ export function AutomationsView(props: {
                 <span>
                   <Icon name="calendar" size={22} />
                 </span>
-                <h3>Nenhuma automação configurada</h3>
-                <p>Crie uma rotina para revisar código, acompanhar testes ou manter o projeto.</p>
+                <h3>{i18n.messages().automations.emptyTitle}</h3>
+                <p>{i18n.messages().automations.emptyDescription}</p>
                 <button class="automation-primary-button" onClick={beginCreate} type="button">
-                  Criar primeira automação
+                  {i18n.messages().automations.createFirst}
                 </button>
               </div>
             }
@@ -315,6 +309,7 @@ export function AutomationsView(props: {
                               {automationProjectLabel(
                                 props.controller.projects(),
                                 automation.projectPath,
+                                i18n.messages().automations.noProject,
                               )}
                             </p>
                           </div>
@@ -326,33 +321,47 @@ export function AutomationsView(props: {
                           >
                             {activeRun() === undefined
                               ? automation.enabled
-                                ? "Ativa"
-                                : "Pausada"
-                              : automationRunStatusLabel(activeRun()?.status ?? "queued")}
+                                ? i18n.messages().automations.active
+                                : i18n.messages().automations.paused
+                              : automationRunStatusLabel(
+                                  activeRun()?.status ?? "queued",
+                                  i18n.messages().automations,
+                                )}
                           </span>
                         </div>
                         <p class="automation-prompt-preview">{automation.prompt}</p>
                         <div class="automation-card-meta">
                           <span>
-                            <Icon name="reset" size={13} />A cada{" "}
-                            {formatInterval(automation.intervalMinutes)}
+                            <Icon name="reset" size={13} />
+                            {formatMessage(i18n.messages().automations.every, {
+                              interval: formatInterval(
+                                automation.intervalMinutes,
+                                i18n.messages().automations,
+                              ),
+                            })}
                           </span>
                           <Show
                             when={automation.nextRunAt}
-                            fallback={<span>Sem próxima execução</span>}
+                            fallback={<span>{i18n.messages().automations.noNextRun}</span>}
                           >
                             {(nextRunAt) => (
                               <span>
                                 <Icon name="calendar" size={13} />
-                                Próxima: {formatUnixTimestamp(nextRunAt())}
+                                {formatMessage(i18n.messages().automations.nextRun, {
+                                  date: formatUnixTimestamp(nextRunAt(), i18n.locale()),
+                                })}
                               </span>
                             )}
                           </Show>
                           <Show when={latestRun()}>
                             {(run) => (
                               <span>
-                                Última:{" "}
-                                {automationRunStatusLabel(run().status).toLocaleLowerCase("pt-BR")}
+                                {formatMessage(i18n.messages().automations.lastRun, {
+                                  status: automationRunStatusLabel(
+                                    run().status,
+                                    i18n.messages().automations,
+                                  ).toLocaleLowerCase(i18n.locale()),
+                                })}
                               </span>
                             )}
                           </Show>
@@ -369,31 +378,37 @@ export function AutomationsView(props: {
                           type="button"
                         >
                           <Icon name="arrowUp" size={14} />
-                          Executar agora
+                          {i18n.messages().automations.runNow}
                         </button>
                         <button
                           disabled={commandPending()}
                           onClick={() => void toggleAutomation(automation)}
                           type="button"
                         >
-                          {automation.enabled ? "Pausar" : "Ativar"}
+                          {automation.enabled
+                            ? i18n.messages().automations.pause
+                            : i18n.messages().automations.enable}
                         </button>
                         <button
-                          aria-label={`Editar ${automation.name}`}
+                          aria-label={formatMessage(i18n.messages().automations.editNamed, {
+                            name: automation.name,
+                          })}
                           class="automation-icon-button"
                           disabled={commandPending()}
                           onClick={() => beginEdit(automation)}
-                          title="Editar"
+                          title={i18n.messages().automations.edit}
                           type="button"
                         >
                           <Icon name="edit" size={15} />
                         </button>
                         <button
-                          aria-label={`Excluir ${automation.name}`}
+                          aria-label={formatMessage(i18n.messages().automations.deleteNamed, {
+                            name: automation.name,
+                          })}
                           class="automation-icon-button danger"
                           disabled={commandPending() || activeRun() !== undefined}
                           onClick={() => void props.controller.deleteAutomation(automation.id)}
-                          title="Excluir"
+                          title={i18n.messages().automations.delete}
                           type="button"
                         >
                           <Icon name="trash" size={15} />
@@ -411,8 +426,8 @@ export function AutomationsView(props: {
           <section aria-labelledby="automation-history-title" class="automation-section">
             <div class="automation-section-heading">
               <div>
-                <h2 id="automation-history-title">Execuções recentes</h2>
-                <p>Histórico local mais recente, incluindo itens já revisados.</p>
+                <h2 id="automation-history-title">{i18n.messages().automations.recentRuns}</h2>
+                <p>{i18n.messages().automations.recentRunsDescription}</p>
               </div>
             </div>
             <div class="automation-history">
@@ -448,13 +463,15 @@ export function AutomationsView(props: {
           >
             <header>
               <div>
-                <span class="automations-eyebrow">Agendamento local</span>
+                <span class="automations-eyebrow">{i18n.messages().automations.localSchedule}</span>
                 <h2 id="automation-editor-title">
-                  {editor()?.automationId === null ? "Nova automação" : "Editar automação"}
+                  {editor()?.automationId === null
+                    ? i18n.messages().automations.newAutomation
+                    : i18n.messages().automations.editAutomation}
                 </h2>
               </div>
               <button
-                aria-label="Fechar editor"
+                aria-label={i18n.messages().automations.closeEditor}
                 class="automation-icon-button"
                 disabled={saving()}
                 onClick={closeEditor}
@@ -465,39 +482,36 @@ export function AutomationsView(props: {
             </header>
             <form onSubmit={(event) => void submitAutomation(event)}>
               <label class="automation-field">
-                <span>Nome</span>
+                <span>{i18n.messages().automations.name}</span>
                 <input
                   autofocus
                   maxlength={MAX_AUTOMATION_NAME_BYTES}
                   onInput={(event) => setName(event.currentTarget.value)}
-                  placeholder="Ex.: Revisar regressões do projeto"
+                  placeholder={i18n.messages().automations.namePlaceholder}
                   required
                   value={name()}
                 />
               </label>
               <label class="automation-field">
-                <span>Instruções</span>
+                <span>{i18n.messages().automations.instructions}</span>
                 <textarea
                   maxlength={MAX_AUTOMATION_PROMPT_BYTES}
                   onInput={(event) => setPrompt(event.currentTarget.value)}
-                  placeholder="Descreva o objetivo, os limites e o formato esperado do resultado."
+                  placeholder={i18n.messages().automations.instructionsPlaceholder}
                   required
                   rows={8}
                   value={prompt()}
                 />
-                <small>
-                  A execução usa o mesmo pipeline seguro de conversas, ferramentas e aprovações do
-                  Codex.
-                </small>
+                <small>{i18n.messages().automations.instructionsHelp}</small>
               </label>
               <div class="automation-field-grid">
                 <label class="automation-field">
-                  <span>Projeto</span>
+                  <span>{i18n.messages().automations.project}</span>
                   <select
                     onChange={(event) => setProjectPath(event.currentTarget.value || null)}
                     value={projectPath() ?? ""}
                   >
-                    <option value="">Sem projeto específico</option>
+                    <option value="">{i18n.messages().automations.noProject}</option>
                     <Show
                       when={
                         projectPath() !== null &&
@@ -514,10 +528,10 @@ export function AutomationsView(props: {
                   </select>
                 </label>
                 <fieldset class="automation-field automation-interval-field">
-                  <legend>Frequência</legend>
+                  <legend>{i18n.messages().automations.frequency}</legend>
                   <div>
                     <input
-                      aria-label="Intervalo"
+                      aria-label={i18n.messages().automations.interval}
                       inputmode="numeric"
                       max={maxIntervalValue(intervalUnit())}
                       min={minIntervalValue(intervalUnit())}
@@ -534,23 +548,23 @@ export function AutomationsView(props: {
                       value={intervalValue()}
                     />
                     <select
-                      aria-label="Unidade do intervalo"
+                      aria-label={i18n.messages().automations.intervalUnit}
                       onChange={(event) =>
-                        changeIntervalUnit(event.currentTarget.value as IntervalUnit)
+                        changeIntervalUnit(decodeIntervalUnit(event.currentTarget.value))
                       }
                       value={intervalUnit()}
                     >
-                      <option value="minutes">minutos</option>
-                      <option value="hours">horas</option>
-                      <option value="days">dias</option>
+                      <option value="minutes">{i18n.messages().automations.minutes}</option>
+                      <option value="hours">{i18n.messages().automations.hours}</option>
+                      <option value="days">{i18n.messages().automations.days}</option>
                     </select>
                   </div>
                 </fieldset>
               </div>
               <label class="automation-enabled-field">
                 <span>
-                  <strong>Ativar ao salvar</strong>
-                  <small>A primeira execução ocorrerá após o intervalo configurado.</small>
+                  <strong>{i18n.messages().automations.enableOnSave}</strong>
+                  <small>{i18n.messages().automations.firstRunHelp}</small>
                 </span>
                 <input
                   aria-checked={enabled()}
@@ -574,10 +588,10 @@ export function AutomationsView(props: {
                   onClick={closeEditor}
                   type="button"
                 >
-                  Cancelar
+                  {i18n.messages().common.cancel}
                 </button>
                 <button class="automation-primary-button" disabled={saving()} type="submit">
-                  {saving() ? "Salvando…" : "Salvar automação"}
+                  {saving() ? i18n.messages().automations.saving : i18n.messages().automations.save}
                 </button>
               </footer>
             </form>
@@ -595,6 +609,7 @@ function AutomationRunRow(props: {
   readonly onOpen: () => void;
   readonly run: AutomationRun;
 }) {
+  const i18n = useI18n();
   const terminal = () => isTerminalRun(props.run);
   return (
     <article class="automation-run-row" classList={{ compact: props.compact === true }}>
@@ -614,30 +629,35 @@ function AutomationRunRow(props: {
       </span>
       <div class="automation-run-copy">
         <div>
-          <strong>{props.automation?.name ?? "Automação removida"}</strong>
+          <strong>{props.automation?.name ?? i18n.messages().automations.removed}</strong>
           <span class="automation-status-pill" data-state={props.run.status}>
-            {automationRunStatusLabel(props.run.status)}
+            {automationRunStatusLabel(props.run.status, i18n.messages().automations)}
           </span>
           <Show when={props.run.reviewed}>
-            <small>Revisada</small>
+            <small>{i18n.messages().automations.reviewed}</small>
           </Show>
         </div>
         <p>
           {props.run.error ??
-            `${props.run.trigger === "manual" ? "Execução manual" : "Execução agendada"} · ${formatUnixTimestamp(
+            `${
+              props.run.trigger === "manual"
+                ? i18n.messages().automations.manualRun
+                : i18n.messages().automations.scheduledRun
+            } · ${formatUnixTimestamp(
               props.run.completedAt ?? props.run.startedAt ?? props.run.createdAt,
+              i18n.locale(),
             )}`}
         </p>
       </div>
       <div class="automation-run-actions">
         <Show when={props.run.threadId !== null}>
           <button onClick={props.onOpen} type="button">
-            Abrir conversa
+            {i18n.messages().automations.openConversation}
           </button>
         </Show>
         <Show when={terminal() && !props.run.reviewed}>
           <button class="automation-mark-reviewed" onClick={props.onMarkReviewed} type="button">
-            Marcar revisada
+            {i18n.messages().automations.markReviewed}
           </button>
         </Show>
       </div>
@@ -666,27 +686,31 @@ function isTerminalRun(run: AutomationRun): boolean {
   return run.status === "completed" || run.status === "failed" || run.status === "interrupted";
 }
 
-function automationRunStatusLabel(status: AutomationRunStatus): string {
+function automationRunStatusLabel(
+  status: AutomationRunStatus,
+  messages: TranslationMessages["automations"],
+): string {
   switch (status) {
     case "queued":
-      return "Na fila";
+      return messages.statusQueued;
     case "running":
-      return "Executando";
+      return messages.statusRunning;
     case "completed":
-      return "Concluída";
+      return messages.statusCompleted;
     case "failed":
-      return "Falhou";
+      return messages.statusFailed;
     case "interrupted":
-      return "Interrompida";
+      return messages.statusInterrupted;
   }
 }
 
 function automationProjectLabel(
   projects: readonly { readonly name: string; readonly path: string }[],
   projectPath: string | null,
+  noProjectLabel: string,
 ): string {
   if (projectPath === null) {
-    return "Sem projeto específico";
+    return noProjectLabel;
   }
   const project = projects.find((entry) => pathsEqual(entry.path, projectPath));
   return project?.name ?? projectPath;
@@ -705,15 +729,20 @@ function intervalPresentation(intervalMinutes: number): {
   return { unit: "minutes", value: intervalMinutes };
 }
 
-function formatInterval(intervalMinutes: number): string {
+function formatInterval(
+  intervalMinutes: number,
+  messages: TranslationMessages["automations"],
+): string {
   const presentation = intervalPresentation(intervalMinutes);
   switch (presentation.unit) {
     case "days":
-      return `${presentation.value} ${presentation.value === 1 ? "dia" : "dias"}`;
+      return `${presentation.value} ${presentation.value === 1 ? messages.oneDay : messages.manyDays}`;
     case "hours":
-      return `${presentation.value} ${presentation.value === 1 ? "hora" : "horas"}`;
+      return `${presentation.value} ${presentation.value === 1 ? messages.oneHour : messages.manyHours}`;
     case "minutes":
-      return `${presentation.value} ${presentation.value === 1 ? "minuto" : "minutos"}`;
+      return `${presentation.value} ${
+        presentation.value === 1 ? messages.oneMinute : messages.manyMinutes
+      }`;
   }
 }
 
@@ -743,13 +772,18 @@ function clampIntervalValue(value: number, unit: IntervalUnit): number {
   );
 }
 
-function formatUnixTimestamp(timestampSeconds: number): string {
-  return new Intl.DateTimeFormat("pt-BR", {
+function formatUnixTimestamp(timestampSeconds: number, locale: string): string {
+  return new Intl.DateTimeFormat(locale, {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     month: "short",
   }).format(new Date(timestampSeconds * 1_000));
+}
+
+function decodeIntervalUnit(value: string): IntervalUnit {
+  if (value === "days" || value === "hours" || value === "minutes") return value;
+  throw new Error(`Unsupported automation interval unit ${JSON.stringify(value)}.`);
 }
 
 function utf8Length(value: string): number {

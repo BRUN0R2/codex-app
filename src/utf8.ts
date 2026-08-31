@@ -19,7 +19,7 @@ function measureUtf8Bytes(value: string, stopAfterBytes: number): number {
     const source = offset === 0 ? value : value.slice(offset);
     const { read, written } = UTF8_ENCODER.encodeInto(source, UTF8_SCRATCH);
     if (read === 0) {
-      throw new Error("Não foi possível medir o texto UTF-8.");
+      throw new Error("The UTF-8 text could not be measured.");
     }
     offset += read;
     total += written;

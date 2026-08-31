@@ -5,7 +5,7 @@
     "module": "ESNext",
     "lib": ["ES2024", "ESNext.Disposable", "DOM", "DOM.Iterable"],
     "moduleResolution": "Bundler",
-    "allowImportingTsExtensions": false,
+    "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "moduleDetection": "force",
     "noEmit": true,

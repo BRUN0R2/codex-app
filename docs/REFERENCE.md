@@ -1,168 +1,228 @@
-# Referência do Codex oficial
+# Official Codex reference
 
-Este documento registra apenas conclusões que afetam o produto. A implementação
-local continua independente.
+This document records only upstream conclusions that affect this product. The
+local implementation remains independent.
 
-## Snapshot auditado
+## Audited snapshot
 
-| Fonte | Versão |
+| Source | Version |
 | --- | --- |
-| [`openai/codex`](https://github.com/openai/codex) | commit `d9511fb7888d98f89526d4ae019dd9be2f14199e`, 28/08/2026 |
-| release estável | `rust-v0.150.1`, commit `90854393966b21e9ebfd21b122334eb09a20c93d` |
-| Codex Desktop para Windows | build `26.825.3734.0`, validado em 28/08/2026 |
+| [`openai/codex`](https://github.com/openai/codex) | commit `d9511fb7888d98f89526d4ae019dd9be2f14199e`, 2026-08-28 |
+| stable release | `rust-v0.150.1`, commit `90854393966b21e9ebfd21b122334eb09a20c93d` |
+| Codex Desktop for Windows | build `26.825.5331.0`, validated 2026-08-29 |
 
-O clone de estudo fica em `.references/openai-codex`, que é ignorado. Nenhum
-crate, pacote, executável, banco, configuração ou credencial da referência entra
-no build ou no runtime local.
+The ignored study clone lives in `.references/openai-codex`. No referenced
+crate, package, executable, database, configuration, or credential enters the
+local build or runtime.
 
-O parâmetro `client_version` do catálogo local permanece `0.150.1`, a última
-release estável cujo protocolo foi auditado.
+The local catalog's `client_version` remains `0.150.1`, the latest stable
+release whose protocol was audited.
 
-## Topologia oficial
+## Upstream topology
 
-CLI, extensão e Desktop compartilham o core aberto e o protocolo `app-server`.
-No Windows, o Desktop auditado iniciou:
+The CLI, extension, and Desktop share the open core and `app-server` protocol.
+The audited Windows Desktop started:
 
 ```text
 codex.exe -c features.code_mode_host=true app-server --analytics-default-enabled
 └─ codex-code-mode-host.exe
 ```
 
-O Desktop não usa o fluxo interativo da CLI, mas usa o mesmo harness para loop,
-contexto, ferramentas, sandbox, aprovações, streaming e continuidade. Este
-projeto reproduz os contratos necessários em `NativeEngine`, sem executar esses
-binários.
+Desktop does not use the interactive CLI flow, but it uses the same harness for
+the agent loop, context, tools, sandbox, approvals, streaming, and continuity.
+This project reproduces required contracts in `NativeEngine` without executing
+those binaries.
 
-Referências oficiais:
+Official references:
 
-- [repositório e core](https://github.com/openai/codex);
+- [repository and core](https://github.com/openai/codex);
 - [app-server](https://learn.chatgpt.com/docs/app-server);
-- [Codex como plataforma](https://learn.chatgpt.com/blog/codex-as-a-platform);
+- [Codex as a platform](https://learn.chatgpt.com/blog/codex-as-a-platform);
 - [Browser Use](https://learn.chatgpt.com/docs/browser);
-- [aplicativo para Windows](https://learn.chatgpt.com/docs/windows/windows-app).
+- [Windows application](https://learn.chatgpt.com/docs/windows/windows-app).
 
-## Conclusões portadas
+## Adopted conclusions
 
-| Área | Comportamento confirmado | Decisão local |
+| Area | Confirmed behavior | Local decision |
 | --- | --- | --- |
-| OAuth | PKCE, callback local, troca, renovação e revogação | implementação Rust própria e cofre isolado |
-| modelos | catálogo autoritativo com capabilities | parser fechado; UI não fixa capacidades por nome |
-| Responses | Standard, Lite, SSE e itens tipados | parsers e requests nativos separados |
-| histórico | cada tool call possui exatamente um output | normalização e reparo transacional |
-| instruções | template do catálogo mais contexto factual do runtime | camadas limitadas, sem prompt universal duplicado |
-| cache | catálogo curto em memória e invalidação por ETag | TTL de 5 min, sem cache persistente |
-| contexto | janela do catálogo e Remote Compaction V2 | orçamento dinâmico e checkpoint atômico |
-| comandos | yield, sessão registrada, polling e output incremental | manager próprio com Job Object no Windows |
-| paralelismo | ferramentas independentes podem sobrepor execução | lote local máximo de 8 e ordem determinística |
-| patch | ferramenta freeform com parser dedicado | gramática Lark e commit transacional próprios |
-| imagens | inspeção multimodal é uma tool activity nativa | `view_image`, miniatura e visualizador próprios |
-| browser | superfície visível, ações fechadas e aprovação de origem | child WebView2 controlado pelo engine |
-| Code Mode | V8 isolado, manifesto, callbacks, yield e cancelamento | runtime e ponte Rust próprios |
-| multiagente v2 | árvore, mailbox e lifecycle tipados | persistência transacional e seis tools diretas |
+| OAuth | PKCE, local callback, exchange, refresh, and revocation | Independent Rust implementation and isolated vault |
+| models | Authoritative capability catalog | Closed parser; UI never infers capability from model name |
+| Responses | Standard, Lite, SSE, and typed items | Separate native parsers and requests |
+| history | Every tool call has exactly one output | Transactional normalization and repair |
+| instructions | Catalog template plus factual runtime context | Bounded layers without a duplicate universal prompt |
+| cache | Short in-memory catalog cache with ETag invalidation | Five-minute TTL and no persistence |
+| context | Confirmed use plus local delta and Remote Compaction V2 | Dynamic budget and atomic checkpoint |
+| commands | Yield, registered sessions, polling, and incremental output | Independent manager with Windows Job Objects |
+| parallelism | Independent tools may overlap | Eight-call local batch with deterministic order |
+| patch | Freeform tool with a dedicated parser | Local Lark grammar and transactional commit |
+| images | Multimodal inspection is a native tool activity | Local `view_image`, thumbnail, and viewer |
+| browser | Visible surface, closed actions, and origin approval | Engine-controlled child WebView2 |
+| Code Mode | Isolated V8, manifest, callbacks, yield, and cancellation | Independent Rust runtime and bridge |
+| multi-agent v2 | Typed tree, mailbox, and lifecycle | Transactional persistence and six direct tools |
 
-O core oficial não define um único “máximo de comandos paralelos” equivalente
-ao limite local: o agendamento depende dos handlers e das barreiras. O manager
-oficial admite até 64 processos Unified Exec; este projeto limita uma rodada a
-8 ferramentas e o registry a 32 sessões. Esses limites são intencionais e
-cobertos por testes.
+Upstream has no single parallel-command maximum equivalent to the local limit;
+scheduling depends on handlers and barriers. Its Unified Exec manager accepts up
+to 64 processes. This project limits one round to eight tools and its registry
+to 32 sessions. Both limits are intentional and tested.
 
-## Instruções e prompts
+## Instructions, transport, and context
 
-O fluxo oficial é híbrido:
+The upstream instruction flow is layered:
 
-1. o servidor entrega `model_messages.instructions_template` e capabilities;
-2. o cliente acrescenta instruções do usuário e do repositório, permissão,
-   colaboração, workspace, shell, data e timezone;
-3. o provider recebe cada camada com papel e tamanho próprios.
+1. the server supplies `model_messages.instructions_template` and capabilities;
+2. the client adds user, repository, permission, collaboration, workspace,
+   shell, date, and timezone context;
+3. each layer reaches the provider with its own role and size limit.
 
-Portanto, nem tudo vem do servidor. O core oficial mantém textos locais para
-papéis, modos, ferramentas, permissões e contexto que o servidor não conhece;
-alguns podem ser substituídos ou suprimidos pelo catálogo. Instruções locais são
-necessárias, mas não devem duplicar personalidade ou protocolo já fornecidos por
-`instructions_template`. O runtime local segue essa separação e removeu camadas
-universais concorrentes.
+The core retains local text for roles, modes, tools, permissions, and runtime
+context that the server cannot know. Catalog data may replace or suppress some
+of it. Local instructions are necessary but must not duplicate personality or
+protocol already supplied by `instructions_template`.
 
-Responses Lite mantém a mesma semântica por wire diferente: tools entram em
-`additional_tools`, funções ficam no namespace `functions` e instruções-base
-viram mensagem developer com IDs estáveis. O contrato é escolhido pela capability
-do modelo, nunca por fallback após uma requisição falhar.
+Responses Lite preserves semantics over a different wire shape:
+`additional_tools`, a `functions` namespace, and base instructions encoded as
+a developer message with stable IDs. Model capability selects the contract
+before the request; a failed request never triggers a protocol fallback.
+The audited Desktop resolves an absent `model_reasoning_summary` preference to
+`auto`, even though current model metadata commonly publishes `none` as the Core
+default. The local native client applies that same explicit product preference
+only when the catalog advertises parameter support.
 
-## Cache e integridade
+Upstream calculates active context from the latest confirmed usage and local
+items after the latest model output. A local audit found that taking the maximum
+of that total and a fresh full estimate with margin inflated 200,340 tokens to
+252,518 and 186,851 to 250,917, causing two early compactions. The runtime now
+uses the same authoritative boundary. Full estimation is restricted to the
+phase before compatible telemetry.
 
-O catálogo não é salvo em disco. ETag igual renova o TTL; ETag diferente invalida
-imediatamente; ausência do header não destrói uma entrada válida. A chave de
-prompt é o ID estável da tarefa, evitando fragmentação entre rodadas e polls.
+SSE text deltas do not contain exact usage. `response.completed` supplies
+`output_tokens`, so the timeline accumulates only confirmed values per turn.
+The count updates after confirmed cycles, remains attached to completed turns,
+and survives history reload. The frontend never attempts to reproduce the
+tokenizer.
 
-A auditoria local validou `PRAGMA integrity_check`, JSON persistido e referências
-entre tabelas sem encontrar corrupção. Não havia corrupção no cache do catálogo
-ou no prompt cache. Havia um defeito real no cache de leituras aninhadas: uma
-mutação no Code Mode podia deixar uma leitura anterior reutilizável. O cache agora
-troca de geração após qualquer mutação, com regressões para escrita e patch.
+## Cache and integrity
 
-## Code Mode, multiagente e Ultra
+The model catalog is not persisted. A matching ETag renews TTL, a changed ETag
+invalidates immediately, and a missing header does not destroy a valid entry.
+The stable task ID is the prompt-cache key, avoiding fragmentation across rounds
+and polls.
 
-No core oficial, Code Mode é um subsistema com protocolo, runtime V8 sandboxed,
-host, negociação, backpressure, limites, yield e cancelamento. O Desktop auditado
-habilita `features.code_mode_host` e inicia `codex-code-mode-host.exe`.
+The local audit validated `PRAGMA integrity_check`, persisted JSON, and table
+references without finding database, catalog-cache, or prompt-cache corruption.
+It did find a nested Code Mode read-cache defect: a mutation could leave an old
+read reusable. Every mutation now advances the cache generation, with write and
+patch regressions.
 
-O runtime local reproduz esse fluxo com isolate V8 próprio e manifesto de tools
-filtrado. O isolate não possui Node.js nem acesso implícito ao host; chamadas
-passam por uma ponte Rust limitada e cancelável. Modelos `code_mode_only` são
-selecionáveis porque o host agora existe.
+Upstream does not impose the former local 2,000-line read window and treats EOF
+as normal completion. The local tool keeps its 2 MiB per-file bound, accepts
+unbounded line ranges, clamps ends to EOF, and returns an explicit EOF marker
+when the start is beyond content. Compaction and `read_output` remain
+responsible for the model-facing budget.
 
-Multiagente v2 usa quatro slots concorrentes, incluindo a raiz, limite vitalício
-de 64 tarefas por árvore, mailbox persistida e operações distintas para enfileirar
-mensagem ou iniciar follow-up. As tools de colaboração permanecem diretas e não
-entram no Code Mode.
+## Code Mode, multi-agent, and Ultra
 
-Ultra é uma preferência de orquestração local: fica roxo na interface, exige
-multiagente v2 e aparece indisponível somente dentro do seletor quando a capability
-falta. O provider recebe o esforço multiagente informado pelo catálogo ou o maior
-esforço suportado; o literal `ultra` nunca atravessa a rede.
+Upstream Code Mode is a subsystem with protocol, sandboxed V8 runtime, host,
+negotiation, backpressure, limits, yield, and cancellation. The audited Desktop
+enabled `features.code_mode_host` and started `codex-code-mode-host.exe`.
 
-## Imagens e Browser Use
+The local runtime implements the same boundary with its own V8 isolate and
+filtered tool manifest. The isolate has no Node.js or implicit host access;
+calls cross a bounded, cancellable Rust bridge. This makes
+`code_mode_only` models selectable without an external host.
 
-O Desktop representa a inspeção de imagem como atividade da ferramenta, com
-miniatura expansível. O fluxo local segue o mesmo contrato visual e semântico:
-`view_image` decodifica o arquivo uma vez, envia esses bytes como conteúdo
-multimodal, guarda um snapshot gerenciado idêntico e publica “Visualizou uma
-imagem”. Não há navegação para `file://` nem abertura do browser.
+In `app-server`, each item progresses from `item/started` to
+`item/completed`; the terminal event is authoritative for the same identity.
+The upstream executor retains an invocation after cancellation is signaled so
+the tool-lifecycle owner can publish its terminal result. The local session uses
+the same barrier and cooperatively drains tool callbacks on cell completion and
+interruption.
 
-Browser Use é um subsistema diferente: controla página HTTP(S) visível por ações
-fechadas, screenshot, snapshot e aprovação da primeira origem. Computer Use,
-controle amplo do desktop e CDP irrestrito não fazem parte do escopo local.
+`exec` and `wait` are Code Mode orchestration details, not visual activities.
+The timeline shows only semantic bridge operations such as commands, reads,
+edits, and searches. Yielded JavaScript is neither exposed nor left visually
+active.
 
-## Decisões não portadas
+The audited Desktop uses the latest active semantic action and the latest
+reasoning title as a fallback within one persistent group. The local timeline
+therefore updates a single reflective header for tools, reads, edits, and
+reasoning. During a reasoning stream, only a closed bold heading starts a new
+semantic section; partial headings retain the preceding readable title and body
+deltas cannot replace it. Completed plain summaries remain readable for stored
+or older protocol data. A standalone thinking state appears only before such a
+group exists.
 
-- armazenamento, config e processo do Codex CLI;
-- Computer Use amplo;
-- CDP arbitrário e perfil de navegação externo;
-- Responses WebSocket sem equivalência comprovada com SSE;
-- compatibilidade genérica com versões antigas do protocolo.
+Completed reads use direct action language: one file in the singular and files
+in the plural. For active commands, the parent header says only "Running
+command". After ten seconds, only the child row shows elapsed time with compact
+seconds, minutes, or hours. The full command appears in the terminal state, and
+expanded output remains available during execution.
 
-## Cobertura antirregressão
+The reflective header uses a masked contrast copy with 2D counter-translations
+from `-50% to 125%` and `50% to -125%`, synchronized to a one-second,
+48-step pulse. It avoids scaling, filtering, and artificial layers. The pulse
+belongs only to the current parent title and repeats every 1.2 seconds per
+product requirement, rather than the audited snapshot's four seconds.
 
-Fixtures e testes locais travam:
+Multi-agent v2 has four concurrent slots including the root, a 64-task lifetime
+limit per tree, persistent mailboxes, and distinct queue-message and start-
+follow-up operations. Collaboration tools remain direct and do not enter Code
+Mode.
 
-- schemas Rust ↔ TypeScript e métodos de evento;
-- Standard ↔ Lite e instruções por capability;
-- TTL/ETag e ausência de cache persistente;
-- pareamento call/output, ordenação e retomada;
-- paralelismo, barreiras, yield, cursor e cancelamento;
-- isolate, manifesto, callback, limites e lifecycle do Code Mode;
-- árvore, mailbox, concorrência, herança e lifecycle multiagente;
-- compactação e recuperação de janela;
-- atomicidade do patch;
-- validação, snapshot exato, apresentação e limites de imagem;
-- origem, bounds e lifecycle do browser.
+Ultra is a local orchestration preference. It renders purple, requires
+multi-agent v2, and becomes unavailable only in the selector when capability is
+missing. The provider receives the catalog's multi-agent effort or highest
+supported effort; the literal `ultra` never crosses the network.
 
-## Atualização da referência
+## Images, browser, and scrolling
 
-Ao mudar o snapshot:
+Desktop represents image inspection as a tool activity with an expandable
+thumbnail. Local `view_image` decodes once, sends those bytes as multimodal
+content, stores an identical managed snapshot, and publishes the corresponding
+activity. It never navigates to `file://` or opens the browser.
 
-1. registre commit e release estável;
-2. revise apenas áreas usadas pelo produto;
-3. compare protocolo e comportamento antes de portar código;
-4. implemente no domínio local com testes de regressão;
-5. atualize `client_version` somente após validar o catálogo;
-6. execute `pnpm verify`.
+Browser Use is separate: it controls a visible HTTP(S) page through closed
+actions, screenshots, snapshots, and first-origin approval. Broad Computer Use,
+desktop control, and unrestricted CDP are out of scope. The child-WebView limit
+protects live resources; persisted topology for inactive tasks does not consume
+native tabs and is removed when its task is deleted.
+
+Outputs, reads, and diffs with their own viewport contain vertical scrolling.
+Wheel input at an inner boundary is not transferred or animated into the
+conversation. The timeline scrolls only after the pointer enters its surface.
+Command output uses the same full native scrollbar as file reads, including
+width and arrows.
+
+## Decisions not adopted
+
+- Codex CLI storage, configuration, or process dependencies;
+- broad Computer Use;
+- arbitrary CDP and external browser profiles;
+- Responses WebSocket without proven SSE parity;
+- generic compatibility for old protocol versions.
+
+## Regression coverage
+
+Local fixtures and tests lock:
+
+- Rust/TypeScript schemas and event methods;
+- Standard/Lite transport and capability-driven instructions;
+- capability-gated `auto` reasoning summaries and semantic headline transitions;
+- TTL/ETag behavior and absence of persistent catalog cache;
+- call/output pairing, ordering, and resume;
+- parallelism, barriers, yield, cursors, and cancellation;
+- Code Mode isolate, manifest, callbacks, limits, and lifecycle;
+- multi-agent tree, mailbox, concurrency, inheritance, and lifecycle;
+- compaction and context-window recovery;
+- patch atomicity;
+- image validation, exact snapshots, presentation, and limits;
+- browser origin, bounds, and lifecycle.
+
+## Updating the reference
+
+1. Record the commit and stable release.
+2. Review only product-relevant areas.
+3. Compare protocol and behavior before porting code.
+4. Implement the local domain contract with regression tests.
+5. Update `client_version` only after catalog validation.
+6. Run `pnpm verify`.

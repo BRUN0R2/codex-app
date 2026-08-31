@@ -9,6 +9,7 @@ import {
 } from "solid-js";
 import { Portal } from "solid-js/web";
 
+import { useI18n } from "../i18n/context";
 import { Icon } from "./Icon";
 
 export interface ImageViewerEntry {
@@ -24,6 +25,7 @@ interface ImageViewerContextValue {
 const ImageViewerContext = createContext<ImageViewerContextValue>();
 
 export function ImageViewerProvider(props: ParentProps) {
+  const i18n = useI18n();
   const [entry, setEntry] = createSignal<ImageViewerEntry | null>(null);
   let closeButton: HTMLButtonElement | undefined;
   let previousFocus: HTMLElement | null = null;
@@ -90,11 +92,11 @@ export function ImageViewerProvider(props: ParentProps) {
                 <header class="image-viewer-header">
                   <span>{visibleEntry().name ?? visibleEntry().alt}</span>
                   <button
-                    aria-label="Fechar visualização da imagem"
+                    aria-label={i18n.messages().imageViewer.close}
                     class="image-viewer-close"
                     onClick={close}
                     ref={closeButton}
-                    title="Fechar"
+                    title={i18n.messages().common.close}
                     type="button"
                   >
                     <Icon name="close" size={19} />
@@ -115,7 +117,7 @@ export function ImageViewerProvider(props: ParentProps) {
 export function useImageViewer(): ImageViewerContextValue {
   const context = useContext(ImageViewerContext);
   if (context === undefined) {
-    throw new Error("O visualizador de imagens não foi inicializado.");
+    throw new Error("The image viewer context was not initialized.");
   }
   return context;
 }

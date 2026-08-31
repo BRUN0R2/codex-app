@@ -31,7 +31,7 @@ describe("cache de páginas de conversa", () => {
         ...current,
         thread: { ...current.thread, id: "b" },
       })),
-    ).toThrow("trocar o identificador");
+    ).toThrow("change the thread identifier");
   });
 
   it("só considera atual uma página da mesma conversa e revisão", () => {

@@ -64,7 +64,7 @@ export function projectSourceOutput(text: string, path: string): SourceOutputPro
   let maximumColumns = 1;
   const lines = parsed.map((line) => {
     if (line === null) {
-      throw new Error("A saída de leitura mudou depois de ser validada.");
+      throw new Error("The read output changed after validation.");
     }
     lineNumberDigits = Math.max(lineNumberDigits, String(line.number).length);
     maximumColumns = Math.max(maximumColumns, monospaceColumnCount(line.content));
@@ -76,7 +76,7 @@ export function projectSourceOutput(text: string, path: string): SourceOutputPro
     maximumColumns,
     tokensAt(index) {
       if (!Number.isSafeInteger(index) || index < 0 || index >= lines.length) {
-        throw new Error("O índice sintático da leitura de arquivo é inválido.");
+        throw new Error("The file-read syntax index is invalid.");
       }
       if (tokenizer === null) {
         return null;
@@ -84,7 +84,7 @@ export function projectSourceOutput(text: string, path: string): SourceOutputPro
       for (let nextIndex = cachedTokens.length; nextIndex <= index; nextIndex += 1) {
         const line = lines[nextIndex];
         if (line === undefined) {
-          throw new Error(`A linha de leitura ${nextIndex} não existe.`);
+          throw new Error(`Read line ${nextIndex} does not exist.`);
         }
         const lineBytes = utf8ByteLength(line.content) + 1;
         highlighting =

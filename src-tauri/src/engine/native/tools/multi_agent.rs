@@ -41,20 +41,20 @@ pub(super) fn definitions(available_models: &[CodexModel]) -> Vec<Value> {
                         "description": "Task name using lowercase letters, digits, and underscores."
                     },
                     "fork_turns": {
-                        "type": "string",
-                        "description": "History to inherit: `none`, `all` (default), or a positive integer string."
+                        "type": ["string", "null"],
+                        "description": "History to inherit: `none`, `all`, or a positive integer string. Use null for the `all` default."
                     },
                     "model": {
-                        "type": "string",
-                        "description": "Optional model override. Omit to inherit the parent model."
+                        "type": ["string", "null"],
+                        "description": "Model override, or null to inherit the parent model."
                     },
                     "reasoning_effort": {
-                        "type": "string",
-                        "enum": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
-                        "description": "Optional reasoning-effort override. Omit to inherit the parent effort."
+                        "type": ["string", "null"],
+                        "enum": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", null],
+                        "description": "Reasoning-effort override, or null to inherit the parent effort."
                     }
                 },
-                "required": ["message", "task_name"],
+                "required": ["message", "task_name", "fork_turns", "model", "reasoning_effort"],
                 "additionalProperties": false
             }),
         ),
@@ -90,10 +90,11 @@ pub(super) fn definitions(available_models: &[CodexModel]) -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "path_prefix": {
-                        "type": "string",
-                        "description": "Task-path prefix without a trailing slash. Omit to list all agents."
+                        "type": ["string", "null"],
+                        "description": "Task-path prefix without a trailing slash, or null to list all agents."
                     }
                 },
+                "required": ["path_prefix"],
                 "additionalProperties": false
             }),
         ),
@@ -104,12 +105,13 @@ pub(super) fn definitions(available_models: &[CodexModel]) -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "timeout_ms": {
-                        "type": "integer",
+                        "type": ["integer", "null"],
                         "minimum": 10000,
                         "maximum": 3600000,
-                        "description": "Timeout in milliseconds. Defaults to 30000."
+                        "description": "Timeout in milliseconds, or null for the 30000 ms default."
                     }
                 },
+                "required": ["timeout_ms"],
                 "additionalProperties": false
             }),
         ),
@@ -248,7 +250,7 @@ fn message_parameters(description: &'static str) -> Value {
 fn spawn_agent_description(available_models: &[CodexModel]) -> String {
     let models = available_models_description(available_models);
     format!(
-        "{models}\n\nSpawns an agent to work on the specified task. If the current task is `/root/task1` and it spawns `task_3`, the canonical task name is `/root/task1/task_3`; `task_3` and the canonical name can both address it from the parent. Agents in another branch must use the canonical name.\n\nSpawned agents inherit the current model and reasoning effort by default. Omit overrides unless an explicit override is needed.\n\nOnly call this tool for a concrete, bounded subtask that can run independently alongside useful local work. The spawned agent shares the workspace, has the same tools, can spawn subagents, and returns its final answer to the parent.\n\n`fork_turns=\"none\"` passes no surrounding context. `fork_turns=\"all\"` passes the full completed history."
+        "{models}\n\nSpawns an agent to work on the specified task. If the current task is `/root/task1` and it spawns `task_3`, the canonical task name is `/root/task1/task_3`; `task_3` and the canonical name can both address it from the parent. Agents in another branch must use the canonical name.\n\nSpawned agents inherit the current model and reasoning effort by default. Set `model` and `reasoning_effort` to null unless an explicit override is needed.\n\nOnly call this tool for a concrete, bounded subtask that can run independently alongside useful local work. The spawned agent shares the workspace, has the same tools, can spawn subagents, and returns its final answer to the parent.\n\n`fork_turns=\"none\"` passes no surrounding context. `fork_turns=null` or `fork_turns=\"all\"` passes the full completed history."
     )
 }
 

@@ -21,7 +21,7 @@ export function prependThreadHistory(current: CodexThread, olderPage: CodexThrea
   const currentIds = new Set(current.turns.map((turn) => turn.id));
   for (const turn of olderPage.turns) {
     if (currentIds.has(turn.id) && (!boundaryOverlap || turn.id !== olderLast?.id)) {
-      throw new Error("As páginas do histórico contêm turnos sobrepostos fora da fronteira.");
+      throw new Error("The history pages contain overlapping turns outside the boundary.");
     }
   }
 
@@ -62,6 +62,6 @@ function assertSameThread(left: ThreadSummary, right: ThreadSummary): void {
     left.cwd !== right.cwd ||
     left.projectPath !== right.projectPath
   ) {
-    throw new Error("A página de histórico não pertence à conversa aberta.");
+    throw new Error("The history page does not belong to the open conversation.");
   }
 }

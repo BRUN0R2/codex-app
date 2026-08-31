@@ -14,17 +14,17 @@ const versions = new Map([
 ]);
 const invalid = [...versions].filter(([, version]) => typeof version !== "string");
 if (invalid.length > 0) {
-  throw new Error(`Versão ausente em: ${invalid.map(([file]) => file).join(", ")}`);
+  throw new Error(`Version is missing from: ${invalid.map(([file]) => file).join(", ")}`);
 }
 const unique = new Set(versions.values());
 if (unique.size !== 1) {
   throw new Error(
-    `Versões divergentes: ${[...versions].map(([file, version]) => `${file}=${version}`).join(", ")}`,
+    `Versions differ: ${[...versions].map(([file, version]) => `${file}=${version}`).join(", ")}`,
   );
 }
 const version = [...unique][0];
 const releaseTag = process.env.GITHUB_REF_TYPE === "tag" ? process.env.GITHUB_REF_NAME : undefined;
 if (releaseTag !== undefined && releaseTag !== `v${version}`) {
-  throw new Error(`A tag ${releaseTag} não corresponde à versão v${version}.`);
+  throw new Error(`Tag ${releaseTag} does not match version v${version}.`);
 }
-process.stdout.write(`Versão consistente: ${version}\n`);
+process.stdout.write(`Version is consistent: ${version}\n`);

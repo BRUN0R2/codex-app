@@ -261,8 +261,8 @@ pub(in crate::engine::native) async fn interrupt_agent(
         cancellation.send_replace(true);
         inner
             .command_sessions
-            .cancel_turn(&target.thread_id, &turn_id)
-            .await?;
+            .request_turn_cancellation(&target.thread_id, &turn_id)
+            .await;
     }
     Ok(json!({ "previous_status": previous_status }))
 }

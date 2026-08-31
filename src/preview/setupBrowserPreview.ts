@@ -1,3 +1,4 @@
+import { decodeConfigUpdate } from "../contracts/decode";
 import type {
   AccountProfileResponse,
   AccountRateLimitsResponse,
@@ -29,6 +30,7 @@ import {
 } from "../infrastructure/runtimeBridge";
 import { saveProjects } from "../state/projects";
 import { utf8ByteLength } from "../utf8";
+import { updatePreviewConfig } from "./previewConfig";
 
 const PREVIEW_PERMISSION_PROFILE = {
   sandbox: "danger-full-access",
@@ -472,6 +474,24 @@ const PREVIEW_CONTEXT_THREAD = {
           content: [],
         },
         {
+          type: "contextUsage",
+          id: "context-preview-active-turn-0",
+          model: PREVIEW_MODEL_ID,
+          usage: {
+            inputTokens: 1_100,
+            cachedInputTokens: 900,
+            outputTokens: 62,
+            reasoningOutputTokens: 48,
+            totalTokens: 1_162,
+          },
+          contextWindow: {
+            tokens: 272_000,
+            usableTokens: 258_400,
+            usablePercent: 95,
+            maximumTokens: 400_000,
+          },
+        },
+        {
           type: "commandExecution",
           id: "preview-command-1",
           command:
@@ -749,6 +769,12 @@ const PREVIEW_CONTEXT_THREAD = {
         },
         {
           type: "agentMessage",
+          id: "preview-image-answer",
+          text: `A imagem gerada também aparece como uma prévia clicável.\n\n![Interface gerada](${PREVIEW_IMAGE_TWO})`,
+          phase: "finalAnswer",
+        },
+        {
+          type: "agentMessage",
           id: "preview-latest-commentary",
           text: "Vou investigar em três frentes: entender a implementação do menu e do perfil neste projeto, localizar a instalação oficial do Codex Desktop e comparar como ela resolve e carrega a imagem do usuário antes de alterar qualquer código.\uE200cite\uE202turn0search0\uE202turn0search5\uE201",
           phase: "commentary",
@@ -776,12 +802,6 @@ const PREVIEW_CONTEXT_THREAD = {
           },
           exitCode: null,
           durationMs: null,
-        },
-        {
-          type: "agentMessage",
-          id: "preview-image-answer",
-          text: `A imagem gerada também aparece como uma prévia clicável.\n\n![Interface gerada](${PREVIEW_IMAGE_TWO})`,
-          phase: "finalAnswer",
         },
       ],
     },
@@ -930,7 +950,7 @@ function previewTimelineStressDiffShape(index: number): PreviewTimelineDiffShape
   const changeIndex = Math.floor((index - 1) / 3);
   const shape = PREVIEW_TIMELINE_DIFF_SHAPES[changeIndex % PREVIEW_TIMELINE_DIFF_SHAPES.length];
   if (shape === undefined) {
-    throw new Error("O estresse da timeline perdeu sua forma de diff.");
+    throw new Error("The timeline stress fixture lost its diff shape.");
   }
   return shape;
 }
@@ -1027,7 +1047,7 @@ function previewTimelineStressActivities(): readonly VisibleThreadItem[] {
         } satisfies VisibleThreadItem;
       }
       default:
-        throw new Error("O gerador de estresse da timeline produziu uma categoria inválida.");
+        throw new Error("The timeline stress generator produced an invalid category.");
     }
   });
 }
@@ -1353,7 +1373,9 @@ export function setupBrowserPreview(): void {
       ? PREVIEW_RUNTIME_RESTRICTED_MODEL_CATALOG
       : PREVIEW_MODEL_CATALOG;
   const preferenceUpdateDelay = previewDelay(previewParameters.get("preferenceDelay"));
+  const modelRefreshDelay = previewDelay(previewParameters.get("modelRefreshDelay"));
   const timelineStressPreview = previewParameters.get("timelineStress") === "1";
+  const reasoningReflectionPreview = previewParameters.get("reasoningReflection") === "1";
   const activityReconciliationPreview =
     timelineStressPreview && previewParameters.get("activityReconciliation") === "1";
   const timelineFileCount = timelineStressPreview
@@ -1386,14 +1408,42 @@ export function setupBrowserPreview(): void {
           data: [previewThreadSummary(previewThread)],
           nextCursor: null,
         } as const satisfies ThreadListResponse);
-  document.title = "Codex App · Visualização";
+  document.title = "Codex App · Preview";
   document.documentElement.setAttribute("data-runtime", "browser-preview");
   if (previewParameters.get("chrome") === "1") {
     document.documentElement.setAttribute("data-window-chrome-preview", "true");
   }
   saveProjects(PREVIEW_PROJECTS);
   const previewBrowserTabs = new Map<string, BrowserTabSnapshot>();
+  let previewConfig: ConfigReadResponse = PREVIEW_CONFIG;
   let activityReconciliationScheduled = false;
+  let contextActivityScheduled = false;
+  const previewWindow = window as Window & {
+    __previewModelListActiveCount?: number;
+    __previewModelListCallCount?: number;
+    __previewModelListLastStartedAt?: number;
+  };
+  previewWindow.__previewModelListActiveCount = 0;
+  previewWindow.__previewModelListCallCount = 0;
+
+  async function readPreviewModels(catalog: ModelListResponse): Promise<ModelListResponse> {
+    previewWindow.__previewModelListCallCount =
+      (previewWindow.__previewModelListCallCount ?? 0) + 1;
+    previewWindow.__previewModelListActiveCount =
+      (previewWindow.__previewModelListActiveCount ?? 0) + 1;
+    previewWindow.__previewModelListLastStartedAt = performance.now();
+    try {
+      if (modelRefreshDelay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, modelRefreshDelay));
+      }
+      return catalog;
+    } finally {
+      previewWindow.__previewModelListActiveCount = Math.max(
+        0,
+        (previewWindow.__previewModelListActiveCount ?? 1) - 1,
+      );
+    }
+  }
 
   installBrowserPreviewRuntime((command, args) => {
     switch (command) {
@@ -1420,12 +1470,12 @@ export function setupBrowserPreview(): void {
         const browserTabId = readPreviewRequestString(args, "browserTabId");
         const current = previewBrowserTabs.get(browserTabId);
         if (current === undefined) {
-          throw new Error("A aba solicitada não existe na prévia do navegador.");
+          throw new Error("The requested tab does not exist in the browser preview.");
         }
         const snapshot = {
           ...current,
           url: readPreviewRequestString(args, "url"),
-          title: "Página de prévia",
+          title: "Preview page",
           canGoBack: current.url !== "about:blank",
           isLoading: false,
         } satisfies BrowserTabSnapshot;
@@ -1438,7 +1488,7 @@ export function setupBrowserPreview(): void {
         const browserTabId = readPreviewRequestString(args, "browserTabId");
         const snapshot = previewBrowserTabs.get(browserTabId);
         if (snapshot === undefined) {
-          throw new Error("A aba solicitada não existe na prévia do navegador.");
+          throw new Error("The requested tab does not exist in the browser preview.");
         }
         return snapshot;
       }
@@ -1449,7 +1499,7 @@ export function setupBrowserPreview(): void {
         const browserTabId = readPreviewRequestString(args, "browserTabId");
         const current = previewBrowserTabs.get(browserTabId);
         if (current === undefined) {
-          throw new Error("A aba solicitada não existe na prévia do navegador.");
+          throw new Error("The requested tab does not exist in the browser preview.");
         }
         const viewport = readPreviewBrowserViewport(args);
         const snapshot = { ...current, viewport } satisfies BrowserTabSnapshot;
@@ -1459,16 +1509,27 @@ export function setupBrowserPreview(): void {
       case "browser_surface_sync":
         return { applied: true };
       case "engine_start": {
-        return PREVIEW_ENGINE;
+        return { ...PREVIEW_ENGINE, config: previewConfig };
       }
       case "engine_runtime_diagnostic_report":
         return { applied: true };
+      case "engine_config_update": {
+        const update = decodeConfigUpdate(
+          (args as { request?: { readonly update?: unknown } }).request?.update,
+        );
+        previewConfig = updatePreviewConfig(
+          previewConfig,
+          readPreviewRequestNumber(args, "expectedVersion"),
+          update,
+        );
+        return previewConfig;
+      }
       case "engine_account_read":
         return PREVIEW_ACCOUNT;
       case "engine_account_profile_read":
         return PREVIEW_ACCOUNT_PROFILE;
       case "engine_model_list":
-        return previewModelCatalog;
+        return readPreviewModels(previewModelCatalog);
       case "engine_chat_model_list":
         return PREVIEW_CHAT_MODEL_CATALOG;
       case "engine_thread_list":
@@ -1499,7 +1560,7 @@ export function setupBrowserPreview(): void {
         const expectedVersion = readPreviewRequestNumber(args, "expectedVersion");
         const current = previewAutomations.find((automation) => automation.id === automationId);
         if (current === undefined || current.version !== expectedVersion) {
-          throw new Error("A automação de prévia foi alterada por outra operação.");
+          throw new Error("The preview automation was changed by another operation.");
         }
         const now = Math.floor(Date.now() / 1_000);
         const automation: Automation = {
@@ -1528,7 +1589,7 @@ export function setupBrowserPreview(): void {
         const automationId = readPreviewRequestString(args, "automationId");
         const automation = previewAutomations.find((entry) => entry.id === automationId);
         if (automation === undefined) {
-          throw new Error("A automação de prévia não existe.");
+          throw new Error("The preview automation does not exist.");
         }
         const now = Math.floor(Date.now() / 1_000);
         const run: AutomationRun = {
@@ -1559,7 +1620,7 @@ export function setupBrowserPreview(): void {
           ? timelineStressThreadsById.get(readPreviewRequestString(args, "threadId"))
           : previewThread;
         if (resumedThread === undefined) {
-          throw new Error("A tarefa solicitada não existe na prévia de estresse.");
+          throw new Error("The requested task does not exist in the stress preview.");
         }
         if (
           activityReconciliationPreview &&
@@ -1568,6 +1629,14 @@ export function setupBrowserPreview(): void {
         ) {
           activityReconciliationScheduled = true;
           schedulePreviewActivityReconciliation();
+        }
+        if (
+          !timelineStressPreview &&
+          resumedThread.id === PREVIEW_CONTEXT_THREAD.id &&
+          !contextActivityScheduled
+        ) {
+          contextActivityScheduled = true;
+          schedulePreviewContextActivity(reasoningReflectionPreview);
         }
         return {
           thread: resumedThread,
@@ -1622,7 +1691,7 @@ export function setupBrowserPreview(): void {
       case "application_preferences_update": {
         const preferences = (args as { preferences?: ApplicationPreferences }).preferences;
         if (preferences === undefined) {
-          throw new Error("A atualização de preferências não recebeu um valor.");
+          throw new Error("The preference update did not receive a value.");
         }
         const applyPreferences = () => {
           previewApplicationPreferences = preferences;
@@ -1669,7 +1738,7 @@ export function setupBrowserPreview(): void {
           buttons?: { cancel?: string; ok?: string } | string;
           message?: string;
         };
-        const confirmed = window.confirm(request.message ?? "Confirmar operação?");
+        const confirmed = window.confirm(request.message ?? "Confirm operation?");
         if (typeof request.buttons === "object") {
           return confirmed ? (request.buttons.ok ?? "Ok") : (request.buttons.cancel ?? "Cancel");
         }
@@ -1701,7 +1770,7 @@ export function setupBrowserPreview(): void {
         };
       default:
         throw new Error(
-          `O modo de visualização não executa o comando nativo ${JSON.stringify(command)}.`,
+          `Preview mode does not execute the native command ${JSON.stringify(command)}.`,
         );
     }
   });
@@ -1725,12 +1794,197 @@ export function setupBrowserPreview(): void {
   }
 }
 
+function schedulePreviewContextActivity(reflectReasoning: boolean): void {
+  const root = document.documentElement;
+  const activeTurn = PREVIEW_CONTEXT_THREAD.turns.find((turn) => turn.id === "preview-active-turn");
+  const activeItem = activeTurn?.items.find((item) => item.id === "preview-command-5");
+  if (activeTurn === undefined || activeItem?.type !== "commandExecution") {
+    throw new Error("The main preview does not contain its running activity.");
+  }
+  const notifications = [
+    {
+      method: "item.started",
+      params: {
+        threadId: PREVIEW_CONTEXT_THREAD.id,
+        turnId: activeTurn.id,
+        item: activeItem,
+      },
+    },
+    ...(reflectReasoning
+      ? [
+          {
+            method: "item.completed",
+            params: {
+              threadId: PREVIEW_CONTEXT_THREAD.id,
+              turnId: activeTurn.id,
+              item: {
+                ...activeItem,
+                processId: null,
+                status: "completed" as const,
+                liveOutput: null,
+                exitCode: 0,
+                durationMs: 35_000,
+              },
+            },
+          },
+          {
+            method: "item.started",
+            params: {
+              threadId: PREVIEW_CONTEXT_THREAD.id,
+              turnId: activeTurn.id,
+              item: {
+                type: "reasoning" as const,
+                id: "preview-reflected-reasoning",
+                summary: [],
+                content: [],
+              },
+            },
+          },
+          {
+            method: "item.streamDeltas",
+            params: {
+              threadId: PREVIEW_CONTEXT_THREAD.id,
+              turnId: activeTurn.id,
+              deltas: [
+                {
+                  kind: "reasoningSummary" as const,
+                  itemId: "preview-reflected-reasoning",
+                  index: 0,
+                  delta: "**Planning",
+                },
+              ],
+            },
+          },
+          {
+            method: "item.streamDeltas",
+            params: {
+              threadId: PREVIEW_CONTEXT_THREAD.id,
+              turnId: activeTurn.id,
+              deltas: [
+                {
+                  kind: "reasoningSummary" as const,
+                  itemId: "preview-reflected-reasoning",
+                  index: 0,
+                  delta: " verification**\n\nInspecting the affected flow",
+                },
+              ],
+            },
+          },
+          {
+            method: "item.streamDeltas",
+            params: {
+              threadId: PREVIEW_CONTEXT_THREAD.id,
+              turnId: activeTurn.id,
+              deltas: [
+                {
+                  kind: "reasoningSummary" as const,
+                  itemId: "preview-reflected-reasoning",
+                  index: 0,
+                  delta: " without replacing its headline",
+                },
+              ],
+            },
+          },
+          {
+            method: "item.streamDeltas",
+            params: {
+              threadId: PREVIEW_CONTEXT_THREAD.id,
+              turnId: activeTurn.id,
+              deltas: [
+                {
+                  kind: "reasoningSummary" as const,
+                  itemId: "preview-reflected-reasoning",
+                  index: 1,
+                  delta: "**Running focused",
+                },
+              ],
+            },
+          },
+          {
+            method: "item.streamDeltas",
+            params: {
+              threadId: PREVIEW_CONTEXT_THREAD.id,
+              turnId: activeTurn.id,
+              deltas: [
+                {
+                  kind: "reasoningSummary" as const,
+                  itemId: "preview-reflected-reasoning",
+                  index: 1,
+                  delta: " checks**\n\nExecuting the regression suite",
+                },
+              ],
+            },
+          },
+          {
+            method: "item.completed",
+            params: {
+              threadId: PREVIEW_CONTEXT_THREAD.id,
+              turnId: activeTurn.id,
+              item: {
+                type: "reasoning" as const,
+                id: "preview-reflected-reasoning",
+                summary: [
+                  "**Planning verification**\n\nInspecting the affected flow without replacing its headline",
+                  "**Running focused checks**\n\nExecuting the regression suite",
+                ],
+                content: [],
+              },
+            },
+          },
+        ]
+      : []),
+  ];
+  let notificationIndex = 0;
+  let observeReasoningHeadlines = false;
+  const reasoningHeadlines: string[] = [];
+  if (reflectReasoning) {
+    root.setAttribute("data-reasoning-preview-ready", "false");
+    root.setAttribute("data-reasoning-headline-sequence", "[]");
+  }
+  const recordReasoningHeadline = () => {
+    if (!observeReasoningHeadlines) {
+      return;
+    }
+    const headline = document
+      .querySelector(
+        ".agent-activity-group > .agent-activity-summary .activity-title.is-running .activity-title-base",
+      )
+      ?.textContent?.trim();
+    if (headline && reasoningHeadlines.at(-1) !== headline) {
+      reasoningHeadlines.push(headline);
+      root.setAttribute("data-reasoning-headline-sequence", JSON.stringify(reasoningHeadlines));
+    }
+  };
+  const schedulePublish = () => requestAnimationFrame(() => requestAnimationFrame(publish));
+  const publish = () => {
+    recordReasoningHeadline();
+    const notification = notifications[notificationIndex];
+    if (notification === undefined) {
+      requestAnimationFrame(() => {
+        recordReasoningHeadline();
+        root.setAttribute("data-reasoning-preview-ready", "true");
+      });
+      return;
+    }
+    if (!emitBrowserPreviewRuntimeEvent("engine://notification", notification)) {
+      schedulePublish();
+      return;
+    }
+    if (reflectReasoning && notificationIndex === 1) {
+      observeReasoningHeadlines = true;
+    }
+    notificationIndex += 1;
+    schedulePublish();
+  };
+  schedulePublish();
+}
+
 function schedulePreviewActivityReconciliation(): void {
   const root = document.documentElement;
   const threadId = PREVIEW_ACTIVITY_RECONCILIATION_THREAD.id;
   const turnId = PREVIEW_ACTIVITY_RECONCILIATION_THREAD.turns[0]?.id;
   if (turnId === undefined) {
-    throw new Error("A prévia de reconciliação não contém um turno.");
+    throw new Error("The reconciliation preview does not contain a turn.");
   }
   const commands = Array.from(
     { length: PREVIEW_ACTIVITY_RECONCILIATION_COMMAND_COUNT },
@@ -1801,7 +2055,7 @@ function schedulePreviewActivityReconciliation(): void {
       if (started < commands.length) {
         const command = commands[started];
         if (command === undefined) {
-          throw new Error("A prévia perdeu um comando que deveria iniciar.");
+          throw new Error("The preview lost a command that should have started.");
         }
         if (
           !emitBrowserPreviewRuntimeEvent("engine://notification", {
@@ -1833,7 +2087,7 @@ function schedulePreviewActivityReconciliation(): void {
       if (completed < completionOrder.length) {
         const command = completionOrder[completed];
         if (command === undefined) {
-          throw new Error("A prévia perdeu um comando que deveria concluir.");
+          throw new Error("The preview lost a command that should have completed.");
         }
         const commandIndex = commands.findIndex((candidate) => candidate.id === command.id);
         if (
@@ -1874,7 +2128,7 @@ function previewActivityReconciliationCommand(
   status: "completed" | "inProgress",
 ): Extract<VisibleThreadItem, { readonly type: "commandExecution" }> {
   if (!Number.isInteger(index) || index < 0) {
-    throw new Error("O índice do comando de reconciliação é inválido.");
+    throw new Error("The reconciliation command index is invalid.");
   }
   const ordinal = index + 1;
   return {
@@ -1882,7 +2136,7 @@ function previewActivityReconciliationCommand(
     id: index === 0 ? PREVIEW_ACTIVITY_RECONCILIATION_COMMAND_ID : `parallel-command-${ordinal}`,
     command: `pnpm exec benchmark --case parallel-${ordinal}`,
     cwd: PREVIEW_WORKSPACE,
-    processId: status === "inProgress" ? `preview-process-${ordinal}` : null,
+    processId: null,
     startedAt: PREVIEW_NOW_SECONDS * 1_000 + ordinal,
     source: "agent",
     status,
@@ -1963,7 +2217,7 @@ function previewBrowserMetrics(conversationId: string): readonly BrowserActionMe
       totalMs: 16,
       screenshotBytes: null,
       page: null,
-      error: "Falha de recurso detectada durante a captura de diagnóstico.",
+      error: "Resource failure detected during diagnostic capture.",
     },
   ];
 }
@@ -2010,14 +2264,14 @@ function readPreviewAutomationRequest(args: unknown): {
 } {
   const request = (args as { request?: PreviewAutomationRequestRecord }).request;
   if (request === undefined) {
-    throw new Error("A operação de automação não recebeu um request.");
+    throw new Error("The automation operation did not receive a request.");
   }
   const projectPath = request.projectPath;
   if (projectPath !== null && typeof projectPath !== "string") {
-    throw new Error("O projeto da automação de prévia é inválido.");
+    throw new Error("The preview automation project is invalid.");
   }
   if (typeof request.enabled !== "boolean") {
-    throw new Error("O estado da automação de prévia é inválido.");
+    throw new Error("The preview automation state is invalid.");
   }
   return {
     enabled: request.enabled,
@@ -2044,7 +2298,7 @@ interface PreviewBrowserViewportRecord {
 function readPreviewRequestString(args: unknown, key: string): string {
   const value = (args as { request?: Record<string, unknown> }).request?.[key];
   if (typeof value !== "string") {
-    throw new Error(`O campo ${key} do request de prévia é inválido.`);
+    throw new Error(`Preview request field ${key} is invalid.`);
   }
   return value;
 }
@@ -2052,7 +2306,7 @@ function readPreviewRequestString(args: unknown, key: string): string {
 function readPreviewRequestNumber(args: unknown, key: string): number {
   const value = (args as { request?: Record<string, unknown> }).request?.[key];
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`O campo ${key} do request de prévia é inválido.`);
+    throw new Error(`Preview request field ${key} is invalid.`);
   }
   return value;
 }
@@ -2063,7 +2317,7 @@ function readPreviewBrowserViewport(args: unknown): BrowserTabSnapshot["viewport
     return null;
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("O viewport do navegador de prévia é inválido.");
+    throw new Error("The preview browser viewport is invalid.");
   }
   const record = value as PreviewBrowserViewportRecord;
   const width = record.width;
@@ -2083,7 +2337,7 @@ function readPreviewBrowserViewport(args: unknown): BrowserTabSnapshot["viewport
     scale < 0.25 ||
     scale > 2
   ) {
-    throw new Error("O viewport do navegador de prévia é inválido.");
+    throw new Error("The preview browser viewport is invalid.");
   }
   return { width, height, scale };
 }
@@ -2099,7 +2353,7 @@ function previewTimelineFileCount(value: string | null): number {
     fileCount > PREVIEW_TIMELINE_MAX_FILE_COUNT
   ) {
     throw new Error(
-      `A prévia extrema aceita entre 1 e ${PREVIEW_TIMELINE_MAX_FILE_COUNT} arquivos.`,
+      `The extreme preview accepts between 1 and ${PREVIEW_TIMELINE_MAX_FILE_COUNT} files.`,
     );
   }
   return fileCount;
@@ -2121,18 +2375,18 @@ function createPreviewModel(id: string, displayName: string, isDefault: boolean)
     description: null,
     hidden: false,
     supportedReasoningEfforts: [
-      { reasoningEffort: "low", description: "Raciocínio mais direto." },
-      { reasoningEffort: "medium", description: "Equilíbrio entre velocidade e profundidade." },
-      { reasoningEffort: "high", description: "Raciocínio aprofundado." },
-      { reasoningEffort: "xhigh", description: "Raciocínio muito aprofundado." },
-      { reasoningEffort: "ultra", description: "Profundidade máxima disponível." },
+      { reasoningEffort: "low", description: "More direct reasoning." },
+      { reasoningEffort: "medium", description: "Balanced speed and depth." },
+      { reasoningEffort: "high", description: "Deep reasoning." },
+      { reasoningEffort: "xhigh", description: "Very deep reasoning." },
+      { reasoningEffort: "ultra", description: "Maximum available depth." },
     ],
     defaultReasoningEffort: "medium",
     serviceTiers: [
       {
         id: "fast",
         name: "Fast",
-        description: "Prioriza menor latência de resposta.",
+        description: "Prioritizes lower response latency.",
       },
     ],
     defaultServiceTier: null,

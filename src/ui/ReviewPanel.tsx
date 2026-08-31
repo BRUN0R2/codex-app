@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 
 import type { FileChange } from "../contracts/types";
+import { useI18n } from "../i18n/context";
 
 import { type DiffDisplayMode, DiffView } from "./DiffView";
 import {
@@ -17,6 +18,7 @@ interface ReviewPanelProps {
 }
 
 export function ReviewPanel(props: ReviewPanelProps) {
+  const i18n = useI18n();
   const documentStore = new ReviewDocumentStore();
   const documents = createMemo(() => documentStore.project(props.changes));
   const stats = createMemo(() => summarizeReviewDocuments(documents()));
@@ -34,17 +36,15 @@ export function ReviewPanel(props: ReviewPanelProps) {
   });
 
   return (
-    <section
-      aria-label="Revisão dos arquivos alterados"
-      class="review-panel"
-      id="turn-review-panel"
-    >
+    <section aria-label={i18n.messages().review.label} class="review-panel" id="turn-review-panel">
       <div class="review-panel-toolbar">
         <div class="review-panel-summary">
-          <strong>Último turno</strong>
+          <strong>{i18n.messages().review.lastTurn}</strong>
           <span>
             {stats().fileCount}{" "}
-            {stats().fileCount === 1 ? "arquivo alterado" : "arquivos alterados"}
+            {stats().fileCount === 1
+              ? i18n.messages().common.changedFile
+              : i18n.messages().common.changedFiles}
           </span>
           <Show when={stats().additions > 0}>
             <span class="review-stat additions">+{stats().additions}</span>
@@ -56,7 +56,7 @@ export function ReviewPanel(props: ReviewPanelProps) {
       </div>
 
       <div class="review-panel-content">
-        <nav aria-label="Arquivos alterados" class="review-file-list">
+        <nav aria-label={i18n.messages().review.changedFiles} class="review-file-list">
           <For each={documents()}>
             {(entry) => (
               <button
@@ -67,11 +67,13 @@ export function ReviewPanel(props: ReviewPanelProps) {
                 title={entry.change.path}
                 type="button"
               >
-                <span class="review-file-type">{fileType(entry.change.path)}</span>
+                <span class="review-file-type">{fileType(entry.change.path, i18n.locale())}</span>
                 <code>{entry.change.path}</code>
                 <Show when={entry.change.kind.type !== "update"}>
                   <span class={`change-kind kind-${entry.change.kind.type}`}>
-                    {entry.change.kind.type === "add" ? "NOVO" : "EXCLUÍDO"}
+                    {entry.change.kind.type === "add"
+                      ? i18n.messages().common.new
+                      : i18n.messages().common.deleted}
                   </span>
                 </Show>
                 <Show when={entry.stats.additions > 0}>
@@ -88,7 +90,7 @@ export function ReviewPanel(props: ReviewPanelProps) {
         <section class="review-file-stage">
           <Show
             when={selected()}
-            fallback={<div class="diff-empty-state">Nenhum arquivo alterado neste turno.</div>}
+            fallback={<div class="diff-empty-state">{i18n.messages().review.noFiles}</div>}
           >
             {(entry) => (
               <>
@@ -103,9 +105,7 @@ export function ReviewPanel(props: ReviewPanelProps) {
                 </header>
                 <Show
                   when={entry().document.unifiedRows.length > 0}
-                  fallback={
-                    <div class="diff-empty-state">O engine não forneceu um diff textual.</div>
-                  }
+                  fallback={<div class="diff-empty-state">{i18n.messages().review.noTextDiff}</div>}
                 >
                   <DiffView
                     document={entry().document}
@@ -123,8 +123,8 @@ export function ReviewPanel(props: ReviewPanelProps) {
   );
 }
 
-function fileType(path: string): string {
+function fileType(path: string, locale: string): string {
   const file = path.split(/[\\/]/u).at(-1) ?? path;
   const extension = file.includes(".") ? file.split(".").at(-1) : null;
-  return extension?.slice(0, FILE_BADGE_EXTENSION_LIMIT).toLocaleUpperCase("pt-BR") ?? "FILE";
+  return extension?.slice(0, FILE_BADGE_EXTENSION_LIMIT).toLocaleUpperCase(locale) ?? "FILE";
 }

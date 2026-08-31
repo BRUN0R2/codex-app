@@ -123,7 +123,7 @@ struct ActiveTurn {
     cancellation: watch::Sender<bool>,
     accepting_steers: bool,
     latest_steer_sequence: Option<i64>,
-    pending_deletion: Option<oneshot::Sender<Result<OperationAck, AppError>>>,
+    deletion_waiters: Vec<oneshot::Sender<Result<OperationAck, AppError>>>,
     deletion_in_progress: bool,
 }
 
@@ -151,6 +151,10 @@ impl ActiveTurn {
         );
     }
 
+    fn request_interruption(&self) -> bool {
+        !self.cancellation.send_replace(true)
+    }
+
     fn continuation_after_response(
         &mut self,
         sampled_through_steer_sequence: i64,
@@ -168,25 +172,20 @@ impl ActiveTurn {
         TurnContinuation::Complete
     }
 
-    fn request_deletion(
-        &mut self,
-    ) -> Result<oneshot::Receiver<Result<OperationAck, AppError>>, AppError> {
-        if self.pending_deletion.is_some() || self.deletion_in_progress {
-            return Err(AppError::State(
-                "thread deletion is already in progress".into(),
-            ));
-        }
+    fn request_deletion(&mut self) -> oneshot::Receiver<Result<OperationAck, AppError>> {
         let (sender, receiver) = oneshot::channel();
-        self.pending_deletion = Some(sender);
+        self.deletion_waiters.push(sender);
         self.accepting_steers = false;
-        self.cancellation.send_replace(true);
-        Ok(receiver)
+        self.request_interruption();
+        receiver
     }
 
-    fn begin_deletion(&mut self) -> Option<oneshot::Sender<Result<OperationAck, AppError>>> {
-        let pending = self.pending_deletion.take();
-        self.deletion_in_progress = pending.is_some();
-        pending
+    fn begin_deletion(&mut self) -> bool {
+        if self.deletion_waiters.is_empty() || self.deletion_in_progress {
+            return false;
+        }
+        self.deletion_in_progress = true;
+        true
     }
 }
 
@@ -208,6 +207,7 @@ pub(super) struct NativeEngineInner {
     automation_scheduler: Mutex<Option<AutomationSchedulerTask>>,
     automation_wake: Notify,
     start_gate: Mutex<()>,
+    code_mode_warmup_started: AtomicBool,
     started: AtomicBool,
 }
 
@@ -243,6 +243,7 @@ impl NativeEngine {
                 automation_scheduler: Mutex::new(None),
                 automation_wake: Notify::new(),
                 start_gate: Mutex::new(()),
+                code_mode_warmup_started: AtomicBool::new(false),
                 started: AtomicBool::new(false),
             }),
         }
@@ -267,6 +268,28 @@ impl NativeEngine {
             inner
                 .finalize_turn(&app_handle, result, thread_id, turn_id)
                 .await;
+        });
+    }
+
+    async fn spawn_code_mode_warmup(&self, app: &AppHandle) {
+        if self
+            .inner
+            .code_mode_warmup_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        let app_handle = app.clone();
+        self.inner.tasks.lock().await.spawn(async move {
+            if let Err(error) = code_mode::warm_runtime().await {
+                inner.emit_diagnostic(
+                    &app_handle,
+                    DiagnosticStream::Runtime,
+                    format!("could not warm the Code Mode runtime: {error}"),
+                );
+            }
         });
     }
 
@@ -506,6 +529,7 @@ impl NativeEngine {
         self.inner.emit_status(app, RuntimeState::Starting, None)?;
         let _start_guard = self.inner.start_gate.lock().await;
         if !self.inner.started.load(Ordering::Acquire) {
+            self.spawn_code_mode_warmup(app).await;
             let result = async {
                 tokio::try_join!(
                     self.inner.storage.initialize(app),
@@ -846,19 +870,29 @@ impl NativeEngine {
         thread_id: String,
     ) -> Result<OperationAck, AppError> {
         self.ensure_started()?;
-        self.inner
-            .command_sessions
-            .cancel_thread(&thread_id)
-            .await?;
         let active_deletion = {
             let lifecycle_guard = self.inner.thread_lifecycle_gate.lock().await;
             let mut active_turns = self.inner.active_turns.lock().await;
             let pending = active_turns
                 .get_mut(&thread_id)
-                .map(ActiveTurn::request_deletion)
-                .transpose()?;
+                .map(|active| (active.turn_id.clone(), active.request_deletion()));
             drop(active_turns);
             let Some(pending) = pending else {
+                let command_settlement = self
+                    .inner
+                    .command_sessions
+                    .cancel_thread(&thread_id)
+                    .await?;
+                if command_settlement.forced_abort_count() > 0 {
+                    self.inner.emit_diagnostic(
+                        app,
+                        DiagnosticStream::Runtime,
+                        format!(
+                            "thread `{thread_id}` deletion force-aborted {} unresponsive command session(s)",
+                            command_settlement.forced_abort_count()
+                        ),
+                    );
+                }
                 let response = self.inner.storage.delete_thread(thread_id.clone()).await?;
                 self.inner.code_mode_sessions.close(&thread_id).await;
                 self.inner.multi_agents.forget_tree(&thread_id).await;
@@ -871,7 +905,11 @@ impl NativeEngine {
             };
             pending
         };
-        active_deletion.await.map_err(|_| {
+        self.inner
+            .command_sessions
+            .request_turn_cancellation(&thread_id, &active_deletion.0)
+            .await;
+        active_deletion.1.await.map_err(|_| {
             AppError::State("active thread deletion lost its completion channel".into())
         })?
     }
@@ -1254,7 +1292,7 @@ impl NativeEngine {
         turn_id: String,
     ) -> Result<OperationAck, AppError> {
         self.ensure_started()?;
-        let cancellation_result = {
+        let applied = {
             let active_turns = self.inner.active_turns.lock().await;
             let active = active_turns
                 .get(&thread_id)
@@ -1264,17 +1302,13 @@ impl NativeEngine {
                     "turn id does not match the active turn".into(),
                 ));
             }
-            active
-                .cancellation
-                .send(true)
-                .map_err(|_| AppError::State("active turn is no longer listening".into()))
+            active.request_interruption()
         };
         self.inner
             .command_sessions
-            .cancel_turn(&thread_id, &turn_id)
-            .await?;
-        cancellation_result?;
-        Ok(OperationAck { applied: true })
+            .request_turn_cancellation(&thread_id, &turn_id)
+            .await;
+        Ok(OperationAck { applied })
     }
 
     pub async fn automation_list(&self) -> Result<AutomationListResponse, AppError> {
@@ -1461,15 +1495,24 @@ impl NativeEngine {
             .map(|turn| turn.cancellation.clone())
             .collect::<Vec<_>>();
         for cancellation in cancellations {
-            let _receiver_already_closed = cancellation.send(true);
+            cancellation.send_replace(true);
         }
         self.inner.code_mode_sessions.shutdown().await;
-        if let Err(error) = self.inner.command_sessions.shutdown().await {
-            self.inner.emit_diagnostic(
+        match self.inner.command_sessions.shutdown().await {
+            Ok(settlement) if settlement.forced_abort_count() > 0 => self.inner.emit_diagnostic(
+                app,
+                DiagnosticStream::Runtime,
+                format!(
+                    "shutdown force-aborted {} unresponsive command session(s)",
+                    settlement.forced_abort_count()
+                ),
+            ),
+            Ok(_) => {}
+            Err(error) => self.inner.emit_diagnostic(
                 app,
                 DiagnosticStream::Runtime,
                 format!("could not terminate all command sessions during shutdown: {error}"),
-            );
+            ),
         }
         self.inner.approvals.cancel_all().await;
         self.inner.auth.stop().await;
@@ -1631,13 +1674,12 @@ impl NativeEngineInner {
     /// same storage settlement runs directly so the persisted turn cannot stay
     /// in progress without an owner.
     async fn settle_orphaned_turn(&self, app: &AppHandle, thread_id: String, turn_id: &str) {
-        if let Err(error) = self.command_sessions.settle_turn(&thread_id, turn_id).await {
+        if let Err(error) = self.settle_command_sessions(app, &thread_id, turn_id).await {
             self.emit_diagnostic(
                 app,
                 DiagnosticStream::Runtime,
                 format!("could not terminate commands for orphaned turn `{turn_id}`: {error}"),
             );
-            return;
         }
         let _lifecycle_guard = self.thread_lifecycle_gate.lock().await;
         if let Err(error) = self
@@ -1663,12 +1705,24 @@ impl NativeEngineInner {
         app: &AppHandle,
         thread_id: String,
         turn_id: &str,
-        status: TurnStatus,
-        failure: Option<OperationFailure>,
+        mut status: TurnStatus,
+        mut failure: Option<OperationFailure>,
     ) -> Result<(), AppError> {
-        self.command_sessions
-            .settle_turn(&thread_id, turn_id)
-            .await?;
+        if let Err(error) = self.settle_command_sessions(app, &thread_id, turn_id).await {
+            let message = format!("command cleanup failed: {error}");
+            self.emit_diagnostic(
+                app,
+                DiagnosticStream::Runtime,
+                format!("turn `{turn_id}` {message}"),
+            );
+            if status != TurnStatus::Failed {
+                status = TurnStatus::Failed;
+                failure = Some(OperationFailure {
+                    code: error.public_code(),
+                    message,
+                });
+            }
+        }
         let lifecycle_guard = self.thread_lifecycle_gate.lock().await;
         let completion = self
             .storage
@@ -1679,7 +1733,7 @@ impl NativeEngineInner {
                 failure.as_ref().map(|failure| failure.message.clone()),
             )
             .await;
-        let pending_deletion = {
+        let deletion_requested = {
             let mut active_turns = self.active_turns.lock().await;
             let active = active_turns
                 .get_mut(&thread_id)
@@ -1689,14 +1743,14 @@ impl NativeEngineInner {
                     "active-turn ownership changed during finalization".into(),
                 ));
             }
-            let pending = active.begin_deletion();
-            if pending.is_none() {
+            let requested = active.begin_deletion();
+            if !requested {
                 active_turns.remove(&thread_id);
             }
-            pending
+            requested
         };
 
-        if let Some(sender) = pending_deletion {
+        if deletion_requested {
             let deletion = if completion.is_ok() {
                 self.storage.delete_thread(thread_id.clone()).await
             } else {
@@ -1704,7 +1758,12 @@ impl NativeEngineInner {
                     .delete_owned_active_thread(thread_id.clone(), turn_id.into())
                     .await
             };
-            self.active_turns.lock().await.remove(&thread_id);
+            let deletion_waiters = self
+                .active_turns
+                .lock()
+                .await
+                .remove(&thread_id)
+                .map_or_else(Vec::new, |active| active.deletion_waiters);
             self.multi_agents.notify_turn_settled(&thread_id).await;
             drop(lifecycle_guard);
             match deletion {
@@ -1728,18 +1787,22 @@ impl NativeEngineInner {
                         .emit_notification(
                             app,
                             EngineNotification::ThreadDeleted(ThreadDeletedNotification {
-                                thread_id,
+                                thread_id: thread_id.clone(),
                             }),
                         )
                         .map(|()| response);
                     if let Err(error) = &result {
                         self.emit_diagnostic(app, DiagnosticStream::Runtime, error.to_string());
                     }
-                    let _receiver_was_closed = sender.send(result);
+                    for sender in deletion_waiters {
+                        let _receiver_was_closed = sender.send(result.clone());
+                    }
                     return Ok(());
                 }
                 Err(error) => {
-                    let _receiver_was_closed = sender.send(Err(error));
+                    for sender in deletion_waiters {
+                        let _receiver_was_closed = sender.send(Err(error.clone()));
+                    }
                 }
             }
         } else {
@@ -1812,6 +1875,29 @@ impl NativeEngineInner {
         Ok(())
     }
 
+    async fn settle_command_sessions(
+        &self,
+        app: &AppHandle,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), AppError> {
+        let settlement = self
+            .command_sessions
+            .settle_turn(thread_id, turn_id)
+            .await?;
+        if settlement.forced_abort_count() > 0 {
+            self.emit_diagnostic(
+                app,
+                DiagnosticStream::Runtime,
+                format!(
+                    "turn `{turn_id}` force-aborted {} unresponsive command session(s)",
+                    settlement.forced_abort_count()
+                ),
+            );
+        }
+        Ok(())
+    }
+
     /// Registers exclusive ownership of a freshly persisted turn. The caller must hold the
     /// thread lifecycle gate across the storage write and this call, and drop it afterwards.
     async fn claim_active_turn(
@@ -1830,7 +1916,7 @@ impl NativeEngineInner {
                         cancellation,
                         accepting_steers,
                         latest_steer_sequence: None,
-                        pending_deletion: None,
+                        deletion_waiters: Vec::new(),
                         deletion_in_progress: false,
                     });
                     None
@@ -1986,7 +2072,7 @@ mod tests {
             cancellation,
             accepting_steers: true,
             latest_steer_sequence: None,
-            pending_deletion: None,
+            deletion_waiters: Vec::new(),
             deletion_in_progress: false,
         }
     }
@@ -2074,31 +2160,42 @@ mod tests {
         assert!(!active.can_accept_steer());
     }
 
+    #[test]
+    fn repeated_interruption_has_one_applied_transition() {
+        let active = active_turn();
+        let applied = (0..1_000).filter(|_| active.request_interruption()).count();
+
+        assert_eq!(applied, 1);
+        assert!(*active.cancellation.borrow());
+    }
+
     #[tokio::test]
-    async fn deletion_cancels_the_turn_and_has_one_completion_owner() {
+    async fn deletion_coalesces_waiters_under_one_completion_owner() {
         let mut active = active_turn();
-        let completion = active
-            .request_deletion()
-            .expect("the first deletion request should register");
+        let first_completion = active.request_deletion();
+        let second_completion = active.request_deletion();
 
         assert!(*active.cancellation.borrow());
         assert!(!active.can_accept_steer());
-        assert!(active.request_deletion().is_err());
+        assert_eq!(active.deletion_waiters.len(), 2);
+        assert!(active.begin_deletion());
+        assert!(!active.begin_deletion());
+        let third_completion = active.request_deletion();
 
-        let sender = active
-            .begin_deletion()
-            .expect("finalization should own the pending request");
-        assert!(active.request_deletion().is_err());
-        sender
-            .send(Ok(OperationAck { applied: true }))
-            .expect("the command should still be waiting");
+        for sender in std::mem::take(&mut active.deletion_waiters) {
+            sender
+                .send(Ok(OperationAck { applied: true }))
+                .expect("every deletion command should still be waiting");
+        }
 
-        assert!(
-            completion
-                .await
-                .expect("the completion channel should remain open")
-                .expect("deletion should succeed")
-                .applied
-        );
+        for completion in [first_completion, second_completion, third_completion] {
+            assert!(
+                completion
+                    .await
+                    .expect("the completion channel should remain open")
+                    .expect("deletion should succeed")
+                    .applied
+            );
+        }
     }
 }

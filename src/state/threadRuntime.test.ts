@@ -12,12 +12,38 @@ import {
   queuedMessageDispatchDecision,
   readActiveTurnPlan,
   readPersistedVisibleTurns,
+  readThreadRuntimeItemIds,
+  shouldMaterializeThreadItemNotification,
   synchronizeThreadRuntime,
   updateThreadRuntime,
 } from "./threadRuntime";
 import type { VisibleThreadTurn } from "./visibleTurnSequence";
 
 describe("thread runtime reducer", () => {
+  it("keeps started items transient and materializes only terminal notifications", () => {
+    expect(shouldMaterializeThreadItemNotification("item.started")).toBe(false);
+    expect(shouldMaterializeThreadItemNotification("item.completed")).toBe(true);
+  });
+
+  it("tracks reasoning and every other transient item until its terminal notification", () => {
+    const runtime = updateThreadRuntime(new Map(), "thread-a", (current) => ({
+      ...current,
+      activeTurnId: "turn-a",
+      itemOverlaysByTurn: overlays("turn-a", [
+        { type: "agentMessage", id: "message-a", text: "partial", phase: null },
+        { type: "reasoning", id: "reasoning-a", summary: ["**Planning"], content: [] },
+        backgroundCommand(),
+      ]),
+    })).get("thread-a");
+
+    expect([...readThreadRuntimeItemIds(runtime)]).toEqual([
+      "message-a",
+      "reasoning-a",
+      "background-command",
+    ]);
+    expect(readThreadRuntimeItemIds(undefined).size).toBe(0);
+  });
+
   it("isolates concurrent streams by thread", () => {
     let state = updateThreadRuntime(new Map(), "thread-a", (runtime) => ({
       ...runtime,
@@ -85,7 +111,7 @@ describe("thread runtime reducer", () => {
     }));
     const runningRuntime = running.get("thread-a");
     if (runningRuntime === undefined) {
-      throw new Error("O runtime do turno concluído não foi criado.");
+      throw new Error("The completed-turn runtime was not created.");
     }
     const result = completeThreadRuntimeTurn(runningRuntime, {
       id: "turn-a",
@@ -167,7 +193,7 @@ describe("thread runtime reducer", () => {
     }));
     const runtime = runtimeMap.get("thread-a");
     if (runtime === undefined) {
-      throw new Error("O runtime do turno interrompido não foi criado.");
+      throw new Error("The interrupted-turn runtime was not created.");
     }
 
     const result = completeThreadRuntimeTurn(runtime, {
@@ -199,6 +225,29 @@ describe("thread runtime reducer", () => {
 
     expect(isTimelineVisibleItem(poll)).toBe(false);
     expect(readPersistedVisibleTurns(newTurnCache(), withPoll)[0]?.items).not.toContainEqual(poll);
+  });
+
+  it("projects confirmed output tokens from persisted usage after turn completion and reload", () => {
+    const thread = threadFixture("completed");
+    const withUsage: CodexThread = {
+      ...thread,
+      turns: thread.turns.map((turn) => ({
+        ...turn,
+        items: [
+          ...turn.items,
+          contextUsage("usage-1", 17),
+          { type: "contextCompaction", id: "compaction-1" },
+          contextUsage("usage-2", 25),
+        ],
+      })),
+    };
+
+    const firstProjection = readPersistedVisibleTurns(newTurnCache(), withUsage)[0];
+    const reloadedProjection = readPersistedVisibleTurns(newTurnCache(), withUsage)[0];
+
+    expect(firstProjection?.confirmedOutputTokens).toBe(42);
+    expect(firstProjection?.items.map((item) => item.type)).not.toContain("contextUsage");
+    expect(reloadedProjection?.confirmedOutputTokens).toBe(42);
   });
 
   it("treats runtime ownership as active even when the persisted snapshot is stale", () => {
@@ -287,6 +336,54 @@ describe("thread runtime reducer", () => {
 
     expect(turns.at(0)?.items.map((item) => item.id)).toEqual([command.id, commentary.id]);
     expect(turns.at(0)?.items[0]).toEqual(liveCommand);
+  });
+
+  it("keeps a transient command before commentary that completed first", () => {
+    const command = backgroundCommand();
+    const commentary = {
+      type: "agentMessage" as const,
+      id: "commentary-newer",
+      text: "Mensagem mais recente",
+      phase: "commentary" as const,
+    };
+    const baseThread = threadFixture("inProgress");
+    const baseTurn = baseThread.turns.at(0);
+    if (!baseTurn) {
+      throw new Error("Expected the thread fixture to contain a turn");
+    }
+    const thread: CodexThread = {
+      ...baseThread,
+      turns: [{ ...baseTurn, items: [commentary] }],
+    };
+
+    const turns = mergeRuntimeThreadItems(
+      thread,
+      readPersistedVisibleTurns(newTurnCache(), thread),
+      overlays("turn-a", [command]),
+      "turn-a",
+      new Map([["turn-a", [command.id, commentary.id]]]),
+    );
+
+    expect(turns.at(0)?.items.map((item) => item.id)).toEqual([command.id, commentary.id]);
+  });
+
+  it("projects a command immediately from item.started before background promotion", () => {
+    const command = {
+      ...backgroundCommand(),
+      processId: null,
+      liveOutput: { stdout: "", stderr: "", truncated: false },
+    };
+    const thread = threadFixture("inProgress");
+
+    const turns = mergeRuntimeThreadItems(
+      thread,
+      readPersistedVisibleTurns(newTurnCache(), thread),
+      overlays("turn-a", [command]),
+      "turn-a",
+    );
+
+    expect(isTimelineVisibleItem(command)).toBe(true);
+    expect(turns.at(-1)?.items).toEqual([command]);
   });
 
   it("keeps an older background command attached to its owning turn", () => {
@@ -384,7 +481,7 @@ describe("thread runtime reducer", () => {
       ]),
     })).get("thread-a");
     if (runtime === undefined) {
-      throw new Error("O runtime com dois turnos não foi criado.");
+      throw new Error("The two-turn runtime was not created.");
     }
 
     const result = completeThreadRuntimeTurn(runtime, {
@@ -445,6 +542,7 @@ describe("thread runtime reducer", () => {
   it("projects an active overlay without cloning a long persisted turn array", () => {
     const persisted = Array.from({ length: 10_000 }, (_, index) => ({
       id: `turn-${index}`,
+      confirmedOutputTokens: 0,
       items: [],
       status: "completed" as const,
       error: null,
@@ -539,6 +637,27 @@ function backgroundCommand() {
     liveOutput: { stdout: "", stderr: "", truncated: false },
     exitCode: null,
     durationMs: null,
+  };
+}
+
+function contextUsage(id: string, outputTokens: number) {
+  return {
+    type: "contextUsage" as const,
+    id,
+    model: "gpt-5.6",
+    usage: {
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      outputTokens,
+      reasoningOutputTokens: 0,
+      totalTokens: 100 + outputTokens,
+    },
+    contextWindow: {
+      tokens: 272_000,
+      usableTokens: 258_400,
+      usablePercent: 95,
+      maximumTokens: 400_000,
+    },
   };
 }
 

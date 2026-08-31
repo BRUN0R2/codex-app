@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { presentTurnFailure } from "./turnFailure";
+import { findCatalog, translationCatalogs } from "../i18n/catalog";
+import { presentTurnFailure as rawPresentTurnFailure } from "./turnFailure";
+
+const messages = findCatalog(translationCatalogs, "pt-BR")?.messages.timeline;
+if (messages === undefined) throw new Error("The Brazilian Portuguese catalog is unavailable.");
+const presentTurnFailure = (message: string) => rawPresentTurnFailure(message, messages, "pt-BR");
 
 describe("turn failure presentation", () => {
   it("explains a provider usage limit without exposing raw JSON", () => {
@@ -111,7 +116,7 @@ describe("turn failure presentation", () => {
     const failure = presentTurnFailure(
       "Failed to open file at C:\\Users\\test\\secret\\project.txt",
     );
-    expect(failure.detail).toBe("Failed to open file at <caminho-local>");
+    expect(failure.detail).toBe("Failed to open file at <local-path>");
     expect(failure.tone).toBe("error");
   });
 });

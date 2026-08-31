@@ -295,9 +295,7 @@ impl CellCallbacks {
     }
 
     async fn finish(&mut self) {
-        self.tool_cancellation.send_replace(true);
-        self.tool_tasks.abort_all();
-        while self.tool_tasks.join_next().await.is_some() {}
+        self.settle_tool_tasks().await;
         let drain = async { while self.notification_tasks.join_next().await.is_some() {} };
         if tokio::time::timeout(Duration::from_secs(NOTIFICATION_DRAIN_SECONDS), drain)
             .await
@@ -310,12 +308,17 @@ impl CellCallbacks {
     }
 
     async fn cancel(&mut self) {
-        self.tool_cancellation.send_replace(true);
         self.notification_cancellation.send_replace(true);
-        self.tool_tasks.abort_all();
         self.notification_tasks.abort_all();
-        while self.tool_tasks.join_next().await.is_some() {}
+        self.settle_tool_tasks().await;
         while self.notification_tasks.join_next().await.is_some() {}
+    }
+
+    async fn settle_tool_tasks(&mut self) {
+        // A delegate can own a visible item after publishing item.started. Cancelling and
+        // draining keeps that future alive until it persists and publishes the terminal item.
+        self.tool_cancellation.send_replace(true);
+        while self.tool_tasks.join_next().await.is_some() {}
     }
 }
 

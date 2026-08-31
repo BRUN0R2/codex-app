@@ -19,7 +19,10 @@ export type BrowserViewportPresetId = (typeof STANDARD_BROWSER_VIEWPORTS)[number
 
 export type BrowserViewportParseResult =
   | { readonly ok: true; readonly viewport: BrowserViewport }
-  | { readonly ok: false; readonly message: string };
+  | {
+      readonly ok: false;
+      readonly reason: "heightOutOfRange" | "invalidScale" | "widthOutOfRange";
+    };
 
 export function parseBrowserViewport(
   widthInput: string,
@@ -33,23 +36,17 @@ export function parseBrowserViewport(
     width < MIN_BROWSER_VIEWPORT_WIDTH ||
     width > MAX_BROWSER_VIEWPORT_WIDTH
   ) {
-    return {
-      ok: false,
-      message: `A largura deve estar entre ${MIN_BROWSER_VIEWPORT_WIDTH} e ${MAX_BROWSER_VIEWPORT_WIDTH} px.`,
-    };
+    return { ok: false, reason: "widthOutOfRange" };
   }
   if (
     !Number.isSafeInteger(height) ||
     height < MIN_BROWSER_VIEWPORT_HEIGHT ||
     height > MAX_BROWSER_VIEWPORT_HEIGHT
   ) {
-    return {
-      ok: false,
-      message: `A altura deve estar entre ${MIN_BROWSER_VIEWPORT_HEIGHT} e ${MAX_BROWSER_VIEWPORT_HEIGHT} px.`,
-    };
+    return { ok: false, reason: "heightOutOfRange" };
   }
   if (!BROWSER_VIEWPORT_SCALES.some((candidate) => candidate === scale)) {
-    return { ok: false, message: "A escala responsiva selecionada é inválida." };
+    return { ok: false, reason: "invalidScale" };
   }
   return { ok: true, viewport: { width, height, scale } };
 }

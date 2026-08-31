@@ -6,6 +6,7 @@ import type {
   CommandApprovalServerRequest,
   EngineServerRequest,
 } from "../contracts/types";
+import { useI18n } from "../i18n/context";
 import type { AppController } from "../state/appController";
 
 type ApprovalCardController = Pick<AppController, "approvals" | "respondToApproval">;
@@ -36,6 +37,7 @@ function CommandApproval(props: {
   readonly controller: ApprovalCardController;
   readonly request: CommandApprovalServerRequest;
 }) {
+  const i18n = useI18n();
   const [responding, setResponding] = createSignal(false);
 
   async function decide(decision: ApprovalDecision): Promise<void> {
@@ -51,8 +53,8 @@ function CommandApproval(props: {
           <Icon name="shield" size={18} />
         </span>
         <div>
-          <p class="eyebrow">Aprovação necessária</p>
-          <h3 id={`approval-${props.request.id}`}>Executar este comando?</h3>
+          <p class="eyebrow">{i18n.messages().approval.eyebrow}</p>
+          <h3 id={`approval-${props.request.id}`}>{i18n.messages().approval.commandTitle}</h3>
         </div>
         <Show when={props.controller.approvals().length > 1}>
           <span class="approval-count">+{props.controller.approvals().length - 1}</span>
@@ -63,17 +65,17 @@ function CommandApproval(props: {
       <small>{props.request.params.cwd}</small>
       <footer>
         <button disabled={responding()} onClick={() => void decide("cancel")} type="button">
-          Cancelar turno
+          {i18n.messages().common.cancelTurn}
         </button>
         <button disabled={responding()} onClick={() => void decide("decline")} type="button">
-          Recusar
+          {i18n.messages().common.decline}
         </button>
         <button
           disabled={responding()}
           onClick={() => void decide("acceptForSession")}
           type="button"
         >
-          Permitir nesta tarefa
+          {i18n.messages().approval.allowForTask}
         </button>
         <button
           class="primary-button"
@@ -81,7 +83,7 @@ function CommandApproval(props: {
           onClick={() => void decide("accept")}
           type="button"
         >
-          Executar uma vez
+          {i18n.messages().approval.runOnce}
         </button>
       </footer>
     </section>
@@ -92,6 +94,7 @@ function BrowserOriginApproval(props: {
   readonly controller: ApprovalCardController;
   readonly request: BrowserOriginApprovalServerRequest;
 }) {
+  const i18n = useI18n();
   const [responding, setResponding] = createSignal(false);
 
   async function decide(decision: "accept" | "cancel" | "decline"): Promise<void> {
@@ -107,8 +110,8 @@ function BrowserOriginApproval(props: {
           <Icon name="globe" size={18} />
         </span>
         <div>
-          <p class="eyebrow">Aprovação necessária</p>
-          <h3 id={`approval-${props.request.id}`}>Permitir acesso a este site?</h3>
+          <p class="eyebrow">{i18n.messages().approval.eyebrow}</p>
+          <h3 id={`approval-${props.request.id}`}>{i18n.messages().approval.browserTitle}</h3>
         </div>
         <Show when={props.controller.approvals().length > 1}>
           <span class="approval-count">+{props.controller.approvals().length - 1}</span>
@@ -116,13 +119,13 @@ function BrowserOriginApproval(props: {
       </header>
       <p>{props.request.params.reason}</p>
       <pre class="approval-command">{props.request.params.origin}</pre>
-      <small>O agente poderá usar a sessão isolada do navegador interno nesta origem.</small>
+      <small>{i18n.messages().approval.browserDescription}</small>
       <footer>
         <button disabled={responding()} onClick={() => void decide("cancel")} type="button">
-          Cancelar turno
+          {i18n.messages().common.cancelTurn}
         </button>
         <button disabled={responding()} onClick={() => void decide("decline")} type="button">
-          Recusar
+          {i18n.messages().common.decline}
         </button>
         <button
           class="primary-button"
@@ -130,7 +133,7 @@ function BrowserOriginApproval(props: {
           onClick={() => void decide("accept")}
           type="button"
         >
-          Permitir uma vez
+          {i18n.messages().approval.allowOnce}
         </button>
       </footer>
     </section>

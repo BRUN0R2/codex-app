@@ -12,8 +12,9 @@ describe("cadenced activity shimmer", () => {
     vi.useRealTimers();
   });
 
-  it("matches the official delayed one-second pulse on a four-second cadence", () => {
+  it("preserves the one-second pulse on the requested 1.2-second cadence", () => {
     vi.useFakeTimers();
+    expect(ACTIVITY_SHIMMER_INTERVAL_MS).toBe(1_200);
     const states: boolean[] = [];
     const stop = scheduleCadencedActivityShimmer((active) => states.push(active));
 

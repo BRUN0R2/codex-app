@@ -173,7 +173,7 @@ export function createStreamDeltaBatcher(options: StreamDeltaBatcherOptions): St
       } else {
         const current = pending[pendingIndex];
         if (current === undefined || current.kind !== delta.kind) {
-          options.reportError(new Error("O lote de deltas do stream ficou inconsistente."));
+          options.reportError(new Error("The stream delta batch became inconsistent."));
           return;
         }
         pending[pendingIndex] = { ...current, delta: current.delta + delta.delta };

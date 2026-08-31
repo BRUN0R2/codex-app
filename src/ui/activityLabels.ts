@@ -1,4 +1,5 @@
 import type { IconName } from "./Icon";
+import type { TimelineMessages } from "./timelinePresentation";
 
 export type ToolCategory =
   | "browser"
@@ -88,41 +89,41 @@ export function toolIconName(name: string): IconName {
   }
 }
 
-export function toolLabel(name: string): string {
+export function toolLabel(name: string, messages: TimelineMessages): string {
   switch (name) {
     case "read_file":
-      return "Leitura de arquivo";
+      return messages.toolReadFile;
     case "list_files":
-      return "Listagem de arquivos";
+      return messages.toolListFiles;
     case "search_text":
-      return "Busca no projeto";
+      return messages.toolProjectSearch;
     case "web_search":
-      return "Pesquisa na web";
+      return messages.toolWebSearch;
     case "browser_manage":
-      return "Controle do navegador";
+      return messages.toolBrowserControl;
     case "browser_snapshot":
-      return "Inspeção do navegador";
+      return messages.toolBrowserInspection;
     case "browser_screenshot":
-      return "Captura visual do navegador";
+      return messages.toolBrowserCapture;
     case "browser_pointer":
-      return "Mouse do navegador";
+      return messages.toolBrowserPointer;
     case "browser_type":
-      return "Digitação no navegador";
+      return messages.toolBrowserTyping;
     case "browser_viewport":
-      return "Viewport do navegador";
+      return messages.toolBrowserViewport;
     case "browser_key":
-      return "Teclado do navegador";
+      return messages.toolBrowserKeyboard;
     case "browser_wait":
-      return "Espera no navegador";
+      return messages.toolBrowserWait;
     case "browser_metrics":
-      return "Métricas do navegador";
+      return messages.toolBrowserMetrics;
     case "view_image":
-      return "Visualização de imagem";
+      return messages.toolImageView;
     case "poll_command":
-      return "Monitoramento de comando";
+      return messages.toolCommandMonitoring;
     case "read_output":
     case "read_thread_terminal":
-      return "Terminal do chat";
+      return messages.toolChatTerminal;
     default:
       return name;
   }

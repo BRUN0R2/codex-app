@@ -1,4 +1,4 @@
-import type { CodexModel, ReasoningEffort } from "../contracts/types";
+import type { CodexModel, ConfigUpdate, ModelDefaults, ReasoningEffort } from "../contracts/types";
 
 export function reasoningEffortIsRuntimeCompatible(
   model: CodexModel | undefined,
@@ -48,4 +48,25 @@ export function selectRuntimeCompatibleServiceTier(
     return requested;
   }
   return model?.defaultServiceTier ?? null;
+}
+
+export function resolveRuntimeCompatibleModelSelection(
+  models: readonly CodexModel[],
+  requestedModel: string | null,
+  requestedEffort: ReasoningEffort | null,
+  requestedServiceTier: string | null,
+): ModelDefaults {
+  const model = selectRuntimeCompatibleModel(models, requestedModel, null);
+  return {
+    model: model?.id ?? null,
+    reasoningEffort: selectRuntimeCompatibleReasoningEffort(model, requestedEffort),
+    serviceTier: selectRuntimeCompatibleServiceTier(model, requestedServiceTier),
+  };
+}
+
+export function persistModelDefaults(
+  updateSetting: (update: ConfigUpdate) => Promise<boolean>,
+  value: ModelDefaults,
+): Promise<boolean> {
+  return updateSetting({ type: "modelDefaults", value });
 }

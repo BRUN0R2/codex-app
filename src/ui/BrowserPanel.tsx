@@ -1,5 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { BrowserActionMetric } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage } from "../i18n/messages";
 import { openExternalUrl } from "../infrastructure/codexClient";
 import { isBrowserPreview } from "../platform/desktopRuntime";
 import type { BrowserController } from "../state/browserController";
@@ -20,6 +22,7 @@ export function BrowserPanel(props: {
   readonly controller: BrowserController;
   readonly conversationId: string;
 }) {
+  const i18n = useI18n();
   let surfaceElement: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let synchronizationFrame: number | undefined;
@@ -113,7 +116,19 @@ export function BrowserPanel(props: {
   function applyViewport(width: string, height: string, scale: number): void {
     const result = parseBrowserViewport(width, height, scale);
     if (!result.ok) {
-      setViewportError(result.message);
+      setViewportError(
+        result.reason === "widthOutOfRange"
+          ? formatMessage(i18n.messages().browser.widthRange, {
+              maximum: MAX_BROWSER_VIEWPORT_WIDTH,
+              minimum: MIN_BROWSER_VIEWPORT_WIDTH,
+            })
+          : result.reason === "heightOutOfRange"
+            ? formatMessage(i18n.messages().browser.heightRange, {
+                maximum: MAX_BROWSER_VIEWPORT_HEIGHT,
+                minimum: MIN_BROWSER_VIEWPORT_HEIGHT,
+              })
+            : i18n.messages().browser.invalidScale,
+      );
       return;
     }
     setViewportWidth(String(result.viewport.width));
@@ -161,10 +176,10 @@ export function BrowserPanel(props: {
   });
 
   return (
-    <section aria-label="Navegador interno" class="browser-panel">
+    <section aria-label={i18n.messages().browser.label} class="browser-panel">
       <div class="browser-toolbar">
         <button
-          aria-label="Voltar"
+          aria-label={i18n.messages().browser.back}
           class="browser-toolbar-button"
           disabled={activeTab()?.canGoBack !== true}
           onClick={() => void props.controller.back(props.conversationId)}
@@ -173,7 +188,7 @@ export function BrowserPanel(props: {
           <Icon name="arrowLeft" size={15} />
         </button>
         <button
-          aria-label="Avançar"
+          aria-label={i18n.messages().browser.forward}
           class="browser-toolbar-button browser-forward-button"
           disabled={activeTab()?.canGoForward !== true}
           onClick={() => void props.controller.forward(props.conversationId)}
@@ -182,17 +197,21 @@ export function BrowserPanel(props: {
           <Icon name="arrowLeft" size={15} />
         </button>
         <button
-          aria-label="Recarregar"
+          aria-label={i18n.messages().browser.reload}
           class="browser-toolbar-button"
           onClick={() => void props.controller.reload(props.conversationId)}
           type="button"
         >
           <Icon name="reset" size={14} />
         </button>
-        <form aria-label="Barra de endereço" class="browser-address" onSubmit={submitAddress}>
+        <form
+          aria-label={i18n.messages().browser.addressBar}
+          class="browser-address"
+          onSubmit={submitAddress}
+        >
           <Icon name="globe" size={13} />
           <input
-            aria-label="Pesquisar ou digitar endereço"
+            aria-label={i18n.messages().browser.addressPlaceholder}
             onBlur={() => {
               addressFocused = false;
             }}
@@ -200,38 +219,42 @@ export function BrowserPanel(props: {
               addressFocused = true;
             }}
             onInput={(event) => setAddress(event.currentTarget.value)}
-            placeholder="Pesquisar ou digitar endereço"
+            placeholder={i18n.messages().browser.addressPlaceholder}
             spellcheck={false}
             value={address()}
           />
           <Show when={activeTab()?.isLoading === true}>
-            <span aria-label="Carregando" class="browser-loading-indicator" role="status" />
+            <span
+              aria-label={i18n.messages().browser.loading}
+              class="browser-loading-indicator"
+              role="status"
+            />
           </Show>
         </form>
         <button
-          aria-label="Alternar viewport responsivo"
+          aria-label={i18n.messages().browser.toggleResponsive}
           aria-pressed={responsiveViewport() !== null}
           class="browser-toolbar-button"
           classList={{ active: responsiveViewport() !== null }}
           onClick={toggleResponsiveViewport}
-          title="Viewport responsivo"
+          title={i18n.messages().browser.responsiveViewport}
           type="button"
         >
           <Icon name="monitor" size={14} />
         </button>
         <button
           aria-pressed={debugOpen()}
-          aria-label="Alternar diagnóstico do navegador"
+          aria-label={i18n.messages().browser.toggleDiagnostics}
           class="browser-toolbar-button"
           classList={{ active: debugOpen() }}
           onClick={() => setDebugOpen((value) => !value)}
-          title="Diagnóstico e métricas"
+          title={i18n.messages().browser.diagnosticsAndMetrics}
           type="button"
         >
           <Icon name="bug" size={14} />
         </button>
         <button
-          aria-label="Abrir no navegador padrão"
+          aria-label={i18n.messages().browser.openDefaultBrowser}
           class="browser-toolbar-button"
           disabled={activeTab() === null || activeTab()?.url === "about:blank"}
           onClick={() => {
@@ -247,13 +270,13 @@ export function BrowserPanel(props: {
       </div>
       <Show when={responsiveViewport() !== null}>
         <form
-          aria-label="Configuração do viewport responsivo"
+          aria-label={i18n.messages().browser.responsiveConfiguration}
           class="browser-responsive-toolbar"
           onSubmit={submitViewport}
         >
-          <strong>Dimensões:</strong>
+          <strong>{i18n.messages().browser.dimensions}</strong>
           <select
-            aria-label="Resolução padrão"
+            aria-label={i18n.messages().browser.standardResolution}
             onChange={(event) => {
               const preset = browserViewportPreset(event.currentTarget.value);
               if (preset !== null) {
@@ -263,13 +286,13 @@ export function BrowserPanel(props: {
             }}
             value=""
           >
-            <option value="">Responsivo</option>
+            <option value="">{i18n.messages().browser.responsive}</option>
             <For each={STANDARD_BROWSER_VIEWPORTS}>
               {(preset) => <option value={preset.id}>{preset.label}</option>}
             </For>
           </select>
           <input
-            aria-label="Largura do viewport"
+            aria-label={i18n.messages().browser.viewportWidth}
             inputmode="numeric"
             max={MAX_BROWSER_VIEWPORT_WIDTH}
             min={MIN_BROWSER_VIEWPORT_WIDTH}
@@ -280,7 +303,7 @@ export function BrowserPanel(props: {
           />
           <span aria-hidden="true">×</span>
           <input
-            aria-label="Altura do viewport"
+            aria-label={i18n.messages().browser.viewportHeight}
             inputmode="numeric"
             max={MAX_BROWSER_VIEWPORT_HEIGHT}
             min={MIN_BROWSER_VIEWPORT_HEIGHT}
@@ -290,16 +313,16 @@ export function BrowserPanel(props: {
             value={viewportHeight()}
           />
           <button
-            aria-label="Inverter largura e altura"
+            aria-label={i18n.messages().browser.swapDimensions}
             class="browser-responsive-button"
             onClick={() => applyViewport(viewportHeight(), viewportWidth(), viewportScale())}
-            title="Girar viewport"
+            title={i18n.messages().browser.rotateViewport}
             type="button"
           >
             <Icon name="reset" size={14} />
           </button>
           <select
-            aria-label="Escala do viewport"
+            aria-label={i18n.messages().browser.viewportScale}
             onChange={(event) =>
               applyViewport(viewportWidth(), viewportHeight(), Number(event.currentTarget.value))
             }
@@ -318,10 +341,10 @@ export function BrowserPanel(props: {
           </Show>
           <span aria-hidden="true" class="browser-responsive-spacer" />
           <button
-            aria-label="Redefinir viewport responsivo"
+            aria-label={i18n.messages().browser.resetResponsive}
             class="browser-responsive-button"
             onClick={toggleResponsiveViewport}
-            title="Usar viewport da janela"
+            title={i18n.messages().browser.useWindowViewport}
             type="button"
           >
             <Icon name="close" size={14} />
@@ -332,15 +355,19 @@ export function BrowserPanel(props: {
         <BrowserDebugPanel metrics={metrics()} />
       </Show>
       <section
-        aria-label="Conteúdo do navegador"
+        aria-label={i18n.messages().browser.content}
         class="browser-native-surface"
         ref={surfaceElement}
       >
         <Show when={isBrowserPreview()}>
           <div class="browser-preview-page">
             <Icon name="globeStand" size={34} />
-            <strong>Navegador interno</strong>
-            <span>{activeTab()?.url === "about:blank" ? "Nova aba" : activeTab()?.url}</span>
+            <strong>{i18n.messages().browser.label}</strong>
+            <span>
+              {activeTab()?.url === "about:blank"
+                ? i18n.messages().browser.newTab
+                : activeTab()?.url}
+            </span>
             <Show when={responsiveViewport()}>
               {(viewport) => (
                 <small>
@@ -356,6 +383,7 @@ export function BrowserPanel(props: {
 }
 
 function BrowserDebugPanel(props: { readonly metrics: readonly BrowserActionMetric[] }) {
+  const i18n = useI18n();
   const recent = createMemo(() => props.metrics.slice(-20));
   const latest = createMemo(() => recent().at(-1) ?? null);
   const latestPage = createMemo(
@@ -371,46 +399,69 @@ function BrowserDebugPanel(props: { readonly metrics: readonly BrowserActionMetr
   const failures = createMemo(() => recent().filter((metric) => metric.status === "failed").length);
 
   return (
-    <section aria-label="Diagnóstico do navegador" class="browser-debug-panel">
+    <section aria-label={i18n.messages().browser.diagnosticLabel} class="browser-debug-panel">
       <header>
         <div>
-          <strong>Diagnóstico</strong>
-          <span>{recent().length} ações recentes</span>
+          <strong>{i18n.messages().browser.diagnostics}</strong>
+          <span>
+            {formatMessage(i18n.messages().browser.recentActions, { count: recent().length })}
+          </span>
         </div>
-        <small>Persistido em browser-actions.jsonl</small>
+        <small>{i18n.messages().browser.persistedMetrics}</small>
       </header>
       <div class="browser-debug-summary">
-        <BrowserDebugValue label="Média" value={formatMilliseconds(averageTotal())} />
-        <BrowserDebugValue label="p95" value={formatMilliseconds(p95Total())} />
-        <BrowserDebugValue label="Falhas" value={String(failures())} />
         <BrowserDebugValue
-          label="Última captura"
+          label={i18n.messages().browser.average}
+          value={formatMilliseconds(averageTotal())}
+        />
+        <BrowserDebugValue label="p95" value={formatMilliseconds(p95Total())} />
+        <BrowserDebugValue label={i18n.messages().browser.failures} value={String(failures())} />
+        <BrowserDebugValue
+          label={i18n.messages().browser.lastCapture}
           value={formatBytes(latest()?.screenshotBytes ?? null)}
         />
       </div>
       <Show
-        fallback={
-          <p class="browser-debug-empty">As métricas aparecem quando o agente usa o navegador.</p>
-        }
+        fallback={<p class="browser-debug-empty">{i18n.messages().browser.metricsEmpty}</p>}
         when={latest()}
       >
         {(metric) => (
           <>
             <div class="browser-debug-stages">
-              <span>fila {formatMilliseconds(metric().queueMs)}</span>
-              <span>ação {formatMilliseconds(metric().actionMs)}</span>
-              <span>carga {formatMilliseconds(metric().loadMs)}</span>
-              <span>snapshot {formatMilliseconds(metric().snapshotMs)}</span>
-              <span>captura {formatMilliseconds(metric().screenshotMs)}</span>
+              <span>
+                {i18n.messages().browser.queue} {formatMilliseconds(metric().queueMs)}
+              </span>
+              <span>
+                {i18n.messages().browser.action} {formatMilliseconds(metric().actionMs)}
+              </span>
+              <span>
+                {i18n.messages().browser.load} {formatMilliseconds(metric().loadMs)}
+              </span>
+              <span>
+                {i18n.messages().browser.snapshot} {formatMilliseconds(metric().snapshotMs)}
+              </span>
+              <span>
+                {i18n.messages().browser.capture} {formatMilliseconds(metric().screenshotMs)}
+              </span>
             </div>
             <Show when={latestPage()}>
               {(page) => (
                 <div class="browser-debug-findings">
-                  <span>console {page().consoleErrors}</span>
-                  <span>página {page().pageErrors}</span>
-                  <span>recursos {page().resourceFailures}</span>
-                  <span>overflow {Math.round(page().horizontalOverflowPx)} px</span>
-                  <span>sem rótulo {page().unlabeledControls}</span>
+                  <span>
+                    {i18n.messages().browser.console} {page().consoleErrors}
+                  </span>
+                  <span>
+                    {i18n.messages().browser.page} {page().pageErrors}
+                  </span>
+                  <span>
+                    {i18n.messages().browser.resources} {page().resourceFailures}
+                  </span>
+                  <span>
+                    {i18n.messages().browser.overflow} {Math.round(page().horizontalOverflowPx)} px
+                  </span>
+                  <span>
+                    {i18n.messages().browser.unlabeled} {page().unlabeledControls}
+                  </span>
                   <span>CLS {page().cumulativeLayoutShift.toFixed(3)}</span>
                   <span>
                     LCP{" "}

@@ -39,14 +39,14 @@ export function loadProductFlowState(): ProductFlowState {
     return defaultProductFlowState();
   }
   if (raw.length > MAX_STORED_VALUE_CHARACTERS) {
-    throw new Error("O estado de navegação entre ChatGPT e Codex excede o limite permitido.");
+    throw new Error("The ChatGPT and Codex navigation state exceeds the allowed limit.");
   }
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch (reason) {
     throw new Error(
-      `O estado de navegação entre ChatGPT e Codex contém JSON inválido: ${describe(reason)}`,
+      `The ChatGPT and Codex navigation state contains invalid JSON: ${describe(reason)}`,
     );
   }
   return decodeProductFlowState(value);
@@ -91,18 +91,18 @@ export function rememberConversationDestination(
 }
 
 function decodeProductFlowState(value: unknown): ProductFlowState {
-  const object = exactObject(value, "estado de navegação", [
+  const object = exactObject(value, "navigation state", [
     "chatGptMode",
     "destinations",
     "product",
     "version",
   ]);
   if (object.version !== 1) {
-    throw new Error("A versão do estado de navegação não é suportada.");
+    throw new Error("The navigation state version is not supported.");
   }
-  const product = literal(object.product, "produto", ["chatgpt", "codex"] as const);
-  const chatGptMode = literal(object.chatGptMode, "modo do ChatGPT", ["chat", "work"] as const);
-  const destinations = exactObject(object.destinations, "destinos", ["chat", "codex", "work"]);
+  const product = literal(object.product, "product", ["chatgpt", "codex"] as const);
+  const chatGptMode = literal(object.chatGptMode, "ChatGPT mode", ["chat", "work"] as const);
+  const destinations = exactObject(object.destinations, "destinations", ["chat", "codex", "work"]);
   return {
     version: 1,
     product,
@@ -129,13 +129,13 @@ function exactObject<const Key extends string>(
   expectedKeys: readonly Key[],
 ): Record<Key, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} não é um objeto.`);
+    throw new Error(`${label} is not an object.`);
   }
   const object = value as Record<string, unknown>;
   const actual = Object.keys(object).sort();
   const expected = [...expectedKeys].sort();
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
-    throw new Error(`${label} possui campos incompatíveis.`);
+    throw new Error(`${label} has incompatible fields.`);
   }
   return object as Record<Key, unknown>;
 }
@@ -146,7 +146,7 @@ function literal<const T extends readonly string[]>(
   allowed: T,
 ): T[number] {
   if (typeof value !== "string" || !allowed.includes(value)) {
-    throw new Error(`${label} é inválido.`);
+    throw new Error(`${label} is invalid.`);
   }
   return value as T[number];
 }
@@ -161,11 +161,11 @@ function nullableBoundedText(value: unknown, label: string, maximum: number): st
     value.length > maximum ||
     /\p{Cc}/u.test(value)
   ) {
-    throw new Error(`${label} é inválido.`);
+    throw new Error(`${label} is invalid.`);
   }
   return value;
 }
 
 function describe(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "erro desconhecido";
+  return reason instanceof Error ? reason.message : "unknown error";
 }

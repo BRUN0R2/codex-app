@@ -1,3 +1,4 @@
+pub(crate) mod menu;
 pub(crate) mod preferences;
 mod startup;
 mod tray;
@@ -7,6 +8,7 @@ use tauri::WebviewWindow;
 
 use crate::error::AppError;
 
+pub use menu::ApplicationMenuState;
 pub use preferences::ApplicationPreferencesState;
 pub use startup::MINIMIZED_STARTUP_ARGUMENT;
 pub use tray::setup_tray_icon;

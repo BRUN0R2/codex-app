@@ -110,7 +110,7 @@ function mergeFileChanges(items: readonly FileChangeItem[]): readonly FileChange
       }
       const previous = merged[existingIndex];
       if (previous === undefined) {
-        throw new Error("O índice de alterações perdeu seu arquivo de referência.");
+        throw new Error("The change index lost its referenced file.");
       }
       merged[existingIndex] = {
         ...change,

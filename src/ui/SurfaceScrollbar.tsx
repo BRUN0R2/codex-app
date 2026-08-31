@@ -1,5 +1,6 @@
 import { createSignal, onCleanup, onMount } from "solid-js";
-
+import { useI18n } from "../i18n/context";
+import { formatMessage } from "../i18n/messages";
 import {
   resolveScrollbarPageScrollAmount,
   SCROLLBAR_ARROW_SCROLL_STEP_PX,
@@ -21,6 +22,8 @@ export function SurfaceScrollbar(props: {
   readonly label: string;
   readonly scrollElement: () => HTMLElement | undefined;
 }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().common;
   let trackElement: HTMLDivElement | undefined;
   let thumbElement: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
@@ -192,18 +195,18 @@ export function SurfaceScrollbar(props: {
     >
       <button
         aria-controls={props.controls}
-        aria-label={`Rolar ${props.label} para cima`}
+        aria-label={formatMessage(messages().scrollNamedUp, { name: props.label })}
         class="surface-scrollbar-arrow up"
         disabled={!scrollbar().scrollable || scrollbar().thumbTop <= 0.5}
         onClick={() => scrollBy(-SCROLLBAR_ARROW_SCROLL_STEP_PX)}
-        title="Rolar para cima"
+        title={messages().scrollUp}
         type="button"
       >
         <span aria-hidden="true" class="surface-scrollbar-arrow-glyph" />
       </button>
       <div
         aria-controls={props.controls}
-        aria-label={`Posição em ${props.label}`}
+        aria-label={formatMessage(messages().positionIn, { name: props.label })}
         aria-orientation="vertical"
         aria-valuemax={Math.round(scrollbar().maximumScroll)}
         aria-valuemin={0}
@@ -230,14 +233,14 @@ export function SurfaceScrollbar(props: {
       </div>
       <button
         aria-controls={props.controls}
-        aria-label={`Rolar ${props.label} para baixo`}
+        aria-label={formatMessage(messages().scrollNamedDown, { name: props.label })}
         class="surface-scrollbar-arrow down"
         disabled={
           !scrollbar().scrollable ||
           scrollbar().thumbTop + scrollbar().thumbHeight >= (trackElement?.clientHeight ?? 0) - 0.5
         }
         onClick={() => scrollBy(SCROLLBAR_ARROW_SCROLL_STEP_PX)}
-        title="Rolar para baixo"
+        title={messages().scrollDown}
         type="button"
       >
         <span aria-hidden="true" class="surface-scrollbar-arrow-glyph" />

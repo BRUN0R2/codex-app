@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use tokio::sync::Mutex;
 
+use crate::error::AppError;
+
 mod cell_state;
 mod description;
 mod runtime;
@@ -30,6 +32,13 @@ pub(super) use types::RuntimeResponse;
 pub(super) use types::ToolDefinition;
 pub(super) use types::ToolDelegate;
 pub(super) use types::ToolKind;
+
+pub(super) async fn warm_runtime() -> Result<(), AppError> {
+    tokio::task::spawn_blocking(runtime::warm_runtime)
+        .await
+        .map_err(|error| AppError::State(format!("Code Mode warmup task failed: {error}")))?
+        .map_err(|error| AppError::State(format!("Code Mode runtime warmup failed: {error}")))
+}
 
 #[derive(Default)]
 pub(super) struct CodeModeSessionRegistry {

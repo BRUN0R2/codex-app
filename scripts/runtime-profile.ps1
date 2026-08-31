@@ -72,7 +72,7 @@ function Get-LoopbackListeners {
         }
     )
   } catch {
-    throw "Não foi possível consultar as portas TCP locais: $($_.Exception.Message)"
+    throw "Could not inspect local TCP ports: $($_.Exception.Message)"
   }
 }
 

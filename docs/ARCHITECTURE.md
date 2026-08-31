@@ -1,143 +1,159 @@
-# Arquitetura
+# Architecture
 
-O aplicativo separa apresentação, estado, IPC e domínio nativo. O backend Rust
-é a autoridade sobre autenticação, agente, ferramentas, browser, processos e
-persistência; o frontend apresenta contratos já validados.
+The application separates presentation, state, IPC, and the native domain. The
+Rust backend owns authentication, agents, tools, browser processes, and
+persistence. The frontend renders contracts only after validation.
 
 ```text
 SolidJS UI
-    ↓ ações / ↑ estado
+    ↓ actions / ↑ state
 State controllers
-    ↓ contratos tipados
+    ↓ typed contracts
 Tauri infrastructure
     ↓ commands / ↑ events
 Rust NativeEngine
-    ├─ auth e providers
-    ├─ loop do agente, Code Mode e multiagente
-    ├─ ferramentas e runtime V8 isolado
-    ├─ browser WebView2 e processos
-    └─ SQLite e cofre de credenciais
+    ├─ authentication and providers
+    ├─ agent loop, Code Mode, and multi-agent collaboration
+    ├─ tools and isolated V8 runtime
+    ├─ child WebView2 and process ownership
+    └─ SQLite and credential vault
 ```
 
-## Fronteiras
+## Boundaries
 
-| Camada | Responsabilidade | Não deve fazer |
+| Layer | Owns | Must not |
 | --- | --- | --- |
-| `src/ui` | renderização e interação | acessar IPC ou decidir regras do domínio |
-| `src/state` | ownership reativo e transições | aceitar payload externo sem decoder |
-| `src/infrastructure` | commands, events e adaptação Tauri | manter regra de negócio |
-| `src/contracts` | tipos e decoders de fronteira | inferir ou reparar payload inválido |
-| `src-tauri/src/engine/native` | agente, auth, provider, storage e ferramentas | depender do frontend ou da CLI |
-| `src-tauri/src/browser` | lifecycle e automação do child WebView2 | expor acesso irrestrito à webview |
-| `src-tauri/src/process` | ownership dos processos filhos | deixar árvores órfãs |
+| `src/ui` | Rendering and interaction | Access IPC or decide domain policy |
+| `src/state` | Reactive ownership and transitions | Accept undecoded external payloads |
+| `src/infrastructure` | Commands, events, and Tauri adaptation | Retain business rules |
+| `src/contracts` | Boundary types and strict decoders | Infer or repair invalid payloads |
+| `src/i18n` | Catalog discovery, validation, locale resolution, and formatting | Translate operational diagnostics or accept incomplete catalogs |
+| `src-tauri/src/engine/native` | Agent, auth, providers, storage, and tools | Depend on the frontend or Codex CLI |
+| `src-tauri/src/browser` | Child-WebView2 lifecycle and automation | Expose unrestricted webview access |
+| `src-tauri/src/process` | Child-process ownership | Leave orphaned process trees |
 
-Contratos inválidos falham na fronteira. Não existe fallback para um formato
-aproximado nem acesso direto do componente ao comando nativo.
+Invalid contracts fail at their boundary. Components never call native commands
+directly, and approximate payload formats are never accepted as fallbacks.
 
-## Fluxo de inicialização
+## Initialization
 
-1. O shell cria o estado nativo e registra commands e events.
-2. O frontend solicita o snapshot do engine.
-3. Rust valida configuração, banco e credenciais antes de responder.
-4. `src/contracts` decodifica a resposta.
-5. O controller publica um estado pronto ou um erro explícito e repetível.
+1. The shell creates native state and registers commands and events.
+2. The frontend requests the engine snapshot.
+3. Rust validates configuration, storage, and credentials.
+4. `src/contracts` decodes the response.
+5. The controller publishes either ready state or an explicit, repeatable error.
 
-Uma falha não produz estado parcialmente inicializado. Tentativas posteriores
-reexecutam a fronteira responsável.
+Failures do not expose partially initialized state. A retry executes the owning
+boundary again.
 
-## Fluxo de uma tarefa Codex
+## Codex task flow
 
-1. A UI envia um turno validado ao controller.
-2. O engine persiste a intenção e monta contexto, modelo, instruções e catálogo
-   compatível com as capacidades ativas.
-3. O provider transmite itens Responses por SSE.
-4. O loop converte deltas em eventos, persiste itens completos e executa chamadas
-   de ferramenta autorizadas.
-5. Saídas são limitadas e compactadas antes de voltar ao contexto do modelo.
-6. Conclusão, falha, interrupção e recuperação fecham o turno de modo explícito.
+1. The UI sends a validated turn to the controller.
+2. The engine persists intent and assembles context, model, instructions, and a
+   capability-compatible tool catalog.
+3. For models that support reasoning summaries, the Desktop product preference
+   explicitly requests `auto`; the provider then streams typed Responses items
+   over SSE.
+4. The loop projects deltas, persists complete items, and executes authorized
+   tools.
+5. Outputs are bounded and compacted before re-entering model context.
+6. Completion, failure, interruption, and recovery close the turn explicitly.
 
-Tarefas distintas podem progredir em paralelo. Cada recurso compartilhado tem
-um dono e limites próprios; cancelamento não depende de desmontar a interface.
+Independent tasks can progress concurrently. Shared resources have explicit
+owners, limits, cancellation, and shutdown behavior.
 
-## Code Mode e colaboração
+## Internationalization
 
-Code Mode executa JavaScript em um isolate V8 dedicado. O modelo recebe apenas
-um manifesto tipado das ferramentas permitidas; callbacks atravessam uma ponte
-Rust limitada, cancelável e sem acesso implícito a Node.js, filesystem, rede ou
-processo. Leituras podem coexistir, enquanto mutações criam uma barreira e
-invalidam o cache da célula.
+`src/i18n/catalog.ts` discovers `src/i18n/locales/*.json` at build time. The
+English catalog is the canonical compile-time message schema. Every catalog is
+also decoded at runtime with exact keys, bounded strings, canonical locale
+metadata, direction, and identical placeholder sets. Catalogs are immutable and
+ordered deterministically.
 
-Multiagente v2 mantém identidade, árvore, mailbox e estado no SQLite. Spawn,
-mensagens, follow-up, interrupção, listagem e espera são operações diretas do
-agente e nunca entram recursivamente no Code Mode. O limite é de quatro agentes
-ativos, incluindo a raiz, e 64 tarefas por árvore durante sua vida útil.
+`src/i18n/messages.ts` contains the schema type and strict formatter without a
+runtime catalog dependency. Presentation logic and Node benchmarks can reuse
+that pure core without evaluating Vite-only discovery.
 
-## Ferramentas e comandos
+The persisted preference is either `auto` or a discovered locale. Auto mode
+tries exact locale matches, then language-family matches, then English. Changing
+the preference updates SolidJS consumers and the document `lang` and `dir`
+attributes. Desktop builds also apply the same validated catalog to the native
+application and tray menus through a closed Tauri command. Storage failures are
+visible in Settings; native synchronization failures enter the application
+diagnostic path. Internal errors and logs are deliberately English and are not
+translation keys.
 
-O catálogo é construído no backend conforme perfil de permissão, plataforma e
-capacidades do modelo. Ferramentas nunca escolhem permissões por conta própria.
+## Code Mode and collaboration
 
-- leitura, listagem e busca validam o workspace e possuem limites;
-- escrita e patch usam alvos normalizados e operações transacionais quando há
-  múltiplos arquivos;
-- comandos usam sessões limitadas, saída incremental e Job Object no Windows;
-- processos longos cedem o turno de execução e são consultados por cursor;
-- resultados extensos são compactados ou armazenados para leitura direcionada.
+Code Mode evaluates JavaScript in a dedicated V8 isolate. The model sees only a
+typed manifest of permitted tools. Calls cross a bounded, cancellable Rust
+bridge with no implicit Node.js, filesystem, network, or process access. Reads
+may overlap; mutations establish a barrier and invalidate the cell read cache.
 
-O contrato completo está em [ENGINE.md](ENGINE.md).
+Multi-agent v2 persists identity, tree, mailbox, and state in SQLite. Spawn,
+message, follow-up, interrupt, list, and wait are direct agent operations and do
+not recurse through Code Mode. A tree has four active-agent slots, including the
+root, and a lifetime limit of 64 tasks.
 
-## Imagens
+## Tools and commands
 
-Anexos são inspecionados no backend. `view_image` lê e valida a imagem local,
-persiste uma cópia gerenciada dos mesmos bytes enviados ao provider e publica
-uma atividade própria na timeline. A interface exibe a miniatura e o visualizador
-nativo; abrir um navegador não faz parte desse fluxo.
+The backend builds the tool catalog from the permission profile, platform, and
+model capabilities. Tools never choose or elevate their own permissions.
 
-## Browser Use
+- reads, listings, and searches validate the workspace and enforce limits;
+- writes and patches normalize targets and use transactions for multi-file work;
+- commands use bounded sessions, incremental output, and Windows Job Objects;
+- long-running processes yield and are read incrementally by cursor;
+- large results are compacted or stored for targeted reads.
 
-O browser usa child WebView2 visível e separado da interface principal. O
-backend controla abas, navegação, viewport, snapshot, screenshot, ponteiro,
-teclado, espera e métricas. A UI apenas sincroniza a superfície e apresenta o
-estado.
+See [ENGINE.md](ENGINE.md) for the complete contract.
 
-Navegação e ações sensíveis respeitam a origem e o perfil de aprovação. O agente
-recebe resultados estruturados ou imagens, nunca acesso arbitrário ao DOM da
-aplicação.
+## Images and browser
 
-## Persistência e secrets
+The backend inspects attachments. `view_image` validates a local image, stores a
+managed snapshot of the exact bytes sent to the provider, and publishes a
+timeline activity. The interface renders the thumbnail and native viewer;
+opening a browser is unrelated to this flow.
 
-- SQLite em WAL guarda tarefas, eventos, agentes, mailboxes, configuração e
-  metadados;
-- mudanças compostas usam transações e concorrência otimista quando aplicável;
-- pares incompletos de chamada e saída são reparados por regras explícitas;
-- credenciais são cifradas em envelope privado do aplicativo;
-- a chave do envelope fica no Windows Credential Manager;
-- tokens não atravessam IPC e não são armazenados no SQLite.
+Browser Use runs in a visible child WebView2 separate from the main interface.
+The backend owns tabs, navigation, viewport, snapshots, screenshots, pointer,
+keyboard, waits, and metrics. Sensitive navigation and actions respect origin
+approval and the permission profile. The agent receives structured results or
+images, never arbitrary access to the application DOM.
 
-Schemas possuem versão e migrações internas testadas. Banco ou cofre com
-identidade incompatível são rejeitados em vez de reinterpretados.
+## Persistence and secrets
 
-## Estado e renderização
+- SQLite WAL stores tasks, events, agents, mailboxes, settings, and metadata;
+- compound changes use transactions and optimistic concurrency where needed;
+- incomplete call/output pairs are repaired by explicit rules;
+- credentials use an application-private encrypted envelope;
+- the envelope key lives in Windows Credential Manager;
+- tokens never cross IPC or enter SQLite.
 
-Controllers mantêm ownership por domínio: conta, projetos, tarefas, browser,
-automações e preferências. Projeções pesadas são memoizadas e listas extensas
-são virtualizadas. Markdown, syntax highlighting, diffs e saídas grandes usam
-trabalho incremental para não bloquear a interface.
+Schemas are versioned and migrations are tested. A database or vault with an
+incompatible identity is rejected instead of reinterpreted.
 
-Eventos podem chegar enquanto outra tarefa está visível; identidade de tarefa e
-turno acompanha cada redução para impedir vazamento de estado entre sessões.
+## Rendering
 
-## Invariantes
+Controllers own account, project, task, browser, automation, and preference
+state. Expensive projections are memoized and large lists are virtualized.
+Markdown, syntax highlighting, diffs, and large outputs use incremental work to
+avoid blocking the main thread.
 
-- Rust é a autoridade do domínio nativo; UI é a autoridade de apresentação.
-- Toda fronteira externa valida schema, tamanho e identidade.
-- Tokens e secrets nunca entram no contrato Tauri.
-- Nenhuma ferramenta amplia a permissão configurada.
-- Nenhum processo filho sobrevive ao owner.
-- Nenhuma saída ilimitada entra na memória, no IPC ou no contexto do modelo.
-- Persistência composta é atômica ou falha visivelmente.
-- Preview, mocks e fixtures não entram no comportamento de produção.
-- O aplicativo não lê configuração, dados ou credenciais do Codex CLI.
+Events may arrive while another task is visible. Every reduction carries task
+and turn identity to prevent state leaking between sessions.
 
-Essas invariantes devem ser cobertas no ponto mais próximo do contrato e pelo
-gate `pnpm verify`.
+## Invariants
+
+- Rust is authoritative for the native domain; the UI owns presentation.
+- Every external boundary validates schema, size, and identity.
+- Tokens and secrets never enter Tauri contracts.
+- No tool expands configured permission.
+- No child process survives its owner.
+- Unbounded output never enters memory, IPC, or model context.
+- Compound persistence is atomic or fails visibly.
+- Preview fixtures do not affect production behavior.
+- The application never reads Codex CLI configuration, data, or credentials.
+
+Tests should enforce each invariant at its nearest boundary, with `pnpm verify`
+as the repository-wide gate.

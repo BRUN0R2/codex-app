@@ -18,31 +18,31 @@ $existingProcesses = @(Get-ProcessesByExecutablePath -ExecutablePath $exePath)
 
 if ($existingProcesses.Count -gt 0) {
   $pids = ($existingProcesses | Select-Object -ExpandProperty Pid) -join ", "
-  throw "Feche o aplicativo release atual antes de executar a release. Processos encontrados: $pids"
+  throw "Close the current release application before running a release. Processes found: $pids"
 }
 
 if ($CheckOnly) {
-  Write-Host "Sanidade concluída: sem instância release em execução."
+  Write-Host "Preflight complete: no release instance is running."
   if (Test-Path -LiteralPath $exePath) {
-    Write-Host "Executável release existente: $exePath"
+    Write-Host "Existing release executable: $exePath"
   } else {
-    Write-Host "Nenhum executável release existente; ele será criado no próximo build."
+    Write-Host "No release executable exists; the next build will create it."
   }
   return
 }
 
 pnpm build
 if ($LASTEXITCODE -ne 0) {
-  throw "Falha ao compilar o frontend (pnpm build), código $LASTEXITCODE."
+  throw "Failed to build the frontend (pnpm build), exit code $LASTEXITCODE."
 }
 
 pnpm tauri build --no-bundle
 if ($LASTEXITCODE -ne 0) {
-  throw "Falha ao compilar o aplicativo (pnpm tauri build --no-bundle), código $LASTEXITCODE."
+  throw "Failed to build the application (pnpm tauri build --no-bundle), exit code $LASTEXITCODE."
 }
 
 if (-not (Test-Path -LiteralPath $exePath)) {
-  throw "A compilação terminou sem gerar o executável release esperado: $exePath"
+  throw "The build completed without producing the expected release executable: $exePath"
 }
 
 if ($SkipLaunch) {
@@ -51,4 +51,4 @@ if ($SkipLaunch) {
 }
 
 Start-Process -FilePath $exePath | Out-Null
-Write-Host "Release lançado: $exePath"
+Write-Host "Release started: $exePath"

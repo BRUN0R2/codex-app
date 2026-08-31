@@ -39,6 +39,7 @@ export function projectProfileActivity(
   usage: readonly AccountProfileDailyUsage[],
   todayIso: string,
   view: ProfileActivityView,
+  locale: string,
 ): ProfileActivityProjection {
   const today = parseIsoDate(todayIso);
   const start = chartStart(today);
@@ -91,7 +92,7 @@ export function projectProfileActivity(
     cells,
     cumulativeTotals,
     dailyValues,
-    monthLabels: profileActivityMonthLabels(start),
+    monthLabels: profileActivityMonthLabels(start, locale),
     weeklyTotals,
   };
 }
@@ -131,8 +132,11 @@ function barLevels(totals: readonly number[]): readonly ProfileActivityLevel[] {
   });
 }
 
-function profileActivityMonthLabels(start: number): readonly ProfileActivityMonthLabel[] {
-  const formatter = new Intl.DateTimeFormat("pt-BR", {
+function profileActivityMonthLabels(
+  start: number,
+  locale: string,
+): readonly ProfileActivityMonthLabel[] {
+  const formatter = new Intl.DateTimeFormat(locale, {
     month: "short",
     timeZone: "UTC",
   });
@@ -162,7 +166,7 @@ function chartStart(today: number): number {
 function parseIsoDate(value: string): number {
   const timestamp = Date.parse(`${value}T00:00:00.000Z`);
   if (!Number.isFinite(timestamp) || toIsoDate(timestamp) !== value) {
-    throw new Error(`Data ISO inválida na atividade do perfil: ${JSON.stringify(value)}.`);
+    throw new Error(`Invalid ISO date in profile activity: ${JSON.stringify(value)}.`);
   }
   return timestamp;
 }

@@ -5,7 +5,7 @@ function Get-ProjectWindowsTarget {
   if (-not [string]::IsNullOrWhiteSpace($requestedTarget)) {
     $target = $requestedTarget.Trim()
     if ($target -notin @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")) {
-      throw "Target Windows não suportado pelas ferramentas locais: $target."
+      throw "Windows target is not supported by the local tools: $target."
     }
     return $target
   }
@@ -16,7 +16,7 @@ function Get-ProjectWindowsTarget {
     "X64" { return "x86_64-pc-windows-msvc" }
     "Arm64" { return "aarch64-pc-windows-msvc" }
     default {
-      throw "Arquitetura Windows não suportada pelas ferramentas locais: $runtimeArchitecture."
+      throw "Windows architecture is not supported by the local tools: $runtimeArchitecture."
     }
   }
 }
@@ -29,12 +29,12 @@ function Get-ProjectRipgrepManifest {
 
   $manifestPath = Join-Path $ProjectRoot "scripts\ripgrep-manifest.json"
   if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-    throw "Manifesto do ripgrep ausente: $manifestPath"
+    throw "Missing ripgrep manifest: $manifestPath"
   }
   $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
     ConvertFrom-Json -Depth 10
   if ($manifest.schemaVersion -ne 1 -or [string]::IsNullOrWhiteSpace($manifest.version)) {
-    throw "Manifesto do ripgrep inválido: $manifestPath"
+    throw "Invalid ripgrep manifest: $manifestPath"
   }
   return $manifest
 }
@@ -49,7 +49,7 @@ function Get-ProjectRipgrepDefinition {
   $target = Get-ProjectWindowsTarget
   $definition = $manifest.targets.PSObject.Properties[$target].Value
   if ($null -eq $definition) {
-    throw "O manifesto do ripgrep não define o alvo $target."
+    throw "The ripgrep manifest does not define target $target."
   }
   return [pscustomobject]@{
     Version = [string]$manifest.version
@@ -142,18 +142,18 @@ function Install-ProjectRipgrep {
 
     $archiveSha256 = Get-ProjectToolSha256 -Path $archivePath
     if ($archiveSha256 -ne $definition.ArchiveSha256) {
-      throw "SHA-256 inválido para $($definition.AssetName): esperado $($definition.ArchiveSha256), recebido $archiveSha256."
+      throw "Invalid SHA-256 for $($definition.AssetName): expected $($definition.ArchiveSha256), received $archiveSha256."
     }
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $extractDirectory)
     $executables = @(Get-ChildItem -LiteralPath $extractDirectory -Recurse -File -Filter "rg.exe")
     if ($executables.Count -ne 1) {
-      throw "O asset do ripgrep deveria conter exatamente um rg.exe; encontrados: $($executables.Count)."
+      throw "The ripgrep asset must contain exactly one rg.exe; found: $($executables.Count)."
     }
     $executableSha256 = Get-ProjectToolSha256 -Path $executables[0].FullName
     if ($executableSha256 -ne $definition.ExecutableSha256) {
-      throw "SHA-256 inválido para rg.exe: esperado $($definition.ExecutableSha256), recebido $executableSha256."
+      throw "Invalid SHA-256 for rg.exe: expected $($definition.ExecutableSha256), received $executableSha256."
     }
 
     $releaseDirectory = $executables[0].Directory.FullName
@@ -166,7 +166,7 @@ function Install-ProjectRipgrep {
     try {
       Move-Item -LiteralPath $releaseDirectory -Destination $targetDirectory
       if (-not (Test-ProjectRipgrep -ProjectRoot $resolvedProjectRoot)) {
-        throw "A instalação concluída do ripgrep não passou na validação final."
+        throw "The completed ripgrep installation failed final validation."
       }
       if ($null -ne $backupDirectory -and (Test-Path -LiteralPath $backupDirectory)) {
         Remove-Item -LiteralPath $backupDirectory -Recurse -Force
@@ -196,7 +196,7 @@ function Get-ProjectV8Definition {
 
   $manifestPath = Join-Path $ProjectRoot "scripts\v8-manifest.json"
   if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-    throw "Manifesto do V8 ausente: $manifestPath"
+    throw "Missing V8 manifest: $manifestPath"
   }
   $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
     ConvertFrom-Json -Depth 10
@@ -205,7 +205,7 @@ function Get-ProjectV8Definition {
     [string]::IsNullOrWhiteSpace($manifest.version) -or
     [string]::IsNullOrWhiteSpace($manifest.releaseBaseUrl)
   ) {
-    throw "Manifesto do V8 inválido: $manifestPath"
+    throw "Invalid V8 manifest: $manifestPath"
   }
 
   $target = Get-ProjectWindowsTarget
@@ -217,7 +217,7 @@ function Get-ProjectV8Definition {
     [string]::IsNullOrWhiteSpace($targetDefinition.bindingAssetName) -or
     [string]::IsNullOrWhiteSpace($targetDefinition.bindingSha256)
   ) {
-    throw "O manifesto do V8 não define completamente o alvo $target."
+    throw "The V8 manifest does not fully define target $target."
   }
 
   return [pscustomobject]@{
@@ -299,11 +299,11 @@ function Install-ProjectV8 {
 
     $archiveSha256 = Get-ProjectToolSha256 -Path $stagingArchive
     if ($archiveSha256 -ne $definition.ArchiveSha256) {
-      throw "SHA-256 inválido para $($definition.ArchiveAssetName): esperado $($definition.ArchiveSha256), recebido $archiveSha256."
+      throw "Invalid SHA-256 for $($definition.ArchiveAssetName): expected $($definition.ArchiveSha256), received $archiveSha256."
     }
     $bindingSha256 = Get-ProjectToolSha256 -Path $stagingBinding
     if ($bindingSha256 -ne $definition.BindingSha256) {
-      throw "SHA-256 inválido para $($definition.BindingAssetName): esperado $($definition.BindingSha256), recebido $bindingSha256."
+      throw "Invalid SHA-256 for $($definition.BindingAssetName): expected $($definition.BindingSha256), received $bindingSha256."
     }
 
     if (Test-Path -LiteralPath $paths.Root) {
@@ -313,7 +313,7 @@ function Install-ProjectV8 {
     try {
       Move-Item -LiteralPath $stagingDirectory -Destination $paths.Root
       if (-not (Test-ProjectV8 -ProjectRoot $resolvedProjectRoot)) {
-        throw "A instalação concluída do runtime V8 não passou na validação final."
+        throw "The completed V8 runtime installation failed final validation."
       }
       if ($null -ne $backupDirectory -and (Test-Path -LiteralPath $backupDirectory)) {
         Remove-Item -LiteralPath $backupDirectory -Recurse -Force
@@ -346,7 +346,7 @@ function Enable-ProjectTools {
 
   $resolvedProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
   if (-not (Test-ProjectRipgrep -ProjectRoot $resolvedProjectRoot)) {
-    $message = "ripgrep local ausente ou inválido. Execute 'pnpm tools:bootstrap'."
+    $message = "Local ripgrep is missing or invalid. Run 'pnpm tools:bootstrap'."
     if ($Required) {
       throw $message
     }

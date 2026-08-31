@@ -126,7 +126,7 @@ describe("message queue", () => {
 
     expect(readQueuedMessages(loaded.queues, "thread-a")).toHaveLength(1);
     expect(loaded.warnings).toHaveLength(1);
-    expect(loaded.warnings[0]).toContain("foi ignorada");
+    expect(loaded.warnings[0]).toContain("was ignored");
   });
 
   it("persists whether follow-ups should queue or steer", () => {
@@ -140,8 +140,6 @@ describe("message queue", () => {
   it("rejects an unknown persisted follow-up behavior", () => {
     localStorage.setItem(PROFILE_STORAGE_KEYS.followUpBehavior, "future");
 
-    expect(() => loadQueueingEnabled()).toThrow(
-      "O comportamento salvo para mensagens de acompanhamento é inválido.",
-    );
+    expect(() => loadQueueingEnabled()).toThrow("The saved follow-up message behavior is invalid.");
   });
 });

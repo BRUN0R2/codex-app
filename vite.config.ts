@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
-import solid from "vite-plugin-solid";
+
+import { createSolidTransformPlugin } from "./src/tooling/solidTransformPlugin.ts";
 
 const resolvedPort = Number(
   // biome-ignore lint/complexity/useLiteralKeys: process.env requires bracket access under noPropertyAccessFromIndexSignature.
@@ -18,7 +19,7 @@ export default defineConfig({
   // async coordinators. Component-level HMR can preserve that controller while
   // replacing consumers with a newer interface, producing a mixed runtime graph.
   // A full reload keeps the controller and every UI consumer on the same revision.
-  plugins: [solid({ hot: false })],
+  plugins: [createSolidTransformPlugin({ hot: false })],
   clearScreen: false,
   server: {
     host: "127.0.0.1",

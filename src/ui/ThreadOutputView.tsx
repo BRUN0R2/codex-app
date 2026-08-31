@@ -1,6 +1,8 @@
 import { createEffect, createMemo, createSignal, Show } from "solid-js";
 
 import type { ThreadOutput, ToolOutputPresentation } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage } from "../i18n/messages";
 import { readOutput } from "../infrastructure/codexClient";
 import { utf8ByteLength } from "../utf8";
 import { frontendFailureMessage, useFrontendFailureReporter } from "./frontendFailure";
@@ -13,6 +15,7 @@ export function ThreadOutputView(props: {
   readonly output: ThreadOutput;
   readonly presentation?: ToolOutputPresentation | undefined;
 }) {
+  const i18n = useI18n();
   const reportFailure = useFrontendFailureReporter();
   const [chunks, setChunks] = createSignal<readonly string[]>([props.output.preview]);
   const [loadedBytes, setLoadedBytes] = createSignal(utf8ByteLength(props.output.preview));
@@ -60,15 +63,18 @@ export function ThreadOutputView(props: {
         return;
       }
       if (response.outputId !== outputId || response.byteLength !== props.output.byteLength) {
-        throw new Error("O recurso de saída mudou durante a leitura.");
+        throw new Error("The output resource changed while it was being read.");
       }
       setChunks((current) => [...current, response.chunk]);
       setLoadedBytes((current) => current + utf8ByteLength(response.chunk));
       setNextCursor(response.nextCursor);
     } catch (reason) {
-      const message = frontendFailureMessage("Falha ao carregar a saída completa", reason);
-      setFailure(message);
-      reportFailure(message);
+      const displayMessage = frontendFailureMessage(
+        i18n.messages().threadOutput.loadFailure,
+        reason,
+      );
+      setFailure(displayMessage);
+      reportFailure(frontendFailureMessage("Failed to load the complete output", reason));
     } finally {
       if (props.output.id === outputId) {
         setLoading(false);
@@ -90,17 +96,25 @@ export function ThreadOutputView(props: {
       <Show when={props.output.nextCursor !== null}>
         <div class="thread-output-pagination">
           <span>
-            {formatByteCount(Math.min(loadedBytes(), props.output.byteLength))} de{" "}
-            {formatByteCount(props.output.byteLength)}
+            {formatMessage(i18n.messages().threadOutput.progress, {
+              loaded: formatByteCount(
+                Math.min(loadedBytes(), props.output.byteLength),
+                i18n.locale(),
+              ),
+              total: formatByteCount(props.output.byteLength, i18n.locale()),
+            })}
           </span>
-          <Show when={nextCursor() !== null} fallback={<span>Saída completa carregada</span>}>
+          <Show
+            when={nextCursor() !== null}
+            fallback={<span>{i18n.messages().threadOutput.complete}</span>}
+          >
             <button
               class="thread-output-load-button"
               disabled={loading()}
               onClick={() => void loadNext()}
               type="button"
             >
-              {loading() ? "Carregando…" : "Carregar mais"}
+              {loading() ? i18n.messages().common.loading : i18n.messages().common.loadMore}
             </button>
           </Show>
         </div>
@@ -110,12 +124,12 @@ export function ThreadOutputView(props: {
   );
 }
 
-function formatByteCount(bytes: number): string {
+function formatByteCount(bytes: number, locale: string): string {
   if (bytes < 1_024) {
     return `${bytes} B`;
   }
   if (bytes < 1_048_576) {
-    return `${(bytes / 1_024).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} KiB`;
+    return `${(bytes / 1_024).toLocaleString(locale, { maximumFractionDigits: 1 })} KiB`;
   }
-  return `${(bytes / 1_048_576).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} MiB`;
+  return `${(bytes / 1_048_576).toLocaleString(locale, { maximumFractionDigits: 1 })} MiB`;
 }

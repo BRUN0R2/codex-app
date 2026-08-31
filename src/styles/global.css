@@ -26,7 +26,7 @@
   --gray-800: #212121;
   --gray-900: #181818;
   --gray-1000: #0d0d0d;
-  /* Vermelho fica reservado a erro e ações destrutivas. */
+  /* Red is reserved for errors and destructive actions. */
   --red-50: #ffd9d9;
   --red-300: #ff6764;
   --red-400: #fa423e;
@@ -35,7 +35,7 @@
   --red-900: #4d100e;
   --white: #ffffff;
   --black: #000000;
-  /* Superfícies semânticas (tema escuro oficial) */
+  /* Semantic surfaces (official dark theme). */
   --bg: var(--gray-900);
   --sidebar-bg: var(--gray-1000);
   --panel: var(--gray-800);
@@ -119,7 +119,7 @@
   --padding-row-y: calc(var(--spacing) * 1);
   --padding-row-x: calc(var(--spacing) * 2);
   --padding-toolbar: calc(var(--spacing) * 4);
-  /* O desktop oficial usa 48rem com raiz de 16px; aqui a raiz é configurável. */
+  /* Official Desktop uses 48rem at a 16px root; this root is configurable. */
   --thread-content-max-width: 768px;
   --thread-content-inline-padding: 16px;
   --timeline-work-gap: calc(var(--spacing) * 3);
@@ -297,7 +297,6 @@ summary:focus-visible {
   .markdown pre,
   .markdown table,
   .agent-activity-viewport,
-  .command-card-scroll,
   .approval-command,
   .review-file-list,
   .attachment-strip,
@@ -317,7 +316,6 @@ summary:focus-visible {
   .markdown pre,
   .markdown table,
   .agent-activity-viewport,
-  .command-card-scroll,
   .approval-command,
   .review-file-list,
   .attachment-strip,
@@ -337,7 +335,6 @@ summary:focus-visible {
   .markdown pre,
   .markdown table,
   .agent-activity-viewport,
-  .command-card-scroll,
   .approval-command,
   .review-file-list,
   .attachment-strip,
@@ -359,7 +356,6 @@ summary:focus-visible {
   .markdown pre,
   .markdown table,
   .agent-activity-viewport,
-  .command-card-scroll,
   .approval-command,
   .review-file-list,
   .attachment-strip,
@@ -379,7 +375,6 @@ summary:focus-visible {
   .markdown pre,
   .markdown table,
   .agent-activity-viewport,
-  .command-card-scroll,
   .approval-command,
   .review-file-list,
   .attachment-strip,
@@ -3612,6 +3607,13 @@ pre {
   letter-spacing: 0;
 }
 
+.turn-token-usage {
+  margin-left: 4px;
+  color: var(--color-token-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .turn-header-line {
   width: 100%;
   height: 1px;
@@ -3859,6 +3861,22 @@ pre {
   white-space: nowrap;
 }
 
+.activity-title.is-running {
+  background: transparent;
+  background-clip: border-box;
+  -webkit-text-fill-color: currentColor;
+}
+
+.activity-title.is-running,
+.activity-title.is-running * {
+  color: var(--codex-chat-muted) !important;
+}
+
+.activity-title.is-running .activity-title-highlight,
+.activity-title.is-running .activity-title-highlight * {
+  color: var(--color-token-text-primary) !important;
+}
+
 .activity-title-base,
 .activity-title-highlight {
   display: block;
@@ -3869,10 +3887,9 @@ pre {
 
 .activity-title-sweep {
   position: absolute;
-  inset: 0;
+  inset: 0 auto 0 0;
   width: 100%;
   overflow: hidden;
-  color: var(--color-token-text-primary);
   mask-image: linear-gradient(
     90deg,
     transparent 0%,
@@ -3882,8 +3899,7 @@ pre {
     transparent 100%
   );
   pointer-events: none;
-  transform: translate3d(-50%, 0, 0);
-  will-change: transform;
+  transform: translate(-50%);
   -webkit-mask-image: linear-gradient(
     90deg,
     transparent 0%,
@@ -3895,16 +3911,24 @@ pre {
 }
 
 .activity-title-highlight {
-  transform: translate3d(50%, 0, 0);
-  will-change: transform;
+  width: 100%;
+  transform: translate(50%);
+  -webkit-text-fill-color: currentColor;
+}
+
+.activity-title.is-shimmer-active .activity-title-sweep,
+.activity-title.is-shimmer-active .activity-title-highlight {
+  animation-duration: 1s;
+  animation-timing-function: steps(48, end);
+  animation-iteration-count: 1;
 }
 
 .activity-title.is-shimmer-active .activity-title-sweep {
-  animation: activity-reflection-sweep 1s steps(48, end) 1;
+  animation-name: activity-reflection-sweep;
 }
 
 .activity-title.is-shimmer-active .activity-title-highlight {
-  animation: activity-reflection-text 1s steps(48, end) 1;
+  animation-name: activity-reflection-text;
 }
 
 .activity-elapsed {
@@ -3964,6 +3988,7 @@ pre {
   max-height: 205px;
   overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding-right: 5px;
 }
 
@@ -4501,13 +4526,13 @@ pre {
 }
 
 @keyframes activity-reflection-sweep {
-  from { transform: translate3d(-50%, 0, 0); }
-  to { transform: translate3d(125%, 0, 0); }
+  from { transform: translate(-50%); }
+  to { transform: translate(125%); }
 }
 
 @keyframes activity-reflection-text {
-  from { transform: translate3d(50%, 0, 0); }
-  to { transform: translate3d(-125%, 0, 0); }
+  from { transform: translate(50%); }
+  to { transform: translate(-125%); }
 }
 
 @keyframes spin {
@@ -7512,9 +7537,6 @@ pre {
 
 .settings-row select {
   width: 228px;
-}
-
-.settings-row select {
   height: 38px;
   padding: 0 30px 0 12px;
   border: 1px solid rgb(255 255 255 / 11%);
@@ -7522,6 +7544,13 @@ pre {
   background: #2b2b2b;
   color: var(--text-soft);
   font-size: 0.79rem;
+}
+
+.settings-row .language-preference-select {
+  width: auto;
+  min-width: 228px;
+  max-width: 100%;
+  field-sizing: content;
 }
 
 .output-detail-select {
@@ -8188,8 +8217,10 @@ pre {
   .settings-nav nav button { font-size: 0; }
   .settings-main { padding: calc(var(--app-titlebar-height) + 32px) 20px 32px; }
   .settings-row { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .settings-row > div { width: 100%; }
   .settings-row select,
   .output-detail-select { width: 100%; }
+  .settings-row .language-preference-select { width: 100%; min-width: 0; }
   .output-detail-menu { width: 100%; }
 }
 
@@ -8252,7 +8283,7 @@ pre {
   max-height: 360px;
   overflow: auto;
   overscroll-behavior-x: contain;
-  overscroll-behavior-y: auto;
+  overscroll-behavior-y: contain;
   scrollbar-gutter: stable;
   background: var(--diff-surface);
   outline: none;

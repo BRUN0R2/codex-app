@@ -2,17 +2,8 @@ const TIMELINE_END_THRESHOLD_PX = 24;
 const SCROLLBAR_MIN_THUMB_PX = 84;
 const SCROLLBAR_OVERFLOW_EPSILON_PX = 2;
 const TIMELINE_PROGRAMMATIC_SCROLL_EPSILON_PX = 1;
-const TIMELINE_WHEEL_LINE_PX = 16;
-const TIMELINE_WHEEL_TRANSFER_EPSILON_PX = 0.5;
-const TIMELINE_WHEEL_DELTA_MODE_LINE = 1;
-const TIMELINE_WHEEL_DELTA_MODE_PAGE = 2;
 
 export type TimelineProgrammaticScrollKind = "instant" | "smooth";
-
-export interface NestedTimelineWheelTransfer {
-  readonly nestedScrollTop: number;
-  readonly timelineDelta: number;
-}
 
 export interface ScrollbarMetrics {
   readonly maximumScroll: number;
@@ -144,111 +135,22 @@ export class TimelineProgrammaticScrollTracker {
   }
 }
 
-export function normalizeTimelineWheelDelta(input: {
-  readonly deltaMode: number;
+export function shouldHandleTimelineWheel(input: {
+  readonly controlKey: boolean;
+  readonly deltaX: number;
   readonly deltaY: number;
-  readonly viewportHeight: number;
-}): number {
-  if (!Number.isFinite(input.deltaY)) {
-    throw new Error("Timeline wheel delta must be finite.");
-  }
-  if (!Number.isFinite(input.viewportHeight) || input.viewportHeight < 0) {
-    throw new Error("Timeline wheel viewport height must be a non-negative finite number.");
-  }
-  switch (input.deltaMode) {
-    case TIMELINE_WHEEL_DELTA_MODE_LINE:
-      return input.deltaY * TIMELINE_WHEEL_LINE_PX;
-    case TIMELINE_WHEEL_DELTA_MODE_PAGE:
-      return input.deltaY * input.viewportHeight;
-    default:
-      return input.deltaY;
-  }
-}
-
-export function resolveNestedTimelineWheelTransfer(input: {
-  readonly clientHeight: number;
-  readonly delta: number;
-  readonly scrollHeight: number;
-  readonly scrollTop: number;
-}): NestedTimelineWheelTransfer | null {
-  if (
-    !Number.isFinite(input.clientHeight) ||
-    input.clientHeight < 0 ||
-    !Number.isFinite(input.delta) ||
-    !Number.isFinite(input.scrollHeight) ||
-    input.scrollHeight < 0 ||
-    !Number.isFinite(input.scrollTop)
-  ) {
-    throw new Error(
-      "Nested timeline scroll metrics must be finite and heights must be non-negative.",
-    );
-  }
-  if (Math.abs(input.delta) <= TIMELINE_WHEEL_TRANSFER_EPSILON_PX) {
-    return null;
-  }
-  const maximumScroll = Math.max(0, input.scrollHeight - input.clientHeight);
-  const scrollTop = Math.min(maximumScroll, Math.max(0, input.scrollTop));
-  const desiredScrollTop = scrollTop + input.delta;
-  const nestedScrollTop = Math.min(maximumScroll, Math.max(0, desiredScrollTop));
-  const timelineDelta = desiredScrollTop - nestedScrollTop;
-  return Math.abs(timelineDelta) <= TIMELINE_WHEEL_TRANSFER_EPSILON_PX
-    ? null
-    : { nestedScrollTop, timelineDelta };
-}
-
-export function resolveTimelineWheelHandoffTarget(input: {
-  readonly currentScrollTop: number;
-  readonly delta: number;
-  readonly maximumScroll: number;
-  readonly pendingTarget: number | null;
-}): number {
-  if (
-    !Number.isFinite(input.currentScrollTop) ||
-    input.currentScrollTop < 0 ||
-    !Number.isFinite(input.delta) ||
-    !Number.isFinite(input.maximumScroll) ||
-    input.maximumScroll < 0 ||
-    (input.pendingTarget !== null &&
-      (!Number.isFinite(input.pendingTarget) || input.pendingTarget < 0))
-  ) {
-    throw new Error(
-      "Timeline wheel handoff requires finite metrics and non-negative scroll positions.",
-    );
-  }
-  const currentScrollTop = Math.min(input.maximumScroll, input.currentScrollTop);
-  if (Math.abs(input.delta) <= TIMELINE_WHEEL_TRANSFER_EPSILON_PX) {
-    return currentScrollTop;
-  }
-  const pendingTarget =
-    input.pendingTarget === null ? null : Math.min(input.maximumScroll, input.pendingTarget);
-  const pendingDelta = pendingTarget === null ? 0 : pendingTarget - currentScrollTop;
-  const continuesPendingDirection =
-    pendingTarget !== null &&
-    (Math.abs(pendingDelta) <= TIMELINE_WHEEL_TRANSFER_EPSILON_PX ||
-      Math.sign(pendingDelta) === Math.sign(input.delta));
-  const origin = continuesPendingDirection ? pendingTarget : currentScrollTop;
-  return Math.min(input.maximumScroll, Math.max(0, origin + input.delta));
-}
-
-export function hasReachedTimelineWheelHandoffTarget(input: {
-  readonly currentScrollTop: number;
-  readonly maximumScroll: number;
-  readonly target: number;
-  readonly tolerance?: number | undefined;
+  readonly insideNestedRegion: boolean;
+  readonly shiftKey: boolean;
 }): boolean {
-  if (
-    !Number.isFinite(input.currentScrollTop) ||
-    input.currentScrollTop < 0 ||
-    !Number.isFinite(input.maximumScroll) ||
-    input.maximumScroll < 0 ||
-    !Number.isFinite(input.target) ||
-    input.target < 0 ||
-    (input.tolerance !== undefined && (!Number.isFinite(input.tolerance) || input.tolerance < 0))
-  ) {
-    throw new Error("Timeline wheel handoff completion requires finite non-negative metrics.");
+  if (!Number.isFinite(input.deltaX) || !Number.isFinite(input.deltaY)) {
+    throw new Error("Timeline wheel deltas must be finite.");
   }
-  const reachableTarget = Math.min(input.maximumScroll, input.target);
-  return Math.abs(input.currentScrollTop - reachableTarget) <= (input.tolerance ?? 1);
+  return (
+    !input.controlKey &&
+    !input.shiftKey &&
+    !input.insideNestedRegion &&
+    Math.abs(input.deltaY) > Math.abs(input.deltaX)
+  );
 }
 
 export function resolveTimelineRestorationTop(input: {

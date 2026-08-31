@@ -1,252 +1,301 @@
-# Contrato do engine
+# Engine contract
 
-`NativeEngine` é o único backend do produto. Ele usa OAuth ChatGPT, HTTPS/SSE e
-SQLite sem executar ou importar dados do Codex CLI.
+`NativeEngine` is the product's only backend. It uses ChatGPT OAuth, HTTPS/SSE,
+and SQLite without running the Codex CLI or importing its data.
 
-| Contrato | Valor atual |
+| Contract | Current value |
 | --- | --- |
-| schema IPC | `20` |
-| schema SQLite | `5` |
-| provider Codex | ChatGPT Codex Responses |
-| transporte | HTTPS/SSE |
-| sidecar | `rg.exe` 15.2.0 validado por hash |
+| IPC schema | `20` |
+| SQLite schema | `5` |
+| Codex provider | ChatGPT Codex Responses |
+| Transport | HTTPS/SSE |
+| Sidecar | hash-validated `rg.exe` 15.2.0 |
 
-## Comandos Tauri
+## Tauri commands
 
-Cada comando possui request e response fechados. Não existe RPC genérico nem
-JSON arbitrário.
+Every command has a closed request and response. There is no generic RPC or
+arbitrary JSON path.
 
-| Área | Comandos |
+| Area | Commands |
 | --- | --- |
 | lifecycle | `engine_start`, `engine_runtime_diagnostic_report` |
-| conta | `engine_account_read`, `engine_account_profile_read`, `engine_account_rate_limits_read`, `engine_account_usage_resets_read`, `engine_account_usage_reset_redeem`, `engine_account_auto_top_up_read`, `engine_account_auto_top_up_enable`, `engine_account_auto_top_up_update`, `engine_account_auto_top_up_disable` |
-| sessão | `engine_login_chatgpt`, `engine_login_cancel`, `engine_logout` |
-| tarefas | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive`, `engine_thread_unarchive`, `engine_thread_delete`, `engine_thread_fork` |
-| turnos e saída | `engine_turn_start`, `engine_turn_steer`, `engine_turn_interrupt`, `engine_output_read` |
-| automações | `engine_automation_list`, `engine_automation_create`, `engine_automation_update`, `engine_automation_delete`, `engine_automation_run_now`, `engine_automation_run_mark_reviewed` |
-| modelos e configuração | `engine_config_update`, `engine_model_list`, `engine_chat_model_list` |
-| aprovações | `engine_server_request_respond` |
-| anexos | `attachment_inspect`, `attachment_read_image`, `attachment_save_pasted_image` |
+| account | `engine_account_read`, `engine_account_profile_read`, `engine_account_rate_limits_read`, `engine_account_usage_resets_read`, `engine_account_usage_reset_redeem`, `engine_account_auto_top_up_read`, `engine_account_auto_top_up_enable`, `engine_account_auto_top_up_update`, `engine_account_auto_top_up_disable` |
+| session | `engine_login_chatgpt`, `engine_login_cancel`, `engine_logout` |
+| tasks | `engine_thread_start`, `engine_thread_list`, `engine_thread_resume`, `engine_thread_read`, `engine_thread_set_name`, `engine_thread_archive`, `engine_thread_unarchive`, `engine_thread_delete`, `engine_thread_fork` |
+| turns and output | `engine_turn_start`, `engine_turn_steer`, `engine_turn_interrupt`, `engine_output_read` |
+| automations | `engine_automation_list`, `engine_automation_create`, `engine_automation_update`, `engine_automation_delete`, `engine_automation_run_now`, `engine_automation_run_mark_reviewed` |
+| models and configuration | `engine_config_update`, `engine_model_list`, `engine_chat_model_list` |
+| approvals | `engine_server_request_respond` |
+| attachments | `attachment_inspect`, `attachment_read_image`, `attachment_save_pasted_image` |
 | browser | `browser_tab_create`, `browser_tab_navigate`, `browser_tab_back`, `browser_tab_forward`, `browser_tab_reload`, `browser_tab_close`, `browser_viewport_set`, `browser_surface_sync` |
-| desktop | `application_preferences_read`, `application_preferences_update`, `application_workspace_open` |
+| desktop | `application_menu_update`, `application_preferences_read`, `application_preferences_update`, `application_workspace_open` |
 
-`application_workspace_open` aceita somente diretório absoluto, existente e
-canonicalizado. O WebView não recebe permissão para abrir paths diretamente.
+`application_workspace_open` accepts only an existing, canonicalized absolute
+directory. The WebView cannot open paths directly.
 
-## Eventos
+`application_menu_update` applies the validated active catalog to the native
+application and tray menus. The application menu is rolled back if tray menu
+synchronization fails.
 
-| Canal | Conteúdo |
+## Events
+
+| Channel | Content |
 | --- | --- |
-| `engine://runtime-status` | `starting`, `ready`, `failed` ou `stopped` |
-| `engine://runtime-diagnostic` | falha operacional estruturada |
-| `engine://notification` | auth, tarefa, turno, item, modelo e automação |
-| `engine://server-request` | `approval.command` ou `approval.browserOrigin` |
-| `browser://state` | estado autoritativo da aba |
-| `browser://new-window` | URL HTTP(S) validada para nova aba controlada |
-| `browser://agent-activity` | conversa, ação e abertura do painel |
-| `browser://metric` | amostra limitada de QA e latência |
+| `engine://runtime-status` | `starting`, `ready`, `failed`, or `stopped` |
+| `engine://runtime-diagnostic` | Structured operational failure |
+| `engine://notification` | Authentication, task, turn, item, model, and automation events |
+| `engine://server-request` | `approval.command` or `approval.browserOrigin` |
+| `browser://state` | Authoritative tab state |
+| `browser://new-window` | Validated HTTP(S) URL for a controlled new tab |
+| `browser://agent-activity` | Conversation, action, and panel-open state |
+| `browser://metric` | Bounded QA and latency sample |
 
-Notificações aceitas: `auth.loginCompleted`, `auth.sessionChanged`,
-`thread.created`, `thread.updated`, `thread.archived`, `thread.unarchived`,
-`thread.deleted`, `turn.started`, `turn.completed`, `item.started`,
-`item.completed`, `item.streamDeltas`, `model.rerouted`, `model.verification`,
-`model.safetyBufferingUpdated`, `automation.changed`, `automation.deleted` e
-`automation.runUpdated`. Métodos desconhecidos falham no decoder.
+Accepted notifications are `auth.loginCompleted`, `auth.sessionChanged`,
+`thread.created`, `thread.updated`, `thread.archived`,
+`thread.unarchived`, `thread.deleted`, `turn.started`, `turn.completed`,
+`item.started`, `item.completed`, `item.streamDeltas`, `model.rerouted`,
+`model.verification`, `model.safetyBufferingUpdated`, `automation.changed`,
+`automation.deleted`, and `automation.runUpdated`. Decoders reject unknown
+methods.
 
-Fixtures golden em `src/contracts/fixtures` travam Rust e TypeScript. Para
-regenerá-las intencionalmente:
+Golden fixtures in `src/contracts/fixtures` lock Rust and TypeScript together.
+Regenerate them only intentionally:
 
 ```powershell
 cargo test --locked --manifest-path src-tauri/Cargo.toml engine::contracts_fixtures::tests::regenerate_golden_contract_fixtures -- --ignored
 ```
 
-## Modelos, instruções e contexto
+## Models, instructions, and context
 
-Chat consumidor e Codex usam protocolos e catálogos separados. O catálogo Codex
-é mantido apenas em memória por cinco minutos; ETag igual renova a validade e
-ETag diferente invalida a entrada. Não existe cache persistente de modelos.
+Consumer Chat and Codex use separate protocols and catalogs. The Codex catalog
+is cached in memory for five minutes. A matching ETag renews validity; a changed
+ETag invalidates the entry. Catalogs are never persisted. The frontend does not
+duplicate this TTL: opening an empty task or starting a draft revalidates through
+the native boundary, which returns a valid cached value or coalesces one network
+refresh. Starting a new turn requires the active catalog; steering an active turn
+does not.
 
-As instruções-base vêm de `model_messages.instructions_template`, com
-`base_instructions` apenas para catálogo legado. O runtime adiciona, em itens
-separados e limitados, instruções do repositório, permissões, colaboração e
-ambiente. Não existe prompt universal local duplicando o protocolo do modelo.
+Base instructions come from `model_messages.instructions_template`, with
+`base_instructions` reserved for legacy catalogs. The runtime adds separate,
+bounded repository, permission, collaboration, and environment items. It does
+not maintain a universal prompt that duplicates model protocol.
 
-`tool_mode` desconhecido falha na fronteira. Uma versão futura desconhecida de
-`multi_agent_version` permanece decodificável, mas desativa MultiAgent e Ultra
-até que o runtime implemente explicitamente esse contrato. `direct`, `code_mode`
-e `code_mode_only` selecionam contratos próprios.
-Ultra só fica disponível com multiagente v2 e seu requisito aparece apenas na
-opção do seletor; o literal `ultra` nunca é enviado ao provider. Catálogo e
-capabilities, não nomes comerciais codificados na UI, definem esforço efetivo,
-tiers, modalidades, detalhe de imagem e janela de contexto.
+Unknown `tool_mode` values fail at the boundary. A future unknown
+`multi_agent_version` remains decodable but disables MultiAgent and Ultra until
+implemented explicitly. `direct`, `code_mode`, and `code_mode_only` select
+distinct contracts. Ultra requires multi-agent v2 and is never sent as the
+literal `ultra`; catalog capabilities determine effective effort, service tier,
+modalities, image detail, and context window.
 
-Antes de cada amostragem, o engine mede o request real e aplica margem de 12%.
-Quando o limite do catálogo é alcançado, Remote Compaction V2 instala um único
-checkpoint válido em transação. `context_length_exceeded` permite uma recuperação
-por compactação antes de se tornar terminal.
+Before compatible provider telemetry exists, the engine estimates the real
+request and applies a 12% margin. After `response.completed`, provider totals
+are authoritative and receive only the local cost of items added after the last
+model output. A full estimate never inflates that confirmed value again. At the
+catalog limit, Remote Compaction V2 installs one valid checkpoint transactionally.
+`context_length_exceeded` permits one compaction recovery before becoming
+terminal.
 
-## Loop do agente
+Each confirmed usage sample is persisted as `contextUsage`. During a turn, the
+UI sums provider-confirmed `output_tokens` and shows the total next to elapsed
+time. Text deltas are not tokenized or extrapolated locally. The projection is
+derived from persisted items, so the total survives completion and reload.
 
-1. O engine normaliza histórico e garante um output para cada tool call.
-2. Monta instruções, itens, capabilities e catálogo permitido.
-3. Consome Responses Standard ou Lite por SSE.
-4. Persiste itens completos; deltas permanecem projeções transitórias.
-5. Executa ferramentas, persiste outputs na ordem original e continua a rodada.
-6. Conclui, interrompe ou falha o turno em transação.
+## Agent loop
 
-Heartbeats não renovam o deadline de evento semântico. Falhas transitórias de
-transporte, timeout, HTTP 5xx e SSE podem retomar com backoff e cancelamento
-imediato; protocolo inválido é terminal. Rate limit respeita o prazo do provider
-sem criar um contador local arbitrário de tentativas.
+1. Normalize history and guarantee one output for every tool call.
+2. Build instructions, input items, capabilities, and the permitted catalog.
+3. Consume Standard or Lite Responses over SSE.
+4. Persist complete items; deltas and `item.started` remain transient
+   projections.
+5. Execute tools, persist outputs in original call order, and continue.
+6. Complete, interrupt, or fail the turn transactionally.
 
-Chamadas consecutivas somente leitura podem executar em paralelo. Qualquer
-mutação, aprovação ou comando exclusivo cria uma barreira. O lote local é
-limitado a oito e os resultados voltam ao provider na ordem das chamadas.
+Heartbeats do not extend the semantic-event deadline. Transient transport,
+timeout, HTTP 5xx, and SSE failures may resume with backoff and immediate
+cancellation. Invalid protocol is terminal. Rate limiting follows the provider
+deadline without an arbitrary local retry counter.
 
-## Ferramentas
+Consecutive read-only calls may overlap. A mutation, approval, or exclusive
+command creates a barrier. A local batch contains at most eight calls, and
+results return to the provider in call order.
 
-O catálogo base possui 20 definições. Code Mode acrescenta `exec` e `wait` ou,
-em `code_mode_only`, substitui as ferramentas diretas por elas. Multiagente v2
-acrescenta seis ferramentas diretas quando habilitado:
+## Tools
 
-| Grupo | Ferramentas |
+The base catalog has 20 definitions. Code Mode adds `exec` and `wait`, or
+replaces direct tools with them in `code_mode_only`. Multi-agent v2 adds six
+direct collaboration tools when enabled.
+
+| Group | Tools |
 | --- | --- |
-| arquivos e estado | `read_file`, `list_files`, `search_text`, `view_image`, `edit_file`, `write_file`, `read_output`, `update_plan` |
-| execução | `exec_command`, `poll_command` |
-| patch freeform | `apply_patch` |
+| files and state | `read_file`, `list_files`, `search_text`, `view_image`, `edit_file`, `write_file`, `read_output`, `update_plan` |
+| execution | `exec_command`, `poll_command` |
+| freeform patch | `apply_patch` |
 | browser | `browser_manage`, `browser_snapshot`, `browser_screenshot`, `browser_viewport`, `browser_pointer`, `browser_type`, `browser_key`, `browser_wait`, `browser_metrics` |
 | Code Mode | `exec`, `wait` |
-| colaboração | `spawn_agent`, `send_message`, `followup_task`, `interrupt_agent`, `list_agents`, `wait_agent` |
+| collaboration | `spawn_agent`, `send_message`, `followup_task`, `interrupt_agent`, `list_agents`, `wait_agent` |
 
-| Ferramenta | Somente leitura | Projeto | Acesso total |
+| Tool class | Read-only | Workspace write | Full access |
 | --- | ---: | ---: | ---: |
-| leitura, busca, imagem, output e plano | sim | sim | sim |
-| ferramentas de browser | sim | sim | sim |
-| `edit_file`, `write_file`, `apply_patch` | não | sim | sim |
-| `exec_command` | não | aprovação | sem aprovação |
-| `poll_command` | sim | sim | sim |
+| read, search, image, output, and plan | yes | yes | yes |
+| browser tools | yes | yes | yes |
+| `edit_file`, `write_file`, `apply_patch` | no | yes | yes |
+| `exec_command` | no | approval | no approval |
+| `poll_command` | yes | yes | yes |
 
-O perfil somente leitura nem anuncia ferramentas proibidas. Chamadas puras
-idênticas no mesmo trecho podem ser coalescidas; efeitos nunca são deduplicados.
-Schemas são estritos e qualquer restrição não representável no JSON Schema é
-validada novamente pelo decoder Rust.
+Read-only mode does not advertise prohibited tools. Identical pure calls in the
+same segment may be coalesced; effects are never deduplicated. Schemas are
+strict, and Rust validates constraints that JSON Schema cannot represent.
 
-### Arquivos e patches
+`read_file` retains a 2 MiB per-file limit, accepts nullable line bounds, and
+does not impose an arbitrary line-count window. Requested ends clamp to EOF; a
+start beyond content returns an explicit EOF marker. Full content remains
+subject to provider compaction and becomes paginated output when over budget.
 
-Paths são normalizados dentro do workspace. Escritas são UTF-8 e atômicas.
-`apply_patch` usa gramática Lark própria, sem shell ou `git apply`: planeja todos
-os arquivos em memória, rejeita escapes, symlinks e sobreposição, revalida
-snapshots e aplica ou reverte a transação completa.
+### Files and patches
 
-`search_text` executa o ripgrep embarcado por caminho absoluto, sem shell nem
-dependência do `PATH`. O engine aplica `.gitignore`, limites, timeout,
-cancelamento e leitura incremental.
+Paths are normalized inside the workspace. Writes are UTF-8 and atomic.
+`apply_patch` uses a dedicated Lark grammar without a shell or `git apply`.
+It plans every file in memory, rejects escapes, symlinks, and overlaps,
+revalidates snapshots, and commits or rolls back the complete transaction.
 
-### Comandos
+`search_text` executes bundled ripgrep by absolute path without a shell or
+`PATH` dependency. The engine applies ignore rules, limits, timeout,
+cancellation, and incremental reads.
 
-`exec_command` usa PowerShell 7 em UTF-8, sem cor e sem janela. No Windows, cada
-árvore entra em um Job Object com `KILL_ON_JOB_CLOSE`; falhar ao assumir ownership
-impede o launch.
+### Commands
 
-| Limite | Valor |
+`exec_command` uses hidden, colorless PowerShell 7 in UTF-8. On Windows, each
+tree enters a Job Object with `KILL_ON_JOB_CLOSE`; launch fails if ownership
+cannot be established.
+
+| Limit | Value |
 | --- | ---: |
-| sessões simultâneas | 32 |
-| espera inicial padrão | 10 s |
-| `yield_time_ms` | 250 ms a 30 s |
-| espera de `poll_command` | 0 a 30 s |
-| prévia viva | 256 KiB por stream |
+| concurrent sessions | 32 |
+| default initial wait | 10 s |
+| `yield_time_ms` | 250 ms to 30 s |
+| `poll_command` wait | 0 to 30 s |
+| live preview | 256 KiB per stream |
+| cooperative shutdown | 6 s |
+| shutdown after forced abort | 2 s |
 
-Após o yield, a sessão continua vinculada à tarefa e retorna deltas por cursor.
-O transcript integral é persistido em chunks e consultado por `read_output` ou
-`engine_output_read`. Conclusão do turno, exclusão e shutdown cancelam e drenam
-todas as sessões antes do evento terminal.
+After yielding, the session remains owned by its task and returns cursor-based
+deltas. The full transcript is persisted in chunks and read through
+`read_output` or `engine_output_read`. Turn completion, deletion, and shutdown
+cancel and drain sessions before the terminal event. Interruption records
+idempotent cancellation and returns immediately; the finalizer alone owns the
+drain. A non-cooperative execution is aborted by the task that owns its Job
+Object without blocking the terminal turn transaction.
 
 ### Code Mode
 
-`exec` avalia JavaScript em um isolate V8 sem Node.js, rede, filesystem ou APIs
-do host. O manifesto expõe apenas ferramentas já filtradas por permissão e
-capability; colaboração é sempre direta e não pode ser invocada de dentro do
-isolate. `wait` retoma ou encerra uma célula que cedeu o controle.
+`exec` evaluates JavaScript in a V8 isolate without Node.js, network,
+filesystem, or host APIs. Its manifest contains only tools already filtered by
+permission and capability. Collaboration remains direct and is unavailable from
+the isolate. `wait` resumes or terminates a yielded cell.
 
-| Limite | Valor |
+| Limit | Value |
 | --- | ---: |
-| source por execução | 1 MiB |
-| ferramentas aninhadas | 64 |
-| células ativas | 8 |
-| runtime por célula | 10 min |
-| output por célula | 4 MiB ou 256 itens |
-| valores persistidos | 128 entradas de até 1 MiB |
-| callbacks pendentes | 64 |
+| source per execution | 1 MiB |
+| nested tool calls | 64 |
+| active cells | 8 |
+| runtime per cell | 10 min |
+| output per cell | 4 MiB or 256 items |
+| stored values | 128 entries, 1 MiB each |
+| pending callbacks | 64 |
 
-O isolate é inicializado uma vez por processo e aquecido dentro da mesma
-barreira, evitando corrida entre testes, tarefas e runtimes concorrentes.
-Callbacks preservam cancelamento e backpressure; mutações serializam a célula e
-invalidam o cache de leitura antes da próxima chamada.
+V8 warm-up is claimed atomically once at engine startup and runs in the tracked
+background task set. The process initialization barrier still protects the
+isolate, so a cell arriving during warm-up shares the same work and never starts
+a second cold runtime. The first `exec` no longer owns this cost, while engine
+`ready` is not delayed.
 
-### Multiagente v2
+Callbacks preserve cancellation and backpressure. Cancellation first completes
+the visual item as failed and then propagates to the cell. Completion or
+cancellation signals the session and drains callbacks that own visual items;
+those futures are never aborted after `item.started`. Mutations serialize the
+cell and invalidate its read cache before the next call.
 
-As seis ferramentas de colaboração operam sobre uma árvore persistida. Há no
-máximo quatro agentes ativos, incluindo a raiz, e 64 tarefas por árvore. Spawn e
-mensagens são transacionais; `followup_task` acorda um agente ocioso,
-`send_message` apenas enfileira, e direcionamento do usuário acorda `wait_agent`.
+### Multi-agent v2
 
-`fork_turns=all` herda modelo e esforço e rejeita overrides; `none` não herda
-contexto e um número positivo aceita até 1.000 turnos. A espera usa mínimo de
-10 s, padrão de 30 s e máximo de 1 h. Conclusão e interrupção publicam estados
-tipados e não dependem de polling do frontend.
+Six collaboration tools operate on a persistent tree. A tree allows four active
+agents including the root and 64 lifetime tasks. Spawn and messages are
+transactional. `followup_task` wakes an idle agent, `send_message` only
+queues, and user steering wakes `wait_agent`.
 
-### Imagens
+`fork_turns=all` inherits model and effort and rejects overrides. `none`
+inherits no context; a positive value accepts up to 1,000 turns. Waits have a
+10-second minimum, 30-second default, and one-hour maximum. Completion and
+interruption publish typed states and do not depend on frontend polling.
 
-`view_image` é a única ferramenta de inspeção visual de arquivo local. Ela
-valida sandbox e cancelamento, decodifica PNG, JPEG, GIF ou WebP, limita arquivo
-a 10 MiB, dimensão a 16.384 px e alocação decodificada a 256 MiB. O provider
-recebe data URL e a timeline referencia um snapshot gerenciado dos mesmos bytes
-validados, portanto alteração ou remoção posterior do original não muda o
-histórico. A atividade é “Visualizou uma imagem”; o browser não participa.
+### Images
+
+`view_image` is the only local visual-inspection tool. It validates sandbox and
+cancellation, decodes PNG, JPEG, GIF, or WebP, limits files to 10 MiB,
+dimensions to 16,384 px, and decoded allocation to 256 MiB. The provider gets a
+data URL; the timeline references a managed snapshot of the same validated
+bytes, so later source changes do not alter history.
 
 ### Browser Use
 
-O browser mantém até 16 child WebViews no runtime, cada uma vinculada à conversa
-proprietária. URLs aceitam apenas HTTP, HTTPS ou `about:blank`, sem credenciais
-embutidas. Webviews remotos não recebem IPC, filesystem ou opener.
+The runtime materializes at most 16 child WebViews, each owned by a conversation.
+Persisted metadata is separate: up to 16 tabs per task and 256 tasks without
+consuming a WebView until use. Deleting a task removes topology and releases its
+native WebViews. URLs allow only HTTP, HTTPS, or `about:blank`, without embedded
+credentials. Remote webviews receive no IPC, filesystem, or opener access.
 
-Automação expõe apenas ações fechadas de aba, viewport, snapshot, screenshot,
-ponteiro, texto, teclado, espera e métricas. Não existe comando CDP arbitrário.
-Screenshot entra como conteúdo multimodal do tool output. Nova origem exige
-`approval.browserOrigin` para a conversa atual.
+Automation exposes only closed tab, viewport, snapshot, screenshot, pointer,
+text, keyboard, wait, and metric actions. There is no arbitrary CDP command.
+Screenshots enter tool output as multimodal content. A new origin requires
+`approval.browserOrigin` for the current conversation.
 
-## Persistência e recuperação
+## Persistence and recovery
 
-SQLite usa WAL e transações para alterações compostas. Calls sem output deixadas
-por interrupção recebem `aborted`; outputs órfãos são removidos. Turnos ativos no
-boot são recuperados para estado terminal explícito e comandos antigos nunca são
-reativados. A versão 5 adiciona identidades e mailboxes multiagente com migração
-cumulativa e validação exata das tabelas e colunas.
+SQLite uses WAL and transactions for compound changes. Interrupted calls without
+outputs receive `aborted`; orphan outputs are removed. Active turns at startup
+recover to an explicit terminal state, and old commands are never reactivated.
+Schema 5 adds multi-agent identities and mailboxes with cumulative migration and
+exact table and column validation.
 
-`engine_turn_steer` persiste mensagem e entrada causal na mesma transação. A fila
-é promovida apenas depois da resposta que não a observou, preservando ordem mesmo
-após queda do processo. Exclusão de tarefa ativa cancela, impede nova aquisição
-e só responde após a transação de remoção.
+`engine_turn_steer` persists the message and causal input atomically. A queued
+message is promoted only after the response that could not observe it, preserving
+order across process failure. Deleting an active task cancels it, blocks new
+acquisition, and responds only after removal commits. Concurrent requests to
+interrupt, delete, archive, fork, or answer one approval coalesce by identity.
+Native-tab initialization, catalog revalidation, and immediate automation runs
+use the same single-flight contract. One logical effect issues one native
+command.
 
-Saídas volumosas ficam em recursos paginados, não no item da timeline. Eventos
-ao vivo possuem limites próprios; o item concluído é a barreira autoritativa.
+Large outputs live in paginated resources, not timeline items. Live events have
+independent limits; the completed item is authoritative. The last semantic group
+within a turn owns one reflective header: it shows the active tool, then the
+latest complete reasoning-section heading. Partial markers and summary bodies do
+not replace a readable heading; a completed legacy plain summary remains
+supported. Raw reasoning content is never promoted into the header. Command
+parents say only "Running command"; the child row alone owns elapsed time.
 
-## Automações
+The model catalog's reasoning-summary default describes Core behavior, not the
+Desktop interface preference. When the model advertises the summary parameter,
+the native request explicitly sends `summary: "auto"`, including Responses Lite;
+unsupported models omit the parameter. This matches the audited Desktop default
+and keeps capability selection separate from product policy.
 
-Automações possuem versão, timezone, intervalo, próximo disparo e estado. Updates
-exigem `expectedVersion`. O scheduler permite no máximo duas execuções globais e
-uma por automação; claim, avanço e criação do run são atômicos. Cada run usa uma
-tarefa e um turno normais, sem caminho especial no agente.
+## Automations
 
-## Configuração
+Automations have version, timezone, interval, next run, and state. Updates
+require `expectedVersion`. The scheduler permits two global runs and one per
+automation. Claim, advancement, and run creation are atomic. Each run uses a
+normal task and turn, with no special agent path.
 
-`AppConfig` é um schema fechado com concorrência otimista. Modelo, esforço e tier
-são atualizados juntos; overrides de um turno não alteram o padrão persistido.
+## Configuration
 
-Combinações válidas:
+`AppConfig` is a closed schema with optimistic concurrency. Model, effort, and
+service tier update together; per-turn overrides do not change persisted
+defaults.
 
-- `read-only` + `untrusted`;
-- `workspace-write` + `on-request`;
-- `danger-full-access` + `never`.
+Valid combinations are:
 
-Qualquer outra combinação é rejeitada no Rust e no TypeScript.
+- `read-only` with `untrusted`;
+- `workspace-write` with `on-request`;
+- `danger-full-access` with `never`.
+
+Rust and TypeScript reject every other combination.

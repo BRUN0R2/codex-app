@@ -57,7 +57,6 @@ pub(super) const MAX_PROVIDER_ITEM_BYTES: usize = 2 * 1_048_576;
 const MAX_TOOL_ARGUMENT_BYTES: usize = 262_144;
 const MAX_TOOL_DESCRIPTION_BYTES: usize = 160;
 const MAX_FILE_BYTES: usize = 2 * 1_048_576;
-const MAX_READ_LINES: usize = 2_000;
 const MAX_LIST_RESULTS: usize = 500;
 const MAX_LIST_DEPTH: usize = 12;
 const MAX_SEARCH_RESULTS: usize = 200;
@@ -163,8 +162,8 @@ pub struct ToolExecutionContext<'a> {
 #[serde(deny_unknown_fields)]
 struct ReadFileArgs {
     path: String,
-    start_line: u32,
-    end_line: u32,
+    start_line: Option<u32>,
+    end_line: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -386,13 +385,25 @@ impl ToolRegistry {
         let mut definitions = vec![
             function_tool(
                 "read_file",
-                "Read a bounded UTF-8 range from a file inside the workspace.",
+                "Read UTF-8 lines from a file inside the workspace. Null bounds read from the start or through EOF; an end past EOF is clamped.",
                 json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Workspace-relative file path." },
-                        "start_line": { "type": "integer", "minimum": 1 },
-                        "end_line": { "type": "integer", "minimum": 1 }
+                        "start_line": {
+                            "anyOf": [
+                                { "type": "integer", "minimum": 1 },
+                                { "type": "null" }
+                            ],
+                            "description": "First line, one-based. Use null to start at line 1."
+                        },
+                        "end_line": {
+                            "anyOf": [
+                                { "type": "integer", "minimum": 1 },
+                                { "type": "null" }
+                            ],
+                            "description": "Last line, inclusive. Use null to read through EOF; values past EOF are clamped."
+                        }
                     },
                     "required": ["path", "start_line", "end_line"],
                     "additionalProperties": false
@@ -2175,6 +2186,44 @@ mod tests {
     }
 
     #[test]
+    fn read_file_schema_supports_explicit_unbounded_ranges_without_a_line_cap() {
+        let definition = ToolRegistry
+            .definitions()
+            .iter()
+            .find(|tool| tool["name"] == "read_file")
+            .expect("read_file should be advertised");
+        let parameters = &definition["parameters"];
+
+        assert_eq!(
+            parameters["required"],
+            serde_json::json!(["path", "start_line", "end_line"])
+        );
+        for name in ["start_line", "end_line"] {
+            let alternatives = parameters["properties"][name]["anyOf"]
+                .as_array()
+                .expect("a read bound should be nullable");
+            assert!(
+                alternatives
+                    .iter()
+                    .any(|schema| schema["type"] == "integer")
+            );
+            assert!(alternatives.iter().any(|schema| schema["type"] == "null"));
+            assert!(
+                alternatives
+                    .iter()
+                    .all(|schema| schema.get("maximum").is_none())
+            );
+        }
+        ToolRegistry
+            .prepare(
+                "read-unbounded".into(),
+                "read_file",
+                r#"{"path":"src/main.rs","start_line":null,"end_line":null}"#,
+            )
+            .expect("an explicitly unbounded read should prepare");
+    }
+
+    #[test]
     fn poll_command_schema_is_bounded_and_strict() {
         let definition = ToolRegistry
             .definitions()
@@ -2293,11 +2342,10 @@ mod tests {
 
     #[test]
     fn function_schemas_follow_their_declared_strictness() {
-        for definition in ToolRegistry
-            .definitions()
-            .iter()
-            .filter(|tool| tool["type"] == "function")
-        {
+        let mut definitions = ToolRegistry.definitions().to_vec();
+        definitions.extend(ToolRegistry.multi_agent_definitions(&[]));
+
+        for definition in definitions.iter().filter(|tool| tool["type"] == "function") {
             let name = definition["name"]
                 .as_str()
                 .expect("function tools should have names");

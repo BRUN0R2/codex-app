@@ -6,6 +6,8 @@ import type {
   AccountProfileSummary,
   ReasoningEffort,
 } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage, type TranslationMessages } from "../i18n/messages";
 import type { AppController } from "../state/appController";
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { accountPlanName } from "./accountPresentation";
@@ -25,23 +27,6 @@ type ProfileController = Pick<
   | "refreshAccountProfile"
 >;
 
-const compactNumberFormatter = new Intl.NumberFormat("pt-BR", {
-  maximumFractionDigits: 1,
-  notation: "compact",
-});
-const integerFormatter = new Intl.NumberFormat("pt-BR", {
-  maximumFractionDigits: 0,
-});
-const percentageFormatter = new Intl.NumberFormat("pt-BR", {
-  maximumFractionDigits: 0,
-  style: "percent",
-});
-const activityDateFormatter = new Intl.DateTimeFormat("pt-BR", {
-  day: "numeric",
-  month: "short",
-  timeZone: "UTC",
-  year: "numeric",
-});
 const TOP_INVOCATIONS_LIMIT: number = 5;
 const PROFILE_WEEK_COLUMN_SPAN: number = 4;
 
@@ -49,11 +34,17 @@ export function ProfileView(props: {
   readonly controller: ProfileController;
   readonly mode?: "settings" | "surface";
 }) {
+  const i18n = useI18n();
   const [activityView, setActivityView] = createSignal<ProfileActivityView>("daily");
   const profile = () => props.controller.accountProfile();
   const account = () => props.controller.account()?.account;
   const projection = createMemo(() =>
-    projectProfileActivity(profile()?.dailyUsage ?? [], profileTodayIso(), activityView()),
+    projectProfileActivity(
+      profile()?.dailyUsage ?? [],
+      profileTodayIso(),
+      activityView(),
+      i18n.locale(),
+    ),
   );
 
   onMount(() => {
@@ -62,7 +53,7 @@ export function ProfileView(props: {
 
   return (
     <section
-      aria-label="Perfil"
+      aria-label={i18n.messages().profile.label}
       class="profile-page"
       classList={{ "profile-page-settings": props.mode === "settings" }}
     >
@@ -88,7 +79,7 @@ export function ProfileView(props: {
                       {(username) => <span>@{username()}</span>}
                     </Show>
                     <span class="profile-plan-badge">
-                      {accountPlanName(account()?.planType ?? null)}
+                      {accountPlanName(account()?.planType ?? null, i18n.messages().account)}
                     </span>
                   </div>
                 </header>
@@ -123,14 +114,15 @@ function ProfileInitialState(props: {
   readonly loading: boolean;
   readonly onRetry: () => void;
 }) {
+  const i18n = useI18n();
   return (
     <Show when={props.error !== null && !props.loading} fallback={<ProfileSkeleton />}>
       <div class="profile-load-error" role="alert">
         <Icon name="helpCircle" size={20} />
-        <strong>Não foi possível carregar seu perfil.</strong>
+        <strong>{i18n.messages().profile.loadFailure}</strong>
         <p>{props.error}</p>
         <button onClick={props.onRetry} type="button">
-          Tentar novamente
+          {i18n.messages().common.tryAgain}
         </button>
       </div>
     </Show>
@@ -138,8 +130,9 @@ function ProfileInitialState(props: {
 }
 
 function ProfileSkeleton() {
+  const i18n = useI18n();
   return (
-    <div aria-label="Carregando perfil" class="profile-skeleton" role="status">
+    <div aria-label={i18n.messages().profile.loading} class="profile-skeleton" role="status">
       <span class="profile-skeleton-avatar" />
       <span class="profile-skeleton-line profile-skeleton-name" />
       <span class="profile-skeleton-line profile-skeleton-handle" />
@@ -153,34 +146,44 @@ function ProfileSummary(props: {
   readonly status: "available" | "unavailable";
   readonly summary: AccountProfileSummary;
 }) {
+  const i18n = useI18n();
+  const formatters = createMemo(() => createProfileFormatters(i18n.locale()));
   const entries = () => [
     {
-      label: "Total de tokens",
-      value: formatOptionalCompact(props.summary.lifetimeTokens),
+      label: i18n.messages().profile.totalTokens,
+      value: formatOptionalCompact(props.summary.lifetimeTokens, formatters().compactNumber),
     },
     {
-      label: "Pico de tokens",
-      value: formatOptionalCompact(props.summary.peakDailyTokens),
+      label: i18n.messages().profile.peakTokens,
+      value: formatOptionalCompact(props.summary.peakDailyTokens, formatters().compactNumber),
     },
     {
-      label: "Chat mais longo",
+      label: i18n.messages().profile.longestChat,
       value: formatOptionalDuration(props.summary.longestRunningTurnSeconds),
     },
     {
-      label: "Sequência atual",
-      value: formatOptionalDays(props.summary.currentStreakDays),
+      label: i18n.messages().profile.currentStreak,
+      value: formatOptionalDays(
+        props.summary.currentStreakDays,
+        formatters().integer,
+        i18n.messages().profile,
+      ),
     },
     {
-      label: "Maior sequência",
-      value: formatOptionalDays(props.summary.longestStreakDays),
+      label: i18n.messages().profile.longestStreak,
+      value: formatOptionalDays(
+        props.summary.longestStreakDays,
+        formatters().integer,
+        i18n.messages().profile,
+      ),
     },
   ];
 
   return (
-    <section aria-label="Resumo de atividade" class="profile-summary">
+    <section aria-label={i18n.messages().profile.activitySummary} class="profile-summary">
       <Show
         when={props.status === "available"}
-        fallback={<p>Estatísticas do perfil indisponíveis.</p>}
+        fallback={<p>{i18n.messages().profile.statisticsUnavailable}</p>}
       >
         <For each={entries()}>
           {(entry) => (
@@ -201,19 +204,22 @@ function ProfileActivityChart(props: {
   readonly projection: ReturnType<typeof projectProfileActivity>;
   readonly unavailable: boolean;
 }) {
-  const tabs = [
-    { label: "Diário", value: "daily" },
-    { label: "Semanal", value: "weekly" },
-    { label: "Acumulado", value: "cumulative" },
-  ] as const;
+  const i18n = useI18n();
+  const formatters = createMemo(() => createProfileFormatters(i18n.locale()));
+  const tabs = () =>
+    [
+      { label: i18n.messages().profile.daily, value: "daily" },
+      { label: i18n.messages().profile.weekly, value: "weekly" },
+      { label: i18n.messages().profile.cumulative, value: "cumulative" },
+    ] as const;
 
   return (
     <section class="profile-activity-chart">
       <header>
-        <h2>Atividade de tokens</h2>
+        <h2>{i18n.messages().profile.tokenActivity}</h2>
         <fieldset class="profile-activity-tabs">
-          <legend class="visually-hidden">Agregação da atividade</legend>
-          <For each={tabs}>
+          <legend class="visually-hidden">{i18n.messages().profile.activityAggregation}</legend>
+          <For each={tabs()}>
             {(tab) => (
               <button
                 aria-pressed={props.activityView === tab.value}
@@ -229,7 +235,11 @@ function ProfileActivityChart(props: {
       </header>
       <Show
         when={!props.unavailable}
-        fallback={<div class="profile-section-unavailable">Histórico de tokens indisponível.</div>}
+        fallback={
+          <div class="profile-section-unavailable">
+            {i18n.messages().profile.tokenHistoryUnavailable}
+          </div>
+        }
       >
         <div class="profile-activity-visual">
           <div aria-hidden="true" class="profile-activity-months">
@@ -246,7 +256,7 @@ function ProfileActivityChart(props: {
             </For>
           </div>
           <div
-            aria-label="Calendário de atividade de tokens"
+            aria-label={i18n.messages().profile.tokenCalendar}
             class="profile-activity-grid"
             role="img"
           >
@@ -257,7 +267,13 @@ function ProfileActivityChart(props: {
                   class="profile-activity-cell"
                   classList={{ future: cell.future }}
                   data-level={cell.level}
-                  title={activityCellLabel(cell.date, cell.tokens, props.activityView)}
+                  title={activityCellLabel(
+                    cell.date,
+                    cell.tokens,
+                    props.activityView,
+                    i18n.messages().profile,
+                    formatters(),
+                  )}
                 />
               )}
             </For>
@@ -272,40 +288,46 @@ function ProfileInsights(props: {
   readonly insights: AccountProfileActivityInsights;
   readonly unavailable: boolean;
 }) {
+  const i18n = useI18n();
+  const formatters = createMemo(() => createProfileFormatters(i18n.locale()));
   const insightRows = () =>
     [
       props.insights.fastModePercent === null
         ? null
         : {
-            label: "Modo rápido",
-            value: formatPercentage(props.insights.fastModePercent),
+            label: i18n.messages().profile.fastMode,
+            value: formatPercentage(props.insights.fastModePercent, formatters().percentage),
           },
       props.insights.mostUsedReasoningEffort === null ||
       props.insights.mostUsedReasoningEffortPercent === null
         ? null
         : {
-            label: "Raciocínio mais usado",
-            value: `${reasoningEffortLabel(props.insights.mostUsedReasoningEffort)} · ${formatPercentage(
+            label: i18n.messages().profile.mostUsedReasoning,
+            value: `${reasoningEffortLabel(
+              props.insights.mostUsedReasoningEffort,
+              i18n.messages().profile,
+            )} · ${formatPercentage(
               props.insights.mostUsedReasoningEffortPercent,
+              formatters().percentage,
             )}`,
           },
       props.insights.uniqueSkillsUsed === null
         ? null
         : {
-            label: "Habilidades exploradas",
-            value: integerFormatter.format(props.insights.uniqueSkillsUsed),
+            label: i18n.messages().profile.skillsExplored,
+            value: formatters().integer.format(props.insights.uniqueSkillsUsed),
           },
       props.insights.totalSkillsUsed === null
         ? null
         : {
-            label: "Total de habilidades usadas",
-            value: integerFormatter.format(props.insights.totalSkillsUsed),
+            label: i18n.messages().profile.totalSkillsUsed,
+            value: formatters().integer.format(props.insights.totalSkillsUsed),
           },
       props.insights.totalThreads === null
         ? null
         : {
-            label: "Total de chats",
-            value: integerFormatter.format(props.insights.totalThreads),
+            label: i18n.messages().profile.totalChats,
+            value: formatters().integer.format(props.insights.totalThreads),
           },
     ].filter(
       (entry): entry is { readonly label: string; readonly value: string } => entry !== null,
@@ -313,12 +335,16 @@ function ProfileInsights(props: {
   const invocations = () => props.insights.topInvocations?.slice(0, TOP_INVOCATIONS_LIMIT) ?? [];
 
   return (
-    <section aria-label="Atividade do Codex" class="profile-insights-grid">
+    <section aria-label={i18n.messages().profile.codexActivity} class="profile-insights-grid">
       <div>
-        <h2>Insights de atividade</h2>
+        <h2>{i18n.messages().profile.activityInsights}</h2>
         <Show
           when={!props.unavailable}
-          fallback={<div class="profile-section-unavailable">Insights indisponíveis.</div>}
+          fallback={
+            <div class="profile-section-unavailable">
+              {i18n.messages().profile.insightsUnavailable}
+            </div>
+          }
         >
           <dl class="profile-insight-list">
             <For each={insightRows()}>
@@ -333,12 +359,14 @@ function ProfileInsights(props: {
         </Show>
       </div>
       <div>
-        <h2>Plugins mais usados</h2>
+        <h2>{i18n.messages().profile.topPlugins}</h2>
         <Show
           when={!props.unavailable && invocations().length > 0}
           fallback={
             <div class="profile-section-unavailable">
-              {props.unavailable ? "Atividade de plugins indisponível." : "Nenhum plugin usado."}
+              {props.unavailable
+                ? i18n.messages().profile.pluginActivityUnavailable
+                : i18n.messages().profile.noPlugins}
             </div>
           }
         >
@@ -354,6 +382,7 @@ function ProfileInsights(props: {
 }
 
 function ProfileInvocation(props: { readonly invocation: AccountProfileInvocation }) {
+  const i18n = useI18n();
   const label = () =>
     props.invocation.type === "skill"
       ? (props.invocation.name.split(":").at(-1) ?? props.invocation.name)
@@ -367,14 +396,17 @@ function ProfileInvocation(props: { readonly invocation: AccountProfileInvocatio
         <span title={props.invocation.name}>{label()}</span>
       </span>
       <small>
-        {props.invocation.usageCount} {props.invocation.usageCount === 1 ? "execução" : "execuções"}
+        {props.invocation.usageCount}{" "}
+        {props.invocation.usageCount === 1
+          ? i18n.messages().profile.oneRun
+          : i18n.messages().profile.manyRuns}
       </small>
     </li>
   );
 }
 
-function formatOptionalCompact(value: number | null): string {
-  return value === null ? "—" : compactNumberFormatter.format(value);
+function formatOptionalCompact(value: number | null, formatter: Intl.NumberFormat): string {
+  return value === null ? "—" : formatter.format(value);
 }
 
 function formatOptionalDuration(seconds: number | null): string {
@@ -390,41 +422,89 @@ function formatOptionalDuration(seconds: number | null): string {
   return minutes > 0 ? `${minutes}m` : `${roundedSeconds}s`;
 }
 
-function formatOptionalDays(value: number | null): string {
+function formatOptionalDays(
+  value: number | null,
+  formatter: Intl.NumberFormat,
+  messages: TranslationMessages["profile"],
+): string {
   if (value === null) {
     return "—";
   }
-  return `${integerFormatter.format(value)} ${value === 1 ? "dia" : "dias"}`;
+  return `${formatter.format(value)} ${value === 1 ? messages.oneDay : messages.manyDays}`;
 }
 
-function formatPercentage(value: number): string {
-  return percentageFormatter.format(value / 100);
+function formatPercentage(value: number, formatter: Intl.NumberFormat): string {
+  return formatter.format(value / 100);
 }
 
-function reasoningEffortLabel(effort: ReasoningEffort): string {
+function reasoningEffortLabel(
+  effort: ReasoningEffort,
+  messages: TranslationMessages["profile"],
+): string {
   switch (effort) {
     case "none":
-      return "Nenhum";
+      return messages.reasoningNone;
     case "minimal":
-      return "Mínimo";
+      return messages.reasoningMinimal;
     case "low":
-      return "Baixo";
+      return messages.reasoningLow;
     case "medium":
-      return "Médio";
+      return messages.reasoningMedium;
     case "high":
-      return "Alto";
+      return messages.reasoningHigh;
     case "xhigh":
-      return "Muito alto";
+      return messages.reasoningVeryHigh;
     case "max":
-      return "Máximo";
+      return messages.reasoningMaximum;
     case "ultra":
       return "Ultra";
   }
 }
 
-function activityCellLabel(dateIso: string, tokens: number, view: ProfileActivityView): string {
-  const date = activityDateFormatter.format(new Date(`${dateIso}T00:00:00.000Z`));
+function activityCellLabel(
+  dateIso: string,
+  tokens: number,
+  view: ProfileActivityView,
+  messages: TranslationMessages["profile"],
+  formatters: ProfileFormatters,
+): string {
+  const date = formatters.activityDate.format(new Date(`${dateIso}T00:00:00.000Z`));
   const prefix =
-    view === "daily" ? "Tokens" : view === "weekly" ? "Tokens na semana" : "Tokens acumulados";
-  return `${prefix}: ${compactNumberFormatter.format(tokens)} em ${date}`;
+    view === "daily"
+      ? messages.tokens
+      : view === "weekly"
+        ? messages.weeklyTokens
+        : messages.cumulativeTokens;
+  return formatMessage(messages.activityCell, {
+    date,
+    prefix,
+    tokens: formatters.compactNumber.format(tokens),
+  });
+}
+
+interface ProfileFormatters {
+  readonly activityDate: Intl.DateTimeFormat;
+  readonly compactNumber: Intl.NumberFormat;
+  readonly integer: Intl.NumberFormat;
+  readonly percentage: Intl.NumberFormat;
+}
+
+function createProfileFormatters(locale: string): ProfileFormatters {
+  return {
+    activityDate: new Intl.DateTimeFormat(locale, {
+      day: "numeric",
+      month: "short",
+      timeZone: "UTC",
+      year: "numeric",
+    }),
+    compactNumber: new Intl.NumberFormat(locale, {
+      maximumFractionDigits: 1,
+      notation: "compact",
+    }),
+    integer: new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }),
+    percentage: new Intl.NumberFormat(locale, {
+      maximumFractionDigits: 0,
+      style: "percent",
+    }),
+  };
 }

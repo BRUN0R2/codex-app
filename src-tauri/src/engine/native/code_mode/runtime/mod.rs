@@ -19,6 +19,10 @@ use super::types::{ExecuteRequest, ToolDefinition, ToolKind};
 
 const EXIT_SENTINEL: &str = "__codex_desktop_code_mode_exit__";
 
+pub(super) fn warm_runtime() -> Result<(), String> {
+    ensure_v8_initialized()
+}
+
 #[derive(Debug)]
 pub(super) enum RuntimeCommand {
     ToolResponse { id: String, result: Value },

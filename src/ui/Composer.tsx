@@ -13,9 +13,12 @@ import type {
   Attachment,
   ChatModelOption,
   CodexModel,
+  ModelDefaults,
   PermissionProfile,
   ReasoningEffort,
 } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage, type TranslationMessages } from "../i18n/messages";
 import { openDesktopDialog as open } from "../infrastructure/codexClient";
 import type { AppController } from "../state/appController";
 import {
@@ -36,6 +39,7 @@ type ComposerController = Pick<
   | "deleteQueuedMessage"
   | "engine"
   | "enqueueMessage"
+  | "ensureModelsForMode"
   | "inspectFiles"
   | "interrupt"
   | "models"
@@ -65,10 +69,13 @@ import {
   saveQueueingEnabled,
 } from "../state/messageQueue";
 import { ContextWindowIndicator } from "./ContextWindowIndicator";
+import { canSubmitComposerMessage, shouldWarmComposerModelCatalog } from "./composerSubmission";
 import { Icon } from "./Icon";
 import { ImagePreview } from "./ImagePreview";
 import { modelContextWindowPreference, resolveModelContextWindow } from "./modelContextWindow";
 import {
+  persistModelDefaults,
+  resolveRuntimeCompatibleModelSelection,
   selectRuntimeCompatibleModel,
   selectRuntimeCompatibleReasoningEffort,
   selectRuntimeCompatibleServiceTier,
@@ -91,8 +98,11 @@ export interface ComposerDraftRequest {
 }
 
 type ModelMenuSection = "effort" | "model" | "serviceTier";
+type ComposerMessages = TranslationMessages["composer"];
 
 export function Composer(props: ComposerProps) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().composer;
   let initialChatSelection: ChatIntelligenceSelection | null = null;
   let initialQueueingEnabled = true;
   let initialPreferenceError: string | null = null;
@@ -126,6 +136,8 @@ export function Composer(props: ComposerProps) {
   let activeDraftKey = currentDraftKey();
   let composerElement: HTMLFormElement | undefined;
   let textArea: HTMLTextAreaElement | undefined;
+  let modelSelectionWriteRevision = 0;
+  let pendingModelSelection: ModelDefaults | null = null;
 
   const configuredModel = createMemo(() =>
     selectRuntimeCompatibleModel(
@@ -154,12 +166,36 @@ export function Composer(props: ComposerProps) {
   const selectedChatOption = createMemo(() => chatIntelligence().option);
   const selectedChatLabel = createMemo(() => {
     const option = selectedChatOption();
-    return option === undefined ? "Carregando" : chatOptionLabel(option);
+    return option === undefined ? messages().loading : chatOptionLabel(option);
   });
   const reasoningOptions = createMemo(() => configuredModel()?.supportedReasoningEfforts ?? []);
-  const canSend = createMemo(
-    () => !sending() && (text().trim().length > 0 || attachments().length > 0),
+  const modelSelectionReady = createMemo(() =>
+    mode() === "chat" ? selectedChatOption() !== undefined : selectedModel() !== undefined,
   );
+  const modelSelectionRequired = createMemo(
+    () => !props.controller.turnBusy() || queueingEnabled(),
+  );
+  const hasDraft = createMemo(() => text().trim().length > 0 || attachments().length > 0);
+  const canSend = createMemo(() =>
+    canSubmitComposerMessage({
+      hasDraft: hasDraft(),
+      modelSelectionRequired: modelSelectionRequired(),
+      modelSelectionReady: modelSelectionReady(),
+      sending: sending(),
+    }),
+  );
+
+  createEffect(() => {
+    if (
+      !shouldWarmComposerModelCatalog({
+        engineReady: props.controller.engine() !== null,
+        hasDraft: hasDraft(),
+      })
+    ) {
+      return;
+    }
+    void props.controller.ensureModelsForMode(mode());
+  });
 
   createEffect(() => {
     if (chatIntelligence().source !== "selectionUnavailable") {
@@ -179,6 +215,15 @@ export function Composer(props: ComposerProps) {
     if (configured === undefined || catalog.length === 0) {
       return;
     }
+    if (
+      pendingModelSelection !== null &&
+      (configured.model !== pendingModelSelection.model ||
+        configured.modelReasoningEffort !== pendingModelSelection.reasoningEffort ||
+        configured.serviceTier !== pendingModelSelection.serviceTier)
+    ) {
+      return;
+    }
+    pendingModelSelection = null;
     applyCodexSelection(configured.model, configured.modelReasoningEffort, configured.serviceTier);
   });
 
@@ -245,7 +290,7 @@ export function Composer(props: ComposerProps) {
   });
 
   function selectNextModel(value: string): void {
-    applyCodexSelection(value, effort(), null);
+    persistModelSelection(applyCodexSelection(value, effort(), null));
   }
 
   function selectNextChatOption(option: ChatModelOption): void {
@@ -270,6 +315,16 @@ export function Composer(props: ComposerProps) {
   }
 
   function resetModelSelection(): void {
+    const defaults = {
+      model: null,
+      reasoningEffort: null,
+      serviceTier: null,
+    } satisfies ModelDefaults;
+    applyCodexSelection(defaults.model, defaults.reasoningEffort, defaults.serviceTier);
+    persistModelSelection(defaults);
+  }
+
+  function restoreConfiguredModelSelection(): void {
     const configured = props.controller.config()?.config;
     applyCodexSelection(
       configured?.model ?? null,
@@ -282,11 +337,49 @@ export function Composer(props: ComposerProps) {
     requestedModel: string | null,
     requestedEffort: ReasoningEffort | null,
     requestedServiceTier: string | null,
-  ): void {
-    const nextModel = selectRuntimeCompatibleModel(props.controller.models(), requestedModel, null);
-    setModel(nextModel?.id ?? null);
-    setEffort(selectRuntimeCompatibleReasoningEffort(nextModel, requestedEffort));
-    setServiceTier(selectRuntimeCompatibleServiceTier(nextModel, requestedServiceTier));
+  ): ModelDefaults {
+    const selection = resolveRuntimeCompatibleModelSelection(
+      props.controller.models(),
+      requestedModel,
+      requestedEffort,
+      requestedServiceTier,
+    );
+    setModel(selection.model);
+    setEffort(selection.reasoningEffort);
+    setServiceTier(selection.serviceTier);
+    return selection;
+  }
+
+  function persistModelSelection(selection: ModelDefaults): void {
+    const revision = ++modelSelectionWriteRevision;
+    pendingModelSelection = selection;
+    void persistModelDefaults(props.controller.updateSetting, selection).then((succeeded) => {
+      if (revision !== modelSelectionWriteRevision) {
+        return;
+      }
+      pendingModelSelection = null;
+      if (!succeeded) {
+        restoreConfiguredModelSelection();
+      }
+    });
+  }
+
+  function selectNextEffort(value: ReasoningEffort): void {
+    setEffort(value);
+    persistModelSelection({
+      model: selectedModel()?.id ?? null,
+      reasoningEffort: value,
+      serviceTier: serviceTier(),
+    });
+  }
+
+  function selectNextServiceTier(value: string | null): void {
+    setServiceTier(value);
+    persistModelSelection({
+      model: selectedModel()?.id ?? null,
+      reasoningEffort: effort(),
+      serviceTier: value,
+    });
   }
 
   async function selectPermission(profile: PermissionProfile): Promise<void> {
@@ -320,6 +413,9 @@ export function Composer(props: ComposerProps) {
       if (props.controller.queuedMessages().length > 0) {
         void props.controller.sendQueuedMessageNow();
       }
+      return;
+    }
+    if (modelSelectionRequired() && !modelSelectionReady()) {
       return;
     }
     if (sending()) {
@@ -458,7 +554,7 @@ export function Composer(props: ComposerProps) {
   return (
     <section class="composer-wrap">
       <Show when={props.controller.queuedMessages().length > 0}>
-        <ul aria-label="Mensagens na fila" class="composer-queue">
+        <ul aria-label={messages().queuedMessages} class="composer-queue">
           <For each={props.controller.queuedMessages()}>
             {(message) => (
               <QueuedMessageRow
@@ -474,7 +570,7 @@ export function Composer(props: ComposerProps) {
         </ul>
       </Show>
       <form
-        aria-label="Compositor"
+        aria-label={messages().label}
         class="composer"
         classList={{ busy: props.controller.turnBusy() }}
         data-mode={mode()}
@@ -501,7 +597,9 @@ export function Composer(props: ComposerProps) {
                       <span>{attachment.name}</span>
                       <small>{formatBytes(attachment.size)}</small>
                       <button
-                        aria-label={`Remover ${attachment.name}`}
+                        aria-label={formatMessage(messages().removeNamed, {
+                          name: attachment.name,
+                        })}
                         onClick={() => removeAttachment(attachment.id)}
                         type="button"
                       >
@@ -518,10 +616,12 @@ export function Composer(props: ComposerProps) {
                       source={attachment.path}
                     />
                     <button
-                      aria-label={`Remover ${attachment.name}`}
+                      aria-label={formatMessage(messages().removeNamed, {
+                        name: attachment.name,
+                      })}
                       class="composer-image-remove"
                       onClick={() => removeAttachment(attachment.id)}
-                      title={`Remover ${attachment.name}`}
+                      title={formatMessage(messages().removeNamed, { name: attachment.name })}
                       type="button"
                     >
                       <Icon name="close" size={12} strokeWidth={2.2} />
@@ -533,7 +633,7 @@ export function Composer(props: ComposerProps) {
           </div>
         </Show>
         <textarea
-          aria-label={composerPlaceholder(mode())}
+          aria-label={composerPlaceholder(mode(), messages())}
           maxlength={COMPOSER_MESSAGE_MAXIMUM_CHARACTERS}
           onInput={(event) => {
             setText(event.currentTarget.value);
@@ -546,7 +646,7 @@ export function Composer(props: ComposerProps) {
             }
           }}
           onPaste={(event) => void handlePaste(event)}
-          placeholder={composerPlaceholder(mode())}
+          placeholder={composerPlaceholder(mode(), messages())}
           ref={textArea}
           rows={1}
           value={text()}
@@ -558,7 +658,7 @@ export function Composer(props: ComposerProps) {
                 aria-controls="composer-add-menu"
                 aria-expanded={addMenuOpen()}
                 aria-haspopup="menu"
-                aria-label="Adicionar arquivos ou projeto"
+                aria-label={messages().addFilesOrProject}
                 class="add-button"
                 classList={{ active: addMenuOpen() }}
                 disabled={props.controller.turnBusy()}
@@ -568,19 +668,19 @@ export function Composer(props: ComposerProps) {
                   setModelMenuOpen(false);
                   setModelMenuSection(null);
                 }}
-                title="Adicionar"
+                title={messages().add}
                 type="button"
               >
                 <Icon name="plus" size={17} />
               </button>
               <Show when={addMenuOpen()}>
                 <div
-                  aria-label="Adicionar"
+                  aria-label={messages().add}
                   class="composer-popover add-menu"
                   id="composer-add-menu"
                   role="menu"
                 >
-                  <header>Adicionar</header>
+                  <header>{messages().add}</header>
                   <button
                     disabled={attachments().length >= COMPOSER_ATTACHMENT_MAXIMUM_COUNT}
                     onClick={() => {
@@ -592,8 +692,8 @@ export function Composer(props: ComposerProps) {
                   >
                     <Icon name="paperclip" size={16} />
                     <span>
-                      <strong>Arquivos</strong>
-                      <small>Até 12 anexos por mensagem</small>
+                      <strong>{messages().files}</strong>
+                      <small>{messages().attachmentLimit}</small>
                     </span>
                   </button>
                   <Show when={mode() !== "chat"}>
@@ -609,10 +709,10 @@ export function Composer(props: ComposerProps) {
                       <span>
                         <strong>
                           {props.controller.workspace() === null
-                            ? "Escolher projeto"
-                            : "Trocar projeto"}
+                            ? messages().chooseProject
+                            : messages().switchProject}
                         </strong>
-                        <small>Defina a pasta de trabalho desta tarefa</small>
+                        <small>{messages().workspaceDescription}</small>
                       </span>
                     </button>
                   </Show>
@@ -638,18 +738,25 @@ export function Composer(props: ComposerProps) {
                     setModelMenuOpen(false);
                     setModelMenuSection(null);
                   }}
-                  title="Permissões"
+                  title={messages().permissions}
                   type="button"
                 >
                   <Icon name="shield" size={15} />
                   <span>
-                    {permissionLabel(props.controller.config()?.config.permissionProfile.sandbox)}
+                    {permissionLabel(
+                      props.controller.config()?.config.permissionProfile.sandbox,
+                      messages(),
+                    )}
                   </span>
                 </button>
                 <Show when={permissionMenuOpen()}>
-                  <div aria-label="Permissões" class="composer-popover permission-menu" role="menu">
+                  <div
+                    aria-label={messages().permissions}
+                    class="composer-popover permission-menu"
+                    role="menu"
+                  >
                     <header>
-                      <strong>Como as ações do Codex devem ser aprovadas?</strong>
+                      <strong>{messages().permissionQuestion}</strong>
                       <button
                         onClick={() => {
                           setPermissionMenuOpen(false);
@@ -657,7 +764,7 @@ export function Composer(props: ComposerProps) {
                         }}
                         type="button"
                       >
-                        Configurações
+                        {messages().settings}
                       </button>
                     </header>
                     <For each={props.controller.engine()?.permissionProfiles ?? []}>
@@ -682,8 +789,8 @@ export function Composer(props: ComposerProps) {
                         >
                           <Icon name="shield" size={16} />
                           <span>
-                            <strong>{permissionLabel(profile.sandbox)}</strong>
-                            <small>{permissionDescription(profile)}</small>
+                            <strong>{permissionLabel(profile.sandbox, messages())}</strong>
+                            <small>{permissionDescription(profile, messages())}</small>
                           </span>
                           <Show
                             when={samePermission(
@@ -716,7 +823,7 @@ export function Composer(props: ComposerProps) {
                     setModelMenuSection(null);
                     setPermissionMenuOpen(false);
                   }}
-                  title="Modelo e nível de raciocínio"
+                  title={messages().modelAndReasoning}
                   type="button"
                 >
                   <span class="model-button-effort">{selectedChatLabel()}</span>
@@ -724,12 +831,12 @@ export function Composer(props: ComposerProps) {
                 </button>
                 <Show when={modelMenuOpen()}>
                   <div
-                    aria-label="Modelo e nível de raciocínio"
+                    aria-label={messages().modelAndReasoning}
                     class="composer-popover model-menu chat-intelligence-menu"
                     role="menu"
                   >
                     <div class="chat-intelligence-heading">
-                      <span>Modelo do ChatGPT</span>
+                      <span>{messages().chatModel}</span>
                     </div>
                     <ChatModelMenuOptions
                       model={selectedChatOption()}
@@ -749,7 +856,7 @@ export function Composer(props: ComposerProps) {
                         role="menuitem"
                         type="button"
                       >
-                        <span>Redefinir para o padrão</span>
+                        <span>{messages().resetDefault}</span>
                         <Icon name="reset" size={14} />
                       </button>
                     </Show>
@@ -775,18 +882,18 @@ export function Composer(props: ComposerProps) {
                     setModelMenuSection(null);
                     setPermissionMenuOpen(false);
                   }}
-                  title="Modelo, raciocínio e velocidade"
+                  title={messages().modelReasoningSpeed}
                   type="button"
                 >
                   <Show when={serviceTier() !== null}>
                     <span class="model-speed-indicator">
                       <Icon name="bolt" size={13} />
-                      <span class="visually-hidden">Modo rápido ativo</span>
+                      <span class="visually-hidden">{messages().fastModeActive}</span>
                     </span>
                   </Show>
                   <span class="model-button-name">
                     {selectedModel() === undefined
-                      ? "Carregando"
+                      ? messages().loading
                       : compactModelName(selectedModel()?.displayName ?? "")}
                   </span>
                   <Show when={effort()}>
@@ -795,7 +902,7 @@ export function Composer(props: ComposerProps) {
                         class="model-button-effort"
                         classList={{ ultra: selectedEffort() === "ultra" }}
                       >
-                        {effortLabel(selectedEffort())}
+                        {effortLabel(selectedEffort(), messages())}
                       </span>
                     )}
                   </Show>
@@ -803,33 +910,33 @@ export function Composer(props: ComposerProps) {
                 </button>
                 <Show when={modelMenuOpen()}>
                   <div
-                    aria-label="Modelo e raciocínio"
+                    aria-label={messages().modelAndReasoningMenu}
                     class="composer-popover model-menu"
                     role="menu"
                   >
                     <ModelMenuRow
                       active={modelMenuSection() === "model"}
-                      label="Modelo"
+                      label={messages().model}
                       onActivate={() => setModelMenuSection("model")}
                       value={
                         selectedModel() === undefined
-                          ? "Carregando"
+                          ? messages().loading
                           : compactModelName(selectedModel()?.displayName ?? "")
                       }
                     />
                     <ModelMenuRow
                       active={modelMenuSection() === "effort"}
                       disabled={reasoningOptions().length === 0}
-                      label="Esforço"
+                      label={messages().effort}
                       onActivate={() => setModelMenuSection("effort")}
-                      value={selectedEffortLabel(effort())}
+                      value={selectedEffortLabel(effort(), messages())}
                       valueTone={effort() === "ultra" ? "ultra" : undefined}
                     />
                     <ModelMenuRow
                       active={modelMenuSection() === "serviceTier"}
-                      label="Velocidade"
+                      label={messages().speed}
                       onActivate={() => setModelMenuSection("serviceTier")}
-                      value={serviceTierLabel(selectedModel(), serviceTier())}
+                      value={serviceTierLabel(selectedModel(), serviceTier(), messages())}
                     />
                     <button
                       class="model-reset-button"
@@ -840,7 +947,7 @@ export function Composer(props: ComposerProps) {
                       role="menuitem"
                       type="button"
                     >
-                      <span>Redefinir para o padrão</span>
+                      <span>{messages().resetDefault}</span>
                       <Icon name="reset" size={14} />
                     </button>
                     <Show when={modelMenuSection()}>
@@ -850,7 +957,7 @@ export function Composer(props: ComposerProps) {
                           model={selectedModel()}
                           models={props.controller.models()}
                           onSelectEffort={(value) => {
-                            setEffort(value);
+                            selectNextEffort(value);
                             closeComposerMenus();
                           }}
                           onSelectModel={(value) => {
@@ -858,7 +965,7 @@ export function Composer(props: ComposerProps) {
                             closeComposerMenus();
                           }}
                           onSelectServiceTier={(value) => {
-                            setServiceTier(value);
+                            selectNextServiceTier(value);
                             closeComposerMenus();
                           }}
                           section={section()}
@@ -874,10 +981,10 @@ export function Composer(props: ComposerProps) {
               when={!props.controller.turnBusy() || canSend()}
               fallback={
                 <button
-                  aria-label="Interromper turno"
+                  aria-label={messages().interruptTurn}
                   class="send-button stop-button"
                   onClick={() => void props.controller.interrupt()}
-                  title="Interromper"
+                  title={messages().interrupt}
                   type="button"
                 >
                   <Icon name="stop" size={14} />
@@ -887,18 +994,20 @@ export function Composer(props: ComposerProps) {
               <button
                 aria-label={
                   props.controller.turnBusy() && queueingEnabled()
-                    ? "Adicionar mensagem à fila"
-                    : "Enviar mensagem"
+                    ? messages().queueMessage
+                    : messages().sendMessage
                 }
                 class="send-button"
                 disabled={!canSend()}
                 onClick={() => void send()}
                 title={
                   props.controller.turnBusy() && queueingEnabled()
-                    ? "Adicionar à fila"
+                    ? messages().addToQueue
                     : props.controller.turnBusy()
-                      ? "Orientar agora"
-                      : "Enviar"
+                      ? messages().steerNow
+                      : modelSelectionReady()
+                        ? messages().send
+                        : messages().waitForModels
                 }
                 type="button"
               >
@@ -929,13 +1038,17 @@ interface QueuedMessageRowProps {
 }
 
 function QueuedMessageRow(props: QueuedMessageRowProps) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().composer;
   const summary = () => {
     const message = props.message.text.trim();
     if (message.length > 0) {
       return message;
     }
     const count = props.message.attachments.length;
-    return count === 1 ? "1 anexo" : `${count} anexos`;
+    return count === 1
+      ? messages().oneAttachment
+      : formatMessage(messages().manyAttachments, { count });
   };
 
   return (
@@ -945,23 +1058,23 @@ function QueuedMessageRow(props: QueuedMessageRowProps) {
       <div class="queued-message-actions">
         <button class="queued-message-steer" onClick={props.onSendNow} type="button">
           <Icon name="cornerDownLeft" size={13} strokeWidth={1.7} />
-          Orientar
+          {messages().steer}
         </button>
-        <button aria-label="Excluir mensagem da fila" onClick={props.onDelete} type="button">
+        <button aria-label={messages().deleteQueuedMessage} onClick={props.onDelete} type="button">
           <Icon name="trash" size={14} strokeWidth={1.7} />
         </button>
         <details class="queued-message-more">
-          <summary aria-label="Mais ações para a mensagem">
+          <summary aria-label={messages().moreMessageActions}>
             <Icon name="more" size={14} />
           </summary>
           <div class="queued-message-menu" role="menu">
             <button onClick={props.onEdit} role="menuitem" type="button">
               <Icon name="edit" size={14} strokeWidth={1.7} />
-              Editar mensagem
+              {messages().editMessage}
             </button>
             <button onClick={props.onToggleQueueing} role="menuitem" type="button">
               <Icon name="stop" size={13} strokeWidth={1.7} />
-              {props.queueingEnabled ? "Desativar fila" : "Ativar fila"}
+              {props.queueingEnabled ? messages().disableQueue : messages().enableQueue}
             </button>
           </div>
         </details>
@@ -1036,9 +1149,11 @@ function ModelMenuOptions(props: {
   readonly section: ModelMenuSection;
   readonly serviceTier: string | null;
 }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().composer;
   return (
     <div
-      aria-label={modelMenuSectionLabel(props.section)}
+      aria-label={modelMenuSectionLabel(props.section, messages())}
       class={`composer-popover model-submenu model-submenu-${props.section}`}
       role="menu"
     >
@@ -1084,15 +1199,15 @@ function ModelMenuOptions(props: {
                   disabled={unsupported}
                   onClick={() => props.onSelectEffort(option.reasoningEffort)}
                   role="menuitemradio"
-                  title={unsupported ? "Requer execução multiagente neste runtime." : undefined}
+                  title={unsupported ? messages().multiAgentRequiredTitle : undefined}
                   type="button"
                 >
                   <span class="model-menu-option-copy">
                     <strong classList={{ "tone-ultra": option.reasoningEffort === "ultra" }}>
-                      {effortLabel(option.reasoningEffort)}
+                      {effortLabel(option.reasoningEffort, messages())}
                     </strong>
                     <Show when={unsupported}>
-                      <small>Requer execução multiagente</small>
+                      <small>{messages().multiAgentRequired}</small>
                     </Show>
                   </span>
                   <Show when={option.reasoningEffort === props.effort}>
@@ -1113,8 +1228,8 @@ function ModelMenuOptions(props: {
             type="button"
           >
             <span class="model-menu-option-copy">
-              <strong>Padrão</strong>
-              <small>Velocidade padrão</small>
+              <strong>{messages().default}</strong>
+              <small>{messages().defaultSpeed}</small>
             </span>
             <Show when={props.serviceTier === null}>
               <Icon name="check" size={15} />
@@ -1146,14 +1261,14 @@ function ModelMenuOptions(props: {
   );
 }
 
-function modelMenuSectionLabel(section: ModelMenuSection): string {
+function modelMenuSectionLabel(section: ModelMenuSection, messages: ComposerMessages): string {
   switch (section) {
     case "model":
-      return "Modelo";
+      return messages.model;
     case "effort":
-      return "Esforço";
+      return messages.effort;
     case "serviceTier":
-      return "Velocidade";
+      return messages.speed;
   }
 }
 
@@ -1171,13 +1286,13 @@ function mergeAttachments(
     }
   }
   if (result.length > COMPOSER_ATTACHMENT_MAXIMUM_COUNT) {
-    throw new Error("Uma mensagem aceita no máximo 12 anexos.");
+    throw new Error("A message accepts at most 12 attachments.");
   }
   return result;
 }
 
 function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "Não foi possível processar os anexos.";
+  return reason instanceof Error ? reason.message : "The attachments could not be processed.";
 }
 
 function resizeTextArea(element: HTMLTextAreaElement | undefined): void {
@@ -1199,52 +1314,52 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(chunks.join(""));
 }
 
-function effortLabel(effort: ReasoningEffort): string {
+function effortLabel(effort: ReasoningEffort, messages: ComposerMessages): string {
   switch (effort) {
     case "none":
-      return "Sem raciocínio";
+      return messages.reasoningNone;
     case "minimal":
-      return "Mínimo";
+      return messages.reasoningMinimal;
     case "low":
-      return "Baixo";
+      return messages.reasoningLow;
     case "medium":
-      return "Médio";
+      return messages.reasoningMedium;
     case "high":
-      return "Alto";
+      return messages.reasoningHigh;
     case "xhigh":
-      return "Extra alto";
+      return messages.reasoningExtraHigh;
     case "max":
-      return "Máximo";
+      return messages.reasoningMaximum;
     case "ultra":
-      return "Ultra";
+      return messages.reasoningUltra;
   }
 }
 
-function selectedEffortLabel(effort: ReasoningEffort | null): string {
-  return effort === null ? "Padrão" : effortLabel(effort);
+function selectedEffortLabel(effort: ReasoningEffort | null, messages: ComposerMessages): string {
+  return effort === null ? messages.default : effortLabel(effort, messages);
 }
 
-function permissionLabel(mode: string | undefined): string {
+function permissionLabel(mode: string | undefined, messages: ComposerMessages): string {
   switch (mode) {
     case "read-only":
-      return "Somente leitura";
+      return messages.readOnly;
     case "workspace-write":
-      return "Aprovar por mim";
+      return messages.approveForMe;
     case "danger-full-access":
-      return "Acesso completo";
+      return messages.fullAccess;
     default:
-      return "Permissões";
+      return messages.permissions;
   }
 }
 
-function permissionDescription(profile: PermissionProfile): string {
+function permissionDescription(profile: PermissionProfile, messages: ComposerMessages): string {
   switch (profile.sandbox) {
     case "read-only":
-      return "Lê arquivos sem modificar o projeto.";
+      return messages.readOnlyDescription;
     case "workspace-write":
-      return "Edita o projeto e solicita aprovação quando necessário.";
+      return messages.approveForMeDescription;
     case "danger-full-access":
-      return "Acessa qualquer arquivo e executa comandos sem aprovação.";
+      return messages.fullAccessDescription;
   }
 }
 
@@ -1258,9 +1373,13 @@ function compactModelName(displayName: string): string {
   return displayName.replace(/^gpt[- ]?/iu, "").replaceAll("-", " ");
 }
 
-function serviceTierLabel(model: CodexModel | undefined, serviceTier: string | null): string {
+function serviceTierLabel(
+  model: CodexModel | undefined,
+  serviceTier: string | null,
+  messages: ComposerMessages,
+): string {
   if (serviceTier === null) {
-    return "Padrão";
+    return messages.default;
   }
   return model?.serviceTiers.find((tier) => tier.id === serviceTier)?.name ?? serviceTier;
 }
@@ -1271,13 +1390,13 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1_048_576).toFixed(1)} MB`;
 }
 
-function composerPlaceholder(mode: "chat" | "work" | "codex"): string {
+function composerPlaceholder(mode: "chat" | "work" | "codex", messages: ComposerMessages): string {
   switch (mode) {
     case "chat":
-      return "Mensagem para o ChatGPT";
+      return messages.chatPlaceholder;
     case "work":
-      return "Trabalhe com o ChatGPT";
+      return messages.workPlaceholder;
     case "codex":
-      return "Peça qualquer coisa";
+      return messages.codexPlaceholder;
   }
 }

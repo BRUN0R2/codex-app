@@ -1,4 +1,5 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { useI18n } from "../i18n/context";
 import { openExternalUrl } from "../infrastructure/codexClient";
 import { presentAssistantText } from "./contentReferenceMarkers";
 import { frontendFailureMessage, useFrontendFailureReporter } from "./frontendFailure";
@@ -20,6 +21,7 @@ export interface MarkdownProps {
 }
 
 export function Markdown(props: MarkdownProps) {
+  const i18n = useI18n();
   let element: HTMLDivElement | undefined;
   let tailStart: Comment | undefined;
   let tailEnd: Comment | undefined;
@@ -56,7 +58,7 @@ export function Markdown(props: MarkdownProps) {
           }
           pendingMarkdownRender = undefined;
           reportFailure(
-            frontendFailureMessage("Falha ao renderizar Markdown em segundo plano", reason),
+            frontendFailureMessage("Failed to render Markdown off the main thread", reason),
           );
           applyRenderUpdate(markdownRenderer.render(source, "final"));
         });
@@ -129,7 +131,7 @@ export function Markdown(props: MarkdownProps) {
     const url = safeExternalUrl(href);
     if (url !== null) {
       void openExternalUrl(url).catch((error: unknown) => {
-        reportFailure(frontendFailureMessage("Falha ao abrir o link externo", error));
+        reportFailure(frontendFailureMessage("Failed to open the external link", error));
       });
     }
   }
@@ -154,7 +156,7 @@ export function Markdown(props: MarkdownProps) {
       return;
     }
     viewer.open({
-      alt: image.alt || "Imagem enviada pelo Codex",
+      alt: image.alt || i18n.messages().imagePreview.sentByCodex,
       name: image.title || image.alt || undefined,
       src: source,
     });
@@ -185,9 +187,7 @@ export function Markdown(props: MarkdownProps) {
         .catch((reason: unknown) => {
           if (image.isConnected && image.getAttribute("data-image-source") === source) {
             image.classList.add("image-load-failed");
-            reportFailure(
-              frontendFailureMessage(`Falha ao carregar a imagem \`${source}\``, reason),
-            );
+            reportFailure(frontendFailureMessage(`Failed to load image \`${source}\``, reason));
           }
         })
         .finally(() => {

@@ -83,7 +83,7 @@ function readDocumentPathCache(document: DiffDocument, path: string): CachedDocu
     while (paths.size > MAX_PATHS_PER_DOCUMENT) {
       const oldestPath = paths.keys().next().value;
       if (oldestPath === undefined) {
-        throw new Error("A cache sintática perdeu o caminho candidato à expulsão.");
+        throw new Error("The syntax cache lost its path eviction candidate.");
       }
       paths.delete(oldestPath);
     }
@@ -102,7 +102,7 @@ function storeHunk(cache: CachedDocumentPath, hunkIndex: number, entry: CachedHu
   ) {
     const oldest = cache.entries.keys().next().value;
     if (oldest === undefined) {
-      throw new Error("A cache sintática perdeu o hunk candidato à expulsão.");
+      throw new Error("The syntax cache lost its hunk eviction candidate.");
     }
     const removed = cache.entries.get(oldest);
     cache.entries.delete(oldest);
@@ -140,7 +140,7 @@ function trimCache(cache: CachedDocumentPath, protectedHunkIndex: number): void 
   while (cache.entries.size > 1 && cache.estimatedBytes > MAX_CACHE_ESTIMATED_BYTES) {
     const oldest = cache.entries.keys().next().value;
     if (oldest === undefined || oldest === protectedHunkIndex) {
-      throw new Error("A cache sintática perdeu a ordem de recência dos hunks.");
+      throw new Error("The syntax cache lost the hunk recency order.");
     }
     const removed = cache.entries.get(oldest);
     cache.entries.delete(oldest);

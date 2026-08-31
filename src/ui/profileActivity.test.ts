@@ -14,6 +14,7 @@ describe("profile activity", () => {
       ],
       "2026-08-23",
       "daily",
+      "en",
     );
 
     expect(projection.cells).toHaveLength(364);
@@ -38,6 +39,7 @@ describe("profile activity", () => {
       ],
       "2026-08-23",
       "daily",
+      "en",
     );
 
     expect(
@@ -52,8 +54,8 @@ describe("profile activity", () => {
       { date: "2026-08-15", tokens: 10 },
       { date: "2026-08-22", tokens: 30 },
     ] as const;
-    const weekly = projectProfileActivity(usage, "2026-08-23", "weekly");
-    const cumulative = projectProfileActivity(usage, "2026-08-23", "cumulative");
+    const weekly = projectProfileActivity(usage, "2026-08-23", "weekly", "en");
+    const cumulative = projectProfileActivity(usage, "2026-08-23", "cumulative", "en");
     const weeklyColumn = weekly.cells.slice(51 * 7, 52 * 7).map((cell) => cell.level);
     const cumulativeColumn = cumulative.cells.slice(51 * 7, 52 * 7).map((cell) => cell.level);
 
@@ -69,7 +71,7 @@ describe("profile activity", () => {
 
   it("formats today in UTC and emits sparse month labels", () => {
     expect(profileTodayIso(new Date("2026-08-23T23:59:59.000Z"))).toBe("2026-08-23");
-    const projection = projectProfileActivity([], "2026-08-23", "daily");
+    const projection = projectProfileActivity([], "2026-08-23", "daily", "en");
 
     expect(projection.monthLabels.length).toBeGreaterThanOrEqual(10);
     expect(

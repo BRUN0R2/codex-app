@@ -1,5 +1,5 @@
 export const ACTIVITY_SHIMMER_DURATION_MS = 1_000;
-export const ACTIVITY_SHIMMER_INTERVAL_MS = 4_000;
+export const ACTIVITY_SHIMMER_INTERVAL_MS = 1_200;
 export const ACTIVITY_SHIMMER_INITIAL_DELAY_MS = 600;
 
 export function scheduleCadencedActivityShimmer(setActive: (active: boolean) => void): () => void {

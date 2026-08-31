@@ -21,11 +21,11 @@ const MAX_CALLBACK_CONNECTIONS: usize = 32;
 const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
 
 const SUCCESS_HTML: &str = r#"<!doctype html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Validação concluída</title>
+  <title>Validation complete</title>
   <style>
     :root { color-scheme: dark; font-family: Inter, "Segoe UI", sans-serif; }
     body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #171817; color: #f4f4f2; }
@@ -34,15 +34,15 @@ const SUCCESS_HTML: &str = r#"<!doctype html>
     p { margin: 0; color: #c7c7c2; font-size: 16px; line-height: 1.5; }
   </style>
 </head>
-<body><main><h1>Login concluído</h1><p>A conta ChatGPT foi conectada com segurança. Pode fechar esta janela.</p></main></body>
+<body><main><h1>Login complete</h1><p>The ChatGPT account was connected securely. You can close this window.</p></main></body>
 </html>"#;
 
 const ERROR_HTML: &str = r#"<!doctype html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Não foi possível concluir o login</title>
+  <title>Login could not be completed</title>
   <style>
     :root { color-scheme: dark; font-family: Inter, "Segoe UI", sans-serif; }
     body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #171817; color: #f4f4f2; }
@@ -51,7 +51,7 @@ const ERROR_HTML: &str = r#"<!doctype html>
     p { margin: 0; color: #c7c7c2; font-size: 16px; line-height: 1.5; }
   </style>
 </head>
-<body><main><h1>Não foi possível concluir o login</h1><p>Volte ao aplicativo para ver os detalhes e tentar novamente.</p></main></body>
+<body><main><h1>Login could not be completed</h1><p>Return to the application for details and try again.</p></main></body>
 </html>"#;
 
 pub(super) struct CallbackServer {

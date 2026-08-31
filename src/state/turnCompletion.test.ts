@@ -41,6 +41,26 @@ describe("turn completion reducer", () => {
     expect(thread.turns[0]?.items.map((item) => item.id)).toEqual([command.id, commentary.id]);
   });
 
+  it("inserts a terminal item at its causal slot without materializing its started payload", () => {
+    const command = runningCommand();
+    const commentary: ThreadItem = {
+      type: "agentMessage",
+      id: "commentary-later",
+      text: "Comentário mais recente",
+      phase: "commentary",
+    };
+    const causalOrder = [command.id, commentary.id];
+    let thread = applyTurnItem(threadFixture("inProgress"), "turn-a", commentary, causalOrder);
+    thread = applyTurnItem(
+      thread,
+      "turn-a",
+      { ...command, status: "completed", processId: null, liveOutput: null },
+      causalOrder,
+    );
+
+    expect(thread.turns[0]?.items.map((item) => item.id)).toEqual([command.id, commentary.id]);
+  });
+
   it("cannot leave an in-progress activity inside a terminal turn", () => {
     const thread = applyTurnItem(threadFixture("inProgress"), "turn-a", runningCommand());
     const completed = applyTurnCompletion(thread, completionFixture());
@@ -59,18 +79,18 @@ describe("turn completion reducer", () => {
         ...completionFixture(),
         id: "missing",
       }),
-    ).toThrow("não pertence");
+    ).toThrow("does not belong");
 
     const completed = applyTurnCompletion(threadFixture("inProgress"), completionFixture());
     expect(() =>
       applyTurnCompletion(completed, { ...completionFixture(), status: "completed" }),
-    ).toThrow("conflitantes");
+    ).toThrow("conflicting completions");
     expect(() =>
       applyTurnCompletion(threadFixture("inProgress"), {
         ...completionFixture(),
         updatedAt: 0,
       }),
-    ).toThrow("antes de ser criado");
+    ).toThrow("before it was created");
   });
 });
 

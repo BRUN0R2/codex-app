@@ -45,8 +45,8 @@ pub(in crate::engine::native) struct ReadToolCacheKey {
 enum ReadToolOperationKey {
     ReadFile {
         path: String,
-        start_line: u32,
-        end_line: u32,
+        start_line: Option<u32>,
+        end_line: Option<u32>,
     },
     ListFiles {
         path: String,

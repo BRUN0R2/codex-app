@@ -21,13 +21,13 @@ export function loadChatIntelligenceSelection(): ChatIntelligenceSelection | nul
     return null;
   }
   if (raw.length > MAX_STORED_VALUE_CHARACTERS) {
-    throw new Error("A seleção de modelo do Chat excede o limite permitido.");
+    throw new Error("The Chat model selection exceeds the allowed limit.");
   }
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch (reason) {
-    throw new Error(`A seleção de modelo do Chat contém JSON inválido: ${describe(reason)}`);
+    throw new Error(`The Chat model selection contains invalid JSON: ${describe(reason)}`);
   }
   return decodeChatIntelligenceSelection(value);
 }
@@ -71,7 +71,7 @@ export function chatOptionLabel(option: ChatModelOption): string {
 
 function decodeChatIntelligenceSelection(value: unknown): ChatIntelligenceSelection {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("A seleção de modelo do Chat não é um objeto.");
+    throw new Error("The Chat model selection is not an object.");
   }
   const object = value as {
     readonly optionId?: unknown;
@@ -79,10 +79,10 @@ function decodeChatIntelligenceSelection(value: unknown): ChatIntelligenceSelect
   };
   const keys = Object.keys(object).sort();
   if (keys.join(",") !== "optionId,version") {
-    throw new Error("A seleção de modelo do Chat possui campos incompatíveis.");
+    throw new Error("The Chat model selection has incompatible fields.");
   }
   if (object.version !== 2) {
-    throw new Error("A versão da seleção de modelo do Chat não é suportada.");
+    throw new Error("The Chat model selection version is unsupported.");
   }
   return {
     version: 2,
@@ -97,11 +97,11 @@ function optionId(value: unknown): string {
     value.length > MAX_MODEL_OPTION_ID_CHARACTERS ||
     /\p{Cc}/u.test(value)
   ) {
-    throw new Error("A opção de modelo selecionada para o Chat é inválida.");
+    throw new Error("The selected Chat model option is invalid.");
   }
   return value;
 }
 
 function describe(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "erro desconhecido";
+  return reason instanceof Error ? reason.message : "unknown error";
 }

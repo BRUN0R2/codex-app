@@ -22,7 +22,7 @@ export function loadProjects(): readonly ProjectRecord[] {
   try {
     value = JSON.parse(raw);
   } catch (reason) {
-    throw new Error(`A lista local de projetos contém JSON inválido: ${describe(reason)}`);
+    throw new Error(`The local project list contains invalid JSON: ${describe(reason)}`);
   }
   return decodeStoredProjects(value).projects;
 }
@@ -42,7 +42,7 @@ export function addProject(
     return projects;
   }
   if (projects.length >= MAX_PROJECTS) {
-    throw new Error(`O aplicativo aceita no máximo ${MAX_PROJECTS} projetos fixados.`);
+    throw new Error(`The application accepts at most ${MAX_PROJECTS} pinned projects.`);
   }
   return [{ name: projectName(normalized), path: normalized }, ...projects];
 }
@@ -88,36 +88,36 @@ export function normalizeProjectPath(path: string): string {
 
 function decodeStoredProjects(value: unknown): StoredProjects {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("A lista local de projetos não é um objeto.");
+    throw new Error("The local project list is not an object.");
   }
   const object = value as Record<"projects" | "version", unknown>;
   const keys = Object.keys(object).sort();
   if (keys.length !== 2 || keys[0] !== "projects" || keys[1] !== "version") {
-    throw new Error("A lista local de projetos possui campos incompatíveis.");
+    throw new Error("The local project list has incompatible fields.");
   }
   if (object.version !== 1 || !Array.isArray(object.projects)) {
-    throw new Error("A versão da lista local de projetos não é suportada.");
+    throw new Error("The local project list version is not supported.");
   }
   if (object.projects.length > MAX_PROJECTS) {
-    throw new Error(`A lista local excede ${MAX_PROJECTS} projetos.`);
+    throw new Error(`The local list exceeds ${MAX_PROJECTS} projects.`);
   }
   const seen = new Set<string>();
   const projects = object.projects.map((entry, index) => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error(`O projeto ${index + 1} é inválido.`);
+      throw new Error(`Project ${index + 1} is invalid.`);
     }
     const project = entry as Record<"color" | "icon" | "name" | "path", unknown>;
     const path = validatePath(project.path);
     const name = project.name;
     if (typeof name !== "string" || name.length === 0 || name.length > MAX_NAME_CHARACTERS) {
-      throw new Error(`O nome do projeto ${index + 1} é inválido.`);
+      throw new Error(`Project ${index + 1} has an invalid name.`);
     }
     const icon =
       typeof project.icon === "string" && isIconName(project.icon) ? project.icon : undefined;
     const color = project.color === undefined ? undefined : normalizeProjectColor(project.color);
     const comparison = normalizeForComparison(path);
     if (seen.has(comparison)) {
-      throw new Error(`O projeto ${index + 1} está duplicado.`);
+      throw new Error(`Project ${index + 1} is duplicated.`);
     }
     seen.add(comparison);
     return { name, path, ...(icon ? { icon } : {}), ...(color ? { color } : {}) };
@@ -136,14 +136,14 @@ function validatePath(value: unknown): string {
     value.length > MAX_PATH_CHARACTERS ||
     /\p{Cc}/u.test(value)
   ) {
-    throw new Error("O caminho do projeto é inválido.");
+    throw new Error("The project path is invalid.");
   }
   const normalized = value.replaceAll("/", "\\");
   const driveRoot = /^[A-Za-z]:\\$/u.test(normalized);
   const driveAbsolute = /^[A-Za-z]:\\.+/u.test(normalized);
   const uncAbsolute = /^\\\\[^\\]+\\[^\\]+(?:\\.*)?$/u.test(normalized);
   if (!driveRoot && !driveAbsolute && !uncAbsolute) {
-    throw new Error("O caminho do projeto deve ser absoluto no Windows.");
+    throw new Error("The project path must be absolute on Windows.");
   }
   return driveRoot ? normalized : normalized.replace(/\\+$/u, "");
 }
@@ -161,5 +161,5 @@ export function projectName(path: string): string {
 }
 
 function describe(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "erro desconhecido";
+  return reason instanceof Error ? reason.message : "unknown error";
 }

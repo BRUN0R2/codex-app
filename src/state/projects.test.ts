@@ -47,7 +47,7 @@ describe("project storage", () => {
 
   it("normalizes separators without accepting drive-relative paths", () => {
     expect(addProject([], "D:/code/project/")[0]?.path).toBe("D:\\code\\project");
-    expect(() => addProject([], "D:project")).toThrow("absoluto");
+    expect(() => addProject([], "D:project")).toThrow("absolute");
   });
 
   it("preserves project order when selecting an existing project", () => {

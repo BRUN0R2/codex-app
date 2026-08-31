@@ -28,12 +28,39 @@ export interface RetainedIdentityComparison {
   readonly retainedCount: number;
 }
 
+export function chromiumAuditArguments(userDataDirectory: string): readonly string[] {
+  if (!path.isAbsolute(userDataDirectory)) {
+    throw new Error("The temporary browser profile must use an absolute path.");
+  }
+  return [
+    "--headless=new",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-breakpad",
+    "--disable-component-update",
+    "--disable-default-apps",
+    "--disable-features=Translate",
+    "--disable-renderer-backgrounding",
+    "--disable-sync",
+    "--edge-skip-compat-layer-relaunch",
+    "--enable-smooth-scrolling",
+    "--force-prefers-no-reduced-motion",
+    "--hide-scrollbars",
+    "--metrics-recording-only",
+    "--no-first-run",
+    "--remote-debugging-port=0",
+    `--user-data-dir=${userDataDirectory}`,
+    "about:blank",
+  ];
+}
+
 export function loopbackHttpOrigin(address: AddressInfo | string | null): string {
   if (address === null || typeof address === "string") {
-    throw new Error("O servidor visual não publicou um endereço TCP.");
+    throw new Error("The visual server did not publish a TCP address.");
   }
   if (!Number.isSafeInteger(address.port) || address.port < 1 || address.port > 65_535) {
-    throw new Error(`O servidor visual publicou uma porta inválida: ${address.port}.`);
+    throw new Error(`The visual server published an invalid port: ${address.port}.`);
   }
   return `http://127.0.0.1:${address.port}`;
 }
@@ -78,21 +105,21 @@ export function observeProcess(child: ChildProcess, label: string): ObservedProc
   const diagnostics = (): string => {
     const normalizedOutput = output.trim();
     return normalizedOutput.length === 0
-      ? "Saída capturada: (vazia)"
-      : `Saída capturada:\n${normalizedOutput}`;
+      ? "Captured output: (empty)"
+      : `Captured output:\n${normalizedOutput}`;
   };
 
   return {
     diagnostics,
     failure: () => {
       if (spawnError !== undefined) {
-        return `${label} não pôde ser iniciado: ${spawnError.message}\n${diagnostics()}`;
+        return `${label} could not be started: ${spawnError.message}\n${diagnostics()}`;
       }
-      if (child.exitCode !== null) {
-        return `${label} encerrou com código ${child.exitCode} antes de ficar pronto.\n${diagnostics()}`;
+      if (child.exitCode !== null && child.exitCode !== 0) {
+        return `${label} exited with code ${child.exitCode} before becoming ready.\n${diagnostics()}`;
       }
       if (child.signalCode !== null) {
-        return `${label} encerrou com o sinal ${child.signalCode} antes de ficar pronto.\n${diagnostics()}`;
+        return `${label} exited with signal ${child.signalCode} before becoming ready.\n${diagnostics()}`;
       }
       return undefined;
     },
@@ -108,18 +135,18 @@ export function parseDevToolsActivePort(content: string): DevToolsEndpoint {
   const browserWebSocketPath = lines[1];
 
   if (portText === undefined || browserWebSocketPath === undefined) {
-    throw new Error("DevToolsActivePort não contém a porta e o endpoint do navegador.");
+    throw new Error("DevToolsActivePort does not contain the browser port and endpoint.");
   }
   if (!/^\d+$/u.test(portText)) {
-    throw new Error(`Porta inválida em DevToolsActivePort: ${portText}`);
+    throw new Error(`Invalid port in DevToolsActivePort: ${portText}`);
   }
 
   const port = Number(portText);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
-    throw new Error(`Porta fora do intervalo válido em DevToolsActivePort: ${portText}`);
+    throw new Error(`Port outside the valid range in DevToolsActivePort: ${portText}`);
   }
   if (!browserWebSocketPath.startsWith("/devtools/browser/")) {
-    throw new Error(`Endpoint inválido em DevToolsActivePort: ${browserWebSocketPath}`);
+    throw new Error(`Invalid endpoint in DevToolsActivePort: ${browserWebSocketPath}`);
   }
 
   return {
@@ -136,7 +163,7 @@ export async function waitForDevToolsEndpoint(
   const settings = resolveWaitSettings(options);
   const activePortPath = path.join(userDataDirectory, DEVTOOLS_ACTIVE_PORT_FILE);
   const deadline = Date.now() + settings.timeoutMilliseconds;
-  let lastFailure = "o arquivo ainda não foi criado";
+  let lastFailure = "the file has not been created yet";
 
   while (Date.now() < deadline) {
     assertProcessRunning(processObservation, activePortPath);
@@ -150,7 +177,7 @@ export async function waitForDevToolsEndpoint(
 
   assertProcessRunning(processObservation, activePortPath);
   throw new Error(
-    `Tempo esgotado aguardando ${activePortPath}. Última falha: ${lastFailure}\n${processObservation.diagnostics()}`,
+    `Timed out waiting for ${activePortPath}. Last failure: ${lastFailure}\n${processObservation.diagnostics()}`,
   );
 }
 
@@ -161,7 +188,7 @@ export async function waitForHttp(
 ): Promise<void> {
   const settings = resolveWaitSettings(options);
   const deadline = Date.now() + settings.timeoutMilliseconds;
-  let lastFailure = "nenhuma resposta recebida";
+  let lastFailure = "no response received";
 
   while (Date.now() < deadline) {
     assertProcessRunning(processObservation, url);
@@ -183,14 +210,14 @@ export async function waitForHttp(
 
   assertProcessRunning(processObservation, url);
   throw new Error(
-    `Tempo esgotado aguardando ${url}. Última falha: ${lastFailure}\n${processObservation.diagnostics()}`,
+    `Timed out waiting for ${url}. Last failure: ${lastFailure}\n${processObservation.diagnostics()}`,
   );
 }
 
 function assertProcessRunning(processObservation: ObservedProcess, target: string): void {
   const failure = processObservation.failure();
   if (failure !== undefined) {
-    throw new Error(`${failure}\nRecurso aguardado: ${target}`);
+    throw new Error(`${failure}\nAwaited resource: ${target}`);
   }
 }
 
@@ -206,7 +233,7 @@ function resolveWaitSettings(options: ReadinessOptions): WaitSettings {
 
 function assertPositiveFiniteInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 1) {
-    throw new TypeError(`${name} deve ser um inteiro positivo.`);
+    throw new TypeError(`${name} must be a positive integer.`);
   }
 }
 

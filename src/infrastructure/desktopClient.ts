@@ -1,11 +1,13 @@
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-import { listenRuntime as listen } from "./runtimeBridge";
+import type { TranslationMessages } from "../i18n/messages";
+import { invokeRuntime, listenRuntime as listen } from "./runtimeBridge";
 
 const MENU_NEW_THREAD_EVENT = "menu:new-thread";
 const MENU_SETTINGS_EVENT = "menu:settings";
 const MENU_TOGGLE_SIDEBAR_EVENT = "menu:toggle-sidebar";
+let menuUpdateQueue: Promise<void> = Promise.resolve();
 
 export interface MenuEventHandlers {
   readonly onNewThread: () => void;
@@ -38,9 +40,19 @@ export async function subscribeToMenuEvents(handlers: MenuEventHandlers): Promis
     registerUnlistener(await listen(MENU_TOGGLE_SIDEBAR_EVENT, () => handlers.onToggleSidebar()));
   } catch (reason) {
     disposeActiveUnlisteners();
-    throw asError(reason, "Não foi possível registrar os eventos do menu.");
+    throw asError(reason, "Menu events could not be registered.");
   }
   return disposeActiveUnlisteners;
+}
+
+export function synchronizeApplicationMenu(
+  translation: TranslationMessages["nativeMenu"],
+): Promise<void> {
+  const operation = menuUpdateQueue.then(() =>
+    invokeRuntime<void>("application_menu_update", { translation }),
+  );
+  menuUpdateQueue = operation.catch(() => undefined);
+  return operation;
 }
 
 export async function isMainWindowMaximized(): Promise<boolean> {

@@ -20,26 +20,26 @@ $requestedPort = $defaultPort
 if ($env:CODEX_DESKTOP_DEV_PORT) {
   $value = $env:CODEX_DESKTOP_DEV_PORT
   if (-not [int]::TryParse($value, [ref]$requestedPort)) {
-    throw "A variável CODEX_DESKTOP_DEV_PORT precisa ser um número inteiro entre 1 e 65535."
+    throw "CODEX_DESKTOP_DEV_PORT must be an integer between 1 and 65535."
   }
 } elseif ($env:VITE_PORT) {
   $value = $env:VITE_PORT
   if (-not [int]::TryParse($value, [ref]$requestedPort)) {
-    throw "A variável VITE_PORT precisa ser um número inteiro entre 1 e 65535."
+    throw "VITE_PORT must be an integer between 1 and 65535."
   }
 }
 
 if ($requestedPort -lt 1 -or $requestedPort -gt 65535) {
-  throw "Porta inválida para desenvolvimento: $requestedPort. Use um valor entre 1 e 65535."
+  throw "Invalid development port: $requestedPort. Use a value between 1 and 65535."
 }
 
 $existingDevProcesses = @(Get-ProcessesByExecutablePath -ExecutablePath $debugExecutablePath)
 if ($existingDevProcesses.Count -gt 0) {
   $processes = $existingDevProcesses | ForEach-Object {
-    "pid=$($_.Pid) caminho=$($_.Path) comando=$($_.Command)"
+    "pid=$($_.Pid) path=$($_.Path) command=$($_.Command)"
   }
   throw @(
-    "Já existe uma instância dev deste perfil em execução.",
+    "A development instance for this profile is already running.",
     ($processes -join "`n")
   ) -join "`n"
 }
@@ -49,9 +49,9 @@ if ($listeners.Count -gt 0) {
   $details = $listeners |
     Select-Object -ExpandProperty OwningProcess -Unique |
     ForEach-Object { Get-ProcessDetails -ProcessId $_ } |
-    ForEach-Object { "pid=$($_.Pid) caminho=$($_.Path) comando=$($_.Command)" }
+    ForEach-Object { "pid=$($_.Pid) path=$($_.Path) command=$($_.Command)" }
   throw @(
-    "A porta fixa do perfil dev, 127.0.0.1:$requestedPort, já está em uso.",
+    "The fixed development-profile port 127.0.0.1:$requestedPort is already in use.",
     ($details -join "`n")
   ) -join "`n"
 }
@@ -98,11 +98,11 @@ try {
     ConvertTo-Json -Depth 20 |
     Set-Content -Path $tempConfigPath -Encoding UTF8
 } catch {
-  throw "Falha ao gerar a configuração de execução em $tempConfigPath. $_"
+  throw "Failed to generate the runtime configuration at $tempConfigPath. $_"
 }
 
 $env:CODEX_DESKTOP_DEV_PORT = "$requestedPort"
-Write-Host "Iniciando dev em $devUrl"
+Write-Host "Starting development at $devUrl"
 
 $exitCode = 1
 try {
@@ -113,5 +113,5 @@ try {
 }
 
 if ($exitCode -ne 0) {
-  throw "pnpm tauri dev falhou com código $exitCode."
+  throw "pnpm tauri dev failed with exit code $exitCode."
 }

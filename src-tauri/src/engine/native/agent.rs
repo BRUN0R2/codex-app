@@ -393,7 +393,7 @@ pub(super) async fn run_turn(
                     protocol: run.model.response_protocol(),
                     parallel_tool_calls: run.model.request_parallel_tool_calls(),
                     reasoning_effort: run.provider_reasoning_effort,
-                    reasoning_summary: run.model.reasoning_summary(),
+                    reasoning_summary: run.model.requested_reasoning_summary(),
                     service_tier: run.service_tier.as_deref(),
                     prompt_cache_key: Some(&run.thread_id),
                     verbosity,

@@ -24,7 +24,7 @@ export function resolveImageSource(source: string): Promise<string> {
     return Promise.resolve(value);
   }
   if (value.length === 0) {
-    return Promise.reject(new Error("A imagem não possui uma origem válida."));
+    return Promise.reject(new Error("The image has no valid source."));
   }
 
   return readAttachmentImage(value).then((response) => response.dataUrl);

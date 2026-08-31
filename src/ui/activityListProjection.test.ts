@@ -50,7 +50,7 @@ describe("activity list projection", () => {
     expect(pathReads).toBe(4);
     expect(projection.kindAt(0)).toBe("fileChange");
     expect(projection.fileChangeAt(0, projection.keyAt(0))).toBe(change);
-    expect(() => projection.fileChangeAt(0, lastEntry.key)).toThrow("perdeu sua posição");
+    expect(() => projection.fileChangeAt(0, lastEntry.key)).toThrow("lost its position");
   });
 
   it("flattens every changed file into the virtualized activity sequence", () => {

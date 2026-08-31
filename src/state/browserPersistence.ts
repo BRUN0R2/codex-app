@@ -3,8 +3,8 @@ import { PROFILE_STORAGE_KEYS } from "./profileStorage";
 const STORAGE_KEY = PROFILE_STORAGE_KEYS.browserTabs;
 const LEGACY_STORAGE_KEY = "codex-browser-tabs-v1";
 const STORAGE_VERSION = 1;
-const MAX_PERSISTED_BROWSER_TABS = 16;
-const MAX_PERSISTED_CONVERSATIONS = 16;
+const MAX_PERSISTED_BROWSER_TABS_PER_CONVERSATION = 16;
+const MAX_PERSISTED_CONVERSATIONS = 256;
 export const MAX_BROWSER_URL_BYTES = 16_384;
 
 export interface PersistedBrowserTab {
@@ -100,7 +100,6 @@ export function decodePersistedBrowserState(value: unknown): PersistedBrowserSta
   ) {
     throw new Error("Persisted browser conversations exceed the supported limit.");
   }
-  let totalTabs = 0;
   const conversationIds = new Set<string>();
   const tabIds = new Set<string>();
   const conversations = state.conversations.map((entry) => {
@@ -114,9 +113,8 @@ export function decodePersistedBrowserState(value: unknown): PersistedBrowserSta
     if (!Array.isArray(conversation.tabs) || conversation.tabs.length === 0) {
       throw new Error("Persisted browser conversations require at least one tab.");
     }
-    totalTabs += conversation.tabs.length;
-    if (totalTabs > MAX_PERSISTED_BROWSER_TABS) {
-      throw new Error("Persisted browser tabs exceed the supported limit.");
+    if (conversation.tabs.length > MAX_PERSISTED_BROWSER_TABS_PER_CONVERSATION) {
+      throw new Error("Persisted browser tabs exceed the per-conversation limit.");
     }
     const tabs = conversation.tabs.map((entry) => {
       const tab = exactObject(entry, ["browserTabId", "url"]);

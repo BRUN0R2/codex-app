@@ -16,6 +16,7 @@ import type {
   BrowserViewport,
   OperationAck,
 } from "../contracts/types";
+import { listenEngineNotifications } from "./codexClient";
 import { invokeRuntime as invoke, listenRuntime as listen } from "./runtimeBridge";
 
 const BROWSER_STATE_EVENT = "browser://state";
@@ -130,6 +131,17 @@ export async function listenBrowserMetric(
       onError(reason);
     }
   });
+}
+
+export function listenThreadDeleted(
+  onDeleted: (threadId: string) => void,
+  onError: (reason: unknown) => void,
+): Promise<UnlistenFn> {
+  return listenEngineNotifications((notification) => {
+    if (notification.method === "thread.deleted") {
+      onDeleted(notification.params.threadId);
+    }
+  }, onError);
 }
 
 async function invokeDecoded<T>(

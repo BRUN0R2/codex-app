@@ -9,6 +9,8 @@ import {
   Suspense,
 } from "solid-js";
 import type { BrowserAgentActivityNotification } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage } from "../i18n/messages";
 import { openExternalUrl, openWorkspaceDirectory } from "../infrastructure/codexClient";
 import { subscribeToMenuEvents } from "../infrastructure/desktopClient";
 import { isBrowserPreview } from "../platform/desktopRuntime";
@@ -59,6 +61,8 @@ const SettingsDialog = lazy(async () => ({
 }));
 
 export function AppShell(props: { readonly controller: AppController }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().shell;
   const previewSettingsPage = readPreviewSettingsPage();
   const previewSurface = readPreviewSurface();
   const [settingsOpen, setSettingsOpen] = createSignal(previewSettingsPage !== null);
@@ -212,7 +216,7 @@ export function AppShell(props: { readonly controller: AppController }) {
     const browserTabId =
       requestedBrowserTabId ?? browserController.activeTab(conversationId)?.browserTabId;
     if (browserTabId === undefined) {
-      props.controller.reportError(new Error("O navegador interno não possui uma aba ativa."));
+      props.controller.reportError(new Error("The internal browser has no active tab."));
       return;
     }
     setWorkspaceTabs((current) =>
@@ -522,7 +526,7 @@ export function AppShell(props: { readonly controller: AppController }) {
             }
           >
             <button
-              aria-label="Abrir navegador interno"
+              aria-label={messages().openBrowser}
               class="browser-panel-toggle"
               onClick={() => {
                 const conversationId = props.controller.currentThread()?.id;
@@ -530,7 +534,7 @@ export function AppShell(props: { readonly controller: AppController }) {
                   void openBrowserWorkspace(conversationId);
                 }
               }}
-              title="Abrir navegador interno (Ctrl+Shift+B)"
+              title={messages().openBrowserShortcut}
               type="button"
             >
               <Icon name="globe" size={15} />
@@ -589,14 +593,15 @@ export function AppShell(props: { readonly controller: AppController }) {
             }
           >
             <hr
-              aria-label="Redimensionar chat e área de trabalho"
+              aria-label={messages().resizeWorkspace}
               aria-orientation="vertical"
               aria-valuemax={Math.round(workspaceSplitMetrics().maximumRatio * 100)}
               aria-valuemin={Math.round(workspaceSplitMetrics().minimumRatio * 100)}
               aria-valuenow={Math.round(workspaceSplitMetrics().ratio * 100)}
-              aria-valuetext={`Chat ${Math.round(
-                workspaceSplitMetrics().ratio * 100,
-              )}%, área de trabalho ${Math.round((1 - workspaceSplitMetrics().ratio) * 100)}%`}
+              aria-valuetext={formatMessage(messages().workspaceRatio, {
+                chat: Math.round(workspaceSplitMetrics().ratio * 100),
+                workspace: Math.round((1 - workspaceSplitMetrics().ratio) * 100),
+              })}
               class="workspace-splitter"
               onDblClick={() => commitWorkspaceSplitRatio(WORKSPACE_SPLIT_DEFAULT_RATIO, true)}
               onKeyDown={handleWorkspaceSplitKeyDown}
@@ -607,7 +612,7 @@ export function AppShell(props: { readonly controller: AppController }) {
               onPointerUp={(event) => endWorkspaceSplitPointerDrag(event, true)}
               ref={workspaceSplitterElement}
               tabIndex={0}
-              title="Arraste para redimensionar; clique duas vezes para dividir igualmente"
+              title={messages().resizeWorkspaceTitle}
             />
           </Show>
           <Show
@@ -661,7 +666,11 @@ export function AppShell(props: { readonly controller: AppController }) {
         {(message) => (
           <div class="error-toast" role="alert">
             <span>{message()}</span>
-            <button aria-label="Fechar erro" onClick={props.controller.clearError} type="button">
+            <button
+              aria-label={messages().closeError}
+              onClick={props.controller.clearError}
+              type="button"
+            >
               <Icon name="close" size={16} />
             </button>
           </div>
@@ -708,6 +717,8 @@ function readPreviewBrowserOpen(): boolean {
 }
 
 function UsageLimitBanner(props: { readonly controller: AppController }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().shell;
   const snapshot = () => props.controller.rateLimits()?.rateLimits;
   const exhausted = () => {
     const current = snapshot();
@@ -726,10 +737,11 @@ function UsageLimitBanner(props: { readonly controller: AppController }) {
     <Show when={exhausted()}>
       <aside class="usage-limit-banner" role="status">
         <div class="usage-limit-copy">
-          <strong>Você esgotou o uso do Codex e do Work</strong>
+          <strong>{messages().usageExhausted}</strong>
           <p>
-            Adicione créditos ou faça upgrade do seu plano — ou aguarde a redefinição do uso em{" "}
-            {formatResetDate(resetAt())}.
+            {formatMessage(messages().usageExhaustedDescription, {
+              date: formatResetDate(resetAt(), i18n.locale(), i18n.messages().common.soon),
+            })}
           </p>
         </div>
         <div class="usage-limit-actions">
@@ -738,14 +750,14 @@ function UsageLimitBanner(props: { readonly controller: AppController }) {
             onClick={() => void openExternalUrl("https://chatgpt.com/membership/plans")}
             type="button"
           >
-            Fazer upgrade para o Pro
+            {messages().upgradePro}
           </button>
           <button
             class="usage-credits-button"
             onClick={() => void openExternalUrl("https://chatgpt.com/settings/billing")}
             type="button"
           >
-            Adicionar créditos
+            {messages().addCredits}
           </button>
         </div>
       </aside>
@@ -753,14 +765,16 @@ function UsageLimitBanner(props: { readonly controller: AppController }) {
   );
 }
 
-function formatResetDate(resetAt: number | null): string {
+function formatResetDate(resetAt: number | null, locale: string, soonLabel: string): string {
   if (resetAt === null) {
-    return "em breve";
+    return soonLabel;
   }
-  return formatShortDate(resetAt);
+  return formatShortDate(resetAt, locale, soonLabel);
 }
 
 function ModelSafetyNotice(props: { readonly controller: AppController }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().shell;
   const visible = () =>
     props.controller.safetyBuffering()?.showBufferingUi === true ||
     props.controller.modelReroute() !== null ||
@@ -773,25 +787,25 @@ function ModelSafetyNotice(props: { readonly controller: AppController }) {
         </span>
         <div>
           <Show when={props.controller.safetyBuffering()?.showBufferingUi === true}>
-            <strong>Verificando a resposta por segurança</strong>
-            <p>O servidor está concluindo uma checagem antes de finalizar este turno.</p>
+            <strong>{messages().checkingSafety}</strong>
+            <p>{messages().checkingSafetyDescription}</p>
           </Show>
           <Show when={props.controller.modelReroute()}>
             {(reroute) => (
               <>
-                <strong>Modelo redirecionado pelo servidor</strong>
+                <strong>{messages().modelRerouted}</strong>
                 <p>
-                  Este turno foi movido de {reroute().fromModel} para {reroute().toModel} por uma
-                  verificação de segurança.
+                  {formatMessage(messages().modelReroutedDescription, {
+                    fromModel: reroute().fromModel,
+                    toModel: reroute().toModel,
+                  })}
                 </p>
               </>
             )}
           </Show>
           <Show when={props.controller.modelVerifications().includes("trustedAccessForCyber")}>
-            <strong>Verificação adicional disponível</strong>
-            <p>
-              O servidor recomenda solicitar acesso confiável para atividades de cibersegurança.
-            </p>
+            <strong>{messages().additionalVerification}</strong>
+            <p>{messages().additionalVerificationDescription}</p>
           </Show>
         </div>
       </aside>
