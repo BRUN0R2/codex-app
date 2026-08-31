@@ -744,7 +744,7 @@ pub enum UserContent {
     Mention { name: String, path: String },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageDetail {
     Auto,

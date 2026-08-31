@@ -178,6 +178,8 @@ fn is_transient_provider_code(code: Option<&str>) -> bool {
                 | "temporarily_unavailable"
                 | "upstream_error"
                 | "gateway_timeout"
+                | "previous_response_not_found"
+                | "websocket_connection_limit_reached"
         )
     )
 }

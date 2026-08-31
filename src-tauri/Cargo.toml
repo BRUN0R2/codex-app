@@ -47,6 +47,7 @@ tauri-plugin-single-instance = "2.4.3"
 tempfile = "3.27.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.28.0", default-features = false, features = ["handshake"] }
 url = "2.5.8"
 uuid = { version = "1.25.0", features = ["serde", "v5", "v7"] }
 v8 = { version = "=150.4.0", features = ["v8_enable_sandbox"] }

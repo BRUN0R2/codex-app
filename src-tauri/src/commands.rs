@@ -411,12 +411,13 @@ pub async fn engine_thread_list(
 
 #[tauri::command]
 pub async fn engine_thread_resume(
+    app: AppHandle,
     engine: State<'_, EngineManager>,
     request: ThreadIdRequest,
 ) -> CommandResult<ThreadResumeResponse> {
     validate_protocol_id("thread id", &request.thread_id)?;
     engine
-        .thread_resume(request.thread_id)
+        .thread_resume(&app, request.thread_id)
         .await
         .map_err(Into::into)
 }
