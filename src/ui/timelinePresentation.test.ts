@@ -1,25 +1,75 @@
 import { describe, expect, it } from "vitest";
 
+import { findCatalog, translationCatalogs } from "../i18n/catalog";
 import {
-  commandActivityTitle,
-  commandLiveOutputText,
   commandOutputText,
-  commandPollActivityTitle,
-  fileChangeActionLabel,
-  fileChangeGroupTitle,
-  fileReadActivityTitle,
   formatCompactElapsedSeconds,
   formatElapsedSeconds,
-  reasoningTitle,
-  runningCommandHeadline,
-  terminalReadActivityTitle,
+  commandActivityTitle as rawCommandActivityTitle,
+  commandHeadline as rawCommandHeadline,
+  commandLiveOutputText as rawCommandLiveOutputText,
+  commandPollActivityTitle as rawCommandPollActivityTitle,
+  confirmedOutputTokenLabel as rawConfirmedOutputTokenLabel,
+  fileChangeActionLabel as rawFileChangeActionLabel,
+  fileChangeGroupTitle as rawFileChangeGroupTitle,
+  fileReadActivityTitle as rawFileReadActivityTitle,
+  fileReadItemTitle as rawFileReadItemTitle,
+  reasoningTitle as rawReasoningTitle,
+  runningCommandHeadline as rawRunningCommandHeadline,
+  terminalReadActivityTitle as rawTerminalReadActivityTitle,
+  toolActivityTitle as rawToolActivityTitle,
+  turnDurationLabel as rawTurnDurationLabel,
+  shouldShowCommandDurationSuffix,
   thinkingPresentation,
-  toolActivityTitle,
   toolOutputText,
-  turnDurationLabel,
   userMessageMarkerWidth,
   visibleCommandDurationMs,
 } from "./timelinePresentation";
+
+const messages = findCatalog(translationCatalogs, "pt-BR")?.messages.timeline;
+if (messages === undefined) throw new Error("The Brazilian Portuguese catalog is unavailable.");
+
+const turnDurationLabel = (status: Parameters<typeof rawTurnDurationLabel>[0], duration: string) =>
+  rawTurnDurationLabel(status, duration, messages);
+const confirmedOutputTokenLabel = (tokens: number) =>
+  rawConfirmedOutputTokenLabel(tokens, messages, "pt-BR");
+const runningCommandHeadline = (duration: string | null, fallback: string) =>
+  rawRunningCommandHeadline(duration, fallback, messages);
+const reasoningTitle = (
+  summary: readonly string[],
+  state: Parameters<typeof rawReasoningTitle>[1] = "completed",
+) => rawReasoningTitle(summary, state);
+const commandActivityTitle = (
+  command: string,
+  status: Parameters<typeof rawCommandActivityTitle>[1],
+  expanded: boolean,
+) => rawCommandActivityTitle(command, status, expanded, messages);
+const commandHeadline = (
+  command: string,
+  status: Parameters<typeof rawCommandHeadline>[1],
+  expanded: boolean,
+  duration: string | null,
+) => rawCommandHeadline(command, status, expanded, duration, messages);
+const toolActivityTitle = (
+  description: string,
+  status: Parameters<typeof rawToolActivityTitle>[1],
+  expanded: boolean,
+) => rawToolActivityTitle(description, status, expanded, messages);
+const commandPollActivityTitle = (status: Parameters<typeof rawCommandPollActivityTitle>[0]) =>
+  rawCommandPollActivityTitle(status, messages);
+const terminalReadActivityTitle = (status: Parameters<typeof rawTerminalReadActivityTitle>[0]) =>
+  rawTerminalReadActivityTitle(status, messages);
+const fileReadActivityTitle = (
+  status: Parameters<typeof rawFileReadActivityTitle>[0],
+  count?: number,
+) => rawFileReadActivityTitle(status, messages, count);
+const fileReadItemTitle = (status: Parameters<typeof rawFileReadItemTitle>[0], name: string) =>
+  rawFileReadItemTitle(status, name, messages);
+const fileChangeGroupTitle = (count: number) => rawFileChangeGroupTitle(count, messages);
+const fileChangeActionLabel = (kind: Parameters<typeof rawFileChangeActionLabel>[0]) =>
+  rawFileChangeActionLabel(kind, messages);
+const commandLiveOutputText = (output: Parameters<typeof rawCommandLiveOutputText>[0]) =>
+  rawCommandLiveOutputText(output, messages);
 
 describe("timeline presentation", () => {
   it("shows thinking immediately and stops it when the final answer starts", () => {
@@ -32,6 +82,12 @@ describe("timeline presentation", () => {
   it("uses the official running and completed turn semantics", () => {
     expect(turnDurationLabel("inProgress", "18 min 15 s")).toBe("Processando há 18 min 15 s");
     expect(turnDurationLabel("completed", "18 min 15 s")).toBe("Trabalhou por 18 min 15 s");
+  });
+
+  it("formats only safe provider-confirmed output token counts", () => {
+    expect(confirmedOutputTokenLabel(1)).toBe("↑ 1 token");
+    expect(confirmedOutputTokenLabel(1_234)).toBe("↑ 1.234 tokens");
+    expect(() => confirmedOutputTokenLabel(-1)).toThrow(RangeError);
   });
 
   it("keeps second-level precision for minute and hour durations", () => {
@@ -53,24 +109,57 @@ describe("timeline presentation", () => {
     expect(runningCommandHeadline(null, "Executando comando")).toBe("Executando comando");
   });
 
-  it("uses the latest streamed reasoning heading without exposing completed markdown", () => {
-    expect(reasoningTitle(["Investigating remounts"], [])).toBe("Investigating remounts");
-    expect(reasoningTitle(["Earlier", "**Designing stable render with <Index>**"], [])).toBe(
-      "Designing stable render with <Index>",
+  it("changes streamed reasoning only at complete semantic section boundaries", () => {
+    expect(reasoningTitle(["Investigating remounts"], "streaming")).toBeNull();
+    expect(reasoningTitle(["**Designing stable rende"], "streaming")).toBeNull();
+    expect(reasoningTitle(["**Planning verification**\n\nInspecting files"], "streaming")).toBe(
+      "Planning verification",
     );
-    expect(reasoningTitle(["**Designing stable rende"], [])).toBe("**Designing stable rende");
+    expect(
+      reasoningTitle(
+        ["**Planning verification**\n\nInspecting files", "**Running focused"],
+        "streaming",
+      ),
+    ).toBe("Planning verification");
+    expect(
+      reasoningTitle(
+        [
+          "**Planning verification**\n\nInspecting files",
+          "**Running focused checks**\n\nExecuting the suite",
+        ],
+        "streaming",
+      ),
+    ).toBe("Running focused checks");
+  });
+
+  it("uses stable plain summaries only after their item completes", () => {
+    expect(reasoningTitle(["Investigating remounts"], "completed")).toBe("Investigating remounts");
+    expect(reasoningTitle(["# Reviewing   final output"], "completed")).toBe(
+      "Reviewing final output",
+    );
+    expect(reasoningTitle([], "completed")).toBeNull();
   });
 
   it("changes an expanded command title according to its live state", () => {
     expect(commandActivityTitle("rg --files src", "completed", false)).toBe(
-      "Comando executado: rg --files src",
+      "Executou rg --files src",
     );
     expect(commandActivityTitle("rg --files src", "completed", true)).toBe("Comando executado");
-    expect(commandActivityTitle("rg --files src", "inProgress", false)).toBe(
-      "Executando comando: rg --files src",
-    );
+    expect(commandActivityTitle("rg --files src", "inProgress", false)).toBe("Comando em execução");
     expect(commandActivityTitle("rg --files src", "inProgress", true)).toBe("Executando comando");
     expect(toolActivityTitle("Validar interface", "inProgress", false)).toBe("Validar interface");
+  });
+
+  it("reveals the command text only after execution reaches a terminal state", () => {
+    expect(commandHeadline("pnpm verify", "inProgress", false, "1m 31s")).toBe(
+      "Comando em execução há 1m 31s",
+    );
+    expect(commandHeadline("pnpm verify", "inProgress", false, null)).toBe("Comando em execução");
+    expect(commandHeadline("pnpm verify", "completed", false, "1m 32s")).toBe(
+      "Executou pnpm verify",
+    );
+    expect(shouldShowCommandDurationSuffix("inProgress")).toBe(false);
+    expect(shouldShowCommandDurationSuffix("completed")).toBe(true);
   });
 
   it("uses the official chat-terminal labels for stored output reads", () => {
@@ -80,9 +169,12 @@ describe("timeline presentation", () => {
   });
 
   it("formats file reads from execution state and known cardinality", () => {
-    expect(fileReadActivityTitle("completed")).toBe("Executou leitura de arquivo");
-    expect(fileReadActivityTitle("completed", 1)).toBe("Executou leitura de um arquivo");
-    expect(fileReadActivityTitle("completed", 2)).toBe("Executou leitura de 2 arquivos");
+    expect(fileReadActivityTitle("completed")).toBe("Leu arquivo");
+    expect(fileReadActivityTitle("completed", 1)).toBe("Leu um arquivo");
+    expect(fileReadActivityTitle("completed", 2)).toBe("Leu arquivos");
+    expect(fileReadActivityTitle("completed", 3)).toBe("Leu arquivos");
+    expect(fileReadItemTitle("completed", "RULES.md")).toBe("Leu arquivo RULES.md");
+    expect(fileReadItemTitle("failed", "RULES.md")).toBe("Falha ao ler arquivo: RULES.md");
     expect(fileReadActivityTitle("inProgress")).toBe("Lendo arquivo");
     expect(fileReadActivityTitle("inProgress", 1)).toBe("Lendo um arquivo");
     expect(fileReadActivityTitle("inProgress", 2)).toBe("Lendo 2 arquivos");

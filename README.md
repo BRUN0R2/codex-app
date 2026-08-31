@@ -1,96 +1,121 @@
 # Codex Desktop Next
 
-Cliente Windows nativo e independente para ChatGPT Chat, ChatGPT Work local e
-um agente Codex. O aplicativo usa a conta ChatGPT, mas não inicia, empacota nem
-depende do Codex CLI. O repositório público `openai/codex` serve apenas como
-referência de protocolo e comportamento.
+A native, standalone Windows client for ChatGPT Chat, local ChatGPT Work, and a
+Codex agent. The application uses a ChatGPT account but does not start, package,
+or depend on the Codex CLI. The public `openai/codex` repository is used only as
+a protocol and behavior reference.
 
-## O que o aplicativo oferece
+## Features
 
-- OAuth ChatGPT com PKCE, renovação, revogação e cancelamento;
-- Chat e Codex com catálogos próprios, streaming HTTPS/SSE e histórico isolado;
-- tarefas simultâneas, direcionamento, interrupção, compactação, fork e arquivo;
-- agente nativo com Code Mode V8, arquivos, comandos, planos, imagens e browser;
-- colaboração multiagente v2 persistida, cancelável e limitada por ownership;
-- esforço Ultra identificado em roxo e traduzido para capabilities do catálogo;
-- três perfis explícitos: somente leitura, escrita no projeto e acesso total;
-- processos longos em segundo plano, saída incremental e encerramento da árvore;
-- SQLite local com WAL e credenciais protegidas pelo Windows Credential Manager;
-- limites, aprovações e contratos Tauri validados nas duas fronteiras;
-- interface SolidJS para tarefas, modelos, uso, automações e configurações.
+- ChatGPT OAuth with PKCE, refresh, revocation, and cancellation;
+- separate Chat and Codex catalogs, HTTPS/SSE streaming, and isolated history;
+- concurrent tasks, steering, interruption, compaction, forks, and archiving;
+- a native agent with sandboxed V8 Code Mode, files, commands, plans, images,
+  and browser tools;
+- persistent, cancellable multi-agent v2 collaboration with ownership limits;
+- explicit read-only, workspace-write, and full-access permission profiles;
+- background processes with incremental output and deterministic tree cleanup;
+- live reasoning summaries with stable, semantic progress headings;
+- local SQLite WAL storage and credentials protected by Windows Credential
+  Manager;
+- bounded approvals and Tauri contracts validated on both sides of IPC;
+- a SolidJS interface for tasks, models, usage, automations, and settings;
+- automatically discovered JSON translations, system-language detection, and
+  explicit language selection.
 
-## Arquitetura
+## Architecture
 
-| Camada | Responsabilidade |
+| Layer | Responsibility |
 | --- | --- |
-| Rust/Tauri | autenticação, provider, agente, ferramentas, browser e persistência |
-| TypeScript/SolidJS | contratos decodificados, estado da interface e apresentação |
-| SQLite | tarefas, eventos, configurações e metadados não secretos |
-| Windows Credential Manager | chave usada para proteger credenciais locais |
+| Rust/Tauri | Authentication, providers, agent, tools, browser, and persistence |
+| TypeScript/SolidJS | Decoded contracts, interface state, and presentation |
+| SQLite | Tasks, events, settings, and non-secret metadata |
+| Windows Credential Manager | Key material used to protect local credentials |
 
-As versões e o grafo de dependências são definidos pelos manifestos e lockfiles.
-Consulte [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) para os limites entre
-módulos e [docs/ENGINE.md](docs/ENGINE.md) para o contrato do agente.
+Manifests and lockfiles define the exact versions and dependency graph. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module boundaries and
+[docs/ENGINE.md](docs/ENGINE.md) for the agent contract.
 
-## Requisitos
+## Requirements
 
-- Windows 10 ou 11 com WebView2;
-- conta ChatGPT com acesso aos recursos usados;
+- Windows 10 or 11 with WebView2;
+- a ChatGPT account with access to the features in use;
 - PowerShell 7 (`pwsh`);
-- Node.js 26 ou superior e pnpm 11.22 ou superior;
-- Rust 1.98.0 com toolchain MSVC.
+- Node.js 26 or later and pnpm 11.22 or later;
+- Rust 1.98.0 with the MSVC toolchain.
 
-O Codex CLI não é necessário.
+The Codex CLI is not required.
 
-## Desenvolvimento
+## Development
 
 ```powershell
 pnpm install --frozen-lockfile
 pnpm dev:launch
 ```
 
-O primeiro comando instala exatamente o lockfile. O segundo inicia Vite e o
-shell Tauri em um perfil de desenvolvimento separado.
+The first command installs the locked dependency graph. The second starts Vite
+and the Tauri shell with an isolated development profile.
 
-Para trabalhar apenas na interface:
+On Windows, `codex-app.bat` exposes the debug and release flows. Its preflight
+requires pnpm on `PATH`, installs the locked graph when needed, and repairs
+missing local package commands. PowerShell, Rust, and Tauri remain owned by the
+respective scripts and toolchains.
+
+To work on the interface only:
 
 ```powershell
 pnpm dev
 ```
 
-Abra `http://127.0.0.1:1420/?preview=1`. O preview usa contratos determinísticos,
-rejeita operações nativas e não entra no bundle de produção.
+Open `http://127.0.0.1:1420/?preview=1`. The preview uses deterministic
+contracts, rejects native operations, and is excluded from production bundles.
 
-## Verificação
+## Translations
+
+The default language preference is **Auto-detect**, which selects the closest
+catalog to the browser or operating-system languages. Users can override it in
+Settings. English and Brazilian Portuguese are included.
+
+To add a language, copy `src/i18n/locales/en.json`, translate every message, set
+a canonical locale and native display name, then save it as
+`src/i18n/locales/<locale>.json`. The Vite glob discovers it automatically. The
+application rejects missing or extra keys, invalid metadata, duplicate locales,
+and placeholder mismatches during startup; no registry edit is required.
+
+Operational logs, diagnostics, and internal errors remain in English. Only
+user-facing interface copy belongs in translation catalogs.
+
+## Verification
 
 ```powershell
 pnpm verify
 ```
 
-Esse é o gate completo: encoding, lint, tipagem, testes, benchmarks de regressão,
-QA visual, build de produção, dependências transitivas, `cargo check`, formato,
-Clippy e testes Rust.
+This is the complete gate: encoding, lint, type checking, tests, regression
+benchmarks, visual QA, production build, transitive dependencies, `cargo check`,
+formatting, Clippy, and Rust tests.
 
-Comandos úteis:
+Useful commands:
 
 ```powershell
-pnpm smoke:browser   # fluxo real do child WebView2 sem conta
-pnpm measure:tokens  # orçamento de contexto e compactação
-pnpm tauri build     # bundle NSIS local
+pnpm smoke:browser   # real child-WebView2 flow without an account
+pnpm measure:tokens  # context and compaction budgets
+pnpm tauri build     # local NSIS bundle
 ```
 
-Releases oficiais seguem [docs/RELEASE.md](docs/RELEASE.md).
+Official releases follow [docs/RELEASE.md](docs/RELEASE.md).
 
-## Estrutura
+## Repository layout
 
-- `src/contracts`: tipos e decoders de fronteira;
-- `src/infrastructure`: comandos e eventos Tauri;
-- `src/state`: estado reativo e reduções determinísticas;
-- `src/ui`: apresentação sem acesso direto ao IPC;
-- `src-tauri/src/engine/native`: agente, auth, provider, storage, Code Mode,
-  multiagente e ferramentas;
-- `scripts`: gates, medições e automação local;
-- `docs`: contrato, arquitetura, referência, desempenho e release.
+- `src/contracts`: boundary types and decoders;
+- `src/i18n`: catalog discovery, validation, locale resolution, and context;
+- `src/infrastructure`: Tauri commands and events;
+- `src/state`: reactive ownership and deterministic transitions;
+- `src/ui`: presentation without direct IPC access;
+- `src-tauri/src/engine/native`: agent, authentication, providers, storage,
+  Code Mode, multi-agent collaboration, and tools;
+- `scripts`: gates, measurements, and local automation;
+- `docs`: contract, architecture, reference, performance, and release guidance.
 
-Antes de alterar o projeto, leia [docs/RULES.md](docs/RULES.md). O backlog ativo
-fica em [docs/TODO.md](docs/TODO.md).
+Read [docs/RULES.md](docs/RULES.md) before changing the project. The active
+backlog is [docs/TODO.md](docs/TODO.md).

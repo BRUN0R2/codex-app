@@ -3,15 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   calculateTimelineScrollbar,
   findTimelineAnchorIndex,
-  hasReachedTimelineWheelHandoffTarget,
   isTimelineNearEnd,
-  normalizeTimelineWheelDelta,
-  resolveNestedTimelineWheelTransfer,
   resolveTimelineAnchorCorrection,
   resolveTimelineFollowing,
   resolveTimelineMessageOffset,
   resolveTimelineRestorationTop,
-  resolveTimelineWheelHandoffTarget,
+  shouldHandleTimelineWheel,
   shouldMeasureTimelineScrollAsUserInitiated,
   shouldPreserveTimelineAnchor,
   shouldSynchronizeTimelineToEnd,
@@ -155,147 +152,31 @@ describe("timeline scroll metrics", () => {
     expect(tracker.consume(1_000)).toBe(false);
   });
 
-  it("normalizes pixel, line, and page wheel deltas", () => {
-    expect(normalizeTimelineWheelDelta({ deltaMode: 0, deltaY: -12, viewportHeight: 800 })).toBe(
-      -12,
-    );
-    expect(normalizeTimelineWheelDelta({ deltaMode: 1, deltaY: 3, viewportHeight: 800 })).toBe(48);
-    expect(normalizeTimelineWheelDelta({ deltaMode: 2, deltaY: -1, viewportHeight: 720 })).toBe(
-      -720,
-    );
-  });
+  it("routes vertical wheel input only from the outer timeline surface", () => {
+    const verticalWheel = {
+      controlKey: false,
+      deltaX: 0,
+      deltaY: 80,
+      shiftKey: false,
+    };
 
-  it("leaves wheel movement that fits inside a nested viewport to the native scroller", () => {
+    expect(shouldHandleTimelineWheel({ ...verticalWheel, insideNestedRegion: false })).toBe(true);
+    expect(shouldHandleTimelineWheel({ ...verticalWheel, insideNestedRegion: true })).toBe(false);
     expect(
-      resolveNestedTimelineWheelTransfer({
-        clientHeight: 200,
-        delta: -80,
-        scrollHeight: 1_000,
-        scrollTop: 400,
-      }),
-    ).toBeNull();
-  });
-
-  it("transfers only the exact nested wheel overflow to the timeline", () => {
-    expect(
-      resolveNestedTimelineWheelTransfer({
-        clientHeight: 200,
-        delta: -100,
-        scrollHeight: 1_000,
-        scrollTop: 40,
-      }),
-    ).toEqual({ nestedScrollTop: 0, timelineDelta: -60 });
-    expect(
-      resolveNestedTimelineWheelTransfer({
-        clientHeight: 200,
-        delta: 90,
-        scrollHeight: 1_000,
-        scrollTop: 760,
-      }),
-    ).toEqual({ nestedScrollTop: 800, timelineDelta: 50 });
-  });
-
-  it("routes the whole wheel delta when nested content has no vertical range", () => {
-    expect(
-      resolveNestedTimelineWheelTransfer({
-        clientHeight: 200,
-        delta: -120,
-        scrollHeight: 200,
-        scrollTop: 0,
-      }),
-    ).toEqual({ nestedScrollTop: 0, timelineDelta: -120 });
-  });
-
-  it("ignores only a wheel event with no vertical movement", () => {
-    expect(
-      resolveNestedTimelineWheelTransfer({
-        clientHeight: 200,
-        delta: 0,
-        scrollHeight: 1_000,
-        scrollTop: 400,
-      }),
-    ).toBeNull();
-  });
-
-  it("accumulates smooth handoff deltas against the pending destination", () => {
-    expect(
-      resolveTimelineWheelHandoffTarget({
-        currentScrollTop: 100,
-        delta: 40,
-        maximumScroll: 500,
-        pendingTarget: null,
-      }),
-    ).toBe(140);
-    expect(
-      resolveTimelineWheelHandoffTarget({
-        currentScrollTop: 112,
-        delta: 40,
-        maximumScroll: 500,
-        pendingTarget: 140,
-      }),
-    ).toBe(180);
-  });
-
-  it("clamps a pending smooth handoff after the timeline range changes", () => {
-    expect(
-      resolveTimelineWheelHandoffTarget({
-        currentScrollTop: 480,
-        delta: 80,
-        maximumScroll: 500,
-        pendingTarget: 560,
-      }),
-    ).toBe(500);
-    expect(
-      resolveTimelineWheelHandoffTarget({
-        currentScrollTop: 20,
-        delta: -80,
-        maximumScroll: 500,
-        pendingTarget: null,
-      }),
-    ).toBe(0);
-  });
-
-  it("reverses from the current position instead of a stale smooth destination", () => {
-    expect(
-      resolveTimelineWheelHandoffTarget({
-        currentScrollTop: 112,
-        delta: -40,
-        maximumScroll: 500,
-        pendingTarget: 180,
-      }),
-    ).toBe(72);
-    expect(
-      resolveTimelineWheelHandoffTarget({
-        currentScrollTop: 112,
-        delta: 0,
-        maximumScroll: 500,
-        pendingTarget: 180,
-      }),
-    ).toBe(112);
-  });
-
-  it("ignores stale scrollend events until a wheel handoff reaches its destination", () => {
-    expect(
-      hasReachedTimelineWheelHandoffTarget({
-        currentScrollTop: 320,
-        maximumScroll: 1_000,
-        target: 260,
+      shouldHandleTimelineWheel({
+        ...verticalWheel,
+        controlKey: true,
+        insideNestedRegion: false,
       }),
     ).toBe(false);
     expect(
-      hasReachedTimelineWheelHandoffTarget({
-        currentScrollTop: 260.5,
-        maximumScroll: 1_000,
-        target: 260,
+      shouldHandleTimelineWheel({
+        ...verticalWheel,
+        deltaX: 80,
+        deltaY: 20,
+        insideNestedRegion: false,
       }),
-    ).toBe(true);
-    expect(
-      hasReachedTimelineWheelHandoffTarget({
-        currentScrollTop: 800,
-        maximumScroll: 800,
-        target: 900,
-      }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("restores either the saved viewport or the exact end deterministically", () => {

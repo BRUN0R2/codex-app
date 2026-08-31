@@ -82,6 +82,6 @@ describe("product flow", () => {
       JSON.stringify({ version: 1, product: "chatgpt", chatGptMode: "chat" }),
     );
 
-    expect(() => loadProductFlowState()).toThrow(/campos incompatíveis/u);
+    expect(() => loadProductFlowState()).toThrow(/incompatible fields/u);
   });
 });

@@ -61,7 +61,7 @@ export function appendQueuedMessage(
 ): MessageQueueMap {
   const current = readQueuedMessages(queues, threadId);
   if (current.some((entry) => entry.id === message.id)) {
-    throw new Error("A mensagem já está na fila desta tarefa.");
+    throw new Error("The message is already queued for this task.");
   }
   const next = new Map(queues);
   next.set(threadId, [...current, message]);
@@ -115,21 +115,21 @@ export function loadMessageQueues(): LoadedMessageQueues {
     try {
       const stored = decodeStoredMessageQueue(JSON.parse(raw));
       if (key !== messageQueueStorageKey(stored.threadId)) {
-        throw new Error("a chave não corresponde ao identificador da tarefa");
+        throw new Error("the key does not match the task identifier");
       }
       if (queues.has(stored.threadId)) {
-        throw new Error("a tarefa aparece mais de uma vez");
+        throw new Error("the task appears more than once");
       }
       queues.set(stored.threadId, stored.messages);
     } catch (reason) {
-      warnings.push(`Uma fila persistida foi ignorada: ${describe(reason)}.`);
+      warnings.push(`A persisted queue was ignored: ${describe(reason)}.`);
     }
   }
   return { queues, warnings };
 }
 
 export function saveMessageQueue(threadId: string, messages: readonly QueuedMessage[]): void {
-  const validatedThreadId = validateIdentifier(threadId, "identificador da tarefa");
+  const validatedThreadId = validateIdentifier(threadId, "task identifier");
   const key = messageQueueStorageKey(validatedThreadId);
   if (messages.length === 0) {
     localStorage.removeItem(key);
@@ -164,7 +164,7 @@ export function loadQueueingEnabled(): boolean {
   if (value === "steer") {
     return false;
   }
-  throw new Error("O comportamento salvo para mensagens de acompanhamento é inválido.");
+  throw new Error("The saved follow-up message behavior is invalid.");
 }
 
 export function saveQueueingEnabled(enabled: boolean): void {
@@ -172,57 +172,57 @@ export function saveQueueingEnabled(enabled: boolean): void {
 }
 
 function decodeStoredMessageQueue(value: unknown): StoredMessageQueue {
-  const object = exactObject(value, ["messages", "threadId", "version"], "fila persistida");
+  const object = exactObject(value, ["messages", "threadId", "version"], "persisted queue");
   if (object.version !== 1 || !Array.isArray(object.messages)) {
-    throw new Error("a versão da fila persistida não é suportada");
+    throw new Error("the persisted queue version is not supported");
   }
-  const threadId = validateIdentifier(object.threadId, "identificador da tarefa");
+  const threadId = validateIdentifier(object.threadId, "task identifier");
   const seen = new Set<string>();
   const messages = object.messages.map((entry, index) => {
     const message = decodeQueuedMessage(entry, index);
     if (seen.has(message.id)) {
-      throw new Error(`a mensagem ${index + 1} está duplicada`);
+      throw new Error(`message ${index + 1} is duplicated`);
     }
     seen.add(message.id);
     return message;
   });
   if (messages.length === 0) {
-    throw new Error("a fila persistida está vazia");
+    throw new Error("the persisted queue is empty");
   }
   return { version: 1, threadId, messages };
 }
 
 function decodeQueuedMessage(value: unknown, index: number): QueuedMessage {
-  const label = `mensagem ${index + 1}`;
+  const label = `message ${index + 1}`;
   const object = exactObject(
     value,
     ["attachments", "effort", "id", "model", "serviceTier", "text"],
     label,
   );
   if (typeof object.text !== "string" || utf8ByteLength(object.text) > MAX_TEXT_BYTES) {
-    throw new Error(`${label} possui texto inválido`);
+    throw new Error(`${label} has invalid text`);
   }
   if (!Array.isArray(object.attachments)) {
-    throw new Error(`${label} possui anexos inválidos`);
+    throw new Error(`${label} has invalid attachments`);
   }
   const effort = object.effort;
   if (
     effort !== null &&
     (typeof effort !== "string" || !REASONING_EFFORTS.has(effort as ReasoningEffort))
   ) {
-    throw new Error(`${label} possui esforço de raciocínio inválido`);
+    throw new Error(`${label} has an invalid reasoning effort`);
   }
   return {
-    id: validateIdentifier(object.id, `identificador da ${label}`),
+    id: validateIdentifier(object.id, `${label} identifier`),
     text: object.text,
     attachments: object.attachments.map((attachment, attachmentIndex) =>
-      decodeAttachment(attachment, `${label}, anexo ${attachmentIndex + 1}`),
+      decodeAttachment(attachment, `${label}, attachment ${attachmentIndex + 1}`),
     ),
-    model: validateNullableText(object.model, `${label}, modelo`, MAX_IDENTIFIER_CHARACTERS),
+    model: validateNullableText(object.model, `${label}, model`, MAX_IDENTIFIER_CHARACTERS),
     effort: effort as ReasoningEffort | null,
     serviceTier: validateNullableText(
       object.serviceTier,
-      `${label}, nível de serviço`,
+      `${label}, service tier`,
       MAX_IDENTIFIER_CHARACTERS,
     ),
   };
@@ -231,20 +231,20 @@ function decodeQueuedMessage(value: unknown, index: number): QueuedMessage {
 function decodeAttachment(value: unknown, label: string): Attachment {
   const object = exactObject(value, ["id", "kind", "mediaType", "name", "path", "size"], label);
   if (object.kind !== "file" && object.kind !== "image") {
-    throw new Error(`${label} possui tipo inválido`);
+    throw new Error(`${label} has an invalid kind`);
   }
   if (typeof object.size !== "number" || !Number.isSafeInteger(object.size) || object.size < 0) {
-    throw new Error(`${label} possui tamanho inválido`);
+    throw new Error(`${label} has an invalid size`);
   }
   return {
-    id: validateIdentifier(object.id, `${label}, identificador`),
-    name: validateText(object.name, `${label}, nome`, MAX_NAME_CHARACTERS),
-    path: validateText(object.path, `${label}, caminho`, MAX_PATH_CHARACTERS),
+    id: validateIdentifier(object.id, `${label}, identifier`),
+    name: validateText(object.name, `${label}, name`, MAX_NAME_CHARACTERS),
+    path: validateText(object.path, `${label}, path`, MAX_PATH_CHARACTERS),
     kind: object.kind,
     size: object.size,
     mediaType: validateNullableText(
       object.mediaType,
-      `${label}, tipo de mídia`,
+      `${label}, media type`,
       MAX_MEDIA_TYPE_CHARACTERS,
     ),
   };
@@ -256,7 +256,7 @@ function exactObject<const Keys extends readonly string[]>(
   label: string,
 ): { [Key in Keys[number]]: unknown } {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} não é um objeto`);
+    throw new Error(`${label} is not an object`);
   }
   const object = value as Record<string, unknown>;
   const keys = Object.keys(object).sort();
@@ -264,7 +264,7 @@ function exactObject<const Keys extends readonly string[]>(
     keys.length !== expectedKeys.length ||
     keys.some((key, index) => key !== expectedKeys[index])
   ) {
-    throw new Error(`${label} possui campos incompatíveis`);
+    throw new Error(`${label} has incompatible fields`);
   }
   return object as { [Key in Keys[number]]: unknown };
 }
@@ -280,7 +280,7 @@ function validateText(value: unknown, label: string, maximumCharacters: number):
     value.length > maximumCharacters ||
     /\p{Cc}/u.test(value)
   ) {
-    throw new Error(`${label} é inválido`);
+    throw new Error(`${label} is invalid`);
   }
   return value;
 }
@@ -298,5 +298,5 @@ function messageQueueStorageKey(threadId: string): string {
 }
 
 function describe(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "erro desconhecido";
+  return reason instanceof Error ? reason.message : "unknown error";
 }

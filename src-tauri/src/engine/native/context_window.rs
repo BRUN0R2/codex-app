@@ -85,9 +85,7 @@ pub(super) fn evaluate_context_window(
                 .unwrap_or_default();
             snapshot.usage.total_tokens.saturating_add(local_tokens)
         });
-    let active_tokens = measured_with_local_delta.map_or(estimated_request, |measured| {
-        measured.max(estimated_request)
-    });
+    let active_tokens = measured_with_local_delta.unwrap_or(estimated_request);
     let should_compact = evaluation
         .auto_compact_limit
         .is_some_and(|limit| active_tokens >= limit)
@@ -562,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn current_request_estimate_covers_larger_instructions() {
+    fn provider_measurement_remains_authoritative_after_a_completed_response() {
         let history = vec![text("assistant", "done")];
         let snapshot = ContextUsageSnapshot {
             model: "gpt-test".into(),
@@ -579,7 +577,30 @@ mod tests {
             context_window: None,
         });
 
-        assert!(status.should_compact);
+        assert_eq!(status.active_tokens, 10);
+        assert!(!status.should_compact);
+    }
+
+    #[test]
+    fn provider_measurement_prevents_premature_compaction_from_a_larger_request_estimate() {
+        let history = vec![text("assistant", "done")];
+        let snapshot = ContextUsageSnapshot {
+            model: "gpt-5.6-sol".into(),
+            usage: usage(200_340),
+        };
+        let status = evaluate_context_window(ContextWindowEvaluation {
+            model_id: "gpt-5.6-sol",
+            base_instructions: &"i".repeat(900_000),
+            prompt_context: &[],
+            history: &history,
+            tools: &[],
+            snapshot: Some(&snapshot),
+            auto_compact_limit: Some(244_800),
+            context_window: None,
+        });
+
+        assert_eq!(status.active_tokens, 200_340);
+        assert!(!status.should_compact);
     }
 
     #[test]

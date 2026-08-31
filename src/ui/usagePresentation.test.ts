@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { AccountRateLimitsResponse, RateLimitSnapshot } from "../contracts/types";
+import { findCatalog, translationCatalogs } from "../i18n/catalog";
 import { presentUsageLimits, usagePercentLabel, usageWindowLabel } from "./usagePresentation";
+
+const english = findCatalog(translationCatalogs, "en")?.messages.settings;
+if (english === undefined) throw new Error("The English translation catalog is unavailable.");
 
 function snapshot(overrides: Partial<RateLimitSnapshot> = {}): RateLimitSnapshot {
   return {
@@ -31,16 +35,16 @@ function response(
 
 describe("usage limit presentation", () => {
   it("names common Codex windows by their actual duration", () => {
-    expect(usageWindowLabel(300)).toBe("Limite de uso de 5 horas");
-    expect(usageWindowLabel(1_440)).toBe("Limite de uso diário");
-    expect(usageWindowLabel(10_080)).toBe("Limite de uso semanal");
-    expect(usageWindowLabel(43_200)).toBe("Limite de uso mensal");
+    expect(usageWindowLabel(300, english)).toBe("5-hour usage limit");
+    expect(usageWindowLabel(1_440, english)).toBe("Daily usage limit");
+    expect(usageWindowLabel(10_080, english)).toBe("Weekly usage limit");
+    expect(usageWindowLabel(43_200, english)).toBe("Monthly usage limit");
   });
 
   it("keeps uncommon windows explicit instead of assigning a false cycle", () => {
-    expect(usageWindowLabel(90)).toBe("Limite de uso de 90 minutos");
-    expect(usageWindowLabel(2_880)).toBe("Limite de uso de 2 dias");
-    expect(usageWindowLabel(null)).toBe("Limite de uso");
+    expect(usageWindowLabel(90, english)).toBe("90-minute usage limit");
+    expect(usageWindowLabel(2_880, english)).toBe("2-day usage limit");
+    expect(usageWindowLabel(null, english)).toBe("Usage limit");
   });
 
   it("uses remaining capacity for the meter", () => {
@@ -50,10 +54,12 @@ describe("usage limit presentation", () => {
           primary: { usedPercent: 51, windowDurationMins: 43_200, resetsAt: 1_800_000_000_000 },
         }),
       ),
+      english,
+      "en",
     );
 
     expect(groups[0]?.limits[0]).toMatchObject({
-      label: "Limite de uso mensal",
+      label: "Monthly usage limit",
       remainingPercent: 49,
       usedPercent: 51,
     });
@@ -80,6 +86,8 @@ describe("usage limit presentation", () => {
           }),
         },
       ),
+      english,
+      "en",
     );
 
     expect(groups).toEqual([
@@ -87,17 +95,17 @@ describe("usage limit presentation", () => {
         id: "codex",
         label: null,
         limits: [
-          expect.objectContaining({ label: "Limite de uso de 5 horas" }),
-          expect.objectContaining({ label: "Limite de uso semanal" }),
+          expect.objectContaining({ label: "5-hour usage limit" }),
+          expect.objectContaining({ label: "Weekly usage limit" }),
         ],
       },
       {
         id: "codex_spark",
         label: "Codex 5.3 Spark",
         limits: [
-          expect.objectContaining({ label: "Limite de uso diário" }),
+          expect.objectContaining({ label: "Daily usage limit" }),
           expect.objectContaining({
-            label: "Limite de uso mensal",
+            label: "Monthly usage limit",
             remainingPercent: 49,
           }),
         ],

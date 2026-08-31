@@ -78,7 +78,7 @@ export function useTimelineDisclosureStorageKey(key: () => string): () => Timeli
 function useTimelineDisclosureContext(): TimelineDisclosureContextValue {
   const context = useContext(TimelineDisclosureContext);
   if (context === undefined) {
-    throw new Error("O estado visual da timeline não foi inicializado.");
+    throw new Error("The timeline disclosure state was not initialized.");
   }
   return context;
 }

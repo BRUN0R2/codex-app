@@ -1,6 +1,8 @@
 import { createMemo, type JSX, Show } from "solid-js";
 
 import type { ContextUsageItem, ModelContextWindow } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage } from "../i18n/messages";
 import { calculateContextWindowMetrics, formatContextTokens } from "./contextWindowMetrics";
 
 interface ContextWindowIndicatorProps {
@@ -9,6 +11,8 @@ interface ContextWindowIndicatorProps {
 }
 
 export function ContextWindowIndicator(props: ContextWindowIndicatorProps): JSX.Element {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().contextWindow;
   const metrics = createMemo(() => calculateContextWindowMetrics(props.usage, props.modelWindow));
   const percent = () => metrics()?.percent ?? 0;
   const remainingPercent = () => metrics()?.remainingPercent ?? 0;
@@ -18,21 +22,24 @@ export function ContextWindowIndicator(props: ContextWindowIndicatorProps): JSX.
   const roundedPercent = () => Math.round(percent());
   const statusLabel = () =>
     roundedPercent() >= 50
-      ? `${roundedPercent()}% cheia`
-      : `${roundedPercent()}% usado (${Math.round(remainingPercent())}% restante)`;
+      ? formatMessage(messages().fullStatus, { percent: roundedPercent() })
+      : formatMessage(messages().usedStatus, {
+          percent: roundedPercent(),
+          remaining: Math.round(remainingPercent()),
+        });
 
   return (
     <Show when={metrics()} fallback={null}>
       {(current) => (
         <div
-          aria-label={`Uso de contexto: ${roundedPercent()}%`}
+          aria-label={formatMessage(messages().usage, { percent: roundedPercent() })}
           class="composer-context-ring-anchor"
           classList={{ full: roundedPercent() >= 100 }}
           role="img"
         >
           <span aria-hidden="true" class="composer-context-ring-icon">
             <svg class="composer-context-ring-svg" height={12} viewBox="0 0 12 12" width={12}>
-              <title>Uso de contexto</title>
+              <title>{messages().title}</title>
               <circle
                 class="composer-context-ring-track"
                 cx={6}
@@ -58,11 +65,13 @@ export function ContextWindowIndicator(props: ContextWindowIndicatorProps): JSX.
             </svg>
           </span>
           <div class="context-window-popover" role="tooltip">
-            <div class="context-window-popover-title">Janela de contexto:</div>
+            <div class="context-window-popover-title">{messages().window}</div>
             <div class="context-window-popover-percent">{statusLabel()}</div>
             <div class="context-window-popover-tokens">
-              {formatContextTokens(current().usedTokens)} /{" "}
-              {formatContextTokens(current().contextWindow)} tokens usados
+              {formatMessage(messages().tokensUsed, {
+                used: formatContextTokens(current().usedTokens),
+                total: formatContextTokens(current().contextWindow),
+              })}
             </div>
           </div>
         </div>

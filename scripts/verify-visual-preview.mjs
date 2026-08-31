@@ -7,16 +7,20 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 
 import {
+  chromiumAuditArguments,
   compareRetainedIdentities,
   loopbackHttpOrigin,
   observeProcess,
   waitForDevToolsEndpoint,
 } from "../src/tooling/visualAuditRuntime.ts";
+import { PROFILE_STORAGE_KEYS } from "../src/state/profileStorage.ts";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PREVIEW_PLACEHOLDER_ORIGIN = "http://127.0.0.1";
 const HOME_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1`;
+const MODEL_WARMUP_PREVIEW_URL = `${HOME_PREVIEW_URL}&modelRefreshDelay=180`;
 const RUNTIME_RESTRICTIONS_PREVIEW_URL = `${HOME_PREVIEW_URL}&runtimeRestrictions=1`;
+const REASONING_REFLECTION_PREVIEW_URL = `${HOME_PREVIEW_URL}&reasoningReflection=1`;
 const CHAT_REFERENCE_PREVIEW_URL = `${HOME_PREVIEW_URL}&chatReference=1`;
 const TIMELINE_STRESS_PREVIEW_URL = `${HOME_PREVIEW_URL}&timelineStress=1`;
 const TIMELINE_EXTREME_PREVIEW_URL = `${TIMELINE_STRESS_PREVIEW_URL}&timelineFiles=100000`;
@@ -30,7 +34,8 @@ const USAGE_SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chr
 const SETTINGS_INTERACTION_PREVIEW_URL = `${SETTINGS_PREVIEW_URL}&preferenceDelay=400`;
 const AUTOMATIONS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&surface=automations`;
 const PROFILE_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=profile`;
-const ARTIFACT_DIRECTORY = path.join(PROJECT_ROOT, ".freebuff", "visual-audit");
+const ARTIFACT_DIRECTORY = path.join(PROJECT_ROOT, ".artifacts", "visual-audit");
+const VISUAL_AUDIT_LOCALE = "pt-BR";
 const VIEWPORTS = [
   { width: 920, height: 640 },
   { width: 1280, height: 820 },
@@ -67,7 +72,7 @@ const SCENARIOS = [
     prepareExpression: `(() => {
       const modelButton = document.querySelector(".model-button");
       if (!(modelButton instanceof HTMLButtonElement)) {
-        throw new Error("O seletor do modelo está ausente.");
+        throw new Error("The model selector is missing.");
       }
       modelButton.click();
       requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -75,7 +80,7 @@ const SCENARIOS = [
           (button) => button.textContent?.includes("Esforço"),
         );
         if (!(effortRow instanceof HTMLButtonElement)) {
-          throw new Error("A seção de esforço está ausente.");
+          throw new Error("The effort section is missing.");
         }
         effortRow.click();
         requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -83,7 +88,7 @@ const SCENARIOS = [
             (button) => button.textContent?.trim() === "Ultra",
           );
           if (!(ultraOption instanceof HTMLButtonElement)) {
-            throw new Error("A opção Ultra está ausente.");
+            throw new Error("The Ultra option is missing.");
           }
           ultraOption.click();
         }));
@@ -93,7 +98,7 @@ const SCENARIOS = [
     auditExpression: () => `(() => {
       const effort = document.querySelector(".model-button-effort.ultra");
       if (!(effort instanceof HTMLElement)) {
-        throw new Error("O esforço Ultra ativo está ausente.");
+        throw new Error("The active Ultra effort is missing.");
       }
       const rootStyle = getComputedStyle(document.documentElement);
       return {
@@ -113,7 +118,7 @@ const SCENARIOS = [
     prepareExpression: `(() => {
       const modelButton = document.querySelector(".model-button");
       if (!(modelButton instanceof HTMLButtonElement)) {
-        throw new Error("O seletor do modelo está ausente.");
+        throw new Error("The model selector is missing.");
       }
       modelButton.click();
       requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -121,7 +126,7 @@ const SCENARIOS = [
           (button) => button.textContent?.includes("Esforço"),
         );
         if (!(effortRow instanceof HTMLButtonElement)) {
-          throw new Error("A seção de esforço está ausente.");
+          throw new Error("The effort section is missing.");
         }
         effortRow.click();
       }));
@@ -147,6 +152,16 @@ const SCENARIOS = [
     validate: validateComposerRuntimeRestrictionsMetrics,
   },
   {
+    id: "model-catalog-warmup",
+    url: MODEL_WARMUP_PREVIEW_URL,
+    initialReadyExpression: `document.querySelector(".new-thread-button") instanceof HTMLButtonElement &&
+      document.querySelector(".composer textarea") instanceof HTMLTextAreaElement`,
+    prepareExpression: modelCatalogWarmupPrepareExpression(),
+    readyExpression: `window.__previewModelWarmupReady === true`,
+    auditExpression: modelCatalogWarmupVisualAuditExpression,
+    validate: validateModelCatalogWarmupMetrics,
+  },
+  {
     id: "active-activity-reflection",
     url: HOME_PREVIEW_URL,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
@@ -159,10 +174,32 @@ const SCENARIOS = [
       threadButton?.click();
     })()`,
     readyExpression: `document.querySelector(
-      ".activity-title.is-running.is-shimmer-active .activity-title-sweep",
+      ".agent-activity-group > .agent-activity-summary .activity-title.is-running.is-shimmer-active .activity-title-sweep",
     ) !== null`,
     auditExpression: activeActivityReflectionVisualAuditExpression,
     validate: validateActiveActivityReflectionMetrics,
+  },
+  {
+    id: "reasoning-activity-reflection",
+    url: REASONING_REFLECTION_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      threadButton?.click();
+    })()`,
+    readyExpression: `document.documentElement.dataset.reasoningPreviewReady === "true" &&
+      [...document.querySelectorAll(
+      ".agent-activity-group > .agent-activity-summary .activity-title.is-running.is-shimmer-active",
+    )].some(
+      (title) => title.querySelector(".activity-title-base")?.textContent?.trim() ===
+        "Running focused checks",
+    )`,
+    auditExpression: activeActivityReflectionVisualAuditExpression,
+    validate: validateReasoningActivityReflectionMetrics,
   },
   {
     id: "user-message-navigation",
@@ -224,15 +261,15 @@ const SCENARIOS = [
     validate: validateManualScrollOwnershipMetrics,
   },
   {
-    id: "nested-scroll-handoff",
+    id: "nested-scroll-containment",
     url: HOME_PREVIEW_URL,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
       (button) => button.textContent?.includes("Inspecionar janela de contexto"),
     )`,
-    prepareExpression: nestedScrollHandoffPrepareExpression(),
+    prepareExpression: nestedScrollContainmentPrepareExpression(),
     readyExpression: `window.__previewNestedScrollReady === true`,
-    auditExpression: nestedScrollHandoffVisualAuditExpression,
-    validate: validateNestedScrollHandoffMetrics,
+    auditExpression: nestedScrollContainmentVisualAuditExpression,
+    validate: validateNestedScrollContainmentMetrics,
   },
   {
     id: "nested-scroll-wheel-ownership",
@@ -375,7 +412,7 @@ const SCENARIOS = [
           const deadline = performance.now() + 5_000;
           while (!predicate()) {
             if (performance.now() > deadline) {
-              throw new Error("Tempo esgotado preparando " + label + ".");
+              throw new Error("Timed out while preparing " + label + ".");
             }
             await frame();
           }
@@ -385,23 +422,23 @@ const SCENARIOS = [
         );
         threadButton?.click();
         await waitUntil(
-          "o gatilho da revisão",
+          "the review trigger",
           () => document.querySelector(".plan-review-trigger") instanceof HTMLButtonElement,
         );
         document.querySelector(".plan-review-trigger")?.click();
         await waitUntil(
-          "a lista de arquivos da revisão",
+          "the review file list",
           () => document.querySelector(".review-file-option") instanceof HTMLButtonElement,
         );
         const largeFile = [...document.querySelectorAll(".review-file-option")].find(
           (option) => option.querySelector("code")?.textContent?.endsWith("module-15.ts"),
         );
         if (!(largeFile instanceof HTMLButtonElement)) {
-          throw new Error("O arquivo grande da revisão está ausente.");
+          throw new Error("The large review file is missing.");
         }
         largeFile.click();
         await waitUntil(
-          "as linhas virtuais da revisão",
+          "the virtual review rows",
           () => document.querySelector(".review-panel .diff-virtual-row") instanceof HTMLElement,
         );
         await frame();
@@ -410,7 +447,7 @@ const SCENARIOS = [
           const diffViewport = document.querySelector(".review-panel .diff-viewport");
           const canvas = diffViewport?.querySelector(".diff-virtual-canvas");
           if (!(diffViewport instanceof HTMLElement) || !(canvas instanceof HTMLElement)) {
-            throw new Error("A geometria virtual da revisão está ausente.");
+            throw new Error("The virtual review geometry is missing.");
           }
           const rows = [...diffViewport.querySelectorAll(".diff-virtual-row")];
           const viewportBounds = diffViewport.getBoundingClientRect();
@@ -436,7 +473,7 @@ const SCENARIOS = [
         const initial = measureReviewVirtualization();
         const diffViewport = document.querySelector(".review-panel .diff-viewport");
         if (!(diffViewport instanceof HTMLElement)) {
-          throw new Error("A viewport da revisão está ausente.");
+          throw new Error("The review viewport is missing.");
         }
         diffViewport.scrollTop = diffViewport.scrollHeight;
         await frame();
@@ -608,10 +645,18 @@ const SCENARIOS = [
   {
     id: "settings",
     url: SETTINGS_PREVIEW_URL,
-    readyExpression: `document.querySelector(".settings-dialog") !== null &&
+    initialReadyExpression: `document.querySelector(".settings-dialog") !== null &&
       document.querySelector(".window-chrome-controls") !== null &&
       document.querySelector(".settings-scrollbar:not(.is-hidden)") !== null &&
       document.querySelectorAll(".application-preference").length === 3`,
+    prepareExpression: `(() => {
+      const languageSelect = document.querySelector(".language-preference-select");
+      if (!(languageSelect instanceof HTMLSelectElement)) {
+        throw new Error("The language preference selector is missing.");
+      }
+      languageSelect.value = "auto";
+    })()`,
+    readyExpression: `document.querySelector(".language-preference-select")?.value === "auto"`,
     auditExpression: settingsVisualAuditExpression,
     validate: validateSettingsMetrics,
   },
@@ -648,7 +693,14 @@ const SCENARIOS = [
     id: "settings-output-detail",
     url: SETTINGS_PREVIEW_URL,
     initialReadyExpression: `document.querySelector(".output-detail-trigger") !== null`,
-    prepareExpression: `document.querySelector(".output-detail-trigger")?.click()`,
+    prepareExpression: `(() => {
+      const trigger = document.querySelector(".output-detail-trigger");
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("The output detail trigger is missing.");
+      }
+      trigger.scrollIntoView({ block: "center", inline: "nearest" });
+      requestAnimationFrame(() => requestAnimationFrame(() => trigger.click()));
+    })()`,
     readyExpression: `document.querySelector(".output-detail-menu") !== null`,
     auditExpression: outputDetailVisualAuditExpression,
     validate: validateOutputDetailMetrics,
@@ -743,7 +795,7 @@ const SCENARIOS = [
         const preset = document.querySelector('select[aria-label="Resolução padrão"]');
         const scale = document.querySelector('select[aria-label="Escala do viewport"]');
         if (!(preset instanceof HTMLSelectElement) || !(scale instanceof HTMLSelectElement)) {
-          throw new Error("Os controles responsivos não foram montados.");
+          throw new Error("The responsive controls were not mounted.");
         }
         preset.value = "7680x4320";
         preset.dispatchEvent(new Event("change", { bubbles: true }));
@@ -805,7 +857,7 @@ const SCENARIOS = [
             if (closeButton !== null) break;
           }
           if (!(closeButton instanceof HTMLButtonElement)) {
-            throw new Error("O navegador não abriu para validar sua desmontagem.");
+            throw new Error("The browser did not open for its disposal check.");
           }
           closeButton.click();
           await frame();
@@ -908,33 +960,14 @@ async function main() {
     browserProfile = await mkdtemp(path.join(os.tmpdir(), "codex-app-visual-"));
     browser = spawn(
       browserPath,
-      [
-        "--headless=new",
-        "--disable-background-networking",
-        "--disable-background-timer-throttling",
-        "--disable-backgrounding-occluded-windows",
-        "--disable-breakpad",
-        "--disable-component-update",
-        "--disable-default-apps",
-        "--disable-features=Translate",
-        "--disable-renderer-backgrounding",
-        "--disable-sync",
-        "--enable-smooth-scrolling",
-        "--force-prefers-no-reduced-motion",
-        "--hide-scrollbars",
-        "--metrics-recording-only",
-        "--no-first-run",
-        "--remote-debugging-port=0",
-        `--user-data-dir=${browserProfile}`,
-        "about:blank",
-      ],
+      chromiumAuditArguments(browserProfile),
       {
         cwd: PROJECT_ROOT,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       },
     );
-    const browserProcess = observeProcess(browser, "Navegador da auditoria visual");
+    const browserProcess = observeProcess(browser, "Visual audit browser");
     const devToolsEndpoint = await waitForDevToolsEndpoint(browserProfile, browserProcess);
     browserController = await CdpClient.connect(devToolsEndpoint.browserWebSocketUrl);
     await mkdir(ARTIFACT_DIRECTORY, { recursive: true });
@@ -949,7 +982,7 @@ async function main() {
       const unknownScenarios = [...REQUESTED_SCENARIOS].filter(
         (scenarioId) => !knownScenarios.has(scenarioId),
       );
-      throw new Error(`Cenários visuais desconhecidos: ${unknownScenarios.join(", ")}`);
+      throw new Error(`Unknown visual scenarios: ${unknownScenarios.join(", ")}`);
     }
     const scenarios = selectedScenarios.map((scenario) => ({
       ...scenario,
@@ -998,6 +1031,9 @@ async function auditViewport(debugPort, viewport, scenario) {
   try {
     await client.send("Page.enable");
     await client.send("Runtime.enable");
+    await client.send("Page.addScriptToEvaluateOnNewDocument", {
+      source: `localStorage.setItem(${JSON.stringify(PROFILE_STORAGE_KEYS.locale)}, ${JSON.stringify(VISUAL_AUDIT_LOCALE)});`,
+    });
     await client.send("Storage.clearDataForOrigin", {
       origin: new URL(scenario.url).origin,
       storageTypes: "all",
@@ -1045,7 +1081,7 @@ async function auditViewport(debugPort, viewport, scenario) {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(
-        `Cenário ${scenario.id} inválido em ${viewport.width}x${viewport.height}: ${reason}. Métricas: ${JSON.stringify(metrics)}`,
+        `Scenario ${scenario.id} is invalid at ${viewport.width}x${viewport.height}: ${reason}. Metrics: ${JSON.stringify(metrics)}`,
         { cause: error },
       );
     }
@@ -1095,8 +1131,8 @@ async function waitForPreview(client, readyExpression, scenarioId, timeoutMs = 1
     )
     .catch(() => null);
   throw new Error(
-    `A prévia visual de ${scenarioId} não ficou pronta dentro de ${timeoutMs / 1000} segundos.\n` +
-      `Diagnóstico: ${JSON.stringify(diagnostics)}`,
+    `Visual preview ${scenarioId} did not become ready within ${timeoutMs / 1000} seconds.\n` +
+      `Diagnostics: ${JSON.stringify(diagnostics)}`,
   );
 }
 
@@ -1116,7 +1152,7 @@ function browserPanelVisualAuditExpression() {
       !(address instanceof HTMLElement) ||
       !(surface instanceof HTMLElement)
     ) {
-      throw new Error("A superfície do navegador interno está incompleta.");
+      throw new Error("The built-in browser surface is incomplete.");
     }
     const rectangle = (element) => {
       const bounds = element.getBoundingClientRect();
@@ -1161,7 +1197,7 @@ function workspaceSplitVisualStateExpression() {
       !(splitter instanceof HTMLElement) ||
       !(workspace instanceof HTMLElement)
     ) {
-      throw new Error("A divisão entre chat e área de trabalho está incompleta.");
+      throw new Error("The split between chat and workspace is incomplete.");
     }
     const rectangle = (element) => {
       const bounds = element.getBoundingClientRect();
@@ -1216,7 +1252,7 @@ function browserResponsiveVisualAuditExpression() {
       !(scale instanceof HTMLSelectElement) ||
       !(reset instanceof HTMLButtonElement)
     ) {
-      throw new Error("O viewport responsivo está incompleto.");
+      throw new Error("The responsive viewport is incomplete.");
     }
     const rectangle = (element) => {
       const bounds = element.getBoundingClientRect();
@@ -1256,7 +1292,7 @@ function browserDebugVisualAuditExpression() {
       !(debug instanceof HTMLElement) ||
       !(surface instanceof HTMLElement)
     ) {
-      throw new Error("O diagnóstico do navegador está incompleto.");
+      throw new Error("The browser diagnostics are incomplete.");
     }
     const rectangle = (element) => {
       const bounds = element.getBoundingClientRect();
@@ -1327,7 +1363,7 @@ function imageViewGroupPrepareExpression() {
           }
         }
         if (!(group instanceof HTMLDetailsElement)) {
-          throw new Error("O agrupamento de imagens não foi montado.");
+          throw new Error("The image group was not mounted.");
         }
         group.scrollIntoView({ block: "center" });
         if (!group.open) {
@@ -1339,7 +1375,7 @@ function imageViewGroupPrepareExpression() {
             return;
           }
         }
-        throw new Error("As duas miniaturas não ficaram prontas.");
+        throw new Error("The two thumbnails did not become ready.");
       } catch (error) {
         window.__previewImageViewError =
           error instanceof Error ? error.stack ?? error.message : String(error);
@@ -1362,11 +1398,11 @@ function previewFileDetailPrepareExpression(fileName) {
         await frame();
         const timeline = document.querySelector(".timeline");
         if (!(timeline instanceof HTMLElement)) {
-          throw new Error("A timeline não foi montada.");
+          throw new Error("The timeline was not mounted.");
         }
         const marker = document.querySelectorAll(".user-message-navigator button")[1];
         if (!(marker instanceof HTMLButtonElement)) {
-          throw new Error("O marcador da mensagem anterior ao arquivo criado está ausente.");
+          throw new Error("The message marker before the created file is missing.");
         }
         marker.click();
         await frame();
@@ -1448,7 +1484,7 @@ function previewFileDetailPrepareExpression(fileName) {
               !(diffViewport instanceof HTMLElement) ||
               !(code instanceof HTMLElement)
             ) {
-              throw new Error("O diff criado não materializou suas linhas visíveis.");
+              throw new Error("The created diff did not materialize its visible rows.");
             }
             const tokens = [...diffViewport.querySelectorAll(".syntax-token")];
             const rows = [...diffViewport.querySelectorAll(".unified-diff-row")];
@@ -1491,9 +1527,9 @@ function previewFileDetailPrepareExpression(fileName) {
           timeline.scrollTop = Math.min(maximumScroll, timeline.scrollTop + step);
         }
         throw new Error(
-          "O arquivo " +
+          "File " +
             ${JSON.stringify(fileName)} +
-            " não foi encontrado na timeline (scrollTop=" +
+            " was not found in the timeline (scrollTop=" +
             timeline.scrollTop +
             ", scrollHeight=" +
             timeline.scrollHeight +
@@ -1580,7 +1616,7 @@ function previewHighlightedToolOutputsPrepareExpression() {
               !(currentCanvas instanceof HTMLElement) ||
               !(currentViewport instanceof HTMLElement)
             ) {
-              throw new Error("A leitura virtual não está materializada.");
+              throw new Error("The virtual read is not materialized.");
             }
             const currentRows = [...currentSource.querySelectorAll(".tool-source-line")];
             const viewportBounds = currentViewport.getBoundingClientRect();
@@ -1612,13 +1648,21 @@ function previewHighlightedToolOutputsPrepareExpression() {
           await frame();
           await frame();
           sourceSummary?.click();
-          await new Promise((resolve) => setTimeout(resolve, 120));
+          await frame();
+          const sourceChevronIcon = sourceSummary?.querySelector(".activity-chevron > svg");
+          if (sourceChevronIcon instanceof SVGElement) {
+            await Promise.all(
+              sourceChevronIcon
+                .getAnimations()
+                .map((animation) => animation.finished.catch(() => undefined)),
+            );
+          }
           await frame();
           await frame();
           const reopened = measureSourceVirtualization();
           const sourceViewport = sourceCard.querySelector(".tool-source-viewport");
           if (!(sourceViewport instanceof HTMLElement)) {
-            throw new Error("A viewport reaberta da leitura está ausente.");
+            throw new Error("The reopened read viewport is missing.");
           }
           sourceViewport.scrollTop = sourceViewport.scrollHeight;
           await frame();
@@ -1765,7 +1809,7 @@ function composerPopoverLayeringPrepareExpression() {
           const deadline = performance.now() + timeoutMs;
           while (!predicate()) {
             if (performance.now() >= deadline) {
-              throw new Error("Tempo excedido aguardando " + label + ".");
+              throw new Error("Timed out waiting for " + label + ".");
             }
             await frame();
           }
@@ -1786,14 +1830,14 @@ function composerPopoverLayeringPrepareExpression() {
         );
         threadButton?.click();
         await waitUntil(
-          "o compositor e o resumo das alterações",
+          "the composer and change summary",
           () =>
             document.querySelector(".composer-wrap") !== null &&
             document.querySelector(".plan-progress-pill") !== null &&
             document.querySelector(".permission-button") !== null,
         );
         await waitUntil(
-          "a timeline de estresse",
+          "the stress timeline",
           () =>
             document.querySelector(".command-activity-card") !== null ||
             document.querySelector(".agent-activity-group") !== null ||
@@ -1806,7 +1850,7 @@ function composerPopoverLayeringPrepareExpression() {
           (summary) => summary.click(),
         );
         await waitUntil(
-          "uma linha de comando materializada",
+          "a materialized command row",
           () =>
             document.querySelector(
               ".command-activity-card > summary .activity-icon svg",
@@ -1816,7 +1860,7 @@ function composerPopoverLayeringPrepareExpression() {
         const measureMenu = async (name, triggerSelector, menuSelector) => {
           const trigger = document.querySelector(triggerSelector);
           if (!(trigger instanceof HTMLButtonElement)) {
-            throw new Error("Controle ausente para o menu " + name + ".");
+            throw new Error("Missing control for the " + name + " menu.");
           }
           trigger.click();
           await frame();
@@ -1824,7 +1868,7 @@ function composerPopoverLayeringPrepareExpression() {
           const menu = document.querySelector(menuSelector);
           const status = document.querySelector(".plan-progress-pill");
           if (!(menu instanceof HTMLElement) || !(status instanceof HTMLElement)) {
-            throw new Error("Superfícies ausentes ao medir o menu " + name + ".");
+            throw new Error("Missing surfaces while measuring the " + name + " menu.");
           }
           const menuBounds = rectangle(menu);
           const statusBounds = rectangle(status);
@@ -1871,7 +1915,7 @@ function composerPopoverLayeringPrepareExpression() {
         menus.push(await measureMenu("model", ".model-button", ".model-menu"));
         const permissionButton = document.querySelector(".permission-button");
         if (!(permissionButton instanceof HTMLButtonElement)) {
-          throw new Error("O controle de permissões desapareceu durante a auditoria.");
+          throw new Error("The permission control disappeared during the audit.");
         }
         permissionButton.click();
         await frame();
@@ -1907,7 +1951,7 @@ function composerPopoverLayeringPrepareExpression() {
           !(commandFrame instanceof SVGRectElement) ||
           commandIconBounds === undefined
         ) {
-          throw new Error("A hierarquia final de camadas do dock está incompleta.");
+          throw new Error("The final dock layer hierarchy is incomplete.");
         }
         timeline.scrollTop = timeline.scrollHeight;
         await frame();
@@ -1922,7 +1966,7 @@ function composerPopoverLayeringPrepareExpression() {
           null,
         );
         if (!(lastTimelineItem instanceof HTMLElement)) {
-          throw new Error("O último item da timeline não está materializado no limite inferior.");
+          throw new Error("The last timeline item is not materialized at the lower boundary.");
         }
         const rootStyle = getComputedStyle(document.documentElement);
         const chatPageBounds = rectangle(chatPage);
@@ -1998,7 +2042,7 @@ function imageViewGroupVisualAuditExpression() {
     }
     const group = document.querySelector(".image-view-group");
     if (!(group instanceof HTMLDetailsElement)) {
-      throw new Error("O agrupamento de imagens está ausente.");
+      throw new Error("The image group is missing.");
     }
     const images = [...group.querySelectorAll(".tool-image-preview img")];
     return {
@@ -2023,7 +2067,7 @@ function manualScrollOwnershipPrepareExpression() {
           const deadline = performance.now() + 3000;
           while (!predicate()) {
             if (performance.now() > deadline) {
-              throw new Error("Tempo esgotado preparando " + label + ".");
+              throw new Error("Timed out while preparing " + label + ".");
             }
             await frame();
           }
@@ -2032,19 +2076,19 @@ function manualScrollOwnershipPrepareExpression() {
           (button) => button.textContent?.includes("Inspecionar janela de contexto"),
         );
         if (!(threadButton instanceof HTMLButtonElement)) {
-          throw new Error("O chat de referência do scroll manual está ausente.");
+          throw new Error("The manual-scroll reference chat is missing.");
         }
         threadButton.click();
         await waitUntil(
-          "o chat de referência",
+          "the reference chat",
           () => document.getElementById("user-message-preview-image-user-message") !== null,
         );
         const timeline = document.querySelector(".timeline");
         if (!(timeline instanceof HTMLElement)) {
-          throw new Error("A timeline do cenário de scroll manual está ausente.");
+          throw new Error("The manual-scroll scenario timeline is missing.");
         }
         await waitUntil(
-          "dois turnos virtualizados",
+          "two virtualized turns",
           () => document.querySelectorAll(".timeline-virtual-item").length >= 2,
         );
         const initialItems = [...document.querySelectorAll(".timeline-virtual-item")];
@@ -2056,12 +2100,12 @@ function manualScrollOwnershipPrepareExpression() {
           !(initialAnchor instanceof HTMLElement) ||
           !(timelineInner instanceof HTMLElement)
         ) {
-          throw new Error("Os itens de referência do scroll manual estão ausentes.");
+          throw new Error("The manual-scroll reference items are missing.");
         }
         const firstId = initialFirst.getAttribute("data-virtual-turn-id");
         const anchorId = initialAnchor.getAttribute("data-virtual-turn-id");
         if (firstId === null || anchorId === null) {
-          throw new Error("Os itens de referência perderam suas identidades virtuais.");
+          throw new Error("The reference items lost their virtual identities.");
         }
         const setupSpacer = document.createElement("div");
         setupSpacer.dataset.previewManualScrollSetup = "";
@@ -2082,7 +2126,7 @@ function manualScrollOwnershipPrepareExpression() {
           '.timeline-virtual-item[data-virtual-turn-id="' + anchorId + '"]',
         );
         if (!(first instanceof HTMLElement) || !(anchor instanceof HTMLElement)) {
-          throw new Error("Os itens de referência foram desmontados durante a preparação.");
+          throw new Error("The reference items were unmounted during preparation.");
         }
         const timelineTop = timeline.getBoundingClientRect().top;
         const anchorContentTop =
@@ -2108,7 +2152,7 @@ function manualScrollOwnershipPrepareExpression() {
           !(mountedFirst instanceof HTMLElement) ||
           !(mountedAnchor instanceof HTMLElement)
         ) {
-          throw new Error("Os itens de referência foram desmontados antes da medição.");
+          throw new Error("The reference items were unmounted before measurement.");
         }
         window.__previewManualScrollState = {
           anchorId,
@@ -2133,7 +2177,7 @@ function manualScrollOwnershipPrepareExpression() {
   })()`;
 }
 
-function nestedScrollHandoffPrepareExpression() {
+function nestedScrollContainmentPrepareExpression() {
   return `(() => {
     void (async () => {
       try {
@@ -2189,7 +2233,7 @@ function nestedScrollHandoffPrepareExpression() {
               !(sourceScroll instanceof HTMLElement) ||
               !(diffScroll instanceof HTMLElement)
             ) {
-              throw new Error("As regiões aninhadas não materializaram seu conteúdo.");
+              throw new Error("The nested regions did not materialize their content.");
             }
             const maximumTimelineScroll = timeline.scrollHeight - timeline.clientHeight;
             const baseTimelineScroll = Math.round(
@@ -2206,13 +2250,7 @@ function nestedScrollHandoffPrepareExpression() {
               await frame();
               region.scrollTop = requestedTop;
               const nestedStart = region.scrollTop;
-              const maximumNestedScroll = Math.max(0, region.scrollHeight - region.clientHeight);
-              const desiredNestedScroll = nestedStart + deltaY;
-              const expectedNestedScroll = Math.min(
-                maximumNestedScroll,
-                Math.max(0, desiredNestedScroll),
-              );
-              const expectedTimelineDelta = desiredNestedScroll - expectedNestedScroll;
+              const overscrollBehaviorY = originalGetComputedStyle(region).overscrollBehaviorY;
               const wheel = new WheelEvent("wheel", {
                 bubbles: true,
                 cancelable: true,
@@ -2221,46 +2259,25 @@ function nestedScrollHandoffPrepareExpression() {
               });
               const timelineStart = timeline.scrollTop;
               region.dispatchEvent(wheel);
-              const targetTimelineScroll = timelineStart + expectedTimelineDelta;
-              const timelinePositions = [timeline.scrollTop];
-              const deadline = performance.now() + 1200;
-              while (
-                Math.abs(timeline.scrollTop - targetTimelineScroll) > 1 &&
-                performance.now() < deadline
-              ) {
-                await frame();
-                timelinePositions.push(timeline.scrollTop);
-              }
               await frame();
-              timelinePositions.push(timeline.scrollTop);
-              const direction = Math.sign(expectedTimelineDelta);
-              const frameDeltas = timelinePositions.slice(1).map(
-                (position, index) => position - (timelinePositions[index] ?? position),
-              );
               return {
                 defaultPrevented: wheel.defaultPrevented,
-                distinctTimelinePositions: new Set(
-                  timelinePositions.map((position) => Math.round(position * 10)),
-                ).size,
-                expectedNestedScroll,
-                expectedTimelineDelta,
-                maximumFrameDelta: Math.max(0, ...frameDeltas.map((delta) => Math.abs(delta))),
-                monotonic:
-                  direction === 0 ||
-                  frameDeltas.every((delta) => direction * delta >= -0.5),
+                nestedStart,
                 nestedScrollTop: region.scrollTop,
-                targetTimelineScroll,
+                overscrollBehaviorY,
                 timelineDelta: timeline.scrollTop - timelineStart,
-                timelineStart,
               };
             };
             try {
-              const handoffStartedAt = performance.now();
+              const containmentStartedAt = performance.now();
+              const commandMetrics = await run(commandScroll, 40, -100);
+              const diffMetrics = await run(diffScroll, 0, -120);
+              const sourceMetrics = await run(sourceScroll, 0, -80);
               window.__previewNestedScrollMetrics = {
-                command: await run(commandScroll, 40, -100),
-                diff: await run(diffScroll, 0, -120),
-                handoffDurationMs: performance.now() - handoffStartedAt,
-                source: await run(sourceScroll, 0, -80),
+                command: commandMetrics,
+                containmentDurationMs: performance.now() - containmentStartedAt,
+                diff: diffMetrics,
+                source: sourceMetrics,
                 styleReadCount,
               };
             } finally {
@@ -2269,12 +2286,71 @@ function nestedScrollHandoffPrepareExpression() {
             return;
           }
         }
-        throw new Error("As atividades-alvo do scroll aninhado não foram montadas.");
+        throw new Error("The nested-scroll target activities were not mounted.");
       } catch (error) {
         window.__previewNestedScrollError =
           error instanceof Error ? error.stack ?? error.message : String(error);
       } finally {
         window.__previewNestedScrollReady = true;
+      }
+    })();
+  })()`;
+}
+
+function modelCatalogWarmupPrepareExpression() {
+  return `(() => {
+    void (async () => {
+      try {
+        const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+        const waitUntil = async (label, predicate) => {
+          const deadline = performance.now() + 3000;
+          while (!predicate()) {
+            if (performance.now() > deadline) {
+              throw new Error("Timed out waiting for " + label + ".");
+            }
+            await frame();
+          }
+        };
+        await waitUntil(
+          "the initial catalog",
+          () =>
+            (window.__previewModelListCallCount ?? 0) >= 1 &&
+            (window.__previewModelListActiveCount ?? 0) === 0,
+        );
+        const baselineCalls = window.__previewModelListCallCount ?? 0;
+        const actionStartedAt = performance.now();
+        const newThread = document.querySelector(".new-thread-button");
+        const textarea = document.querySelector(".composer textarea");
+        if (!(newThread instanceof HTMLButtonElement) || !(textarea instanceof HTMLTextAreaElement)) {
+          throw new Error("The new-task controls are missing.");
+        }
+        newThread.click();
+        textarea.value = "Preparar catálogo antes do envio";
+        textarea.dispatchEvent(
+          new InputEvent("input", { bubbles: true, data: textarea.value, inputType: "insertText" }),
+        );
+        await waitUntil(
+          "revalidation to start",
+          () => (window.__previewModelListCallCount ?? 0) > baselineCalls,
+        );
+        const refreshStartedAt = window.__previewModelListLastStartedAt ?? performance.now();
+        await waitUntil(
+          "revalidation to finish",
+          () => (window.__previewModelListActiveCount ?? 0) === 0,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 240));
+        await frame();
+        window.__previewModelWarmupMetrics = {
+          callDelta: (window.__previewModelListCallCount ?? 0) - baselineCalls,
+          draft: textarea.value,
+          refreshDurationMs: performance.now() - refreshStartedAt,
+          startLatencyMs: refreshStartedAt - actionStartedAt,
+        };
+      } catch (error) {
+        window.__previewModelWarmupError =
+          error instanceof Error ? error.stack ?? error.message : String(error);
+      } finally {
+        window.__previewModelWarmupReady = true;
       }
     })();
   })()`;
@@ -2289,7 +2365,7 @@ function nestedScrollWheelOwnershipPrepareExpression() {
           const deadline = performance.now() + 3000;
           while (!predicate()) {
             if (performance.now() > deadline) {
-              throw new Error("Tempo esgotado preparando " + label + ".");
+              throw new Error("Timed out while preparing " + label + ".");
             }
             await frame();
           }
@@ -2298,11 +2374,11 @@ function nestedScrollWheelOwnershipPrepareExpression() {
           (button) => button.textContent?.includes("Estresse de timeline expandida"),
         );
         if (!(threadButton instanceof HTMLButtonElement)) {
-          throw new Error("O chat de estresse da timeline está ausente.");
+          throw new Error("The timeline stress chat is missing.");
         }
         threadButton.click();
         await waitUntil(
-          "o turno de estresse",
+          "the stress turn",
           () =>
             document.getElementById("user-message-timeline-stress-user-message") !== null,
         );
@@ -2310,12 +2386,12 @@ function nestedScrollWheelOwnershipPrepareExpression() {
         await frame();
         document.querySelector(".agent-activity-group:not([open]) > summary")?.click();
         await waitUntil(
-          "a lista virtualizada de atividades",
+          "the virtualized activity list",
           () => document.querySelector(".agent-activity-virtual-list") !== null,
         );
         const timeline = document.querySelector(".timeline");
         if (!(timeline instanceof HTMLElement)) {
-          throw new Error("A timeline do cenário de wheel nativo está ausente.");
+          throw new Error("The native-wheel scenario timeline is missing.");
         }
         for (let attempt = 0; attempt < 5; attempt += 1) {
           timeline.dispatchEvent(
@@ -2335,7 +2411,7 @@ function nestedScrollWheelOwnershipPrepareExpression() {
         }
         if (timeline.scrollTop > 1) {
           throw new Error(
-            "A timeline não estabilizou no topo antes do teste de wheel aninhado.",
+            "The timeline did not stabilize at the top before the nested wheel test.",
           );
         }
         const materializationSamples = [];
@@ -2397,7 +2473,7 @@ function nestedScrollWheelOwnershipPrepareExpression() {
           };
         };
         throw new Error(
-          "Os arquivos expandidos não materializaram regiões verticais suficientes: " +
+          "The expanded files did not materialize sufficiently tall regions: " +
             JSON.stringify({
               diff: describeTarget(
                 "10:fileChange|24:timeline-stress-change-3|",
@@ -2445,7 +2521,7 @@ async function exerciseNestedScrollWheelOwnership(client) {
       `(() => {
         const timeline = document.querySelector(".timeline");
         if (!(timeline instanceof HTMLElement)) {
-          throw new Error("A timeline está ausente antes de localizar ${label}.");
+          throw new Error("The timeline is missing before locating " + label + ".");
         }
         timeline.scrollTop = 0;
       })()`,
@@ -2468,7 +2544,7 @@ async function exerciseNestedScrollWheelOwnership(client) {
         );
         const details = wrapper?.querySelector("details");
         if (!(details instanceof HTMLDetailsElement)) {
-          throw new Error("Atividade aninhada ausente: ${label}");
+          throw new Error("Missing nested activity: " + label);
         }
         details.querySelector(":scope > summary")?.scrollIntoView({
           block: "center",
@@ -2496,7 +2572,7 @@ async function exerciseNestedScrollWheelOwnership(client) {
             ? details?.querySelector(".diff-viewport")
             : details?.querySelector(".tool-source-viewport");
         if (!(timeline instanceof HTMLElement) || !(region instanceof HTMLElement)) {
-          throw new Error("Viewport de scroll ausente para ${label}.");
+          throw new Error("Missing scroll viewport for " + label + ".");
         }
         const eventCount = 4;
         const eventDelta = 20;
@@ -2510,6 +2586,11 @@ async function exerciseNestedScrollWheelOwnership(client) {
         const timelineStart = timeline.scrollTop;
         const bounds = region.getBoundingClientRect();
         const timelineBounds = timeline.getBoundingClientRect();
+        const summary = details.querySelector(":scope > summary");
+        if (!(summary instanceof HTMLElement)) {
+          throw new Error("Missing outer summary for " + label + ".");
+        }
+        const summaryBounds = summary.getBoundingClientRect();
         const x = Math.min(bounds.right - 8, bounds.left + Math.max(8, bounds.width / 2));
         const visibleTop = Math.max(bounds.top, timelineBounds.top);
         const visibleBottom = Math.min(bounds.bottom, timelineBounds.bottom);
@@ -2523,7 +2604,7 @@ async function exerciseNestedScrollWheelOwnership(client) {
         }
         if (y === null) {
           throw new Error(
-            "Nenhum ponto visível pertence à região ${label}: " +
+            "No visible point belongs to the ${label} region: " +
               JSON.stringify({
                 activityKey: wrapper?.getAttribute("data-virtual-activity-key") ?? null,
                 bounds: bounds.toJSON(),
@@ -2573,6 +2654,18 @@ async function exerciseNestedScrollWheelOwnership(client) {
               }),
           );
         }
+        const outerX = Math.min(
+          summaryBounds.right - 8,
+          summaryBounds.left + Math.max(8, summaryBounds.width / 2),
+        );
+        const outerY = Math.min(
+          timelineBounds.bottom - 4,
+          Math.max(timelineBounds.top + 4, summaryBounds.top + summaryBounds.height / 2),
+        );
+        const outerHit = document.elementFromPoint(outerX, outerY);
+        if (!(outerHit instanceof Node) || region.contains(outerHit)) {
+          throw new Error("The outer point still belongs to the " + label + " region.");
+        }
         const events = [];
         const listener = (event) => {
           if (event.target instanceof Node && region.contains(event.target)) {
@@ -2605,6 +2698,8 @@ async function exerciseNestedScrollWheelOwnership(client) {
         return {
           deltaY: direction * eventDelta,
           eventCount,
+          outerX,
+          outerY,
           x,
           y,
         };
@@ -2623,7 +2718,9 @@ async function exerciseNestedScrollWheelOwnership(client) {
           sample.label !== "${label}" ||
           !(sample.region instanceof HTMLElement)
         ) {
-          throw new Error("A janela virtual ficou inconsistente antes do wheel: ${label}.");
+          throw new Error(
+            "The virtual window became inconsistent before wheel input: " + label + ".",
+          );
         }
         sample.rowsBefore = new Map(
           [...sample.region.querySelectorAll(sample.rowSelector)].map((row) => [
@@ -2669,7 +2766,7 @@ async function exerciseNestedScrollWheelOwnership(client) {
           !(sample.region instanceof HTMLElement) ||
           !(sample.timeline instanceof HTMLElement)
         ) {
-          throw new Error("A amostra de wheel ficou inconsistente para ${label}.");
+          throw new Error("The wheel sample became inconsistent for " + label + ".");
         }
         sample.timeline.removeEventListener("wheel", sample.listener);
         const currentCanvas = sample.region.querySelector(
@@ -2702,7 +2799,7 @@ async function exerciseNestedScrollWheelOwnership(client) {
       })()`,
       false,
     );
-    const handoffPointer = await client.evaluate(
+    const boundaryPointer = await client.evaluate(
       `(() => {
         const sample = window.__previewNestedWheelSample;
         if (
@@ -2711,7 +2808,7 @@ async function exerciseNestedScrollWheelOwnership(client) {
           !(sample.region instanceof HTMLElement) ||
           !(sample.timeline instanceof HTMLElement)
         ) {
-          throw new Error("A região de handoff ficou inconsistente para ${label}.");
+          throw new Error("The boundary region became inconsistent for " + label + ".");
         }
         const eventCount = 4;
         const eventDelta = 20;
@@ -2723,10 +2820,6 @@ async function exerciseNestedScrollWheelOwnership(client) {
           maximumTimelineScroll - sample.timeline.scrollTop >= expectedTimelineDistance + 2
             ? 1
             : -1;
-        const targetTimelineScroll = Math.min(
-          maximumTimelineScroll,
-          Math.max(0, sample.timeline.scrollTop + direction * expectedTimelineDistance),
-        );
         sample.region.scrollTop = direction > 0 ? maximumNestedScroll : 0;
         const events = [];
         const listener = (event) => {
@@ -2739,14 +2832,12 @@ async function exerciseNestedScrollWheelOwnership(client) {
           }
         };
         sample.timeline.addEventListener("wheel", listener);
-        window.__previewNestedWheelHandoffSample = {
+        window.__previewNestedWheelBoundarySample = {
           events,
-          expectedTimelineDelta: targetTimelineScroll - sample.timeline.scrollTop,
           label: "${label}",
           listener,
           nestedStart: sample.region.scrollTop,
           region: sample.region,
-          targetTimelineScroll,
           timeline: sample.timeline,
           timelineStart: sample.timeline.scrollTop,
         };
@@ -2761,43 +2852,40 @@ async function exerciseNestedScrollWheelOwnership(client) {
     );
     await client.send("Input.dispatchMouseEvent", {
       type: "mouseMoved",
-      x: handoffPointer.x,
-      y: handoffPointer.y,
+      x: boundaryPointer.x,
+      y: boundaryPointer.y,
     });
-    for (let index = 0; index < handoffPointer.eventCount; index += 1) {
+    for (let index = 0; index < boundaryPointer.eventCount; index += 1) {
       await client.send("Input.dispatchMouseEvent", {
         type: "mouseWheel",
         deltaX: 0,
-        deltaY: handoffPointer.deltaY,
-        x: handoffPointer.x,
-        y: handoffPointer.y,
+        deltaY: boundaryPointer.deltaY,
+        x: boundaryPointer.x,
+        y: boundaryPointer.y,
       });
     }
-    const handoff = await client.evaluate(
+    const boundary = await client.evaluate(
       `new Promise((resolve, reject) => {
-        const sample = window.__previewNestedWheelHandoffSample;
+        const sample = window.__previewNestedWheelBoundarySample;
         if (
           sample === undefined ||
           sample.label !== "${label}" ||
           !(sample.region instanceof HTMLElement) ||
           !(sample.timeline instanceof HTMLElement)
         ) {
-          reject(new Error("A amostra de handoff ficou inconsistente para ${label}."));
+          reject(new Error("The boundary sample became inconsistent for ${label}."));
           return;
         }
         const positions = [sample.timeline.scrollTop];
-        const deadline = performance.now() + 1200;
+        let remainingFrames = 12;
         const measure = () => {
           positions.push(sample.timeline.scrollTop);
-          if (
-            Math.abs(sample.timeline.scrollTop - sample.targetTimelineScroll) > 1 &&
-            performance.now() < deadline
-          ) {
+          remainingFrames -= 1;
+          if (remainingFrames > 0) {
             requestAnimationFrame(measure);
             return;
           }
           sample.timeline.removeEventListener("wheel", sample.listener);
-          const direction = Math.sign(sample.expectedTimelineDelta);
           const frameDeltas = positions.slice(1).map(
             (position, index) => position - (positions[index] ?? position),
           );
@@ -2806,11 +2894,7 @@ async function exerciseNestedScrollWheelOwnership(client) {
               positions.map((position) => Math.round(position * 10)),
             ).size,
             events: sample.events,
-            expectedTimelineDelta: sample.expectedTimelineDelta,
             maximumFrameDelta: Math.max(0, ...frameDeltas.map((delta) => Math.abs(delta))),
-            monotonic:
-              direction === 0 ||
-              frameDeltas.every((delta) => direction * delta >= -0.5),
             nestedDelta: sample.region.scrollTop - sample.nestedStart,
             timelineDelta: sample.timeline.scrollTop - sample.timelineStart,
           });
@@ -2828,15 +2912,15 @@ async function exerciseNestedScrollWheelOwnership(client) {
           !(sample.region instanceof HTMLElement) ||
           !(sample.timeline instanceof HTMLElement)
         ) {
-          throw new Error("A região de reversão ficou inconsistente para ${label}.");
+          throw new Error("The reversal region became inconsistent for " + label + ".");
         }
-        const handoffDelta = 80;
+        const boundaryDelta = 80;
         const reverseDelta = 20;
         const maximumNestedScroll = sample.region.scrollHeight - sample.region.clientHeight;
         const maximumTimelineScroll =
           sample.timeline.scrollHeight - sample.timeline.clientHeight;
         const direction =
-          maximumTimelineScroll - sample.timeline.scrollTop >= handoffDelta + 2 ? 1 : -1;
+          maximumTimelineScroll - sample.timeline.scrollTop >= boundaryDelta + 2 ? 1 : -1;
         sample.region.scrollTop = direction > 0 ? maximumNestedScroll : 0;
         const events = [];
         const listener = (event) => {
@@ -2853,7 +2937,6 @@ async function exerciseNestedScrollWheelOwnership(client) {
           direction,
           events,
           expectedNestedDelta: -direction * reverseDelta,
-          handoffDelta: direction * handoffDelta,
           label: "${label}",
           listener,
           nestedStart: sample.region.scrollTop,
@@ -2862,7 +2945,7 @@ async function exerciseNestedScrollWheelOwnership(client) {
           timelineStart: sample.timeline.scrollTop,
         };
         return {
-          handoffDeltaY: direction * handoffDelta,
+          boundaryDeltaY: direction * boundaryDelta,
           reverseDeltaY: -direction * reverseDelta,
           x: ${JSON.stringify(pointer.x)},
           y: ${JSON.stringify(pointer.y)},
@@ -2878,7 +2961,7 @@ async function exerciseNestedScrollWheelOwnership(client) {
     await client.send("Input.dispatchMouseEvent", {
       type: "mouseWheel",
       deltaX: 0,
-      deltaY: reversalPointer.handoffDeltaY,
+      deltaY: reversalPointer.boundaryDeltaY,
       x: reversalPointer.x,
       y: reversalPointer.y,
     });
@@ -2899,7 +2982,7 @@ async function exerciseNestedScrollWheelOwnership(client) {
           !(sample.region instanceof HTMLElement) ||
           !(sample.timeline instanceof HTMLElement)
         ) {
-          reject(new Error("A amostra de reversão ficou inconsistente para ${label}."));
+          reject(new Error("The reversal sample became inconsistent for ${label}."));
           return;
         }
         const positions = [];
@@ -2915,7 +2998,6 @@ async function exerciseNestedScrollWheelOwnership(client) {
           resolve({
             events: sample.events,
             expectedNestedDelta: sample.expectedNestedDelta,
-            handoffDelta: sample.handoffDelta,
             nestedDelta: sample.region.scrollTop - sample.nestedStart,
             postCancelRange:
               positions.length === 0 ? 0 : Math.max(...positions) - Math.min(...positions),
@@ -2926,7 +3008,75 @@ async function exerciseNestedScrollWheelOwnership(client) {
       })`,
       true,
     );
-    samples[label] = { handoff, internal, reversal };
+    const outerPointer = await client.evaluate(
+      `(() => {
+        const sample = window.__previewNestedWheelSample;
+        if (
+          sample === undefined ||
+          sample.label !== "${label}" ||
+          !(sample.region instanceof HTMLElement) ||
+          !(sample.timeline instanceof HTMLElement)
+        ) {
+          throw new Error("The outer region became inconsistent for " + label + ".");
+        }
+        const delta = 80;
+        const maximumTimelineScroll =
+          sample.timeline.scrollHeight - sample.timeline.clientHeight;
+        const direction =
+          maximumTimelineScroll - sample.timeline.scrollTop >= delta + 2 ? 1 : -1;
+        window.__previewNestedWheelOuterSample = {
+          label: "${label}",
+          nestedStart: sample.region.scrollTop,
+          region: sample.region,
+          timeline: sample.timeline,
+          timelineStart: sample.timeline.scrollTop,
+        };
+        return {
+          deltaY: direction * delta,
+          x: ${JSON.stringify(pointer.outerX)},
+          y: ${JSON.stringify(pointer.outerY)},
+        };
+      })()`,
+      false,
+    );
+    await client.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: outerPointer.x,
+      y: outerPointer.y,
+    });
+    await client.send("Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      deltaX: 0,
+      deltaY: outerPointer.deltaY,
+      x: outerPointer.x,
+      y: outerPointer.y,
+    });
+    await client.evaluate(
+      `new Promise((resolve) => setTimeout(
+        () => requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        80,
+      ))`,
+      true,
+    );
+    const outer = await client.evaluate(
+      `(() => {
+        const sample = window.__previewNestedWheelOuterSample;
+        if (
+          sample === undefined ||
+          sample.label !== "${label}" ||
+          !(sample.region instanceof HTMLElement) ||
+          !(sample.timeline instanceof HTMLElement)
+        ) {
+          throw new Error("The outer sample became inconsistent for " + label + ".");
+        }
+        return {
+          nestedDelta: sample.region.scrollTop - sample.nestedStart,
+          timelineDelta: sample.timeline.scrollTop - sample.timelineStart,
+        };
+      })()`,
+      false,
+    );
+    samples[label] = { boundary, internal, outer, reversal };
   }
   await client.evaluate(
     `window.__previewNestedWheelMetrics = ${JSON.stringify(samples)}`,
@@ -2952,7 +3102,7 @@ async function exerciseHighlightedReadInteraction(client) {
     identitySelector: ".activity-title",
     stateProperty: "__previewReadActivityInteraction",
     summaryExpression: `[...document.querySelectorAll(".tool-activity-card > summary")]
-      .find((element) => element.textContent?.includes("Executou leitura de arquivo"))`,
+      .find((element) => element.textContent?.includes("Leu arquivo"))`,
   });
 }
 
@@ -3028,7 +3178,7 @@ async function exerciseIntrinsicSummaryInteraction(
     `(() => {
       const summary = ${summaryExpression};
       if (!(summary instanceof HTMLElement)) {
-        throw new Error("A linha para posicionar a interação intrínseca está ausente.");
+        throw new Error("The row used to position the intrinsic interaction is missing.");
       }
       summary.scrollIntoView({ block: "center", inline: "nearest" });
     })()`,
@@ -3054,7 +3204,7 @@ async function exerciseIntrinsicSummaryInteraction(
         !(icon instanceof HTMLElement) ||
         !(chevron instanceof HTMLElement)
       ) {
-        throw new Error("A linha para validar interação intrínseca está ausente.");
+        throw new Error("The row used to validate intrinsic interaction is missing.");
       }
       window.__capturePreviewIntrinsicActivity = () => ({
         actionColor: getComputedStyle(action).color,
@@ -3069,13 +3219,32 @@ async function exerciseIntrinsicSummaryInteraction(
       const bounds = summary.getBoundingClientRect();
       const farX = Math.min(innerWidth - 4, row.getBoundingClientRect().right - 8);
       if (farX <= bounds.right + 16) {
-        throw new Error("A linha não possui área externa suficiente para validar o hover.");
+        throw new Error("The row has insufficient outer area for the hover check.");
+      }
+      const candidateBounds = [
+        action.getBoundingClientRect(),
+        identity.getBoundingClientRect(),
+        icon.getBoundingClientRect(),
+        bounds,
+      ];
+      const hoverPoint = candidateBounds
+        .flatMap((candidate) => [
+          { x: candidate.left + Math.min(4, candidate.width / 2), y: candidate.top + candidate.height / 2 },
+          { x: candidate.left + candidate.width / 2, y: candidate.top + candidate.height / 2 },
+          { x: candidate.right - Math.min(4, candidate.width / 2), y: candidate.top + candidate.height / 2 },
+        ])
+        .find(({ x, y }) => {
+          const hit = document.elementFromPoint(x, y);
+          return hit !== null && summary.contains(hit);
+        });
+      if (hoverPoint === undefined) {
+        throw new Error("The row has no visible point for the hover check.");
       }
       window[${stateKey}] = { rest: window.__capturePreviewIntrinsicActivity() };
       return {
         farX,
-        hoverX: Math.max(bounds.left + 4, bounds.right - 8),
-        y: bounds.top + bounds.height / 2,
+        hoverX: hoverPoint.x,
+        y: hoverPoint.y,
       };
     })()`,
     false,
@@ -3139,7 +3308,7 @@ function nestedScrollFollowingPrepareExpression() {
           }
         }
         if (!(command instanceof HTMLDetailsElement)) {
-          throw new Error("O comando ativo não foi montado para o teste de acompanhamento.");
+          throw new Error("The active command was not mounted for the follow check.");
         }
         if (!command.open) {
           command.querySelector(":scope > summary")?.click();
@@ -3149,7 +3318,7 @@ function nestedScrollFollowingPrepareExpression() {
         const timeline = document.querySelector(".timeline");
         const region = command.querySelector(".command-card-scroll");
         if (!(timeline instanceof HTMLElement) || !(region instanceof HTMLElement)) {
-          throw new Error("A saída interna do comando ativo está ausente.");
+          throw new Error("The active command's inner output is missing.");
         }
         const maximumTimelineScroll = timeline.scrollHeight - timeline.clientHeight;
         timeline.scrollTop = Math.max(0, maximumTimelineScroll - 160);
@@ -3159,7 +3328,7 @@ function nestedScrollFollowingPrepareExpression() {
           'button[aria-label="Ir para o fim da conversa"]',
         );
         if (!(scrollToEndButton instanceof HTMLButtonElement)) {
-          throw new Error("O controle para acompanhar o fim da timeline está ausente.");
+          throw new Error("The control for following the end of the timeline is missing.");
         }
         scrollToEndButton.click();
         const followDeadline = performance.now() + 1200;
@@ -3167,7 +3336,7 @@ function nestedScrollFollowingPrepareExpression() {
           Math.abs(timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop) > 2
         ) {
           if (performance.now() > followDeadline) {
-            throw new Error("A timeline não concluiu a navegação para o fim.");
+            throw new Error("The timeline did not finish navigating to the end.");
           }
           await frame();
         }
@@ -3229,7 +3398,7 @@ function timelinePerformanceStressPrepareExpression() {
           const deadline = performance.now() + timeoutMs;
           while (!predicate()) {
             if (performance.now() > deadline) {
-              throw new Error("Tempo esgotado preparando " + label + ".");
+              throw new Error("Timed out while preparing " + label + ".");
             }
             await frame();
           }
@@ -3239,7 +3408,7 @@ function timelinePerformanceStressPrepareExpression() {
         );
         threadButton?.click();
         await waitUntil(
-          "o primeiro turno do estresse",
+          "the first stress turn",
           () => document.querySelector(".conversation-turn") !== null,
           3000,
         );
@@ -3247,14 +3416,14 @@ function timelinePerformanceStressPrepareExpression() {
         await frame();
         document.querySelector(".agent-activity-group:not([open]) > summary")?.click();
         await waitUntil(
-          "a lista virtualizada de atividades",
+          "the virtualized activity list",
           () => document.querySelector(".agent-activity-virtual-list") !== null,
           3000,
         );
         window.__timelineStressProgress = { phase: "activity-list-ready" };
         const timeline = document.querySelector(".timeline");
         if (!(timeline instanceof HTMLElement)) {
-          throw new Error("A timeline do cenário de estresse está ausente.");
+          throw new Error("The stress-scenario timeline is missing.");
         }
         const claimScrollOwnership = () => {
           timeline.dispatchEvent(
@@ -3277,7 +3446,7 @@ function timelinePerformanceStressPrepareExpression() {
           }
         }
         if (timeline.scrollTop > 1) {
-          throw new Error("A timeline não estabilizou no topo antes da expansão.");
+          throw new Error("The timeline did not stabilize at the top before expansion.");
         }
         const expansionStarted = performance.now();
         window.__timelineStressProgress = { phase: "expanding" };
@@ -3337,11 +3506,11 @@ function timelinePerformanceStressPrepareExpression() {
             (ordinal) => !visitedOrdinals.has(ordinal),
           );
           throw new Error(
-            "A expansão percorreu " +
+            "Expansion visited " +
               visited.size +
-              " de 180 atividades em " +
+              " of 180 activities in " +
               iterations +
-              " iterações. " +
+              " iterations. " +
               JSON.stringify({
                 missingOrdinals,
                 mountedKeys: [...document.querySelectorAll(".agent-activity-virtual-item")].map(
@@ -3373,7 +3542,7 @@ function timelinePerformanceStressPrepareExpression() {
         };
         const probeMaximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
         if (probeMaximum <= 1) {
-          throw new Error("A timeline não possui alcance para sondar identidade durante scroll.");
+          throw new Error("The timeline lacks enough range to probe identity while scrolling.");
         }
         const probeStep = Math.max(
           1,
@@ -3679,7 +3848,7 @@ function timelinePerformanceStressPrepareExpression() {
         lightButton?.click();
         window.__timelineStressProgress = { phase: "opening-light-thread" };
         await waitUntil(
-          "o chat leve de controle",
+          "the lightweight control chat",
           () => document.body.textContent?.includes("Chat de controle pronto."),
           3000,
         );
@@ -3690,7 +3859,7 @@ function timelinePerformanceStressPrepareExpression() {
         reopenButton?.click();
         window.__timelineStressProgress = { phase: "reopening-stress-thread" };
         await waitUntil(
-          "a reabertura da lista virtualizada",
+          "the virtualized list to reopen",
           () =>
             document.querySelector(".agent-activity-group[open]") !== null &&
             document.querySelector(".agent-activity-virtual-item") !== null,
@@ -3704,7 +3873,7 @@ function timelinePerformanceStressPrepareExpression() {
 
         const restoredTimeline = document.querySelector(".timeline");
         if (!(restoredTimeline instanceof HTMLElement)) {
-          throw new Error("A timeline restaurada está ausente.");
+          throw new Error("The restored timeline is missing.");
         }
         for (let attempt = 0; attempt < 5; attempt += 1) {
           restoredTimeline.dispatchEvent(
@@ -3725,7 +3894,7 @@ function timelinePerformanceStressPrepareExpression() {
         }
         if (restoredTimeline.scrollTop > 1) {
           throw new Error(
-            "A timeline não liberou o ownership manual no topo (scrollTop=" +
+            "The timeline did not release manual ownership at the top (scrollTop=" +
               restoredTimeline.scrollTop +
               ").",
           );
@@ -3753,7 +3922,7 @@ function timelinePerformanceStressPrepareExpression() {
           targetKey === null
         ) {
           throw new Error(
-            "As chaves da âncora não foram materializadas no topo: " +
+            "The anchor keys were not materialized at the top: " +
               JSON.stringify({
                 sourceKey,
                 targetKey,
@@ -3784,7 +3953,7 @@ function timelinePerformanceStressPrepareExpression() {
             (element) => element.getAttribute("data-virtual-activity-key") === targetKey,
           );
           if (!(source instanceof HTMLElement) || !(target instanceof HTMLElement)) {
-            throw new Error("A virtualização substituiu a âncora posicionada antes da medição.");
+            throw new Error("Virtualization replaced the positioned anchor before measurement.");
           }
           const targetTop = target.getBoundingClientRect().top;
           source.querySelector("details[open] > summary")?.click();
@@ -3795,7 +3964,7 @@ function timelinePerformanceStressPrepareExpression() {
             ".agent-activity-virtual-item",
           )].find((element) => element.getAttribute("data-virtual-activity-key") === targetKey);
           if (!(currentTarget instanceof HTMLElement)) {
-            throw new Error("A âncora-alvo deixou de ser materializada após o colapso.");
+            throw new Error("The target anchor stopped being materialized after collapse.");
           }
           visualDriftPx = currentTarget.getBoundingClientRect().top - targetTop;
         }
@@ -3907,7 +4076,7 @@ function activityReconciliationPrepareExpression() {
           const deadline = performance.now() + timeoutMs;
           while (!predicate()) {
             if (performance.now() > deadline) {
-              throw new Error("Tempo esgotado preparando " + label + ".");
+              throw new Error("Timed out while preparing " + label + ".");
             }
             await frame();
           }
@@ -3917,24 +4086,33 @@ function activityReconciliationPrepareExpression() {
         );
         threadButton?.click();
         await waitUntil(
-          "o turno de reconciliação",
+          "the reconciliation turn",
           () => document.querySelector(".conversation-turn") !== null,
           3000,
         );
         document.querySelector('button[aria-label="Mostrar trabalho do agente"]')?.click();
         await waitUntil(
-          "o grupo inicial de comandos",
+          "the initial command group",
           () => document.querySelector(".agent-activity-group > summary") !== null,
           3000,
         );
         document.querySelector(".agent-activity-group:not([open]) > summary")?.click();
         await waitUntil(
-          "a lista montada de comandos",
+          "the mounted command list",
           () => document.querySelector(".agent-activity-virtual-item") !== null,
           3000,
         );
+        const firstRunningTitle = document.querySelector(
+          ".command-activity-card .activity-title.is-running",
+        );
+        window.__activityReconciliationStartedPresentation = {
+          completedAtCapture: Number(
+            document.documentElement.dataset.activityReconciliationCompleted ?? 0,
+          ),
+          title: firstRunningTitle?.textContent?.trim() ?? null,
+        };
         await waitUntil(
-          "a conclusão fora de ordem dos comandos",
+          "the out-of-order command completion",
           () => document.documentElement.dataset.activityReconciliationState === "completed",
           10000,
         );
@@ -3962,7 +4140,7 @@ function activityShimmerPrepareExpression() {
           const deadline = performance.now() + timeoutMs;
           while (!predicate()) {
             if (performance.now() > deadline) {
-              throw new Error("Tempo esgotado aguardando " + label + ".");
+              throw new Error("Timed out waiting for " + label + ".");
             }
             await frame();
           }
@@ -3972,25 +4150,50 @@ function activityShimmerPrepareExpression() {
         );
         threadButton?.click();
         await waitUntil(
-          "o título de comando em execução",
-          () => document.querySelector(".command-activity-card .activity-title.is-running") !== null,
+          "the running activity parent title",
+          () => document.querySelector(
+            ".agent-activity-group > .agent-activity-summary .activity-title.is-running",
+          ) !== null,
           3000,
         );
         const title = document.querySelector(
-          ".command-activity-card .activity-title.is-running",
+          ".agent-activity-group > .agent-activity-summary .activity-title.is-running",
         );
         if (!(title instanceof HTMLElement)) {
-          throw new Error("O título animado do comando não foi encontrado.");
+          throw new Error("The animated parent activity title was not found.");
         }
+        const group = title.closest(".agent-activity-group");
+        if (!(group instanceof HTMLElement)) {
+          throw new Error("The animated activity group was not found.");
+        }
+        if (!(group instanceof HTMLDetailsElement)) {
+          throw new Error("The animated activity group does not use details semantics.");
+        }
+        if (!group.open) {
+          const summary = group.querySelector(":scope > .agent-activity-summary");
+          if (!(summary instanceof HTMLElement)) {
+            throw new Error("The animated activity header was not found.");
+          }
+          summary.click();
+          await frame();
+          await frame();
+        }
+        await waitUntil(
+          "a running child activity",
+          () => group.querySelector(
+            ".agent-activity-viewport .activity-title.is-running",
+          ) !== null,
+          3000,
+        );
         const isActive = () => title.classList.contains("is-shimmer-active");
         if (isActive()) {
-          await waitUntil("o fim do pulso já iniciado", () => !isActive(), 2500);
+          await waitUntil("the ongoing pulse to finish", () => !isActive(), 2500);
         }
-        await waitUntil("o início do primeiro pulso", isActive, 5000);
+        await waitUntil("the first pulse to start", isActive, 2500);
         const firstStartedAt = performance.now();
         const sweep = title.querySelector(".activity-title-sweep");
         if (!(sweep instanceof HTMLElement)) {
-          throw new Error("A camada visual do shimmer não foi encontrada.");
+          throw new Error("The shimmer visual layer was not found.");
         }
         const activeStyle = getComputedStyle(sweep);
         const activeAnimation = {
@@ -3999,15 +4202,24 @@ function activityShimmerPrepareExpression() {
           name: activeStyle.animationName,
           timingFunction: activeStyle.animationTimingFunction,
         };
-        await waitUntil("o fim do primeiro pulso", () => !isActive(), 2500);
+        await waitUntil("the first pulse to finish", () => !isActive(), 2500);
         const firstFinishedAt = performance.now();
         const inactiveAnimationName = getComputedStyle(sweep).animationName;
-        await waitUntil("o início do segundo pulso", isActive, 5000);
+        await waitUntil("the second pulse to start", isActive, 3000);
         const secondStartedAt = performance.now();
         window.__activityShimmerMetrics = {
           activeDurationMs: firstFinishedAt - firstStartedAt,
           cadenceMs: secondStartedAt - firstStartedAt,
           activeAnimation,
+          childRunningTargets: group.querySelectorAll(
+            ".agent-activity-viewport .activity-title.is-running",
+          ).length,
+          childShimmerTargets: group.querySelectorAll(
+            ".agent-activity-viewport .activity-title.is-shimmer-active",
+          ).length,
+          childSweepLayers: group.querySelectorAll(
+            ".agent-activity-viewport .activity-title-sweep",
+          ).length,
           inactiveAnimationName,
           titleText: title.textContent?.trim() ?? "",
         };
@@ -4027,7 +4239,7 @@ function activityShimmerAuditExpression() {
       throw new Error(window.__activityShimmerError);
     }
     if (window.__activityShimmerMetrics === undefined) {
-      throw new Error("As métricas temporais do shimmer estão ausentes.");
+      throw new Error("The shimmer timing metrics are missing.");
     }
     return {
       viewport: { width: innerWidth, height: innerHeight },
@@ -4046,7 +4258,7 @@ function timelinePerformanceStressAuditExpression() {
       throw new Error(window.__timelinePerformanceStressError);
     }
     if (window.__timelinePerformanceStressMetrics === undefined) {
-      throw new Error("As métricas de estresse da timeline estão ausentes.");
+      throw new Error("The timeline stress metrics are missing.");
     }
     return {
       viewport: { width: innerWidth, height: innerHeight },
@@ -4084,6 +4296,7 @@ function activityReconciliationAuditExpression() {
       ),
       identityChanges: Number(root.dataset.activityReconciliationIdentityChanges ?? Number.NaN),
       commentaryCount: document.querySelectorAll(".commentary").length,
+      startedPresentation: window.__activityReconciliationStartedPresentation ?? null,
       causalOrderPreserved:
         activityGroup !== null &&
         newerCommentary !== undefined &&
@@ -4106,7 +4319,7 @@ function composerFastModeVisualAuditExpression() {
   return `(() => {
     const rectangle = (element, label) => {
       if (!(element instanceof HTMLElement)) {
-        throw new Error("Elemento ausente: " + label);
+        throw new Error("Missing element: " + label);
       }
       const bounds = element.getBoundingClientRect();
       const style = getComputedStyle(element);
@@ -4164,7 +4377,9 @@ function composerFastModeVisualAuditExpression() {
 
 function activeActivityReflectionVisualAuditExpression() {
   return `(() => {
-    const title = document.querySelector(".activity-title.is-running");
+    const title = document.querySelector(
+      ".agent-activity-group > .agent-activity-summary .activity-title.is-running",
+    );
     const base = title?.querySelector(".activity-title-base");
     const sweep = title?.querySelector(".activity-title-sweep");
     const highlight = sweep?.querySelector(".activity-title-highlight");
@@ -4174,7 +4389,7 @@ function activeActivityReflectionVisualAuditExpression() {
       !(sweep instanceof HTMLElement) ||
       !(highlight instanceof HTMLElement)
     ) {
-      throw new Error("As camadas da atividade animada estão ausentes.");
+      throw new Error("The animated activity layers are missing.");
     }
     const sidebarList = [...document.querySelectorAll(".sidebar-item-list")].find(
       (list) => list.children.length > 1,
@@ -4194,7 +4409,7 @@ function activeActivityReflectionVisualAuditExpression() {
         (element) => /(?:Editou|Leu|leu) arquivos/u.test(element.textContent ?? ""),
       ) ?? document.querySelector(".activity-title:not(.is-running):not(.compaction-text)");
     if (!(completedTitle instanceof HTMLElement)) {
-      throw new Error("Uma atividade concluída de referência está ausente.");
+      throw new Error("A completed reference activity is missing.");
     }
     const titleStyle = getComputedStyle(title);
     const completedTitleStyle = getComputedStyle(completedTitle);
@@ -4271,6 +4486,10 @@ function activeActivityReflectionVisualAuditExpression() {
       animationIterationCount: sweepStyle.animationIterationCount,
       keyframeEasings:
         sweepAnimation?.effect?.getKeyframes().map((keyframe) => keyframe.easing) ?? [],
+      sweepKeyframeTransforms:
+        sweepAnimation?.effect?.getKeyframes().map((keyframe) => keyframe.transform) ?? [],
+      highlightKeyframeTransforms:
+        highlightAnimation?.effect?.getKeyframes().map((keyframe) => keyframe.transform) ?? [],
       maskImage: sweepStyle.maskImage || sweepStyle.webkitMaskImage,
       passPositions,
       pausePositions,
@@ -4279,6 +4498,19 @@ function activeActivityReflectionVisualAuditExpression() {
       selectedThreadBackground: selectedThreadStyle?.backgroundColor ?? null,
       selectedThreadBoxShadow: selectedThreadStyle?.boxShadow ?? null,
       planExplanationCount: document.querySelectorAll(".plan-progress-explanation").length,
+      standaloneThinkingCount: document.querySelectorAll(".thinking-activity-status").length,
+      runningGroupedChildCount: document.querySelectorAll(
+        ".grouped-activity-item .activity-title.is-running",
+      ).length,
+      completedTokenText:
+        document.querySelector('.conversation-turn[data-status="completed"] .turn-token-usage')
+          ?.textContent?.trim() ?? null,
+      activeTokenText:
+        document.querySelector('.conversation-turn[data-status="inProgress"] .turn-token-usage')
+          ?.textContent?.trim() ?? null,
+      reasoningHeadlineSequence: JSON.parse(
+        document.documentElement.dataset.reasoningHeadlineSequence ?? "[]",
+      ),
       ariaHidden: sweep.getAttribute("aria-hidden"),
       pointerEvents: sweepStyle.pointerEvents,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
@@ -4300,7 +4532,7 @@ function userMessageNavigationVisualAuditExpression() {
       !(marker instanceof HTMLButtonElement) ||
       !(activeTurn instanceof HTMLElement)
     ) {
-      throw new Error("Âncora da terceira mensagem do usuário está ausente.");
+      throw new Error("The third user-message anchor is missing.");
     }
     return {
       viewport: { width: innerWidth, height: innerHeight },
@@ -4336,7 +4568,7 @@ function manualScrollOwnershipVisualAuditExpression() {
     const timeline = document.querySelector(".timeline");
     const state = window.__previewManualScrollState;
     if (!(timeline instanceof HTMLElement) || state === undefined) {
-      throw new Error("Cenário de ownership do scroll não foi inicializado.");
+      throw new Error("The scroll-ownership scenario was not initialized.");
     }
     const first = document.querySelector(
       '.timeline-virtual-item[data-virtual-turn-id="' + state.firstId + '"]',
@@ -4345,7 +4577,7 @@ function manualScrollOwnershipVisualAuditExpression() {
       '.timeline-virtual-item[data-virtual-turn-id="' + state.anchorId + '"]',
     );
     if (!(first instanceof HTMLElement) || !(anchor instanceof HTMLElement)) {
-      throw new Error("Os itens de referência do scroll manual foram desmontados.");
+      throw new Error("The manual-scroll reference items were unmounted.");
     }
     const finalAnchorGap =
       anchor.getBoundingClientRect().top - timeline.getBoundingClientRect().top;
@@ -4364,14 +4596,31 @@ function manualScrollOwnershipVisualAuditExpression() {
   })()`;
 }
 
-function nestedScrollHandoffVisualAuditExpression() {
+function nestedScrollContainmentVisualAuditExpression() {
   return `(() => {
     if (window.__previewNestedScrollError !== undefined) {
       throw new Error(window.__previewNestedScrollError);
     }
     const metrics = window.__previewNestedScrollMetrics;
     if (metrics === undefined) {
-      throw new Error("Cenário de transferência do scroll aninhado não foi inicializado.");
+      throw new Error("The nested-scroll containment scenario was not initialized.");
+    }
+    return {
+      ...metrics,
+      viewport: { width: innerWidth, height: innerHeight },
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function modelCatalogWarmupVisualAuditExpression() {
+  return `(() => {
+    if (window.__previewModelWarmupError !== undefined) {
+      throw new Error(window.__previewModelWarmupError);
+    }
+    const metrics = window.__previewModelWarmupMetrics;
+    if (metrics === undefined) {
+      throw new Error("The catalog warm-up scenario was not initialized.");
     }
     return {
       ...metrics,
@@ -4388,7 +4637,7 @@ function nestedScrollWheelOwnershipAuditExpression() {
     }
     const metrics = window.__previewNestedWheelMetrics;
     if (metrics === undefined) {
-      throw new Error("Cenário de wheel nativo em arquivos expandidos não foi inicializado.");
+      throw new Error("The native-wheel scenario for expanded files was not initialized.");
     }
     return {
       ...metrics,
@@ -4405,7 +4654,7 @@ function nestedScrollFollowingVisualAuditExpression() {
     }
     const metrics = window.__previewNestedFollowMetrics;
     if (metrics === undefined) {
-      throw new Error("Cenário de acompanhamento após scroll interno não foi inicializado.");
+      throw new Error("The follow-after-inner-scroll scenario was not initialized.");
     }
     return {
       ...metrics,
@@ -4424,7 +4673,7 @@ function timelineExtremeFilesPrepareExpression() {
           const deadline = performance.now() + timeoutMs;
           while (!predicate()) {
             if (performance.now() > deadline) {
-              throw new Error("Tempo esgotado preparando " + label + ".");
+              throw new Error("Timed out while preparing " + label + ".");
             }
             await frame();
           }
@@ -4434,7 +4683,7 @@ function timelineExtremeFilesPrepareExpression() {
         );
         threadButton?.click();
         await waitUntil(
-          "o turno com 100 mil arquivos",
+          "the turn with 100,000 files",
           () => document.querySelector(".conversation-turn") !== null,
           5000,
         );
@@ -4442,7 +4691,7 @@ function timelineExtremeFilesPrepareExpression() {
         await frame();
         document.querySelector(".agent-activity-group:not([open]) > summary")?.click();
         await waitUntil(
-          "a lista virtual de 100 mil arquivos",
+          "the virtual list of 100,000 files",
           () =>
             document.querySelector(".agent-activity-virtual-list")?.getAttribute(
               "data-virtual-activity-total",
@@ -4453,7 +4702,7 @@ function timelineExtremeFilesPrepareExpression() {
         await frame();
         const timeline = document.querySelector(".timeline");
         if (!(timeline instanceof HTMLElement)) {
-          throw new Error("A timeline extrema está ausente.");
+          throw new Error("The extreme timeline is missing.");
         }
 
         const frameIntervals = [];
@@ -4635,7 +4884,7 @@ function timelineExtremeFilesPrepareExpression() {
         );
         timeline.scrollTop = Math.round(settlementMaximum * 0.5);
         await waitUntil(
-          "uma âncora extrema visível",
+          "a visible extreme anchor",
           () => {
             const timelineBounds = timeline.getBoundingClientRect();
             return [...document.querySelectorAll(".agent-activity-virtual-item")].some(
@@ -4752,7 +5001,7 @@ function timelineExtremeFilesAuditExpression() {
       throw new Error(window.__timelineExtremeFilesError);
     }
     if (window.__timelineExtremeFilesMetrics === undefined) {
-      throw new Error("As métricas de 100 mil arquivos estão ausentes.");
+      throw new Error("The 100,000-file metrics are missing.");
     }
     return {
       viewport: { width: innerWidth, height: innerHeight },
@@ -4775,7 +5024,7 @@ function liveCommandOutputVisualAuditExpression() {
       !(title instanceof HTMLElement) ||
       !(prompt instanceof HTMLElement)
     ) {
-      throw new Error("Detalhes ao vivo do comando em execução estão ausentes.");
+      throw new Error("Live details for the running command are missing.");
     }
     const outputStyle = getComputedStyle(output);
     return {
@@ -4802,7 +5051,7 @@ function singleFileChangeVisualAuditExpression() {
     );
     const block = file?.closest(".diff-block");
     if (!(file instanceof HTMLElement) || !(block instanceof HTMLDetailsElement)) {
-      throw new Error("Bloco direto da alteração única está ausente.");
+      throw new Error("The direct single-change block is missing.");
     }
     const groupedFile = [
       ...document.querySelectorAll(".file-change-diff .diff-file-identity code"),
@@ -4828,7 +5077,7 @@ function singleFileChangeVisualAuditExpression() {
       !(deletedFile instanceof HTMLElement) ||
       !(deletedFileBlock instanceof HTMLDetailsElement)
     ) {
-      throw new Error("Alteração interna do grupo está ausente.");
+      throw new Error("The group's inner change is missing.");
     }
     const action = block.querySelector(".file-change-action");
     const blockStyle = getComputedStyle(block);
@@ -4886,7 +5135,7 @@ function syntaxHighlightedDiffVisualAuditExpression() {
       !(block instanceof HTMLDetailsElement) ||
       !(viewport instanceof HTMLElement)
     ) {
-      throw new Error("Diff Rust realçado está ausente.");
+      throw new Error("The highlighted Rust diff is missing.");
     }
     const tokens = [...viewport.querySelectorAll(".syntax-token")];
     const tokenKinds = [
@@ -5103,7 +5352,7 @@ function reviewFileLayoutVisualAuditExpression() {
       !(canvas instanceof HTMLElement) ||
       !(selectedFile instanceof HTMLElement)
     ) {
-      throw new Error("A estrutura completa da revisão está ausente.");
+      throw new Error("The complete review structure is missing.");
     }
     const rows = [...diffViewport.querySelectorAll(".diff-virtual-row")];
     const viewportBounds = diffViewport.getBoundingClientRect();
@@ -5180,7 +5429,7 @@ function syntaxHighlightedCreatedFileVisualAuditExpression() {
       !(viewport instanceof HTMLElement) ||
       !(code instanceof HTMLElement)
     ) {
-      throw new Error("Diff de arquivo Rust criado está ausente.");
+      throw new Error("The created Rust-file diff is missing.");
     }
     const tokens = [...viewport.querySelectorAll(".syntax-token")];
     const rows = [...viewport.querySelectorAll(".unified-diff-row")];
@@ -5228,7 +5477,7 @@ function highlightedToolOutputVisualAuditExpression() {
     const source = document.querySelector(".tool-source-output");
     const search = document.querySelector(".tool-search-output");
     if (!(source instanceof HTMLElement) || !(search instanceof HTMLElement)) {
-      throw new Error("Saídas tipadas de leitura e busca estão ausentes.");
+      throw new Error("Typed read and search outputs are missing.");
     }
     const sourceTokens = [...source.querySelectorAll(".syntax-token")];
     const searchTokens = [...search.querySelectorAll(".syntax-token")];
@@ -5300,7 +5549,7 @@ function composerPopoverLayeringVisualAuditExpression() {
       throw new Error(window.__previewComposerPopoverLayeringError);
     }
     if (window.__previewComposerPopoverLayeringMetrics === undefined) {
-      throw new Error("As métricas de camadas dos painéis do compositor estão ausentes.");
+      throw new Error("The composer-panel layer metrics are missing.");
     }
     return {
       viewport: { width: innerWidth, height: innerHeight },
@@ -5327,7 +5576,7 @@ function chatReferenceVisualAuditExpression() {
   return `(() => {
     const rectangle = (element, label) => {
       if (!(element instanceof HTMLElement)) {
-        throw new Error("Elemento ausente: " + label);
+        throw new Error("Missing element: " + label);
       }
       const bounds = element.getBoundingClientRect();
       return {
@@ -5341,7 +5590,7 @@ function chatReferenceVisualAuditExpression() {
     };
     const styles = (element, label) => {
       if (!(element instanceof HTMLElement)) {
-        throw new Error("Elemento ausente: " + label);
+        throw new Error("Missing element: " + label);
       }
       const style = getComputedStyle(element);
       return {
@@ -5387,9 +5636,9 @@ function chatReferenceVisualAuditExpression() {
       firstCommentaryElement,
       ".agent-message-row.commentary .markdown",
     );
-    const firstCommand = rectangle(firstCommandElement, "primeiro comando");
-    const terminalRead = rectangle(terminalReadElement, "Terminal do chat lido");
-    const finalAnswer = rectangle(finalAnswerElement, "resposta final");
+    const firstCommand = rectangle(firstCommandElement, "first command");
+    const terminalRead = rectangle(terminalReadElement, "read chat terminal");
+    const finalAnswer = rectangle(finalAnswerElement, "final answer");
     return {
       viewport: { width: innerWidth, height: innerHeight },
       timelineInner: rectangle(timelineInnerElement, ".timeline-inner"),
@@ -5400,10 +5649,10 @@ function chatReferenceVisualAuditExpression() {
       divider: rectangle(dividerElement, ".turn-header-line"),
       dividerStyle: styles(dividerElement, ".turn-header-line"),
       firstCommentary,
-      commentaryStyle: styles(firstCommentaryElement, "primeiro commentary"),
+      commentaryStyle: styles(firstCommentaryElement, "first commentary"),
       firstCommand,
       firstCommandText: firstCommandElement?.textContent?.trim() ?? null,
-      activityStyle: styles(firstCommandElement, "primeiro comando"),
+      activityStyle: styles(firstCommandElement, "first command"),
       terminalRead,
       terminalReadText: terminalReadElement?.textContent?.trim() ?? null,
       finalAnswer,
@@ -5441,7 +5690,7 @@ function projectColorEditorVisualAuditExpression() {
     const rectangle = (selector) => {
       const element = document.querySelector(selector);
       if (!(element instanceof HTMLElement)) {
-        throw new Error("Elemento ausente: " + selector);
+        throw new Error("Missing element: " + selector);
       }
       const bounds = element.getBoundingClientRect();
       return {
@@ -5488,7 +5737,7 @@ function settingsVisualAuditExpression() {
     const rectangle = (selector) => {
       const element = document.querySelector(selector);
       if (!(element instanceof HTMLElement)) {
-        throw new Error("Elemento ausente: " + selector);
+        throw new Error("Missing element: " + selector);
       }
       const bounds = element.getBoundingClientRect();
       const style = getComputedStyle(element);
@@ -5521,6 +5770,24 @@ function settingsVisualAuditExpression() {
     const page = rectangle(".settings-page");
     const heading = rectangle(".settings-heading h2");
     const firstRowLabel = rectangle(".application-preference-copy strong");
+    const languageSelect = document.querySelector(".language-preference-select");
+    if (!(languageSelect instanceof HTMLSelectElement)) {
+      throw new Error("The language preference selector is missing.");
+    }
+    const languageSelectStyle = getComputedStyle(languageSelect);
+    const measurementContext = document.createElement("canvas").getContext("2d");
+    if (measurementContext === null) {
+      throw new Error("A canvas context is required to measure the selected language label.");
+    }
+    measurementContext.font = languageSelectStyle.font;
+    const selectedLanguageLabel = languageSelect.selectedOptions[0]?.textContent?.trim() ?? "";
+    const selectedLanguageLabelWidth = measurementContext.measureText(selectedLanguageLabel).width;
+    const languageSelectTextWidth =
+      languageSelect.clientWidth -
+      Number.parseFloat(languageSelectStyle.paddingLeft) -
+      Number.parseFloat(languageSelectStyle.paddingRight);
+    const languageSelectLabelClearance =
+      languageSelectTextWidth - selectedLanguageLabelWidth;
     const firstNavigationSection = document.querySelector(".settings-nav-section");
     const navigationButtons =
       firstNavigationSection === null ? [] : [...firstNavigationSection.querySelectorAll("button")];
@@ -5548,6 +5815,12 @@ function settingsVisualAuditExpression() {
       page,
       heading,
       firstRowLabel,
+      languageSelect: rectangle(".language-preference-select"),
+      languageSelectFieldSizing: languageSelectStyle.fieldSizing,
+      languageSelectLabelClearance,
+      languageSelectTextWidth,
+      selectedLanguageLabel,
+      selectedLanguageLabelWidth,
       chromeText: document.querySelector(".window-chrome")?.textContent?.trim() ?? null,
       chromeOverlapsSettings: overlaps(chrome, overlay),
       nativeScrollbarWidth: getComputedStyle(
@@ -5579,7 +5852,7 @@ function usageSettingsVisualAuditExpression() {
     const rectangle = (selector) => {
       const element = document.querySelector(selector);
       if (!(element instanceof HTMLElement)) {
-        throw new Error("Elemento ausente: " + selector);
+        throw new Error("Missing element: " + selector);
       }
       const bounds = element.getBoundingClientRect();
       return {
@@ -5636,7 +5909,7 @@ function outputDetailVisualAuditExpression() {
   return `(() => {
     const rectangle = (element, label) => {
       if (!(element instanceof HTMLElement)) {
-        throw new Error("Elemento ausente: " + label);
+        throw new Error("Missing element: " + label);
       }
       const bounds = element.getBoundingClientRect();
       const style = getComputedStyle(element);
@@ -5714,7 +5987,7 @@ function profileVisualAuditExpression() {
     const rectangle = (selector) => {
       const element = document.querySelector(selector);
       if (!(element instanceof HTMLElement)) {
-        throw new Error("Elemento ausente: " + selector);
+        throw new Error("Missing element: " + selector);
       }
       const bounds = element.getBoundingClientRect();
       const style = getComputedStyle(element);
@@ -5752,7 +6025,7 @@ function profileVisualAuditExpression() {
     const surfaceElement = document.querySelector(".profile-page-scroll");
     const settingsMainElement = document.querySelector(".settings-main");
     if (!(surfaceElement instanceof HTMLElement) || !(settingsMainElement instanceof HTMLElement)) {
-      throw new Error("Contêiner de rolagem do perfil ausente.");
+      throw new Error("The profile scroll container is missing.");
     }
     const cells = [...document.querySelectorAll(".profile-activity-cell")];
     return {
@@ -5809,7 +6082,7 @@ function automationsVisualAuditExpression() {
     const rectangle = (selector) => {
       const element = document.querySelector(selector);
       if (!(element instanceof HTMLElement)) {
-        throw new Error("Elemento ausente: " + selector);
+        throw new Error("Missing element: " + selector);
       }
       const bounds = element.getBoundingClientRect();
       const style = getComputedStyle(element);
@@ -5840,7 +6113,7 @@ function automationsVisualAuditExpression() {
     const mainPanel = document.querySelector(".main-panel");
     const surfaceElement = document.querySelector(".automations-view");
     if (!(surfaceElement instanceof HTMLElement) || !(mainPanel instanceof HTMLElement)) {
-      throw new Error("Superfície de Automações ou painel principal ausente.");
+      throw new Error("The Automations surface or main panel is missing.");
     }
     const mainPanelStyle = getComputedStyle(mainPanel);
     return {
@@ -5877,7 +6150,7 @@ function automationEditorVisualAuditExpression() {
     const rectangle = (selector) => {
       const element = document.querySelector(selector);
       if (!(element instanceof HTMLElement)) {
-        throw new Error("Elemento ausente: " + selector);
+        throw new Error("Missing element: " + selector);
       }
       const bounds = element.getBoundingClientRect();
       const style = getComputedStyle(element);
@@ -5903,7 +6176,7 @@ function automationEditorVisualAuditExpression() {
     const editorElement = document.querySelector(".automation-editor");
     const switchElement = document.querySelector('.automation-enabled-field input[role="switch"]');
     if (!(editorElement instanceof HTMLElement) || !(switchElement instanceof HTMLInputElement)) {
-      throw new Error("Controles do editor de Automação ausentes.");
+      throw new Error("The Automation editor controls are missing.");
     }
     return {
       viewport: { width: innerWidth, height: innerHeight },
@@ -5928,171 +6201,194 @@ function validateChatReferenceMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no chat em ${viewport.width}x${viewport.height}`,
+    `unexpected chat viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o chat criou overflow horizontal global");
+  assert(metrics.horizontalOverflow <= tolerance, "chat created global horizontal overflow");
   assert(
     metrics.timelineHorizontalOverflow <= tolerance,
-    "a timeline criou overflow horizontal",
+    "the timeline created horizontal overflow",
   );
   assert(
     metrics.userBubble.top - metrics.timelineInner.top >= 28 &&
       metrics.userBubble.top - metrics.timelineInner.top <= 36,
-    "o início da conversa não respeita o espaçamento superior enxuto",
+    "the conversation start does not preserve the compact top spacing",
   );
   assert(
     metrics.threadContentMaxWidth === "768px",
-    "a largura física oficial equivalente a 48rem foi alterada",
+    "the canonical physical width equivalent to 48rem changed",
   );
   assert(
     metrics.timelineInner.width <= 768 + tolerance && metrics.timelineInner.width >= 560,
-    "a coluna da conversa saiu da largura oficial responsiva",
+    "the conversation column left the canonical responsive width",
   );
   assert(
     metrics.userBubbleStyle.backgroundColor === "rgb(34, 34, 34)",
-    "a bolha do usuário não usa #222222",
+    "the user bubble does not use #222222",
   );
-  assert(metrics.userBubbleStyle.borderRadius === "12px", "o raio da bolha não mede 12px");
-  assert(metrics.userBubbleStyle.borderTopWidth === "0px", "a bolha ganhou borda indevida");
+  assert(metrics.userBubbleStyle.borderRadius === "12px", "the user bubble radius is not 12px");
+  assert(metrics.userBubbleStyle.borderTopWidth === "0px", "the user bubble gained an unexpected border");
   assert(
     metrics.userBubbleStyle.paddingTop === "9px" &&
       metrics.userBubbleStyle.paddingRight === "12px" &&
       metrics.userBubbleStyle.paddingBottom === "9px" &&
       metrics.userBubbleStyle.paddingLeft === "12px",
-    "o padding da bolha do usuário divergiu da referência",
+    "the user bubble padding diverged from the reference",
   );
-  assert(metrics.durationStyle.fontSize === "14px", "a duração não usa tipografia de 14px");
-  assert(metrics.durationStyle.fontWeight === "400", "a duração ficou pesada demais");
+  assert(metrics.durationStyle.fontSize === "14px", "the duration does not use 14px typography");
+  assert(metrics.durationStyle.fontWeight === "400", "the duration became too heavy");
   assert(
     metrics.durationStyle.color === "rgb(144, 144, 144)",
-    "a duração não usa o cinza #909090",
+    "the duration does not use #909090 gray",
   );
-  assert(metrics.divider.height <= 1 + tolerance, "o divisor do turno ficou espesso");
+  assert(metrics.divider.height <= 1 + tolerance, "the turn divider became too thick");
   assert(
     metrics.dividerStyle.backgroundColor === "rgb(45, 45, 45)",
-    "o divisor do turno não usa #2d2d2d",
+    "the turn divider does not use #2d2d2d",
   );
-  assert(metrics.commentaryStyle.fontSize === "14px", "o commentary não usa 14px");
-  assert(metrics.commentaryStyle.lineHeight === "22.4px", "o commentary não usa line-height 1.6");
+  assert(metrics.commentaryStyle.fontSize === "14px", "commentary does not use 14px typography");
+  assert(metrics.commentaryStyle.lineHeight === "22.4px", "commentary does not use a 1.6 line height");
   assert(
     metrics.commentaryStyle.color === "rgb(223, 223, 223)",
-    "o commentary não usa #dfdfdf",
+    "commentary does not use #dfdfdf",
   );
   assert(
     metrics.commentaryStyle.fontFamily.includes("OpenAI Sans"),
-    "o chat deixou de priorizar OpenAI Sans",
+    "chat no longer prioritizes OpenAI Sans",
   );
-  assert(metrics.activityStyle.fontSize === "14px", "a atividade não usa 14px");
-  assert(metrics.activityStyle.fontWeight === "400", "a atividade ficou pesada demais");
+  assert(metrics.activityStyle.fontSize === "14px", "the activity does not use 14px typography");
+  assert(metrics.activityStyle.fontWeight === "400", "the activity became too heavy");
   assert(
     metrics.activityStyle.color === "rgb(144, 144, 144)",
-    "a atividade não usa #909090",
+    "the activity does not use #909090",
   );
   assert(
-    metrics.firstCommandText?.startsWith("Comando executado: Get-Content -Raw docs/RULES.md"),
-    "o primeiro comando não usa a semântica oficial",
+    metrics.firstCommandText?.startsWith("Executou Get-Content -Raw docs/RULES.md"),
+    "the first command does not use the canonical semantics",
   );
-  assert(metrics.terminalReadText === "Terminal do chat lido", "a leitura de terminal está incorreta");
+  assert(metrics.terminalReadText === "Terminal do chat lido", "the terminal-read label is incorrect");
   assert(
     JSON.stringify(metrics.groupSummaries) ===
       JSON.stringify(["Executou comandos", "Executou comandos e leu o terminal do chat"]),
-    "os resumos semânticos das atividades divergiram",
+    "the semantic activity summaries diverged",
   );
-  assert(metrics.commentaryCount === 3, "o cenário não renderizou os três commentaries");
-  assert(metrics.commandRowCount === 7, "a expansão não renderizou os comandos esperados");
-  assert(metrics.activityGroupCount === 2, "a timeline não criou os dois grupos oficiais");
-  assert(metrics.openActivityGroupCount === 1, "mais de um grupo ficou expandido");
-  assert(metrics.turnExpanded === true, "o trabalho do turno não ficou expandido");
-  assert(metrics.timelineAriaLabel === "Conversa", "a timeline perdeu seu nome acessível");
-  assert(metrics.articleCount === 5, "as mensagens deixaram de usar artigos semânticos");
-  assert(metrics.detailsCount >= 9, "os disclosures de atividade ficaram incompletos");
-  assert(metrics.workOrderIsCorrect === true, "a ordem visual do turno foi alterada");
+  assert(metrics.commentaryCount === 3, "the scenario did not render all three commentary messages");
+  assert(metrics.commandRowCount === 7, "the expansion did not render the expected commands");
+  assert(metrics.activityGroupCount === 2, "the timeline did not create the two canonical groups");
+  assert(metrics.openActivityGroupCount === 1, "more than one group remained expanded");
+  assert(metrics.turnExpanded === true, "the turn work did not remain expanded");
+  assert(metrics.timelineAriaLabel === "Conversa", "the timeline lost its accessible name");
+  assert(metrics.articleCount === 5, "messages no longer use semantic article elements");
+  assert(metrics.detailsCount >= 9, "activity disclosures became incomplete");
+  assert(metrics.workOrderIsCorrect === true, "the visual turn order changed");
   assert(
     metrics.bodyText.includes("Trabalhou por 1 min 34 s") &&
       metrics.bodyText.includes("Auditoria rápida concluída"),
-    "o turno de referência ficou incompleto",
+    "the reference turn became incomplete",
   );
 }
 
 function validateComposerFastModeMetrics(metrics, viewport) {
   const tolerance = 1;
   validateChromeMetrics(metrics, viewport);
-  assert(metrics.horizontalOverflow <= tolerance, "o compositor criou overflow horizontal");
-  assert(metrics.buttonHorizontalOverflow <= tolerance, "o seletor do modelo recorta seu conteúdo");
-  assert(metrics.indicatorCount === 1, "o modo rápido não exibe exatamente um indicador");
-  assert(metrics.accessibleLabel === true, "o indicador rápido não possui descrição acessível");
+  assert(metrics.horizontalOverflow <= tolerance, "the composer created horizontal overflow");
+  assert(metrics.buttonHorizontalOverflow <= tolerance, "the model selector clips its content");
+  assert(metrics.indicatorCount === 1, "fast mode does not display exactly one indicator");
+  assert(metrics.accessibleLabel === true, "the fast indicator has no accessible description");
   assert(
     metrics.indicator.right <= metrics.name.left + tolerance,
-    "o raio não está à esquerda do nome do modelo",
+    "the bolt is not positioned to the left of the model name",
   );
   assert(
     metrics.name.left - metrics.indicator.right <= 8 + tolerance,
-    "o raio ficou distante demais do nome do modelo",
+    "the bolt is too far from the model name",
   );
   assert(
     Math.abs(
       (metrics.indicator.top + metrics.indicator.bottom) / 2 -
         (metrics.name.top + metrics.name.bottom) / 2,
     ) <= tolerance,
-    "o raio não está centralizado com o nome do modelo",
+    "the bolt is not centered with the model name",
   );
-  assert(metrics.indicator.width >= 12, "o raio ficou pequeno demais");
-  assert(metrics.fullAccessColor === "rgb(251, 106, 34)", "Acesso completo perdeu o laranja");
-  assert(metrics.projectIconColor === "rgb(74, 222, 128)", "a cor do ícone do projeto não foi aplicada");
-  assert(metrics.diffAddedColor === "#4ade80", "adições não usam o verde-limão semântico");
-  assert(metrics.diffDeletedColor === "#ff6764", "remoções não usam o vermelho semântico");
+  assert(metrics.indicator.width >= 12, "the bolt became too small");
+  assert(metrics.fullAccessColor === "rgb(251, 106, 34)", "Full access lost its orange color");
+  assert(metrics.projectIconColor === "rgb(74, 222, 128)", "the project icon color was not applied");
+  assert(metrics.diffAddedColor === "#4ade80", "additions do not use semantic lime green");
+  assert(metrics.diffDeletedColor === "#ff6764", "deletions do not use semantic red");
 }
 
 function validateComposerUltraEffortMetrics(metrics) {
-  assert(metrics.horizontalOverflow <= 1, "o rótulo Ultra criou overflow horizontal");
-  assert(metrics.text === "Ultra", "o esforço ativo perdeu o rótulo Ultra");
-  assert(metrics.expectedColor === "#a78bfa", "o token semântico de Ultra foi alterado");
-  assert(metrics.color === "rgb(167, 139, 250)", "o esforço Ultra ativo deixou de ser roxo");
+  assert(metrics.horizontalOverflow <= 1, "the Ultra label created horizontal overflow");
+  assert(metrics.text === "Ultra", "the active effort lost the Ultra label");
+  assert(metrics.expectedColor === "#a78bfa", "the Ultra semantic token changed");
+  assert(metrics.color === "rgb(167, 139, 250)", "active Ultra effort is no longer purple");
 }
 
 function validateComposerRuntimeRestrictionsMetrics(metrics) {
-  assert(metrics.horizontalOverflow <= 1, "o aviso contextual criou overflow horizontal");
-  assert(metrics.selectedModel === "5.6 Luna", "o modelo Code Mode configurado foi substituído");
+  assert(metrics.horizontalOverflow <= 1, "the contextual notice created horizontal overflow");
+  assert(metrics.selectedModel === "5.6 Luna", "the configured Code Mode model was replaced");
   assert(
     metrics.persistentCompatibilityNoticeCount === 0,
-    "o requisito de runtime permaneceu visível fora do seletor",
+    "the runtime requirement remained visible outside the selector",
   );
-  assert(metrics.ultraDisabled === true, "Ultra ficou selecionável sem execução multiagente");
+  assert(metrics.ultraDisabled === true, "Ultra became selectable without multi-agent execution");
   assert(
     metrics.ultraLabel === "Ultra" && metrics.ultraRequirement === "Requer execução multiagente",
-    "o requisito de Ultra não ficou restrito à opção",
+    "the Ultra requirement was not confined to its option",
   );
+}
+
+function validateModelCatalogWarmupMetrics(metrics, viewport) {
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `unexpected catalog-warmup viewport at ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= 1, "catalog warmup created horizontal overflow");
+  assert(metrics.callDelta === 1, `new task and draft triggered ${metrics.callDelta} revalidations`);
+  assert(
+    metrics.startLatencyMs >= 0 && metrics.startLatencyMs <= 250,
+    `revalidation took ${metrics.startLatencyMs.toFixed(3)} ms to start`,
+  );
+  assert(
+    metrics.refreshDurationMs >= 160 && metrics.refreshDurationMs <= 800,
+    `simulated revalidation took ${metrics.refreshDurationMs.toFixed(3)} ms`,
+  );
+  assert(metrics.draft === "Preparar catálogo antes do envio", "catalog warmup changed the draft");
 }
 
 function validateActiveActivityReflectionMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado na reflexão em ${viewport.width}x${viewport.height}`,
+    `unexpected reflection viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "a reflexão criou overflow horizontal");
-  assert(metrics.reducedMotion === false, "a auditoria de movimento não normalizou a preferência");
+  assert(metrics.horizontalOverflow <= tolerance, "reflection created horizontal overflow");
+  assert(metrics.reducedMotion === false, "the motion audit did not normalize the preference");
   assert(
     metrics.titleText === metrics.baseText + metrics.highlightText,
-    "a camada visual perdeu o texto do título",
+    "the visual layer lost the title text",
   );
-  assert(metrics.baseText === metrics.highlightText, "o reflexo não replica o título ativo");
+  assert(metrics.baseText === metrics.highlightText, "the reflection does not replicate the active title");
+  assert(metrics.baseText === "Executando comando", "the parent header duplicated command timing");
   assert(
-    /^Comando em execução há (?:\d+s|\d+m \d+s|\d+h \d+m \d+s)$/u.test(metrics.baseText),
-    `o comando longo não exibe duração no título (${JSON.stringify(metrics.baseText)})`,
+    metrics.completedTokenText?.includes("10.000 tokens") === true,
+    `persisted tokens disappeared from the completed turn (${JSON.stringify(metrics.completedTokenText)})`,
+  );
+  assert(
+    metrics.activeTokenText?.includes("62 tokens") === true,
+    `confirmed tokens disappeared from the active turn (${JSON.stringify(metrics.activeTokenText)})`,
   );
   assert(
     metrics.sweepLayerCount === 1 && metrics.highlightLayerCount === 1,
-    "a variante de 21 de agosto não manteve uma única faixa visual",
+    "the August 21 variant did not preserve a single visual strip",
   );
   assert(
     metrics.obsoleteLayerCount === 0,
-    "camadas de animações posteriores continuam montadas",
+    "later animation layers remain mounted",
   );
   assert(
     metrics.titleColor === metrics.completedTitleColor &&
       metrics.titleColor === "rgb(144, 144, 144)",
-    `o texto-base ativo não acompanha a atividade concluída: ${JSON.stringify({
+    `active base text does not match the completed activity: ${JSON.stringify({
       active: metrics.titleColor,
       completed: metrics.completedTitleColor,
       reference: metrics.completedTitleText,
@@ -6101,145 +6397,191 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
   assert(
     metrics.titleFontWeight === metrics.completedTitleFontWeight &&
       metrics.titleFontWeight === "400",
-    `o peso do texto-base ativo não acompanha a atividade concluída: ${JSON.stringify({
+    `active base-text weight does not match the completed activity: ${JSON.stringify({
       active: metrics.titleFontWeight,
       completed: metrics.completedTitleFontWeight,
     })}`,
   );
-  assert(metrics.highlightColor === "rgb(255, 255, 255)", "o brilho deixou de usar branco");
-  assert(metrics.titleFontSize === "14px", "o título histórico não mede 14 px");
+  assert(metrics.highlightColor === "rgb(255, 255, 255)", "the highlight no longer uses white");
+  assert(metrics.titleFontSize === "14px", "the historical title is not 14px");
   assert(
     metrics.titleDisplay === "block",
-    "o título animado não foi blockificado corretamente como item flex",
+    "the animated title was not blockified correctly as a flex item",
   );
   assert(
     metrics.sweepAnimationName === "activity-reflection-sweep" &&
       metrics.highlightAnimationName === "activity-reflection-text",
-    "as duas transformações sincronizadas da reflexão estão ausentes",
+    "the two synchronized reflection transforms are missing",
   );
-  assert(metrics.animationDuration === "1s", "o pulso do reflexo não mede 1 segundo");
-  assert(metrics.animationDelay === "0s", "o pulso CSS manteve um atraso residual");
+  assert(metrics.animationDuration === "1s", "the reflection pulse does not last one second");
+  assert(metrics.animationDelay === "0s", "the CSS pulse retained a residual delay");
   assert(
     metrics.animationTimingFunction.includes("steps(48"),
-    "o pulso perdeu a progressão oficial em 48 passos",
+    "the pulse lost its canonical 48-step progression",
   );
-  assert(metrics.animationIterationCount === "1", "a reflexão voltou a repetir continuamente");
+  assert(metrics.animationIterationCount === "1", "the reflection started repeating continuously again");
   assert(
     metrics.keyframeEasings.length >= 2,
-    `os keyframes da passagem estão ausentes: ${JSON.stringify(metrics.keyframeEasings)}`,
+    `the sweep keyframes are missing: ${JSON.stringify(metrics.keyframeEasings)}`,
+  );
+  const sweepTransforms = JSON.stringify(metrics.sweepKeyframeTransforms);
+  const highlightTransforms = JSON.stringify(metrics.highlightKeyframeTransforms);
+  assert(
+    sweepTransforms.includes("-50%") &&
+      sweepTransforms.includes("125%") &&
+      !sweepTransforms.includes("translate3d"),
+    `the strip lost the canonical 2D translation: ${sweepTransforms}`,
+  );
+  assert(
+    highlightTransforms.includes("50%") &&
+      highlightTransforms.includes("-125%") &&
+      !highlightTransforms.includes("translate3d"),
+    `the text lost the canonical 2D counter-translation: ${highlightTransforms}`,
   );
   assert(
     metrics.sidebarItemGaps.length > 0 &&
       metrics.sidebarItemGaps.every((gap) => gap !== null && gap >= 3.5),
-    `os itens da sidebar continuam visualmente colados: ${JSON.stringify(metrics.sidebarItemGaps)}`,
+    `sidebar items remain visually crowded: ${JSON.stringify(metrics.sidebarItemGaps)}`,
   );
   assert(
     metrics.selectedThreadBackground === "rgba(255, 255, 255, 0.12)",
-    `a seleção do chat não usa a superfície forte: ${metrics.selectedThreadBackground}`,
+    `chat selection does not use the strong surface: ${metrics.selectedThreadBackground}`,
   );
   assert(
     metrics.selectedThreadBoxShadow !== null && metrics.selectedThreadBoxShadow !== "none",
-    "a seleção do chat perdeu o contorno de separação",
+    "chat selection lost its separating outline",
   );
-  assert(metrics.planExplanationCount === 0, "a explicação redundante do plano ainda está visível");
+  assert(metrics.planExplanationCount === 0, "the redundant plan explanation is still visible");
   assert(
     metrics.maskImage.includes("linear-gradient") &&
       metrics.maskImage.includes("20%") &&
       metrics.maskImage.includes("30%") &&
       metrics.maskImage.includes("50%"),
-    `a máscara de 21 de agosto foi alterada: ${metrics.maskImage}`,
+    `the August 21 mask changed: ${metrics.maskImage}`,
   );
   assert(
     metrics.passPositions.length === 2 && new Set(metrics.passPositions).size === 2,
-    `a faixa não atravessou o título: ${JSON.stringify(metrics.passPositions)}`,
+    `the strip did not cross the title: ${JSON.stringify(metrics.passPositions)}`,
   );
   assert(
     metrics.pausePositions.length === 3 && new Set(metrics.pausePositions).size === 3,
-    `a faixa ficou presa antes de concluir a travessia: ${JSON.stringify(metrics.pausePositions)}`,
+    `the strip became stuck before completing the sweep: ${JSON.stringify(metrics.pausePositions)}`,
   );
   assert(
     metrics.alignmentError !== null && metrics.alignmentError <= tolerance,
-    `o texto luminoso saiu do alinhamento: ${metrics.alignmentError}`,
+    `the highlighted text became misaligned: ${metrics.alignmentError}`,
   );
-  assert(metrics.ariaHidden === "true", "a faixa decorativa entrou na árvore acessível");
-  assert(metrics.pointerEvents === "none", "a reflexão passou a interceptar interação");
+  assert(metrics.ariaHidden === "true", "the decorative strip entered the accessibility tree");
+  assert(metrics.pointerEvents === "none", "the reflection started intercepting interaction");
+}
+
+function validateReasoningActivityReflectionMetrics(metrics, viewport) {
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `unexpected reflected-reasoning viewport at ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= 1, "reflected reasoning created horizontal overflow");
+  assert(
+    metrics.baseText === "Running focused checks" &&
+      metrics.highlightText === metrics.baseText &&
+      metrics.titleText === metrics.baseText + metrics.highlightText,
+    `reasoning did not adopt the same live header (${JSON.stringify(metrics.baseText)})`,
+  );
+  assert(
+    JSON.stringify(metrics.reasoningHeadlineSequence) ===
+      JSON.stringify([
+        "Implementing keyed Show with stable Index",
+        "Planning verification",
+        "Running focused checks",
+      ]),
+    `reasoning exposed partial or non-semantic headlines (${JSON.stringify(metrics.reasoningHeadlineSequence)})`,
+  );
+  assert(
+    metrics.standaloneThinkingCount === 0,
+    "reasoning reappeared as a second Thinking message",
+  );
+  assert(
+    metrics.runningGroupedChildCount === 0,
+    "a completed tool remained marked active during reasoning",
+  );
+  assert(
+    metrics.sweepLayerCount === 1 &&
+      metrics.highlightLayerCount === 1 &&
+      metrics.sweepAnimationName === "activity-reflection-sweep",
+    "the reasoning header lost the live-activity reflection",
+  );
 }
 
 function validateUserMessageNavigationMetrics(metrics, viewport) {
   const tolerance = 2;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado na navegação de mensagens em ${viewport.width}x${viewport.height}`,
+    `unexpected message-navigation viewport at ${viewport.width}x${viewport.height}`,
   );
   assert(
     metrics.horizontalOverflow <= tolerance,
-    "a navegação de mensagens criou overflow horizontal",
+    "message navigation created horizontal overflow",
   );
   assert(
     Math.abs(metrics.targetGap - metrics.expectedTargetGap) <= tolerance,
-    `o marcador não navegou para a posição atual possível da mensagem: ${JSON.stringify(metrics)}`,
+    `the marker did not navigate to the message's currently reachable position: ${JSON.stringify(metrics)}`,
   );
   assert(
     metrics.targetOffsetWithinTurn > 500,
-    "o cenário não validou uma mensagem posterior dentro do mesmo turno",
+    "the scenario did not validate a later message within the same turn",
   );
-  assert(metrics.markerCurrent === "true", "o marcador selecionado não ficou ativo");
-  assert(metrics.expandedGroupCount >= 1, "o turno não permaneceu expandido durante a navegação");
+  assert(metrics.markerCurrent === "true", "the selected marker did not remain active");
+  assert(metrics.expandedGroupCount >= 1, "the turn did not remain expanded during navigation");
 }
 
 function validateManualScrollOwnershipMetrics(metrics, viewport) {
   const tolerance = 2;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no ownership de scroll em ${viewport.width}x${viewport.height}`,
+    `unexpected scroll-ownership viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o scroll manual criou overflow horizontal");
+  assert(metrics.horizontalOverflow <= tolerance, "manual scrolling created horizontal overflow");
   assert(
     Math.abs(metrics.visualDrift) <= tolerance,
-    `uma medição virtual deslocou o conteúdo que o usuário estava lendo: ${JSON.stringify(metrics)}`,
+    `a virtual measurement displaced the content being read: ${JSON.stringify(metrics)}`,
   );
   assert(
     Math.abs(metrics.compensationError) <= tolerance,
-    `a correção de âncora não compensou exatamente a mudança de altura acima do viewport ` +
-      `(altura ${metrics.heightDelta.toFixed(3)} px, scroll ` +
-      `${metrics.scrollCompensation.toFixed(3)} px, erro ${metrics.compensationError.toFixed(3)} px)`,
+    `anchor correction did not exactly compensate the height change above the viewport ` +
+      `(height ${metrics.heightDelta.toFixed(3)} px, scroll ` +
+      `${metrics.scrollCompensation.toFixed(3)} px, error ${metrics.compensationError.toFixed(3)} px)`,
   );
 }
 
-function validateNestedScrollHandoffMetrics(metrics, viewport) {
+function validateNestedScrollContainmentMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado na transferência de scroll em ${viewport.width}x${viewport.height}`,
+    `unexpected scroll-containment viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o handoff de scroll criou overflow horizontal");
-  assert(metrics.styleReadCount === 0, "o wheel voltou a forçar leitura síncrona de estilos");
+  assert(metrics.horizontalOverflow <= tolerance, "scroll containment created horizontal overflow");
+  assert(metrics.styleReadCount === 0, "wheel handling forced a synchronous style read again");
   assert(
-    metrics.handoffDurationMs <= 2000,
-    `três handoffs suaves não estabilizaram a tempo: ${metrics.handoffDurationMs.toFixed(3)} ms`,
+    metrics.containmentDurationMs <= 1000,
+    `three internal boundaries did not stabilize in time: ${metrics.containmentDurationMs.toFixed(3)} ms`,
   );
   for (const [label, sample] of Object.entries({
-    comando: metrics.command,
+    command: metrics.command,
     diff: metrics.diff,
-    leitura: metrics.source,
+    source: metrics.source,
   })) {
-    assert(sample.defaultPrevented === true, `${label} não assumiu ownership do wheel excedente`);
+    assert(sample.defaultPrevented === false, `${label} canceled the internal native wheel event`);
     assert(
-      Math.abs(sample.nestedScrollTop - sample.expectedNestedScroll) <= tolerance,
-      `${label} não terminou no limite vertical esperado`,
+      Math.abs(sample.nestedScrollTop - sample.nestedStart) <= tolerance,
+      `${label} moved after a synthetic wheel event without native action`,
     );
     assert(
-      Math.abs(sample.timelineDelta - sample.expectedTimelineDelta) <= tolerance,
-      `${label} não transferiu exatamente o delta excedente para a timeline`,
-    );
-    assert(sample.monotonic === true, `${label} inverteu a direção durante o handoff`);
-    assert(
-      sample.distinctTimelinePositions >= 3,
-      `${label} concluiu o handoff sem passos visuais intermediários`,
+      Math.abs(sample.timelineDelta) <= tolerance,
+      `${label} leaked ${sample.timelineDelta}px into the timeline`,
     );
     assert(
-      sample.maximumFrameDelta < Math.abs(sample.expectedTimelineDelta),
-      `${label} aplicou todo o handoff em um único salto`,
+      sample.overscrollBehaviorY === "contain",
+      `${label} does not declare native vertical containment`,
     );
   }
 }
@@ -6248,106 +6590,106 @@ function validateNestedScrollWheelOwnershipMetrics(metrics, viewport) {
   const tolerance = 2;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no wheel nativo em ${viewport.width}x${viewport.height}`,
+    `unexpected native-wheel viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o wheel nativo criou overflow horizontal");
+  assert(metrics.horizontalOverflow <= tolerance, "native wheel handling created horizontal overflow");
   for (const [label, sample] of Object.entries({
     diff: metrics.diff,
-    leitura: metrics.source,
+    source: metrics.source,
   })) {
-    const { handoff, internal, reversal } = sample;
+    const { boundary, internal, outer, reversal } = sample;
     assert(
       internal.events.length === 4,
-      `${label} não recebeu os quatro eventos reais de wheel interno`,
+      `${label} did not receive all four real internal wheel events`,
     );
     assert(
       internal.events.every((event) => event.cancelable === true),
-      `${label} recebeu wheel não cancelável apesar do listener explícito`,
+      `${label} received a non-cancelable wheel event despite the explicit listener`,
     );
     assert(
       internal.events.every((event) => event.defaultPrevented === false),
-      `${label} perdeu o scroll nativo mesmo com faixa interna disponível`,
+      `${label} lost native scrolling despite available internal range`,
     );
     assert(
       Math.abs(internal.nestedDelta - internal.expectedNestedDelta) <= tolerance,
-      `${label} consumiu ${internal.nestedDelta}px em vez de ${internal.expectedNestedDelta}px`,
+      `${label} consumed ${internal.nestedDelta}px instead of ${internal.expectedNestedDelta}px`,
     );
     assert(
       Math.abs(internal.timelineDelta) <= tolerance,
-      `${label} também deslocou a timeline em ${internal.timelineDelta}px`,
+      `${label} also moved the timeline by ${internal.timelineDelta}px`,
     );
     assert(
       internal.canvasIdentityChanged === false,
-      `${label} substituiu o canvas virtual durante o wheel interno`,
+      `${label} replaced the virtual canvas during internal wheel input`,
     );
     assert(
       internal.rowIdentityComparisons > 0 && internal.mountedRows > 0,
-      `${label} não preservou linhas sobrepostas suficientes para validar identidade`,
+      `${label} did not preserve enough overlapping rows to validate identity`,
     );
     assert(
       internal.rowIdentityChanges === 0,
-      `${label} remontou ${internal.rowIdentityChanges} linhas ainda visíveis durante o scroll`,
+      `${label} remounted ${internal.rowIdentityChanges} rows that remained visible during scrolling`,
+    );
+    assert(boundary.events.length === 4, `${label} did not receive all four boundary wheel events`);
+    assert(
+      boundary.events.every((event) => event.cancelable === true),
+      `${label} received a non-cancelable wheel event at the boundary`,
     );
     assert(
-      handoff.events.length === 4,
-      `${label} não recebeu os quatro eventos reais de wheel no limite`,
+      boundary.events.every((event) => event.defaultPrevented === false),
+      `${label} canceled the native wheel event at the boundary`,
     );
     assert(
-      handoff.events.every((event) => event.cancelable === true),
-      `${label} recebeu wheel não cancelável durante o handoff`,
+      Math.abs(boundary.nestedDelta) <= tolerance,
+      `${label} moved ${boundary.nestedDelta}px beyond the internal boundary`,
     );
     assert(
-      handoff.events.every((event) => event.defaultPrevented === true),
-      `${label} não transferiu deterministicamente o wheel excedente à timeline`,
+      Math.abs(boundary.timelineDelta) <= tolerance,
+      `${label} leaked ${boundary.timelineDelta}px into the timeline at the boundary`,
     );
     assert(
-      Math.abs(handoff.nestedDelta) <= tolerance,
-      `${label} saiu do limite interno em ${handoff.nestedDelta}px durante o handoff`,
+      boundary.distinctTimelinePositions === 1,
+      `${label} animated the timeline while the pointer remained inside the region`,
     );
     assert(
-      Math.abs(handoff.timelineDelta - handoff.expectedTimelineDelta) <= tolerance,
-      `${label} transferiu ${handoff.timelineDelta}px à timeline em vez de ${handoff.expectedTimelineDelta}px`,
-    );
-    assert(handoff.monotonic, `${label} inverteu a direção durante o handoff`);
-    assert(
-      handoff.distinctTimelinePositions >= 3,
-      `${label} concluiu o handoff sem passos visuais intermediários`,
-    );
-    assert(
-      handoff.maximumFrameDelta < Math.abs(handoff.expectedTimelineDelta),
-      `${label} aplicou todo o handoff em um único salto`,
+      boundary.maximumFrameDelta <= tolerance,
+      `${label} moved an outer frame by ${boundary.maximumFrameDelta}px`,
     );
     assert(
       reversal.events.length === 2,
-      `${label} não recebeu o par real de wheel usado na reversão`,
+      `${label} did not receive the real wheel pair used for reversal`,
     );
     assert(
       reversal.events.every((event) => event.cancelable === true),
-      `${label} recebeu wheel não cancelável durante a reversão`,
+      `${label} received a non-cancelable wheel event during reversal`,
     );
     assert(
-      reversal.events[0]?.defaultPrevented === true,
-      `${label} não iniciou o handoff antes da reversão`,
+      reversal.events[0]?.defaultPrevented === false,
+      `${label} canceled the boundary wheel event before reversal`,
     );
     assert(
       reversal.events[1]?.defaultPrevented === false,
-      `${label} não devolveu a direção inversa ao scroll nativo interno`,
+      `${label} did not return the reverse direction to native internal scrolling`,
     );
     assert(
       Math.abs(reversal.nestedDelta - reversal.expectedNestedDelta) <= tolerance,
-      `${label} moveu ${reversal.nestedDelta}px internamente após reverter, esperado ${reversal.expectedNestedDelta}px`,
+      `${label} moved ${reversal.nestedDelta}px internally after reversal; expected ${reversal.expectedNestedDelta}px`,
     );
     assert(
-      Math.sign(reversal.handoffDelta) * reversal.timelineDelta >= -tolerance,
-      `${label} inverteu indevidamente a timeline após devolver o wheel ao conteúdo interno`,
-    );
-    assert(
-      Math.abs(reversal.timelineDelta) < Math.abs(reversal.handoffDelta) - tolerance,
-      `${label} deixou a animação antiga alcançar o destino depois da reversão`,
+      Math.abs(reversal.timelineDelta) <= tolerance,
+      `${label} moved the timeline by ${reversal.timelineDelta}px during internal reversal`,
     );
     assert(
       reversal.postCancelRange <= tolerance,
-      `${label} continuou derivando ${reversal.postCancelRange}px depois de cancelar o handoff`,
+      `${label} continued drifting ${reversal.postCancelRange}px after the boundary wheel event`,
+    );
+    assert(
+      Math.abs(outer.nestedDelta) <= tolerance,
+      `${label} moved ${outer.nestedDelta}px after the pointer left the region`,
+    );
+    assert(
+      Math.abs(outer.timelineDelta) > tolerance,
+      `${label} did not release the timeline after the pointer moved to the outer surface`,
     );
   }
 }
@@ -6356,24 +6698,24 @@ function validateNestedScrollFollowingMetrics(metrics, viewport) {
   const tolerance = 2;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no acompanhamento de scroll interno em ${viewport.width}x${viewport.height}`,
+    `unexpected internal-scroll-following viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o scroll interno criou overflow horizontal");
+  assert(metrics.horizontalOverflow <= tolerance, "internal scrolling created horizontal overflow");
   assert(
     metrics.defaultPrevented === false,
-    "uma região interna impediu wheel que cabia integralmente em sua própria faixa",
+    "an internal region blocked wheel input that fit entirely within its own range",
   );
   assert(
     Math.abs(metrics.nestedDelta - metrics.expectedNestedDelta) <= tolerance,
-    "a região interna não consumiu integralmente seu próprio wheel",
+    "the internal region did not fully consume its own wheel input",
   );
   assert(
     Math.abs(metrics.timelineDelta - 160) <= tolerance,
-    `a timeline deslocou ${metrics.timelineDelta}px em vez de 160px após o crescimento (distância final ${metrics.distanceToEnd}px)`,
+    `the timeline moved ${metrics.timelineDelta}px instead of 160px after growth (final distance ${metrics.distanceToEnd}px)`,
   );
   assert(
     Math.abs(metrics.distanceToEnd) <= tolerance,
-    "a timeline ficou destacada do fim após crescimento de conteúdo",
+    "the timeline became detached from the end after content growth",
   );
 }
 
@@ -6381,21 +6723,21 @@ function validateLiveCommandOutputMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado na saída ao vivo em ${viewport.width}x${viewport.height}`,
+    `unexpected live-output viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "a saída ao vivo criou overflow horizontal");
+  assert(metrics.horizontalOverflow <= tolerance, "live output created horizontal overflow");
   assert(
     metrics.commandHorizontalOverflow <= tolerance,
-    "a saída ao vivo criou overflow horizontal no comando",
+    "live output created horizontal overflow inside the command",
   );
-  assert(metrics.open === true, "o comando em execução não ficou expandido");
+  assert(metrics.open === true, "the running command did not remain expanded");
   assert(
     /^Comando em execução há (?:\d+s|\d+m \d+s|\d+h \d+m \d+s)$/u.test(metrics.title),
-    `o comando aberto perdeu seu estado ou duração (${JSON.stringify(metrics.title)})`,
+    `the open command lost its state or duration (${JSON.stringify(metrics.title)})`,
   );
   assert(
     metrics.prompt?.includes("Get-Content -LiteralPath src/ui/Timeline.tsx -Raw"),
-    "o comando original não aparece junto da saída ao vivo",
+    "the original command does not appear with the live output",
   );
   assert(
     metrics.outputText.includes("stdout:") &&
@@ -6403,79 +6745,79 @@ function validateLiveCommandOutputMetrics(metrics, viewport) {
       metrics.outputText.includes("computing gzip size...") &&
       metrics.outputText.includes("stderr:") &&
       metrics.outputText.includes("warning: release validation is still running"),
-    "stdout e stderr incrementais não estão visíveis antes da conclusão",
+    "incremental stdout and stderr are not visible before completion",
   );
-  assert(metrics.hasFinalOutputView === false, "a prévia ao vivo foi confundida com a saída final");
-  assert(metrics.scrollable === true, "a saída longa não ativou a rolagem limitada");
-  assert(metrics.followGap <= 2, "a saída ao vivo não acompanhou a linha mais recente");
-  assert(metrics.maximumHeight === "205px", "a saída ao vivo perdeu seu limite vertical");
-  assert(metrics.whiteSpace === "pre-wrap", "a saída ao vivo não preserva quebras de linha");
+  assert(metrics.hasFinalOutputView === false, "the live preview was mistaken for final output");
+  assert(metrics.scrollable === true, "long output did not activate bounded scrolling");
+  assert(metrics.followGap <= 2, "live output did not follow the latest line");
+  assert(metrics.maximumHeight === "205px", "live output lost its vertical limit");
+  assert(metrics.whiteSpace === "pre-wrap", "live output does not preserve line breaks");
 }
 
 function validateSingleFileChangeMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no arquivo único em ${viewport.width}x${viewport.height}`,
+    `unexpected single-file viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o arquivo único criou overflow horizontal");
-  assert(metrics.fileName === "engine.rs", "o arquivo direto mudou de identidade");
+  assert(metrics.horizontalOverflow <= tolerance, "the single file created horizontal overflow");
+  assert(metrics.fileName === "engine.rs", "the direct file changed identity");
   assert(
     metrics.action === "Arquivo editado",
-    "a alteração única perdeu o rótulo Arquivo editado",
+    "the single change lost the Edited file label",
   );
-  assert(metrics.compact === true, "a alteração única não usa a apresentação compacta");
-  assert(metrics.hasActivityIcon === true, "a alteração única perdeu o ícone contextual");
-  assert(metrics.borderTopWidth === "0px", "a alteração única recuperou o contorno de cartão");
-  assert(metrics.borderRadius === "0px", "a alteração única recuperou cantos de balão");
+  assert(metrics.compact === true, "the single change does not use the compact presentation");
+  assert(metrics.hasActivityIcon === true, "the single change lost its contextual icon");
+  assert(metrics.borderTopWidth === "0px", "the single change regained a card outline");
+  assert(metrics.borderRadius === "0px", "the single change regained bubble corners");
   assert(
     metrics.backgroundColor === "rgba(0, 0, 0, 0)",
-    "a alteração única recuperou uma superfície de cartão",
+    "the single change regained a card surface",
   );
   assert(
     metrics.groupedAction === "Arquivo editado",
-    "a alteração interna perdeu o rótulo Arquivo editado",
+    "the internal change lost the Edited file label",
   );
   assert(
     metrics.groupedHasActivityIcon === true,
-    "a alteração interna perdeu o ícone contextual do grupo",
+    "the internal change lost the group's contextual icon",
   );
   assert(
     metrics.groupedHasRedundantHeading === false,
-    "o grupo manteve o cabeçalho redundante de contagem de arquivos",
+    "the group retained the redundant file-count header",
   );
   assert(
     metrics.groupedDirectFileCount === 3,
-    "o grupo não expôs os arquivos imediatamente após a primeira expansão",
+    "the group did not expose files immediately after the first expansion",
   );
   assert(
     metrics.groupedNestedCollectionCount === 0,
-    "o grupo de arquivos manteve uma expansão intermediária redundante",
+    "the file group retained a redundant intermediate expansion",
   );
   assert(
     metrics.newFileAction === "Arquivo criado",
-    "o arquivo novo perdeu a semântica Arquivo criado",
+    "the new file lost the Created file semantics",
   );
-  assert(metrics.newFileBadge === "NOVO", "o arquivo novo perdeu o selo NOVO");
-  assert(metrics.newFileAdditions === "+256", "o arquivo novo perdeu a contagem de linhas");
-  assert(metrics.newFileHasDeletions === false, "o arquivo novo ainda exibe uma remoção zerada");
+  assert(metrics.newFileBadge === "NOVO", "the new file lost the NEW badge");
+  assert(metrics.newFileAdditions === "+256", "the new file lost its line count");
+  assert(metrics.newFileHasDeletions === false, "the new file still displays a zero deletion count");
   assert(
     metrics.deletedFileAction === "Arquivo excluído",
-    "o arquivo excluído perdeu a semântica Arquivo excluído",
+    "the deleted file lost the Deleted file semantics",
   );
-  assert(metrics.deletedFileBadge === "EXCLUÍDO", "o arquivo excluído perdeu seu selo");
+  assert(metrics.deletedFileBadge === "EXCLUÍDO", "the deleted file lost its badge");
   assert(
     metrics.deletedFileDeletions === "-288",
-    "o arquivo excluído não exibe o total autoritativo de linhas removidas",
+    "the deleted file does not display the authoritative removed-line total",
   );
   assert(
     metrics.deletedFileHasAdditions === false,
-    "o arquivo excluído ainda exibe uma adição zerada",
+    "the deleted file still displays a zero addition count",
   );
-  assert(metrics.open === false, "a alteração única iniciou expandida");
-  assert(metrics.aggregateContainerCount === 0, "a alteração única ainda criou um agrupador");
-  assert(metrics.directDiffVisible === false, "o diff do arquivo único iniciou visível");
-  validateIntrinsicActivityInteraction(metrics.intrinsicInteraction, "alteração", tolerance);
+  assert(metrics.open === false, "the single change started expanded");
+  assert(metrics.aggregateContainerCount === 0, "the single change still created a grouping container");
+  assert(metrics.directDiffVisible === false, "the single-file diff started visible");
+  validateIntrinsicActivityInteraction(metrics.intrinsicInteraction, "change", tolerance);
 }
 
 function validateIntrinsicActivityInteraction(interaction, label, tolerance) {
@@ -6483,47 +6825,47 @@ function validateIntrinsicActivityInteraction(interaction, label, tolerance) {
     interaction?.rest !== undefined &&
       interaction.far !== undefined &&
       interaction.hover !== undefined,
-    `a interação intrínseca da ${label} não foi capturada`,
+    `the intrinsic interaction for ${label} was not captured`,
   );
   assert(
     interaction.rest.summaryWidth + 40 < interaction.rest.rowWidth,
-    `a área interativa da ${label} ainda ocupa a fileira inteira`,
+    `the interactive area for ${label} still occupies the entire row`,
   );
   assert(
     interaction.rest.expanded === interaction.far.expanded &&
       interaction.rest.expanded === interaction.hover.expanded,
-    `a interação alterou indevidamente o estado expandido da ${label}`,
+    `interaction incorrectly changed the expanded state for ${label}`,
   );
   const restingChevronOpacity = interaction.rest.expanded ? 1 : 0;
   assert(
     interaction.rest.chevronOpacity === restingChevronOpacity &&
       interaction.far.chevronOpacity === restingChevronOpacity,
     interaction.rest.expanded
-      ? `a seta da ${label} expandida não permaneceu visível`
-      : `a seta da ${label} ficou visível sem proximidade real`,
+      ? `the expanded ${label} chevron did not remain visible`
+      : `the ${label} chevron became visible without actual proximity`,
   );
   assert(
     interaction.rest.hovered === false && interaction.far.hovered === false,
-    `uma posição distante ativou indevidamente o hover da ${label}`,
+    `a distant position incorrectly activated hover for ${label}`,
   );
   assert(
     interaction.hover.hovered === true && interaction.hover.chevronOpacity === 1,
-    `a proximidade real da ${label} não revelou sua seta`,
+    `actual proximity did not reveal the ${label} chevron`,
   );
   assert(
     interaction.rest.actionColor === interaction.rest.identityColor &&
       interaction.rest.iconColor === interaction.rest.actionColor,
-    `a ${label} não usa uma cor discreta uniforme em repouso`,
+    `${label} does not use a uniform muted color at rest`,
   );
   assert(
     interaction.hover.actionColor === interaction.hover.identityColor &&
       interaction.hover.iconColor === interaction.hover.actionColor &&
       interaction.hover.actionColor !== interaction.rest.actionColor,
-    `o hover não destacou semanticamente a ${label}`,
+    `hover did not semantically highlight ${label}`,
   );
   assert(
     Math.abs(interaction.hover.summaryWidth - interaction.rest.summaryWidth) <= tolerance,
-    `a ${label} mudou de largura ao revelar sua seta`,
+    `${label} changed width while revealing its chevron`,
   );
 }
 
@@ -6536,16 +6878,16 @@ function validateReviewFileLayoutMetrics(metrics, viewport) {
   );
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado na revisão em ${viewport.width}x${viewport.height}`,
+    `unexpected review viewport at ${viewport.width}x${viewport.height}`,
   );
   validateWorkspaceSplitMetrics(
     metrics.workspaceSplit,
-    "revisão",
+    "review",
     metrics.workspaceSplitInteraction,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "a revisão criou overflow horizontal global");
-  assert(metrics.fileCount === 60, "a revisão não reuniu os sessenta arquivos alterados do turno");
-  assert(metrics.fileListScrollable, "a lista extensa da revisão não preservou sua própria rolagem");
+  assert(metrics.horizontalOverflow <= tolerance, "review created global horizontal overflow");
+  assert(metrics.fileCount === 60, "review did not gather the turn's sixty changed files");
+  assert(metrics.fileListScrollable, "the long review list did not preserve its own scrolling");
   assert(
     metrics.contentDisplay === "flex" &&
       metrics.contentFlexDirection === "column" &&
@@ -6553,40 +6895,40 @@ function validateReviewFileLayoutMetrics(metrics, viewport) {
       metrics.fileListFlexGrow === "0" &&
       metrics.fileListFlexShrink === "1" &&
       metrics.stageFlexGrow === "1",
-    "a revisão perdeu o ownership explícito entre a lista limitada e o estágio flexível",
+    "review lost explicit ownership between the bounded list and flexible stage",
   );
   assert(
     metrics.selectedFile?.endsWith("module-15.ts"),
-    "a auditoria não selecionou o diff grande da revisão",
+    "the audit did not select the large review diff",
   );
   assert(
     metrics.fileListHeight <= maximumListHeight + tolerance,
-    `a lista consumiu ${metrics.fileListHeight.toFixed(1)} px de ${metrics.contentHeight.toFixed(1)} px disponíveis`,
+    `the list consumed ${metrics.fileListHeight.toFixed(1)} px of ${metrics.contentHeight.toFixed(1)} available px`,
   );
   assert(
     Math.abs(metrics.contentHeight - metrics.fileListHeight - metrics.stageHeight) <= tolerance,
-    "a lista e o estágio não dividem integralmente a área útil da revisão",
+    "the list and stage do not fully divide the review's usable area",
   );
   assert(
     Math.abs(metrics.stageHeight - metrics.headerHeight - metrics.diffViewportHeight) <= tolerance,
-    "o diff não preenche a área restante abaixo do cabeçalho do arquivo",
+    "the diff does not fill the remaining area below the file header",
   );
   assert(
     metrics.diffViewportSizing === "container" && metrics.diffViewportInlineHeight === "",
-    "o diff da revisão voltou a disputar altura inline com o contêiner",
+    "the review diff is competing for inline height with its container again",
   );
   assert(
     metrics.diffViewportHeight >= Math.min(120, metrics.contentHeight * 0.4),
-    `a viewport do diff ficou comprimida a ${metrics.diffViewportHeight.toFixed(1)} px`,
+    `the diff viewport was compressed to ${metrics.diffViewportHeight.toFixed(1)} px`,
   );
   assert(
     metrics.mountedRows === expectedMountedRows &&
       metrics.mountedRowIndexes[0] === 1,
-    `a janela virtual montou ${metrics.mountedRows} linhas para ${metrics.diffViewportClientHeight.toFixed(1)} px (${metrics.declaredRows} declaradas)`,
+    `the virtual window mounted ${metrics.mountedRows} rows for ${metrics.diffViewportClientHeight.toFixed(1)} px (${metrics.declaredRows} declared)`,
   );
   assert(
     metrics.rowGaps.every((gap) => Math.abs(gap - 20) <= tolerance),
-    "as linhas montadas na revisão perderam o passo virtual de 20 px",
+    "mounted review rows lost the 20px virtual step",
   );
   assert(
     metrics.tableRole === "table" &&
@@ -6595,11 +6937,11 @@ function validateReviewFileLayoutMetrics(metrics, viewport) {
       metrics.rowCellRoles.every(
         (roles) => JSON.stringify(roles) === JSON.stringify(["rowheader", "cell"]),
       ),
-    "o diff unificado perdeu sua grade semântica independente de tabelas nativas",
+    "the unified diff lost its semantic grid independent of native tables",
   );
   assert(
     metrics.canvasHeight >= metrics.diffViewportScrollHeight - tolerance,
-    "o canvas virtual da revisão ficou menor que sua área rolável",
+    "the review's virtual canvas became smaller than its scrollable area",
   );
   const virtualizationCycle = metrics.virtualizationCycle;
   const virtualizationPhases = [
@@ -6617,7 +6959,7 @@ function validateReviewFileLayoutMetrics(metrics, viewport) {
         phase.rowGaps.every((gap) => Math.abs(gap - 20) <= tolerance) &&
         phase.rowInlineTops.every((top) => /^\d+px$/u.test(top ?? "")),
     ),
-    "a geometria virtual da revisão mudou durante a rolagem sob o CSP de produção",
+    "review virtual geometry changed while scrolling under the production CSP",
   );
   assert(
     virtualizationCycle.initial.canvasHeight > virtualizationCycle.initial.clientHeight &&
@@ -6627,7 +6969,7 @@ function validateReviewFileLayoutMetrics(metrics, viewport) {
       virtualizationCycle.bottom.mountedRowIndexes[0] > 1 &&
       virtualizationCycle.restored.scrollTop === 0 &&
       virtualizationCycle.restored.mountedRowIndexes[0] === 1,
-    "a revisão não preservou início, fim e retorno ao topo durante a rematerialização",
+    "review did not preserve start, end, and return to top during rematerialization",
   );
 }
 
@@ -6635,10 +6977,10 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no diff colorido em ${viewport.width}x${viewport.height}`,
+    `unexpected syntax-highlighted diff viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o diff colorido criou overflow horizontal");
-  assert(metrics.viewportHorizontalOverflow >= 0, "a viewport do diff perdeu sua largura rolável");
+  assert(metrics.horizontalOverflow <= tolerance, "the syntax-highlighted diff created horizontal overflow");
+  assert(metrics.viewportHorizontalOverflow >= 0, "the diff viewport lost its scrollable width");
   for (const kind of [
     "token-attribute",
     "token-constant",
@@ -6650,31 +6992,31 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
     "token-string",
     "token-type",
   ]) {
-    assert(metrics.tokenKinds.includes(kind), `o diff não produziu ${kind}`);
+    assert(metrics.tokenKinds.includes(kind), `the diff did not produce ${kind}`);
   }
-  assert(metrics.tokenCount >= 20, "o diff produziu poucos tokens sintáticos");
-  assert(metrics.tokenColorCount >= 7, "a paleta sintática não possui cores distintas suficientes");
-  assert(metrics.contextHasSyntax === true, "linhas de contexto não receberam syntax highlighting");
+  assert(metrics.tokenCount >= 20, "the diff produced too few syntax tokens");
+  assert(metrics.tokenColorCount >= 7, "the syntax palette does not contain enough distinct colors");
+  assert(metrics.contextHasSyntax === true, "context lines did not receive syntax highlighting");
   assert(
     metrics.additionBackground === "rgb(31, 73, 50)",
-    "o fundo semântico de adição não está sólido e nítido",
+    "the semantic addition background is not solid and crisp",
   );
   assert(
     metrics.deletionBackground === "rgb(82, 39, 37)",
-    "o fundo semântico de remoção não está sólido e nítido",
+    "the semantic deletion background is not solid and crisp",
   );
   assert(
     metrics.additionBackground !== metrics.deletionBackground,
-    "adição e remoção perderam distinção visual",
+    "additions and deletions lost visual distinction",
   );
-  assert(metrics.keywordColor === "#c77dff", "keywords não usam o roxo neon da paleta sintática");
-  assert(metrics.stringColor === "#ffb38a", "strings não usam a paleta sintática");
+  assert(metrics.keywordColor === "#c77dff", "keywords do not use the syntax palette's neon purple");
+  assert(metrics.stringColor === "#ffb38a", "strings do not use the syntax palette");
   assert(
     metrics.expandedSummaryHasIdentity === false &&
       metrics.panelHeaderFile === "engine.rs" &&
       metrics.panelHeaderFileDecoration === "none" &&
       metrics.panelHeaderStats.length === 2,
-    "o diff expandido não usa o cabeçalho interno enxuto do Codex",
+    "the expanded diff does not use Codex's compact internal header",
   );
   assert(
     metrics.expandedSummaryAlignItems === "center" &&
@@ -6682,12 +7024,12 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
       metrics.expandedSummaryBorderBottomWidth === "0px" &&
       metrics.panelHeaderChildCenterOffsets.length === 3 &&
       metrics.panelHeaderChildCenterOffsets.every((offset) => Math.abs(offset) <= tolerance),
-    "o cabeçalho do diff não centraliza verticalmente o arquivo e as estatísticas",
+    "the diff header does not vertically center the file and statistics",
   );
   assert(
     Math.abs(metrics.panelHeaderHeight - 30) <= tolerance &&
       metrics.panelCopyLabel === "Copiar edição",
-    "o cabeçalho interno do diff perdeu altura ou ação de copiar",
+    "the internal diff header lost its height or copy action",
   );
   assert(
     metrics.panelBackground === "rgb(24, 24, 24)" &&
@@ -6695,12 +7037,12 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
       metrics.viewportOpacity === "1" &&
       metrics.viewportFilter === "none" &&
       metrics.viewportBackdropFilter === "none",
-    "o viewport do diff voltou a sobrepor uma segunda superfície ao código",
+    "the diff viewport overlays a second surface on the code again",
   );
   assert(
     metrics.additionCellBackground === "rgba(0, 0, 0, 0)" &&
       metrics.deletionCellBackground === "rgba(0, 0, 0, 0)",
-    "as células voltaram a duplicar o preenchimento semântico da linha",
+    "cells duplicate the row's semantic fill again",
   );
   assert(
     metrics.additionRowWidth !== null &&
@@ -6710,44 +7052,44 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
       metrics.deletionRowWidth + tolerance >= metrics.tableWidth &&
       Math.abs(metrics.additionRowRightGap) <= tolerance &&
       Math.abs(metrics.deletionRowRightGap) <= tolerance,
-    "o preenchimento semântico não alcança o fim da largura rolável do diff",
+    "the semantic fill does not reach the end of the diff's scrollable width",
   );
-  assert(metrics.codeText?.includes("use std::time::Instant;"), "o diff perdeu o texto do código");
-  assert(metrics.codeInset !== null && metrics.codeInset <= 64, "o gutter do diff continua largo demais");
+  assert(metrics.codeText?.includes("use std::time::Instant;"), "the diff lost the code text");
+  assert(metrics.codeInset !== null && metrics.codeInset <= 64, "the diff gutter remains too wide");
   assert(
     metrics.lineNumberCellsPerRow.length > 0 &&
       metrics.lineNumberCellsPerRow.every((count) => count === 1),
-    "o diff unificado não preserva uma única coluna semântica de números",
+    "the unified diff does not preserve a single semantic number column",
   );
   assert(
     metrics.lineNumberLeftSpread !== null && metrics.lineNumberLeftSpread <= tolerance,
-    "a coluna numérica do diff perdeu o alinhamento vertical",
+    "the diff's number column lost vertical alignment",
   );
   assert(
     metrics.lineNumberValues.every((value) => /^\d+$/u.test(value)),
-    "o diff misturou marcadores de edição aos números de linha",
+    "the diff mixed edit markers with line numbers",
   );
   assert(
     metrics.lineNumberValues.some((value) => Number(value) >= 80),
-    "a regressão visual não cobre números de linha com múltiplos dígitos",
+    "the visual regression does not cover multi-digit line numbers",
   );
   assert(
     metrics.lineNumberContentOverflow.length > 0 &&
       metrics.lineNumberContentOverflow.every((overflow) => overflow <= tolerance),
-    "o conteúdo numérico do diff está recortado",
+    "the diff's numeric content is clipped",
   );
   assert(
     metrics.lineNumberContentContainment.every(
       (containment) =>
         containment !== null && containment.left >= -tolerance && containment.right >= -tolerance,
     ),
-    "os números de linha escapam dos limites semânticos do gutter",
+    "line numbers escape the gutter's semantic bounds",
   );
   assert(
     metrics.lineNumberWidths.length > 0 &&
       Math.min(...metrics.lineNumberWidths) >= 30 &&
       Math.max(...metrics.lineNumberWidths) - Math.min(...metrics.lineNumberWidths) <= tolerance,
-    "o gutter não mantém uma largura intrínseca estável",
+    "the gutter does not maintain a stable intrinsic width",
   );
   assert(
     metrics.lineNumberBoxSizing === "border-box" &&
@@ -6755,16 +7097,16 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
       Number.parseFloat(metrics.lineNumberPaddingRight) > 0 &&
       metrics.lineNumberDividerWidth === "0px" &&
       metrics.lineNumberBackground === metrics.additionBackground,
-    "o gutter não forma uma faixa contínua com a linha alterada",
+    "the gutter does not form a continuous strip with the changed line",
   );
   assert(
     metrics.changedIndicatorWidth === "4px" &&
       metrics.changedIndicatorPosition === "absolute",
-    "a barra de alteração não está desacoplada da largura numérica",
+    "the change indicator is not decoupled from the numeric width",
   );
   assert(
     metrics.diffRowHeights.length > 0 && metrics.diffRowHeights.every((height) => height === 20),
-    "as linhas do diff perderam a métrica vertical oficial de 20 px",
+    "diff rows lost the canonical 20px vertical metric",
   );
   assert(
     metrics.diffRowTopOffsets.length > 1 &&
@@ -6772,28 +7114,28 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
         (top, index) => Math.abs(top - index * 20) <= tolerance,
       ) &&
       metrics.diffRowInlineTops.every((top, index) => top === `${index * 20}px`),
-    "as linhas do diff não ocupam posições verticais consecutivas",
+    "diff rows do not occupy consecutive vertical positions",
   );
   assert(
     metrics.diffCanvasHeight !== null &&
       metrics.diffCanvasHeight >= metrics.diffRowTopOffsets.length * 20 &&
       metrics.diffViewportHeight === metrics.diffViewportClientHeight &&
       metrics.diffViewportScrollHeight >= metrics.diffViewportClientHeight,
-    "o canvas virtual do diff não representa a geometria rolável do documento",
+    "the diff's virtual canvas does not represent the document's scrollable geometry",
   );
-  assert(metrics.viewportHorizontalOverflow > 0, "a regressão não exercitou rolagem horizontal");
+  assert(metrics.viewportHorizontalOverflow > 0, "the regression did not exercise horizontal scrolling");
   assert(
     metrics.stickyGutterMovement !== null &&
       metrics.stickyGutterMovement <= tolerance &&
       metrics.stickyOffsetFromViewport !== null &&
       Math.abs(metrics.stickyOffsetFromViewport) <= tolerance,
-    "o gutter numérico não permanece fixo durante a rolagem horizontal",
+    "the numeric gutter does not remain fixed during horizontal scrolling",
   );
-  assert(metrics.markerCellCount === 0, "o diff mantém marcadores de edição redundantes");
-  assert(metrics.newlineMetadataRows === 0, "metadados de newline ainda consomem linhas visuais");
+  assert(metrics.markerCellCount === 0, "the diff retains redundant edit markers");
+  assert(metrics.newlineMetadataRows === 0, "newline metadata still consumes visual rows");
   assert(
     metrics.structuralMetadataRows === 0 && metrics.containsStructuralMetadata === false,
-    "metadados estruturais do patch ainda consomem linhas visuais",
+    "structural patch metadata still consumes visual rows",
   );
 }
 
@@ -6801,49 +7143,49 @@ function validateSyntaxHighlightedCreatedFileMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no arquivo criado colorido em ${viewport.width}x${viewport.height}`,
+    `unexpected syntax-highlighted created-file viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o arquivo criado gerou overflow horizontal");
+  assert(metrics.horizontalOverflow <= tolerance, "the created file generated horizontal overflow");
   for (const kind of ["token-attribute", "token-keyword", "token-number", "token-type"]) {
-    assert(metrics.tokenKinds.includes(kind), `o arquivo criado não produziu ${kind}`);
+    assert(metrics.tokenKinds.includes(kind), `the created file did not produce ${kind}`);
   }
-  assert(metrics.tokenCount >= 20, "o arquivo criado produziu poucos tokens sintáticos");
-  assert(metrics.tokenColorCount >= 4, "o arquivo criado não usa uma paleta sintática suficiente");
-  assert(metrics.additionRows > 0, "o arquivo criado não renderizou linhas adicionadas");
-  assert(metrics.deletionRows === 0, "o arquivo criado inventou linhas removidas");
-  assert(metrics.newlineMetadataRows === 0, "o arquivo criado exibe metadado de newline redundante");
+  assert(metrics.tokenCount >= 20, "the created file produced too few syntax tokens");
+  assert(metrics.tokenColorCount >= 4, "the created file does not use a sufficient syntax palette");
+  assert(metrics.additionRows > 0, "the created file did not render added lines");
+  assert(metrics.deletionRows === 0, "the created file invented deleted lines");
+  assert(metrics.newlineMetadataRows === 0, "the created file displays redundant newline metadata");
   assert(
     metrics.structuralMetadataRows === 0 && metrics.containsStructuralMetadata === false,
-    "o arquivo criado ainda exibe metadados estruturais redundantes",
+    "the created file still displays redundant structural metadata",
   );
-  assert(metrics.codeInset <= 64, "o arquivo criado mantém um gutter largo demais");
+  assert(metrics.codeInset <= 64, "the created file retains an excessively wide gutter");
   assert(
     metrics.lineNumberCellsPerRow.length > 0 &&
       metrics.lineNumberCellsPerRow.every((count) => count === 1),
-    "o arquivo criado não preserva uma única coluna numérica",
+    "the created file does not preserve a single numeric column",
   );
-  assert(metrics.markerCellCount === 0, "o arquivo criado mantém marcadores redundantes");
+  assert(metrics.markerCellCount === 0, "the created file retains redundant markers");
 }
 
 function validateHighlightedToolOutputMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado nas saídas coloridas em ${viewport.width}x${viewport.height}`,
+    `unexpected highlighted-output viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "as saídas tipadas criaram overflow global");
+  assert(metrics.horizontalOverflow <= tolerance, "typed outputs created global overflow");
   assert(
     JSON.stringify(metrics.sourceLineNumbers) ===
       JSON.stringify(["20", "21", "22", "23", "24", "25", "26", "27", "28", "29"]),
-    "a leitura de arquivo perdeu seus números de linha",
+    "the file read lost its line numbers",
   );
-  assert(metrics.sourceTokenKinds.includes("token-keyword"), "a leitura de arquivo não coloriu keywords");
-  assert(metrics.sourceTokenKinds.includes("token-string"), "a leitura de arquivo não coloriu strings");
-  assert(metrics.searchTokenKinds.includes("token-keyword"), "a busca não coloriu os trechos encontrados");
-  assert(metrics.sourceText.includes("const continuation"), "a leitura perdeu o código original");
-  assert(metrics.searchText.includes("src/ui/syntax/diffHighlighter.test.ts:20"), "a busca perdeu a localização");
-  assert(metrics.sourceHorizontalOverflow >= 0, "a leitura perdeu sua largura rolável");
-  assert(metrics.searchHorizontalOverflow >= 0, "a busca perdeu sua largura rolável");
+  assert(metrics.sourceTokenKinds.includes("token-keyword"), "the file read did not highlight keywords");
+  assert(metrics.sourceTokenKinds.includes("token-string"), "the file read did not highlight strings");
+  assert(metrics.searchTokenKinds.includes("token-keyword"), "search did not highlight matched fragments");
+  assert(metrics.sourceText.includes("const continuation"), "the file read lost the original code");
+  assert(metrics.searchText.includes("src/ui/syntax/diffHighlighter.test.ts:20"), "search lost the location");
+  assert(metrics.sourceHorizontalOverflow >= 0, "the file read lost its scrollable width");
+  assert(metrics.searchHorizontalOverflow >= 0, "search lost its scrollable width");
   assert(
     metrics.sourceTableRole === "table" &&
       metrics.sourceRowGroupRole === "rowgroup" &&
@@ -6851,27 +7193,27 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
       metrics.sourceCellRoles.every(
         (roles) => JSON.stringify(roles) === JSON.stringify(["rowheader", "cell"]),
       ),
-    "a leitura perdeu sua grade semântica independente de tabelas nativas",
+    "the file read lost its semantic grid independent of native tables",
   );
   assert(
     metrics.sourceMountedRowIndexes.length === 10 &&
       metrics.sourceMountedRowIndexes[0] === 1 &&
       metrics.sourceMountedRowIndexes.at(-1) === 10,
-    "a leitura não materializou exatamente a janela visível esperada",
+    "the file read did not materialize exactly the expected visible window",
   );
   assert(
     metrics.sourceRowGaps.length === 9 &&
       metrics.sourceRowGaps.every((gap) => Math.abs(gap - 22) <= tolerance),
-    "as linhas da leitura se sobrepõem ou perderam o passo virtual de 22 px",
+    "file-read rows overlap or lost the 22px virtual step",
   );
   assert(
     metrics.sourceInlineOverlapCount === 0,
-    "os fragmentos sintáticos da leitura se sobrepõem na mesma linha",
+    "syntax fragments in the file read overlap on the same line",
   );
   assert(
     metrics.sourceCanvasHeight >= metrics.sourceViewportScrollHeight - tolerance &&
       metrics.sourceViewportClientHeight === 205,
-    "o canvas da leitura não representa integralmente sua faixa virtual",
+    "the file-read canvas does not fully represent its virtual range",
   );
   const virtualizationCycle = metrics.sourceVirtualizationCycle;
   const virtualizationPhases = [
@@ -6891,7 +7233,7 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
         phase.rowGaps.every((gap) => Math.abs(gap - 22) <= tolerance) &&
         phase.rowInlineTops.every((top) => /^\d+px$/u.test(top ?? "")),
     ),
-    "a geometria virtual mudou ao reabrir ou rolar a leitura sob o CSP de produção",
+    "virtual geometry changed while reopening or scrolling the file read under the production CSP",
   );
   assert(
     virtualizationCycle.firstOpen.mountedRowIndexes[0] === 1 &&
@@ -6904,20 +7246,20 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
       virtualizationCycle.restored.scrollTop === 0 &&
       virtualizationCycle.restored.mountedRowIndexes[0] === 1 &&
       virtualizationCycle.restored.lineNumbers[0] === "20",
-    "a leitura não preservou início, fim e retorno ao topo durante a rematerialização",
+    "the file read did not preserve start, end, and return to top during rematerialization",
   );
   assert(
-    metrics.readTitle === "Executou leitura de arquivo: diffHighlighter.test.ts",
-    `a leitura perdeu sua semântica de execução (${JSON.stringify(metrics.readTitle)})`,
+    metrics.readTitle === "Leu arquivo diffHighlighter.test.ts",
+    `the file read lost its execution semantics (${JSON.stringify(metrics.readTitle)})`,
   );
   assert(
     JSON.stringify(metrics.readIconPaths) === JSON.stringify([OFFICIAL_READ_ICON_PATH]),
-    "a leitura não usa fielmente o ícone oficial de livro aberto",
+    "the file read does not faithfully use the canonical open-book icon",
   );
   assert(
     Math.abs(metrics.readIconSize?.width - 16) <= tolerance &&
       Math.abs(metrics.readIconSize?.height - 16) <= tolerance,
-    "o livro aberto não preserva a apresentação oficial de 16x16",
+    "the open book does not preserve the canonical 16x16 presentation",
   );
   assert(
     metrics.readIconViewBox === "0 0 20 20" &&
@@ -6925,85 +7267,85 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
       metrics.readIconStroke === "none" &&
       metrics.readIconStrokeWidth === null &&
       metrics.readIconRtlFlip === true,
-    "o livro aberto não preserva a apresentação preenchida oficial",
+    "the open book does not preserve the canonical filled presentation",
   );
   assert(
     Math.abs(metrics.readChevronSize?.width - 14) <= tolerance &&
       Math.abs(metrics.readChevronSize?.height - 14) <= tolerance,
-    "a seta da leitura não usa a apresentação oficial de 14x14",
+    "the file-read chevron does not use the canonical 14x14 presentation",
   );
   assert(
     metrics.readChevronPath === "m9 18 6-6-6-6" &&
       metrics.readChevronOpacity === 1 &&
       /^matrix\(0, 1, -1, 0, 0, 0\)$/u.test(metrics.readChevronTransform ?? ""),
-    "a seta expandida da leitura não permanece apontada para baixo",
+    "the expanded file-read chevron does not remain pointed downward",
   );
-  validateIntrinsicActivityInteraction(metrics.readInteraction, "leitura de arquivo", tolerance);
+  validateIntrinsicActivityInteraction(metrics.readInteraction, "file read", tolerance);
 }
 
 function validateComposerPopoverLayeringMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado nas camadas do compositor em ${viewport.width}x${viewport.height}`,
+    `unexpected composer-layer viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "os painéis criaram overflow horizontal");
+  assert(metrics.horizontalOverflow <= tolerance, "the panels created horizontal overflow");
   assert(
     metrics.chatPageDisplay === "block" &&
       metrics.timelinePosition === "absolute" &&
       metrics.dockPosition === "absolute",
-    "a timeline não ocupa mais a janela inteira sob o dock medido",
+    "the timeline no longer occupies the full window beneath the measured dock",
   );
-  assert(metrics.composerIsolation === "isolate", "o compositor não possui isolamento de camadas");
+  assert(metrics.composerIsolation === "isolate", "the composer has no layer isolation");
   assert(
     Number(metrics.dockLayer) > metrics.composerLayer &&
       metrics.composerLayer > metrics.statusLayer,
-    "a hierarquia semântica do dock, compositor e status está invertida",
+    "the semantic hierarchy of dock, composer, and status is inverted",
   );
   assert(
     Math.abs(metrics.timelineBounds.top - metrics.chatPageBounds.top) <= tolerance &&
       Math.abs(metrics.timelineBounds.bottom - metrics.chatPageBounds.bottom) <= tolerance &&
       Math.abs(metrics.timelineViewportBounds.top - metrics.chatPageBounds.top) <= tolerance &&
       Math.abs(metrics.timelineViewportBounds.bottom - metrics.chatPageBounds.bottom) <= tolerance,
-    "a viewport rolável não alcança os dois limites verticais da página de chat",
+    "the scrollable viewport does not reach both vertical bounds of the chat page",
   );
   assert(
     Math.abs(metrics.timelineDockOverlap - metrics.dockBounds.height) <= tolerance &&
       Math.abs(metrics.timelineDockGap + metrics.dockBounds.height) <= tolerance,
-    "o dock não está sobreposto à viewport de tela inteira",
+    "the dock does not overlay the full-screen viewport",
   );
   assert(
     Math.abs(metrics.scrollbarBounds.top - metrics.chatPageBounds.top) <= tolerance &&
       Math.abs(metrics.scrollbarBounds.bottom - metrics.chatPageBounds.bottom) <= tolerance &&
       Math.abs(metrics.scrollbarBottomGap) <= tolerance,
-    "a seta inferior do scrollbar não alcança o rodapé da janela",
+    "the scrollbar's lower arrow does not reach the window footer",
   );
   assert(
     Math.abs(metrics.chatDockHeight - Math.ceil(metrics.dockBounds.height)) <= tolerance &&
       metrics.timelineBottomPadding + tolerance >= metrics.chatDockHeight + 32 &&
       metrics.timelineAtEnd <= tolerance &&
       metrics.lastTimelineItemDockGap >= 31,
-    "o dock de tela inteira voltou a ocultar o último item da conversa",
+    "the full-screen dock is hiding the conversation's final item again",
   );
   assert(
     Number(metrics.popoverLayer) === metrics.permissionMenuLayer &&
       metrics.permissionMenuLayer > metrics.composerLayer,
-    "os painéis locais não possuem prioridade sobre o conteúdo do compositor",
+    "local panels do not have priority over composer content",
   );
-  assert(metrics.permissionMenuOpen === true, "o painel de permissões não permaneceu aberto");
-  assert(metrics.menus.length === 3, "nem todos os painéis do compositor foram auditados");
+  assert(metrics.permissionMenuOpen === true, "the permission panel did not remain open");
+  assert(metrics.menus.length === 3, "not all composer panels were audited");
   for (const menu of metrics.menus) {
     assert(
       menu.menuBounds.left >= -tolerance &&
         menu.menuBounds.right <= viewport.width + tolerance &&
         menu.menuBounds.top >= -tolerance &&
         menu.menuBounds.bottom <= viewport.height + tolerance,
-      `o painel ${menu.name} ultrapassou a viewport`,
+      `the ${menu.name} panel exceeded the viewport`,
     );
     if (menu.overlapWidth > tolerance && menu.overlapHeight > tolerance) {
       assert(
         menu.paintedInFront.length === 6 && menu.paintedInFront.every(Boolean),
-        `o painel ${menu.name} foi pintado atrás do resumo de alterações`,
+        `the ${menu.name} panel was painted behind the change summary`,
       );
     }
   }
@@ -7011,7 +7353,7 @@ function validateComposerPopoverLayeringMetrics(metrics, viewport) {
     const menu = metrics.menus.find((candidate) => candidate.name === requiredOverlap);
     assert(
       menu?.overlapWidth > tolerance && menu.overlapHeight > tolerance,
-      `o cenário não exercitou a sobreposição do painel ${requiredOverlap}`,
+      `the scenario did not exercise overlap for the ${requiredOverlap} panel`,
     );
   }
   assert(
@@ -7019,20 +7361,20 @@ function validateComposerPopoverLayeringMetrics(metrics, viewport) {
       metrics.permissionMenuBounds.right <= viewport.width + tolerance &&
       metrics.permissionMenuBounds.top >= -tolerance &&
       metrics.permissionMenuBounds.bottom <= viewport.height + tolerance,
-    "o painel final de permissões ultrapassou a viewport",
+    "the final permission panel exceeded the viewport",
   );
   assert(
     Math.abs(metrics.commandIconSize?.width - 16) <= tolerance &&
       Math.abs(metrics.commandIconSize?.height - 16) <= tolerance &&
       metrics.commandIconViewBox === "0 0 24 24",
-    "o ícone de comando perdeu sua apresentação compacta de 16x16",
+    "the command icon lost its compact 16x16 presentation",
   );
   assert(
     JSON.stringify(metrics.commandFrame) ===
       JSON.stringify({ height: "16", rx: "2.25", width: "20", x: "2", y: "4" }) &&
       JSON.stringify(metrics.commandIconPaths) ===
         JSON.stringify(["m7 9 3 3-3 3", "M13 15h4"]),
-    "o ícone de comando não preserva a moldura horizontal e o espaçamento interno",
+    "the command icon does not preserve its horizontal frame and internal spacing",
   );
 }
 
@@ -7040,138 +7382,153 @@ function validateProjectOpenWorkspaceMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado ao abrir projeto em ${viewport.width}x${viewport.height}`,
+    `unexpected open-project viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "abrir projeto criou overflow horizontal");
+  assert(metrics.horizontalOverflow <= tolerance, "opening the project created horizontal overflow");
   assert(
     /[\\/]codex-app$/u.test(metrics.openedWorkspace ?? ""),
-    "a ação não encaminhou o caminho persistido do projeto",
+    "the action did not forward the persisted project path",
   );
-  assert(metrics.dialogOpen === false, "a ação abriu um seletor ou diálogo indevido");
-  assert(metrics.projectEditorOpen === false, "a ação abriu o editor do projeto");
+  assert(metrics.dialogOpen === false, "the action opened an unexpected picker or dialog");
+  assert(metrics.projectEditorOpen === false, "the action opened the project editor");
 }
 
 function validateProjectColorEditorMetrics(metrics, viewport) {
   const tolerance = 1;
-  assert(metrics.horizontalOverflow <= tolerance, "o editor de projeto criou overflow horizontal");
-  assert(metrics.verticalOverflow <= tolerance, "o editor de projeto criou overflow vertical");
-  assert(metrics.dialogCount === 1, "o editor de projeto não expõe um único diálogo");
-  assert(metrics.container.left >= 0, "o editor de projeto ultrapassa a borda esquerda");
+  assert(metrics.horizontalOverflow <= tolerance, "the project editor created horizontal overflow");
+  assert(metrics.verticalOverflow <= tolerance, "the project editor created vertical overflow");
+  assert(metrics.dialogCount === 1, "the project editor does not expose exactly one dialog");
+  assert(metrics.container.left >= 0, "the project editor exceeds the left edge");
   assert(
     metrics.container.right <= viewport.width + tolerance,
-    "o editor de projeto ultrapassa a borda direita",
+    "the project editor exceeds the right edge",
   );
-  assert(metrics.modal.right <= metrics.colorPanel.left, "os painéis do editor se sobrepõem");
-  assert(metrics.colorPanel.width >= 200, "o painel de cores ficou estreito");
-  assert(metrics.picker.width <= metrics.colorPanel.width, "o seletor ultrapassa o painel de cores");
-  assert(metrics.hueBar.height >= 14, "a faixa de matiz ficou baixa demais");
-  assert(/^[0-9A-F]{6}$/u.test(metrics.hexValue ?? ""), "o campo HEX saiu de #RRGGBB");
+  assert(metrics.modal.right <= metrics.colorPanel.left, "the editor panels overlap");
+  assert(metrics.colorPanel.width >= 200, "the color panel became too narrow");
+  assert(metrics.picker.width <= metrics.colorPanel.width, "the picker exceeds the color panel");
+  assert(metrics.hueBar.height >= 14, "the hue strip became too short");
+  assert(/^[0-9A-F]{6}$/u.test(metrics.hexValue ?? ""), "the HEX field no longer uses #RRGGBB");
   const expectedPreviewColor = `rgb(${Number.parseInt(metrics.hexValue.slice(0, 2), 16)}, ${Number.parseInt(metrics.hexValue.slice(2, 4), 16)}, ${Number.parseInt(metrics.hexValue.slice(4, 6), 16)})`;
   assert(
     metrics.previewColor === expectedPreviewColor,
-    `ícone (${metrics.previewColor}) e campo HEX (${expectedPreviewColor}) divergiram`,
+    `icon (${metrics.previewColor}) and HEX field (${expectedPreviewColor}) diverged`,
   );
-  assert(metrics.badgeText === `#${metrics.hexValue}`, "badge e campo HEX divergiram");
-  assert(/^rgb\(255, 0, \d+\)$/u.test(metrics.boxColor ?? ""), "o quadrado HSV não chegou à matiz vermelha final");
+  assert(metrics.badgeText === `#${metrics.hexValue}`, "badge and HEX field diverged");
+  assert(/^rgb\(255, 0, \d+\)$/u.test(metrics.boxColor ?? ""), "the HSV square did not reach the final red hue");
   assert(
     metrics.hueCursorRightGap !== null && Math.abs(metrics.hueCursorRightGap) <= tolerance,
-    "o cursor de matiz não permaneceu no fim da faixa",
+    "the hue cursor did not remain at the end of the strip",
   );
 }
 
 function validateSettingsMetrics(metrics, viewport) {
   const tolerance = 1;
   validateChromeMetrics(metrics, viewport);
-  assert(metrics.chromeOverlapsSettings === true, "o chrome não está sobreposto às configurações");
-  assert(metrics.chromeText === "", "o chrome ainda exibe um título textual");
+  assert(metrics.chromeOverlapsSettings === true, "window chrome does not overlay settings");
+  assert(metrics.chromeText === "", "window chrome still displays a textual title");
   assert(
     Math.abs(metrics.navigation.top - metrics.content.top) <= tolerance,
-    "a superfície da navegação de configurações não chega ao topo",
+    "the settings navigation surface does not reach the top",
   );
   assert(
     Math.abs(metrics.main.top - metrics.content.top) <= tolerance,
-    "a superfície principal de configurações não chega ao topo",
+    "the main settings surface does not reach the top",
   );
-  assert(metrics.back.top >= metrics.chrome.bottom, "a ação de voltar invade a área de arraste");
-  assert(metrics.heading.top >= metrics.chrome.bottom, "o título das configurações invade o chrome");
+  assert(metrics.back.top >= metrics.chrome.bottom, "the back action intrudes into the drag region");
+  assert(metrics.heading.top >= metrics.chrome.bottom, "the settings title intrudes into window chrome");
   assert(
     Math.abs(metrics.scrollbar.top - metrics.chrome.bottom) <= tolerance,
-    "o scrollbar de configurações não começa abaixo do chrome",
+    "the settings scrollbar does not begin below window chrome",
   );
   assert(
     Math.abs(metrics.scrollbar.right - viewport.width) <= tolerance &&
       Math.abs(metrics.scrollbar.width - 18) <= tolerance,
-    "o scrollbar de configurações não segue a geometria da tela principal",
+    "the settings scrollbar does not follow the main-screen geometry",
   );
-  assert(metrics.scrollbarThumb.width >= 12, "o thumb das configurações ficou estreito demais");
-  assert(metrics.nativeScrollbarWidth === "none", "o scrollbar nativo continua visível");
-  assert(metrics.horizontalOverflow <= tolerance, "a página possui overflow horizontal");
-  assert(metrics.navigation.width >= 248, "a navegação de configurações ficou estreita");
-  assert(metrics.main.width >= 600, "o painel principal de configurações ficou estreito");
-  assert(metrics.page.width >= 500, "o conteúdo de configurações ficou excessivamente estreito");
-  assert(Number.parseFloat(metrics.heading.fontSize) >= 21, "o título ficou pequeno demais");
-  assert(Number.parseFloat(metrics.firstRowLabel.fontSize) >= 11, "os rótulos ficaram pequenos");
-  assert(metrics.checkboxCount === 3, "os três controles booleanos não foram renderizados");
-  assert(metrics.visibleCards >= 2, "menos de dois cartões de configurações estão visíveis");
+  assert(metrics.scrollbarThumb.width >= 12, "the settings scrollbar thumb became too narrow");
+  assert(metrics.nativeScrollbarWidth === "none", "the native scrollbar remains visible");
+  assert(metrics.horizontalOverflow <= tolerance, "the page has horizontal overflow");
+  assert(metrics.navigation.width >= 248, "settings navigation became too narrow");
+  assert(metrics.main.width >= 600, "the main settings panel became too narrow");
+  assert(metrics.page.width >= 500, "settings content became excessively narrow");
+  assert(Number.parseFloat(metrics.heading.fontSize) >= 21, "the title became too small");
+  assert(Number.parseFloat(metrics.firstRowLabel.fontSize) >= 11, "labels became too small");
+  assert(
+    metrics.languageSelectFieldSizing === "content",
+    `the language selector lost content-driven sizing: ${metrics.languageSelectFieldSizing}`,
+  );
+  assert(
+    metrics.selectedLanguageLabel.length > 0 &&
+      metrics.languageSelectLabelClearance >= 12 - tolerance,
+    `the selected language label is clipped: ${JSON.stringify({
+      availableWidth: metrics.languageSelectTextWidth,
+      indicatorClearance: metrics.languageSelectLabelClearance,
+      label: metrics.selectedLanguageLabel,
+      labelWidth: metrics.selectedLanguageLabelWidth,
+      selectWidth: metrics.languageSelect.width,
+    })}`,
+  );
+  assert(metrics.checkboxCount === 3, "the three boolean controls were not rendered");
+  assert(metrics.visibleCards >= 2, "fewer than two settings cards are visible");
   assert(
     !metrics.navigationLabels.includes("Aparência") &&
       !metrics.navigationLabels.includes("Segurança e permissões"),
-    "a navegação ainda expõe páginas removidas",
+    "navigation still exposes removed pages",
   );
-  assert(metrics.navigationLabels.includes("Perfil"), "a página Perfil deixou as configurações");
+  assert(metrics.navigationLabels.includes("Perfil"), "the Profile page left settings");
   assert(
     metrics.navigationItemGaps.length > 0 &&
       metrics.navigationItemGaps.every((gap) => gap !== null && gap >= 3.5),
-    `os itens das configurações continuam visualmente colados: ${JSON.stringify(metrics.navigationItemGaps)}`,
+    `settings items remain visually crowded: ${JSON.stringify(metrics.navigationItemGaps)}`,
   );
   const surfaceAlpha = (value) =>
     Number.parseFloat(value.match(/\/\s*([\d.]+)%/u)?.[1] ?? "0");
   assert(
     surfaceAlpha(metrics.selectedSurface) >= surfaceAlpha(metrics.hoverSurface) * 2,
-    `hover e seleção continuam próximos: ${metrics.hoverSurface} / ${metrics.selectedSurface}`,
+    `hover and selection remain too similar: ${metrics.hoverSurface} / ${metrics.selectedSurface}`,
   );
   assert(
     metrics.selectedNavigationBackground === "rgba(255, 255, 255, 0.12)",
-    `a seleção das configurações não usa a superfície forte: ${metrics.selectedNavigationBackground}`,
+    `settings selection does not use the strong surface: ${metrics.selectedNavigationBackground}`,
   );
   assert(
     metrics.selectedNavigationBoxShadow !== null && metrics.selectedNavigationBoxShadow !== "none",
-    "a seleção das configurações perdeu o contorno de separação",
+    "settings selection lost its separating outline",
   );
 }
 
 function validateUsageSettingsMetrics(metrics, viewport) {
   const tolerance = 1;
-  assert(metrics.horizontalOverflow <= tolerance, "Uso e faturamento criou overflow horizontal");
+  assert(metrics.horizontalOverflow <= tolerance, "Usage and billing created horizontal overflow");
   assert(
     metrics.pageHorizontalOverflow !== null && metrics.pageHorizontalOverflow <= tolerance,
-    "o conteúdo de Uso e faturamento criou overflow interno horizontal",
+    "Usage and billing content created internal horizontal overflow",
   );
-  assert(metrics.page.width >= 500, "a página Uso e faturamento ficou estreita demais");
-  assert(metrics.plan.right <= viewport.width + tolerance, "o cartão do plano ultrapassa a tela");
+  assert(metrics.page.width >= 500, "the Usage and billing page became too narrow");
+  assert(metrics.plan.right <= viewport.width + tolerance, "the plan card exceeds the screen");
   assert(
     metrics.autoTopUp.right <= viewport.width + tolerance,
-    "a recarga automática ultrapassa a tela",
+    "automatic top-up exceeds the screen",
   );
-  assert(metrics.reset.right <= viewport.width + tolerance, "a redefinição ultrapassa a tela");
-  assert(metrics.cardCount >= 5, "faltam seções funcionais em Uso e faturamento");
-  assert(metrics.meterCount >= 4, "faltam limites gerais ou do GPT-5.3-Codex-Spark");
-  assert(metrics.planText.includes("R$ 525,00/mês"), "o preço mensal localizado não foi exibido");
+  assert(metrics.reset.right <= viewport.width + tolerance, "the reset section exceeds the screen");
+  assert(metrics.cardCount >= 5, "functional Usage and billing sections are missing");
+  assert(metrics.meterCount >= 4, "general or GPT-5.3-Codex-Spark limits are missing");
+  assert(metrics.planText.includes("R$ 525,00/mês"), "the localized monthly price was not displayed");
   assert(
     metrics.autoTopUpText.includes("Até 40% de desconto"),
-    "a oferta de recarga automática não foi exibida",
+    "the automatic top-up offer was not displayed",
   );
-  assert(metrics.switchAriaChecked === "false", "o switch de recarga não reflete o estado inicial");
+  assert(metrics.switchAriaChecked === "false", "the top-up switch does not reflect its initial state");
   assert(
     metrics.resetButtonText === "Usar redefinição",
-    "a ação de usar redefinição não foi renderizada",
+    "the use-reset action was not rendered",
   );
-  assert(metrics.resetText.includes("Redefinição completa"), "o título do reset não foi exibido");
+  assert(metrics.resetText.includes("Redefinição completa"), "the reset title was not displayed");
   assert(
     metrics.sectionHeadings.includes("Limites gerais de uso") &&
       metrics.sectionHeadings.includes("Limites de uso do GPT-5.3-Codex-Spark") &&
       metrics.sectionHeadings.includes("Redefinições do limite de uso"),
-    "a estrutura oficial de limites e redefinições está incompleta",
+    "the canonical limits and resets structure is incomplete",
   );
 }
 
@@ -7179,283 +7536,283 @@ function validateUsageSettingsInteractionMetrics(metrics) {
   const tolerance = 1;
   assert(
     metrics.horizontalOverflow <= tolerance,
-    "a interação de Uso e faturamento criou overflow horizontal",
+    "Usage and billing interaction created horizontal overflow",
   );
-  assert(metrics.resetRows === 0, "a redefinição consumida continuou disponível");
+  assert(metrics.resetRows === 0, "the consumed reset remained available");
   assert(
     metrics.successText === "Limites de uso redefinidos.",
-    "o sucesso da redefinição não foi anunciado",
+    "reset success was not announced",
   );
-  assert(metrics.switchAriaChecked === "true", "a recarga automática não foi habilitada");
+  assert(metrics.switchAriaChecked === "true", "automatic top-up was not enabled");
   assert(
     metrics.autoTopUpText.includes("Recarrega para 250 créditos"),
-    "a configuração ativa da recarga automática não foi refletida",
+    "the active automatic top-up configuration was not reflected",
   );
 }
 
 function validateOutputDetailMetrics(metrics, viewport) {
   const tolerance = 1;
-  assert(metrics.horizontalOverflow <= tolerance, "o menu criou overflow horizontal global");
-  assert(metrics.cardAllowsOverflow === true, "o cartão ainda recorta o menu de detalhamento");
-  assert(metrics.optionCount === 4, "as quatro opções de detalhamento não foram renderizadas");
+  assert(metrics.horizontalOverflow <= tolerance, "the menu created global horizontal overflow");
+  assert(metrics.cardAllowsOverflow === true, "the card still clips the detail menu");
+  assert(metrics.optionCount === 4, "the four detail options were not rendered");
   assert(
     metrics.visibleOptionCount === metrics.optionCount,
-    "uma ou mais opções de detalhamento continuam visualmente recortadas",
+    "one or more detail options remain visually clipped",
   );
-  assert(metrics.menu.left >= -tolerance, "o menu ultrapassa a borda esquerda");
-  assert(metrics.menu.right <= viewport.width + tolerance, "o menu ultrapassa a borda direita");
-  assert(metrics.menu.top >= 34 - tolerance, "o menu invade o titlebar");
-  assert(metrics.menu.bottom <= viewport.height + tolerance, "o menu ultrapassa o viewport");
+  assert(metrics.menu.left >= -tolerance, "the menu exceeds the left edge");
+  assert(metrics.menu.right <= viewport.width + tolerance, "the menu exceeds the right edge");
+  assert(metrics.menu.top >= 34 - tolerance, "the menu intrudes into the title bar");
+  assert(metrics.menu.bottom <= viewport.height + tolerance, "the menu exceeds the viewport");
 }
 
 function validateSettingsInteractionMetrics(metrics) {
   const tolerance = 1;
-  assert(metrics.disabledControls === 0, "o salvamento desabilitou controles independentes");
-  assert(metrics.modelSectionShift !== null, "não foi possível medir a estabilidade da página");
-  assert(metrics.modelSectionShift <= tolerance, "o salvamento deslocou o conteúdo da página");
-  assert(metrics.savingAnnounced === true, "o salvamento não foi anunciado de forma acessível");
-  assert(metrics.thirdPreferenceChecked === false, "a preferência não foi atualizada de imediato");
-  assert(metrics.visibleStatus === false, "o salvamento exibiu um status que desloca a página");
+  assert(metrics.disabledControls === 0, "saving disabled independent controls");
+  assert(metrics.modelSectionShift !== null, "page stability could not be measured");
+  assert(metrics.modelSectionShift <= tolerance, "saving displaced page content");
+  assert(metrics.savingAnnounced === true, "saving was not announced accessibly");
+  assert(metrics.thirdPreferenceChecked === false, "the preference was not updated immediately");
+  assert(metrics.visibleStatus === false, "saving displayed a status that displaced the page");
 }
 
 function validateProfileMetrics(metrics, viewport) {
   const tolerance = 1;
   validateChromeMetrics(metrics, viewport);
-  assert(metrics.chromeOverlapsSettings === true, "o chrome não sobrepõe as configurações");
-  assert(metrics.horizontalOverflow <= tolerance, "o perfil criou overflow horizontal global");
+  assert(metrics.chromeOverlapsSettings === true, "window chrome does not overlay settings");
+  assert(metrics.horizontalOverflow <= tolerance, "profile created global horizontal overflow");
   assert(
     metrics.settingsHorizontalOverflow <= tolerance,
-    "o painel de configurações possui overflow horizontal",
+    "the settings panel has horizontal overflow",
   );
   assert(
     metrics.surfaceHorizontalOverflow <= tolerance,
-    "a superfície do perfil possui overflow horizontal",
+    "the profile surface has horizontal overflow",
   );
   assert(
     Math.abs(metrics.navigation.top - metrics.content.top) <= tolerance,
-    "a navegação de configurações não chega ao topo",
+    "settings navigation does not reach the top",
   );
   assert(
     Math.abs(metrics.main.top - metrics.content.top) <= tolerance,
-    "o painel de configurações não chega ao topo",
+    "the settings panel does not reach the top",
   );
   assert(
     metrics.heading.top >= metrics.chrome.bottom,
-    "o título do perfil invade a área do chrome",
+    "the profile title intrudes into the window-chrome area",
   );
   assert(
     metrics.surface.top > metrics.heading.bottom,
-    "o conteúdo do perfil sobrepõe o cabeçalho de configurações",
+    "profile content overlaps the settings header",
   );
-  assert(metrics.page.width <= 821, "a página do perfil ultrapassou 820 px");
+  assert(metrics.page.width <= 821, "the profile page exceeded 820px");
   assert(
     metrics.profileContent.width <= metrics.page.width,
-    "o conteúdo do perfil ultrapassa a página de configurações",
+    "profile content exceeds the settings page",
   );
-  assert(metrics.centeredInsetDifference <= 3, "o conteúdo do perfil não está centralizado");
-  assert(Math.abs(metrics.avatar.width - 80) <= tolerance, "o avatar do perfil não mede 80 px");
-  assert(Math.abs(metrics.avatar.height - 80) <= tolerance, "o avatar do perfil não mede 80 px");
-  assert(metrics.profileAvatarImages === 1, "a foto do avatar não aparece na página de perfil");
-  assert(metrics.summary.height >= 60, "o resumo do perfil ficou baixo demais");
-  assert(metrics.summaryStats === 5, "o resumo não contém as cinco métricas oficiais");
-  assert(metrics.activityCells === 364, "o calendário não contém 52 semanas completas");
-  assert(metrics.activeCells >= 60, "a atividade de preview ficou visualmente vazia");
+  assert(metrics.centeredInsetDifference <= 3, "profile content is not centered");
+  assert(Math.abs(metrics.avatar.width - 80) <= tolerance, "the profile avatar is not 80px wide");
+  assert(Math.abs(metrics.avatar.height - 80) <= tolerance, "the profile avatar is not 80px high");
+  assert(metrics.profileAvatarImages === 1, "the avatar image does not appear on the profile page");
+  assert(metrics.summary.height >= 60, "the profile summary became too short");
+  assert(metrics.summaryStats === 5, "the summary does not contain the five canonical metrics");
+  assert(metrics.activityCells === 364, "the calendar does not contain 52 complete weeks");
+  assert(metrics.activeCells >= 60, "preview activity became visually empty");
   assert(
     metrics.futureCells === metrics.expectedFutureCells,
-    "os dias futuros da última semana não foram isolados",
+    "future days in the final week were not isolated",
   );
-  assert(metrics.monthLabels >= 10, "os rótulos mensais do calendário estão incompletos");
-  assert(metrics.activityTabs === 3, "as três agregações de atividade estão ausentes");
-  assert(metrics.selectedActivityTabs === 1, "a agregação ativa não é única");
-  assert(metrics.insightRows === 5, "os cinco insights oficiais não foram renderizados");
-  assert(metrics.invocationRows === 1, "o plugin mais usado do preview está ausente");
+  assert(metrics.monthLabels >= 10, "calendar month labels are incomplete");
+  assert(metrics.activityTabs === 3, "the three activity aggregations are missing");
+  assert(metrics.selectedActivityTabs === 1, "the active aggregation is not unique");
+  assert(metrics.insightRows === 5, "the five canonical insights were not rendered");
+  assert(metrics.invocationRows === 1, "the preview's most-used plugin is missing");
   assert(
     metrics.selectedProfileNavigation === 1,
-    "Configurações não marca Perfil como a página ativa",
+    "Settings does not mark Profile as the active page",
   );
-  assert(metrics.planBadge === "Pro", "o badge de plano do perfil está incorreto");
-  assert(metrics.loadingStates === 0, "o perfil permaneceu em loading ou erro");
-  assert(metrics.activity.top > metrics.summary.bottom, "o gráfico sobrepõe o resumo");
-  assert(metrics.insights.top > metrics.activityGrid.bottom, "os insights sobrepõem o calendário");
+  assert(metrics.planBadge === "Pro", "the profile plan badge is incorrect");
+  assert(metrics.loadingStates === 0, "the profile remained in a loading or error state");
+  assert(metrics.activity.top > metrics.summary.bottom, "the chart overlaps the summary");
+  assert(metrics.insights.top > metrics.activityGrid.bottom, "insights overlap the calendar");
 }
 
 function validateAutomationsMetrics(metrics, viewport) {
   const tolerance = 1;
   validateChromeMetrics(metrics, viewport);
-  assert(metrics.horizontalOverflow <= tolerance, "Automações possui overflow horizontal global");
+  assert(metrics.horizontalOverflow <= tolerance, "Automations has global horizontal overflow");
   assert(
     metrics.surfaceHorizontalOverflow <= tolerance,
-    "a superfície de Automações possui overflow horizontal",
+    "the Automations surface has horizontal overflow",
   );
   assert(
     Math.abs(metrics.surface.top - metrics.chrome.bottom) <= tolerance,
-    "Automações não começa imediatamente abaixo do chrome",
+    "Automations does not begin immediately below window chrome",
   );
   assert(
     Math.abs(metrics.sidebar.top - metrics.content.top) <= tolerance &&
       Math.abs(metrics.sidebar.bottom - metrics.content.bottom) <= tolerance,
-    "a superfície lateral não ocupa toda a altura da aplicação",
+    "the sidebar surface does not occupy the application's full height",
   );
   assert(
     metrics.primaryNavigation.top >= metrics.chrome.bottom,
-    "a navegação lateral invade a área de arraste",
+    "sidebar navigation intrudes into the drag region",
   );
   assert(
     metrics.sidebarBrand.top >= metrics.chrome.bottom &&
       metrics.sidebarBrand.top - metrics.chrome.bottom <= 6 + tolerance,
-    "a marca Codex não está alinhada próxima ao chrome",
+    "the Codex brand is not aligned near window chrome",
   );
   assert(
     Math.abs(metrics.sidebarTitlebar.bottom - metrics.primaryNavigation.top) <= tolerance,
-    "o espaçamento superior da navegação lateral ficou inconsistente",
+    "the sidebar navigation's top spacing became inconsistent",
   );
-  assert(metrics.surface.width > 500, "a superfície de Automações ficou estreita");
-  assert(metrics.header.width <= metrics.surface.width, "o cabeçalho ultrapassa a superfície");
-  assert(metrics.notice.width <= metrics.surface.width, "o aviso local ultrapassa a superfície");
-  assert(metrics.card.left >= metrics.surface.left, "o cartão ultrapassa a borda esquerda");
-  assert(metrics.card.right <= metrics.surface.right + tolerance, "o cartão ultrapassa a borda direita");
-  assert(Number.parseFloat(metrics.heading.fontSize) >= 21, "o título de Automações ficou pequeno");
-  assert(metrics.activeNavigationItems === 1, "a navegação não marca Automações como ativa");
-  assert(metrics.unreadBadges === 1, "o badge de resultados não revisados não foi renderizado");
-  assert(metrics.automationCards >= 1, "nenhum cartão de Automação foi renderizado");
-  assert(metrics.runRows >= 2, "fila e histórico não renderizaram as execuções");
-  assert(metrics.primaryButtons === 1, "o botão principal de nova Automação está ausente");
-  assert(metrics.sidebarDividerWidth === "1px", "o divisor da sidebar perdeu a espessura padrão");
+  assert(metrics.surface.width > 500, "the Automations surface became too narrow");
+  assert(metrics.header.width <= metrics.surface.width, "the header exceeds the surface");
+  assert(metrics.notice.width <= metrics.surface.width, "the local notice exceeds the surface");
+  assert(metrics.card.left >= metrics.surface.left, "the card exceeds the left edge");
+  assert(metrics.card.right <= metrics.surface.right + tolerance, "the card exceeds the right edge");
+  assert(Number.parseFloat(metrics.heading.fontSize) >= 21, "the Automations title became too small");
+  assert(metrics.activeNavigationItems === 1, "navigation does not mark Automations as active");
+  assert(metrics.unreadBadges === 1, "the unreviewed-results badge was not rendered");
+  assert(metrics.automationCards >= 1, "no Automation card was rendered");
+  assert(metrics.runRows >= 2, "queue and history did not render the runs");
+  assert(metrics.primaryButtons === 1, "the primary new-Automation button is missing");
+  assert(metrics.sidebarDividerWidth === "1px", "the sidebar divider lost its standard thickness");
   assert(
     metrics.sidebarDividerColor === "rgba(255, 255, 255, 0.04)",
-    "o divisor da sidebar está mais aceso do que os demais separadores sutis",
+    "the sidebar divider is brighter than the other subtle separators",
   );
 }
 
 function validateAutomationEditorMetrics(metrics, viewport) {
   const tolerance = 1;
   validateChromeMetrics(metrics, viewport);
-  assert(metrics.horizontalOverflow <= tolerance, "o editor possui overflow horizontal global");
+  assert(metrics.horizontalOverflow <= tolerance, "the editor has global horizontal overflow");
   assert(
     metrics.editorHorizontalOverflow <= tolerance,
-    "o conteúdo do editor possui overflow horizontal",
+    "editor content has horizontal overflow",
   );
   assert(
     Math.abs(metrics.backdrop.top - metrics.chrome.bottom) <= tolerance,
-    "o backdrop do editor não acompanha o início da superfície de conteúdo",
+    "the editor backdrop does not follow the start of the content surface",
   );
-  assert(metrics.editor.top >= metrics.chrome.bottom, "o editor ficou acima do conteúdo");
-  assert(metrics.editor.bottom <= viewport.height + tolerance, "o editor ultrapassa o viewport");
-  assert(metrics.editor.width >= 500, "o editor ficou excessivamente estreito");
-  assert(Number.parseFloat(metrics.heading.fontSize) >= 17, "o título do editor ficou pequeno");
-  assert(metrics.prompt.height >= 150, "o campo de instruções ficou baixo demais");
-  assert(metrics.dialogCount === 1, "o editor não expõe um único diálogo modal");
-  assert(metrics.namedFields >= 6, "os campos essenciais do editor não foram renderizados");
-  assert(metrics.footerButtons === 2, "as ações de cancelar e salvar não foram renderizadas");
-  assert(metrics.switchAriaChecked === "true", "o switch inicial não expõe aria-checked");
+  assert(metrics.editor.top >= metrics.chrome.bottom, "the editor is positioned above the content");
+  assert(metrics.editor.bottom <= viewport.height + tolerance, "the editor exceeds the viewport");
+  assert(metrics.editor.width >= 500, "the editor became excessively narrow");
+  assert(Number.parseFloat(metrics.heading.fontSize) >= 17, "the editor title became too small");
+  assert(metrics.prompt.height >= 150, "the instruction field became too short");
+  assert(metrics.dialogCount === 1, "the editor does not expose exactly one modal dialog");
+  assert(metrics.namedFields >= 6, "essential editor fields were not rendered");
+  assert(metrics.footerButtons === 2, "cancel and save actions were not rendered");
+  assert(metrics.switchAriaChecked === "true", "the initial switch does not expose aria-checked");
 }
 
 function validateBrowserPanelMetrics(metrics, viewport) {
   const tolerance = 1;
   validateWorkspaceSplitMetrics(
     metrics.workspaceSplit,
-    "navegador",
+    "browser",
     metrics.workspaceSplitInteraction,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o navegador criou overflow horizontal global");
-  assert(metrics.workspace.top >= 34 - tolerance, "a área de trabalho invadiu o chrome da janela");
+  assert(metrics.horizontalOverflow <= tolerance, "the browser created global horizontal overflow");
+  assert(metrics.workspace.top >= 34 - tolerance, "the workspace intruded into window chrome");
   assert(
     metrics.workspace.right <= viewport.width + tolerance &&
       metrics.workspace.bottom <= viewport.height + tolerance,
-    "a área de trabalho ultrapassou o viewport",
+    "the workspace exceeded the viewport",
   );
-  assert(metrics.panel.right <= viewport.width + tolerance, "o navegador ultrapassou a borda direita");
-  assert(metrics.panel.bottom <= viewport.height + tolerance, "o navegador ultrapassou a altura útil");
-  assert(metrics.panel.width >= 420, "o navegador ficou estreito demais");
+  assert(metrics.panel.right <= viewport.width + tolerance, "the browser exceeded the right edge");
+  assert(metrics.panel.bottom <= viewport.height + tolerance, "the browser exceeded the usable height");
+  assert(metrics.panel.width >= 420, "the browser became too narrow");
   assert(
     Math.abs(metrics.surface.right - metrics.panel.right) <= tolerance &&
       metrics.surface.left >= metrics.panel.left &&
       metrics.surface.left - metrics.panel.left <= tolerance,
-    `a superfície nativa (${metrics.surface.left}–${metrics.surface.right}) não acompanha o painel (${metrics.panel.left}–${metrics.panel.right})`,
+    `the native surface (${metrics.surface.left}–${metrics.surface.right}) does not follow the panel (${metrics.panel.left}–${metrics.panel.right})`,
   );
-  assert(metrics.surface.height >= 180, "a superfície nativa ficou baixa demais");
-  assert(metrics.tabs.bottom <= metrics.toolbar.top + tolerance, "as abas sobrepõem a barra de endereço");
-  assert(metrics.toolbar.bottom <= metrics.surface.top + tolerance, "a barra sobrepõe o conteúdo web");
-  assert(metrics.address.width >= 180, "a barra de endereço ficou estreita demais");
-  assert(metrics.tabCount >= 1, "o navegador não criou a aba inicial");
-  assert(metrics.selectedTabs === 1, "o navegador não possui uma única aba ativa");
-  assert(metrics.navigationButtons === 6, "faltam controles de navegação/viewport na barra");
-  assert(metrics.addressInputs === 1, "a barra de endereço não possui um único campo");
-  assert(metrics.previewPages === 1, "a prévia não expõe a superfície substituta do webview nativo");
+  assert(metrics.surface.height >= 180, "the native surface became too short");
+  assert(metrics.tabs.bottom <= metrics.toolbar.top + tolerance, "tabs overlap the address bar");
+  assert(metrics.toolbar.bottom <= metrics.surface.top + tolerance, "the toolbar overlaps web content");
+  assert(metrics.address.width >= 180, "the address bar became too narrow");
+  assert(metrics.tabCount >= 1, "the browser did not create its initial tab");
+  assert(metrics.selectedTabs === 1, "the browser does not have exactly one active tab");
+  assert(metrics.navigationButtons === 6, "navigation or viewport controls are missing from the toolbar");
+  assert(metrics.addressInputs === 1, "the address bar does not contain exactly one field");
+  assert(metrics.previewPages === 1, "the preview does not expose the native-webview substitute surface");
 }
 
 function validateWorkspaceSplitMetrics(metrics, label, interaction = null) {
   const tolerance = 1;
-  assert(metrics.chatHidden === false, `o chat foi desmontado ao abrir ${label}`);
+  assert(metrics.chatHidden === false, `chat was unmounted when opening ${label}`);
   assert(
     metrics.role === "separator" && metrics.ariaOrientation === "vertical",
-    `o divisor de ${label} não expõe semântica vertical acessível`,
+    `the ${label} divider does not expose accessible vertical semantics`,
   );
   assert(
     metrics.ariaMinimum <= metrics.ariaNow && metrics.ariaNow <= metrics.ariaMaximum,
-    `o valor acessível do divisor de ${label} saiu dos limites`,
+    `the accessible value of the ${label} divider is out of bounds`,
   );
   assert(
     metrics.ariaText?.includes("Chat") && metrics.ariaText.includes("área de trabalho"),
-    `o divisor de ${label} não descreve as duas proporções`,
+    `the ${label} divider does not describe both proportions`,
   );
   if (metrics.splitterDisplay === "none") {
-    assert(metrics.chatDisplay === "none", `o fallback estreito de ${label} deixou o chat espremido`);
+    assert(metrics.chatDisplay === "none", `the narrow ${label} fallback left chat squeezed`);
     assert(
       Math.abs(metrics.workspace.left - metrics.container.left) <= tolerance &&
         Math.abs(metrics.workspace.right - metrics.container.right) <= tolerance,
-      `o fallback estreito de ${label} não usa toda a área disponível`,
+      `the narrow ${label} fallback does not use all available area`,
     );
     assert(
       interaction === null || interaction.supported === false,
-      `o teste tentou arrastar o divisor oculto de ${label}`,
+      `the test attempted to drag the hidden ${label} divider`,
     );
     return;
   }
-  assert(metrics.chatDisplay !== "none", `o chat não permaneceu visível ao lado de ${label}`);
+  assert(metrics.chatDisplay !== "none", `chat did not remain visible beside ${label}`);
   assert(
     Math.abs(metrics.chat.left - metrics.container.left) <= tolerance &&
       Math.abs(metrics.chat.right - metrics.splitter.left) <= tolerance &&
       Math.abs(metrics.workspace.left - metrics.splitter.right) <= tolerance &&
       Math.abs(metrics.workspace.right - metrics.container.right) <= tolerance,
-    `chat, divisor e ${label} não preenchem a área lado a lado`,
+    `chat, divider, and ${label} do not fill the side-by-side area`,
   );
   assert(
     Math.abs(metrics.splitter.width - 8) <= tolerance,
-    `o alvo de arraste de ${label} não preservou 8 px`,
+    `the ${label} drag target did not preserve 8px`,
   );
   assert(
     metrics.chat.width >= 420 - tolerance && metrics.workspace.width >= 420 - tolerance,
-    `o redimensionamento de ${label} violou a largura mínima dos painéis`,
+    `resizing ${label} violated the panels' minimum width`,
   );
   if (interaction === null) {
     assert(
       Math.abs(metrics.chat.width - metrics.workspace.width) <= tolerance,
-      `${label} não abriu inicialmente em uma divisão 50/50`,
+      `${label} did not initially open in a 50/50 split`,
     );
     return;
   }
-  assert(interaction.supported === true, `o arraste de ${label} não foi exercitado`);
+  assert(interaction.supported === true, `${label} dragging was not exercised`);
   assert(
     Math.abs(interaction.initial.chat.width - interaction.initial.workspace.width) <= tolerance,
-    `${label} não iniciou em 50/50 antes do arraste`,
+    `${label} did not start at 50/50 before dragging`,
   );
   assert(
     interaction.dragged.chat.width >= interaction.initial.chat.width + 40 &&
       interaction.dragged.workspace.width <= interaction.initial.workspace.width - 40,
-    `arrastar o divisor de ${label} não redistribuiu espaço entre os painéis`,
+    `dragging the ${label} divider did not redistribute space between panels`,
   );
   assert(
     Math.abs(metrics.chat.width - interaction.dragged.chat.width) <= tolerance &&
       Math.abs(metrics.workspace.width - interaction.dragged.workspace.width) <= tolerance,
-    `a divisão de ${label} não permaneceu na posição escolhida pelo mouse`,
+    `the ${label} split did not remain at the mouse-selected position`,
   );
   const persistedRatio = Number(interaction.dragged.persistedRatio);
   assert(
     Number.isFinite(persistedRatio) &&
       interaction.dragged.paneRatio !== null &&
       Math.abs(persistedRatio - interaction.dragged.paneRatio) <= 0.01,
-    `a proporção escolhida para ${label} não foi persistida`,
+    `the selected ${label} proportion was not persisted`,
   );
 }
 
@@ -7463,75 +7820,75 @@ function validateBrowserResponsiveMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport externo inesperado no modo responsivo em ${viewport.width}x${viewport.height}`,
+    `unexpected outer viewport in responsive mode at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o modo responsivo criou overflow global");
-  assert(metrics.toolbarOverflow <= tolerance, "os controles responsivos não cabem na barra");
-  assert(metrics.width === "7680", "a largura 8K não foi aplicada");
-  assert(metrics.height === "4320", "a altura 8K não foi aplicada");
-  assert(metrics.scale === "0.25", "a escala de 25% não foi aplicada");
-  assert(metrics.preview === "7680 × 4320 · 25%", "a superfície não refletiu o viewport 8K");
-  assert(metrics.selectedTabs === 1, "o modo responsivo perdeu a aba ativa");
+  assert(metrics.horizontalOverflow <= tolerance, "responsive mode created global overflow");
+  assert(metrics.toolbarOverflow <= tolerance, "responsive controls do not fit in the toolbar");
+  assert(metrics.width === "7680", "8K width was not applied");
+  assert(metrics.height === "4320", "8K height was not applied");
+  assert(metrics.scale === "0.25", "25% scale was not applied");
+  assert(metrics.preview === "7680 × 4320 · 25%", "the surface did not reflect the 8K viewport");
+  assert(metrics.selectedTabs === 1, "responsive mode lost the active tab");
   assert(
     metrics.toolbar.left >= metrics.workspace.left - tolerance &&
       metrics.toolbar.right <= metrics.workspace.right + tolerance,
-    "a barra responsiva saiu da área de trabalho",
+    "the responsive toolbar left the workspace",
   );
-  assert(metrics.toolbar.bottom <= metrics.surface.top + tolerance, "a barra responsiva sobrepõe o conteúdo");
-  assert(metrics.surface.height > 0, "o modo responsivo eliminou a superfície do navegador");
+  assert(metrics.toolbar.bottom <= metrics.surface.top + tolerance, "the responsive toolbar overlaps content");
+  assert(metrics.surface.height > 0, "responsive mode eliminated the browser surface");
   assert(
     metrics.resetLabel === "Redefinir viewport responsivo",
-    "o reset responsivo não possui nome acessível",
+    "the responsive reset has no accessible name",
   );
 }
 
 function validateBrowserDebugMetrics(metrics, viewport) {
   const tolerance = 1;
-  assert(metrics.horizontalOverflow <= tolerance, "o diagnóstico criou overflow horizontal global");
+  assert(metrics.horizontalOverflow <= tolerance, "diagnostics created global horizontal overflow");
   assert(
     metrics.debugHorizontalOverflow <= tolerance,
-    "o conteúdo do diagnóstico criou overflow horizontal",
+    "diagnostic content created horizontal overflow",
   );
-  assert(metrics.panel.right <= viewport.width + tolerance, "o painel de diagnóstico saiu do viewport");
+  assert(metrics.panel.right <= viewport.width + tolerance, "the diagnostic panel left the viewport");
   assert(
     metrics.debug.left >= metrics.panel.left - tolerance &&
       metrics.debug.right <= metrics.panel.right + tolerance,
-    "o diagnóstico não acompanha a largura do navegador",
+    "diagnostics do not follow the browser width",
   );
-  assert(metrics.debug.bottom <= metrics.surface.top + tolerance, "o diagnóstico sobrepõe a webview");
-  assert(metrics.surface.height >= 180, "abrir o diagnóstico reduziu demais a superfície nativa");
-  assert(metrics.summaryCards === 4, "o resumo de diagnóstico não possui quatro métricas");
-  assert(metrics.historyRows >= 3, "o histórico de diagnóstico não renderizou as amostras");
-  assert(metrics.failedRows >= 1, "o diagnóstico não diferencia falhas");
-  assert(metrics.stageBadges === 5, "os estágios de latência não foram renderizados");
-  assert(metrics.findingBadges >= 6, "os achados de qualidade não foram renderizados");
+  assert(metrics.debug.bottom <= metrics.surface.top + tolerance, "diagnostics overlap the webview");
+  assert(metrics.surface.height >= 180, "opening diagnostics reduced the native surface too much");
+  assert(metrics.summaryCards === 4, "the diagnostic summary does not contain four metrics");
+  assert(metrics.historyRows >= 3, "diagnostic history did not render the samples");
+  assert(metrics.failedRows >= 1, "diagnostics do not distinguish failures");
+  assert(metrics.stageBadges === 5, "latency stages were not rendered");
+  assert(metrics.findingBadges >= 6, "quality findings were not rendered");
 }
 
 function validateBrowserPanelLifecycleMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no ciclo do navegador em ${viewport.width}x${viewport.height}`,
+    `unexpected browser-lifecycle viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.panelCount === 0, "o painel do navegador permaneceu montado após fechar");
-  assert(metrics.failureCount === 0, "fechar o navegador produziu uma falha de renderização");
-  assert(metrics.chatVisible === true, "o chat não voltou após fechar o navegador");
-  assert(metrics.horizontalOverflow <= tolerance, "fechar o navegador criou overflow horizontal");
+  assert(metrics.panelCount === 0, "the browser panel remained mounted after closing");
+  assert(metrics.failureCount === 0, "closing the browser produced a render failure");
+  assert(metrics.chatVisible === true, "chat did not return after closing the browser");
+  assert(metrics.horizontalOverflow <= tolerance, "closing the browser created horizontal overflow");
 }
 
 function validateImageViewGroupMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no agrupamento de imagens em ${viewport.width}x${viewport.height}`,
+    `unexpected image-group viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o agrupamento de imagens criou overflow");
-  assert(metrics.label === "Visualizou 2 imagens", "o plural do agrupamento está incorreto");
-  assert(metrics.open === true, "o agrupamento de imagens não permaneceu expandido");
-  assert(metrics.imageCount === 2, "o agrupamento não renderizou as duas imagens");
-  assert(metrics.previewButtons === 2, "as miniaturas não são duas ações clicáveis");
-  assert(metrics.uniqueSources === 2, "as miniaturas foram deduplicadas incorretamente");
-  assert(metrics.rawDataUrlText === false, "a data URL bruta ainda aparece como texto");
+  assert(metrics.horizontalOverflow <= tolerance, "the image group created overflow");
+  assert(metrics.label === "Visualizou 2 imagens", "image-group pluralization is incorrect");
+  assert(metrics.open === true, "the image group did not remain expanded");
+  assert(metrics.imageCount === 2, "the group did not render both images");
+  assert(metrics.previewButtons === 2, "the thumbnails are not two clickable actions");
+  assert(metrics.uniqueSources === 2, "thumbnails were incorrectly deduplicated");
+  assert(metrics.rawDataUrlText === false, "the raw data URL still appears as text");
 }
 
 function validateTimelinePerformanceStressMetrics(metrics, viewport) {
@@ -7541,99 +7898,99 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
   );
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no estresse da timeline em ${viewport.width}x${viewport.height}`,
+    `unexpected timeline-stress viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.visitedItems === 180, "o estresse não abriu todas as 180 atividades");
-  assert(metrics.expansionIterations < 1200, "a expansão virtualizada não convergiu");
-  assert(metrics.expansionMs <= 20_000, "a expansão virtualizada ultrapassou 20 s");
-  assert(metrics.rapidFrames >= 60, "o teste rápido coletou poucos frames");
+  assert(metrics.visitedItems === 180, "the stress test did not open all 180 activities");
+  assert(metrics.expansionIterations < 1200, "virtualized expansion did not converge");
+  assert(metrics.expansionMs <= 20_000, "virtualized expansion exceeded 20 seconds");
+  assert(metrics.rapidFrames >= 60, "the rapid test collected too few frames");
   assert(
     metrics.visibleDeferredBodyFrames === 0 && metrics.maximumVisibleDeferredBodies === 0,
-    `o scroll rápido exibiu corpos vazios em ${metrics.visibleDeferredBodyFrames} frames (máximo ${metrics.maximumVisibleDeferredBodies})`,
+    `rapid scrolling displayed empty bodies in ${metrics.visibleDeferredBodyFrames} frames (maximum ${metrics.maximumVisibleDeferredBodies})`,
   );
   assert(
     metrics.missingSummaryFrames === 0,
-    "o scroll rápido removeu resumos reais de atividades montadas",
+    "rapid scrolling removed real summaries from mounted activities",
   );
   assert(
     metrics.visibleEmptyActivityListFrames === 0 &&
       metrics.maximumVisibleEmptyActivityLists === 0,
-    `a timeline deixou listas visíveis sem conteúdo em ${metrics.visibleEmptyActivityListFrames} frames: ${JSON.stringify(metrics.visibleEmptyActivityListSamples)}`,
+    `the timeline left visible lists empty in ${metrics.visibleEmptyActivityListFrames} frames: ${JSON.stringify(metrics.visibleEmptyActivityListSamples)}`,
   );
   assert(
     metrics.summaryIdentityProbeComparisons > 0,
-    "a sondagem controlada não reteve resumos entre amostras consecutivas",
+    "the controlled probe did not retain summaries between consecutive samples",
   );
   assert(
     metrics.summaryIdentityProbeChanges === 0,
-    `a sondagem controlada substituiu ${metrics.summaryIdentityProbeChanges} resumos retidos`,
+    `the controlled probe replaced ${metrics.summaryIdentityProbeChanges} retained summaries`,
   );
   assert(
     metrics.rapidSummaryIdentityChanges === 0,
-    `o scroll rápido substituiu ${metrics.rapidSummaryIdentityChanges} resumos que permaneceram montados`,
+    `rapid scrolling replaced ${metrics.rapidSummaryIdentityChanges} summaries that remained mounted`,
   );
   assert(
     metrics.iconIntegrityComparisons > 0 &&
       metrics.iconIntegrityKinds.includes("read") &&
       metrics.iconIntegrityKinds.includes("search"),
-    "o teste não reciclou ícones de leitura e busca pelo mesmo slot virtual",
+    "the test did not recycle read and search icons through the same virtual slot",
   );
   assert(
     metrics.iconIntegrityFailures === 0,
-    `a reciclagem deformou ${metrics.iconIntegrityFailures} ícones: ${JSON.stringify(metrics.iconIntegritySamples)}`,
+    `recycling deformed ${metrics.iconIntegrityFailures} icons: ${JSON.stringify(metrics.iconIntegritySamples)}`,
   );
   assert(
     metrics.legacyPlaceholderFrames === 0,
-    "o scroll rápido recuperou placeholders de carregamento legados",
+    "rapid scrolling restored legacy loading placeholders",
   );
   assert(
     metrics.rapidAnimationWorkFrames >= metrics.rapidFrames,
-    "a instrumentação não cobriu todos os frames do scroll rápido",
+    "instrumentation did not cover every rapid-scroll frame",
   );
   assert(
     metrics.rapidP95ApplicationAnimationWorkMs <= 10,
-    `o trabalho do app no P95 foi ${metrics.rapidP95ApplicationAnimationWorkMs.toFixed(2)} ms`,
+    `P95 application work was ${metrics.rapidP95ApplicationAnimationWorkMs.toFixed(2)} ms`,
   );
   assert(
     metrics.rapidP99AnimationWorkMs <= 20,
-    `o trabalho total no P99 foi ${metrics.rapidP99AnimationWorkMs.toFixed(2)} ms`,
+    `total P99 work was ${metrics.rapidP99AnimationWorkMs.toFixed(2)} ms`,
   );
   assert(
     metrics.rapidP99ApplicationAnimationWorkMs <= 10,
-    `o trabalho do app no P99 foi ${metrics.rapidP99ApplicationAnimationWorkMs.toFixed(2)} ms`,
+    `P99 application work was ${metrics.rapidP99ApplicationAnimationWorkMs.toFixed(2)} ms`,
   );
   assert(
     metrics.rapidMaximumApplicationAnimationWorkMs <= 12 &&
       exceptionalApplicationCallbacks.length <= 1,
-    `o trabalho excepcional do app excedeu o contrato: máximo ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms em ${exceptionalApplicationCallbacks.length} callbacks`,
+    `exceptional application work exceeded the contract: maximum ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms across ${exceptionalApplicationCallbacks.length} callbacks`,
   );
   assert(
     metrics.rapidP95FrameMs <= 25,
-    `o P95 do scroll rápido foi ${metrics.rapidP95FrameMs.toFixed(2)} ms`,
+    `rapid-scroll P95 was ${metrics.rapidP95FrameMs.toFixed(2)} ms`,
   );
   assert(
     metrics.rapidP99FrameMs <= 34,
-    `o P99 do scroll rápido foi ${metrics.rapidP99FrameMs.toFixed(2)} ms em ${metrics.rapidFrames} frames (${metrics.rapidFramesOver34Ms} acima de 34 ms, ${metrics.rapidLongTasks} long tasks, máximo ${metrics.rapidMaximumFrameMs.toFixed(2)} ms)`,
+    `rapid-scroll P99 was ${metrics.rapidP99FrameMs.toFixed(2)} ms across ${metrics.rapidFrames} frames (${metrics.rapidFramesOver34Ms} above 34 ms, ${metrics.rapidLongTasks} long tasks, maximum ${metrics.rapidMaximumFrameMs.toFixed(2)} ms)`,
   );
   assert(
     metrics.rapidMaximumFrameMs <= 50,
-    `o máximo do scroll rápido foi ${metrics.rapidMaximumFrameMs.toFixed(2)} ms`,
+    `rapid-scroll maximum was ${metrics.rapidMaximumFrameMs.toFixed(2)} ms`,
   );
   assert(
     metrics.rapidFramesOver34Ms <= 1,
-    `o scroll rápido teve ${metrics.rapidFramesOver34Ms} frames acima de 34 ms (P95 ${metrics.rapidP95FrameMs.toFixed(2)} ms, P99 ${metrics.rapidP99FrameMs.toFixed(2)} ms, máximo ${metrics.rapidMaximumFrameMs.toFixed(2)} ms)`,
+    `rapid scrolling had ${metrics.rapidFramesOver34Ms} frames above 34 ms (P95 ${metrics.rapidP95FrameMs.toFixed(2)} ms, P99 ${metrics.rapidP99FrameMs.toFixed(2)} ms, maximum ${metrics.rapidMaximumFrameMs.toFixed(2)} ms)`,
   );
-  assert(metrics.rapidLongTasks === 0, "o scroll rápido produziu long tasks");
-  assert(metrics.reopenMs <= 1_200, "a reabertura do chat expandido ultrapassou 1,2 s");
-  assert(metrics.visualDriftPx !== null, "o cenário não encontrou uma âncora interna mensurável");
-  assert(Math.abs(metrics.visualDriftPx) <= tolerance, "a âncora interna mudou de posição visual");
-  assert(metrics.domNodes <= 7_000, "a timeline virtualizada excedeu 7 mil nós DOM");
+  assert(metrics.rapidLongTasks === 0, "rapid scrolling produced long tasks");
+  assert(metrics.reopenMs <= 1_200, "reopening the expanded chat exceeded 1.2 seconds");
+  assert(metrics.visualDriftPx !== null, "the scenario found no measurable internal anchor");
+  assert(Math.abs(metrics.visualDriftPx) <= tolerance, "the internal anchor changed visual position");
+  assert(metrics.domNodes <= 7_000, "the virtualized timeline exceeded 7,000 DOM nodes");
   assert(
     metrics.mountedActivityItems <= 80,
-    `${metrics.mountedActivityItems} atividades permaneceram montadas`,
+    `${metrics.mountedActivityItems} activities remained mounted`,
   );
-  assert(metrics.mountedSourceRows <= 800, "linhas demais de ferramentas permaneceram montadas");
-  assert(metrics.mountedDiffRows <= 500, "linhas demais de diff permaneceram montadas");
+  assert(metrics.mountedSourceRows <= 800, "too many tool rows remained mounted");
+  assert(metrics.mountedDiffRows <= 500, "too many diff rows remained mounted");
   assert(
     metrics.diffViewportIntegrity.length > 0 &&
       metrics.diffViewportIntegrity.every(
@@ -7646,189 +8003,204 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
           entry.mountedRows > 0 &&
           entry.rowGaps.every((gap) => Math.abs(gap - 20) <= tolerance),
       ),
-    `os canvases de diff perderam linhas ou geometria após a reciclagem: ${JSON.stringify(metrics.diffViewportIntegrity)}`,
+    `diff canvases lost rows or geometry after recycling: ${JSON.stringify(metrics.diffViewportIntegrity)}`,
   );
   assert(
     metrics.settledDeferredBodies === 0,
-    "corpos adiados permaneceram após o scroll estabilizar",
+    "deferred bodies remained after scrolling settled",
   );
   assert(
     metrics.settledLegacyPlaceholders === 0,
-    "placeholders legados permaneceram após o scroll estabilizar",
+    "legacy placeholders remained after scrolling settled",
   );
-  assert(metrics.horizontalOverflow <= tolerance, "o estresse criou overflow horizontal");
+  assert(metrics.horizontalOverflow <= tolerance, "the stress test created horizontal overflow");
 }
 
 function validateActivityReconciliationMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado na reconciliação em ${viewport.width}x${viewport.height}`,
+    `unexpected reconciliation viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.state === "completed", "a reconciliação paralela não foi concluída");
-  assert(metrics.started === 64, `somente ${metrics.started} comandos foram iniciados`);
-  assert(metrics.completed === 64, `somente ${metrics.completed} comandos foram concluídos`);
-  assert(metrics.commentaryState === "emitted", "o comentário mais novo não foi emitido");
-  assert(metrics.commentaryCount === 1, "o comentário mais novo foi perdido ou duplicado");
+  assert(metrics.state === "completed", "parallel reconciliation did not complete");
+  assert(metrics.started === 64, `only ${metrics.started} commands were started`);
+  assert(metrics.completed === 64, `only ${metrics.completed} commands completed`);
+  assert(metrics.commentaryState === "emitted", "the newest commentary was not emitted");
+  assert(metrics.commentaryCount === 1, "the newest commentary was lost or duplicated");
+  assert(
+    metrics.startedPresentation?.completedAtCapture === 0,
+    "the first command appeared only after a completion",
+  );
+  assert(
+    metrics.startedPresentation?.title?.startsWith("Comando em execução"),
+    `item.started did not appear immediately with semantic state: ${JSON.stringify(metrics.startedPresentation)}`,
+  );
+  assert(
+    !metrics.startedPresentation?.title?.includes("pnpm exec benchmark"),
+    "item.started revealed the command before terminal state",
+  );
   assert(
     metrics.causalOrderPreserved === true,
-    "uma atualização de comando antigo reapareceu depois do comentário mais novo",
+    "an older command update reappeared after the newest commentary",
   );
-  assert(metrics.turnFailures === 0, "a conclusão fora de ordem derrubou a renderização do turno");
-  assert(metrics.totalActivities === 64, "a projeção perdeu comandos concluídos fora de ordem");
-  assert(metrics.identityComparisons > 0, "nenhum slot retido foi comparado durante o streaming");
+  assert(metrics.turnFailures === 0, "out-of-order completion broke turn rendering");
+  assert(metrics.totalActivities === 64, "the projection lost commands completed out of order");
+  assert(metrics.identityComparisons > 0, "no retained slot was compared during streaming");
   assert(
     metrics.identityChanges === 0,
-    `${metrics.identityChanges} atividades retidas recriaram o contêiner DOM`,
+    `${metrics.identityChanges} retained activities recreated the DOM container`,
   );
   assert(
     metrics.mountedActivities === metrics.uniqueMountedActivities,
-    "a janela montada contém chaves duplicadas",
+    "the mounted window contains duplicate keys",
   );
-  assert(metrics.durationMs < 10_000, "a reconciliação paralela ultrapassou 10 s");
-  assert(metrics.horizontalOverflow <= tolerance, "a reconciliação criou overflow horizontal");
+  assert(metrics.durationMs < 10_000, "parallel reconciliation exceeded 10 seconds");
+  assert(metrics.horizontalOverflow <= tolerance, "reconciliation created horizontal overflow");
 }
 
 function validateActivityShimmerMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado no shimmer em ${viewport.width}x${viewport.height}`,
+    `unexpected shimmer viewport at ${viewport.width}x${viewport.height}`,
   );
   assert(
     metrics.activeDurationMs >= 700 && metrics.activeDurationMs <= 1600,
-    `o pulso visual durou ${metrics.activeDurationMs.toFixed(1)} ms em vez de cerca de 1 s`,
+    `the visual pulse lasted ${metrics.activeDurationMs.toFixed(1)} ms instead of about 1 second`,
   );
   assert(
-    metrics.cadenceMs >= 3200 && metrics.cadenceMs <= 4800,
-    `a cadência visual foi ${metrics.cadenceMs.toFixed(1)} ms em vez de cerca de 4 s`,
+    metrics.cadenceMs >= 1050 && metrics.cadenceMs <= 1450,
+    `visual cadence was ${metrics.cadenceMs.toFixed(1)} ms instead of about 1.2 seconds`,
   );
-  assert(metrics.activeAnimation.duration === "1s", "a animação visual não dura exatamente 1 s");
+  assert(metrics.activeAnimation.duration === "1s", "the visual animation does not last exactly 1 second");
   assert(
     metrics.activeAnimation.iterationCount === "1",
-    "o shimmer voltou a executar em loop infinito",
+    "the shimmer started running in an infinite loop again",
   );
   assert(
     metrics.activeAnimation.name === "activity-reflection-sweep",
-    "a camada do shimmer usa uma animação inesperada",
+    "the shimmer layer uses an unexpected animation",
   );
   assert(
     metrics.activeAnimation.timingFunction.includes("steps(48"),
-    "o shimmer perdeu a progressão oficial em 48 passos",
+    "the shimmer lost its canonical 48-step progression",
   );
   assert(
     metrics.inactiveAnimationName === "none",
-    "a animação permaneceu presa no quadro final depois do pulso",
+    "the animation remained stuck on the final frame after the pulse",
   );
-  assert(metrics.activeTargets === 1, "o segundo pulso não ficou restrito à atividade em execução");
-  assert(metrics.titleText.length > 0, "o título animado ficou vazio");
-  assert(metrics.horizontalOverflow <= tolerance, "o shimmer criou overflow horizontal");
+  assert(metrics.activeTargets === 1, "the second pulse was not confined to the running activity");
+  assert(metrics.childRunningTargets > 0, "the scenario contains no running child activity");
+  assert(metrics.childShimmerTargets === 0, "shimmer leaked from the parent message into a child activity");
+  assert(metrics.childSweepLayers === 0, "a child activity retained the shimmer visual layer");
+  assert(metrics.titleText.length > 0, "the animated title became empty");
+  assert(metrics.horizontalOverflow <= tolerance, "shimmer created horizontal overflow");
 }
 
 function validateTimelineExtremeFilesMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado em 100 mil arquivos: ${viewport.width}x${viewport.height}`,
+    `unexpected 100,000-file viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(metrics.totalActivities === 100_000, "a projeção extrema perdeu arquivos");
+  assert(metrics.totalActivities === 100_000, "the extreme projection lost files");
   assert(
     metrics.physicalListHeight > 2_000_000 && metrics.physicalListHeight <= 8_000_000,
-    `a altura física extrema ficou inválida (${metrics.physicalListHeight}px)`,
+    `the extreme physical height became invalid (${metrics.physicalListHeight}px)`,
   );
-  assert(metrics.rapidFrames >= 60, "o teste de 100 mil arquivos coletou poucos frames");
+  assert(metrics.rapidFrames >= 60, "the 100,000-file test collected too few frames");
   assert(
     metrics.rapidAnimationWorkFrames >= metrics.rapidFrames,
-    "a instrumentação não cobriu os frames de 100 mil arquivos",
+    "instrumentation did not cover the 100,000-file frames",
   );
   assert(
     metrics.rapidP95ApplicationAnimationWorkMs <= 8,
-    `o trabalho do app em 100 mil arquivos foi ${metrics.rapidP95ApplicationAnimationWorkMs.toFixed(2)} ms no P95`,
+    `application work for 100,000 files was ${metrics.rapidP95ApplicationAnimationWorkMs.toFixed(2)} ms at P95`,
   );
   assert(
     metrics.rapidP99AnimationWorkMs <= 10,
-    `o trabalho total em 100 mil arquivos foi ${metrics.rapidP99AnimationWorkMs.toFixed(2)} ms no P99`,
+    `total work for 100,000 files was ${metrics.rapidP99AnimationWorkMs.toFixed(2)} ms at P99`,
   );
   assert(
     metrics.rapidP99ApplicationAnimationWorkMs <= 8,
-    `o trabalho do app em 100 mil arquivos foi ${metrics.rapidP99ApplicationAnimationWorkMs.toFixed(2)} ms no P99`,
+    `application work for 100,000 files was ${metrics.rapidP99ApplicationAnimationWorkMs.toFixed(2)} ms at P99`,
   );
   assert(
     metrics.rapidMaximumApplicationAnimationWorkMs <= 10,
-    `o maior trabalho do app em 100 mil arquivos foi ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms`,
+    `maximum application work for 100,000 files was ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms`,
   );
-  assert(metrics.rapidP95FrameMs <= 20, "o P95 de 100 mil arquivos ultrapassou 20 ms");
-  assert(metrics.rapidP99FrameMs <= 34, "o P99 de 100 mil arquivos ultrapassou 34 ms");
-  assert(metrics.rapidMaximumFrameMs <= 50, "o cenário extremo teve frame acima de 50 ms");
-  assert(metrics.rapidLongTasks === 0, "o scroll de 100 mil arquivos produziu long tasks");
+  assert(metrics.rapidP95FrameMs <= 20, "100,000-file P95 exceeded 20ms");
+  assert(metrics.rapidP99FrameMs <= 34, "100,000-file P99 exceeded 34ms");
+  assert(metrics.rapidMaximumFrameMs <= 50, "the extreme scenario produced a frame above 50ms");
+  assert(metrics.rapidLongTasks === 0, "100,000-file scrolling produced long tasks");
   assert(
     metrics.visibleDeferredBodyFrames === 0 && metrics.maximumVisibleDeferredBodies === 0,
-    `o cenário extremo exibiu corpos vazios em ${metrics.visibleDeferredBodyFrames} frames (máximo ${metrics.maximumVisibleDeferredBodies})`,
+    `the extreme scenario displayed empty bodies in ${metrics.visibleDeferredBodyFrames} frames (maximum ${metrics.maximumVisibleDeferredBodies})`,
   );
   assert(
     metrics.missingSummaryFrames === 0,
-    "o cenário extremo removeu resumos reais durante o scroll",
+    "the extreme scenario removed real summaries during scrolling",
   );
   assert(
     metrics.summaryIdentityChanges === 0,
-    `o cenário extremo substituiu ${metrics.summaryIdentityChanges} resumos que continuavam visíveis`,
+    `the extreme scenario replaced ${metrics.summaryIdentityChanges} summaries that remained visible`,
   );
   assert(
     metrics.wrapperIdentityChanges === 0,
-    `o cenário extremo substituiu ${metrics.wrapperIdentityChanges} contêineres que continuavam visíveis`,
+    `the extreme scenario replaced ${metrics.wrapperIdentityChanges} containers that remained visible`,
   );
   assert(
     metrics.legacyPlaceholderFrames === 0,
-    "o cenário extremo recuperou placeholders legados",
+    "the extreme scenario restored legacy placeholders",
   );
   assert(
     metrics.maximumMountedItems <= 128,
-    `${metrics.maximumMountedItems} arquivos ficaram montados no cenário extremo`,
+    `${metrics.maximumMountedItems} files remained mounted in the extreme scenario`,
   );
-  assert(metrics.domNodes <= 3_000, "o cenário extremo excedeu 3 mil nós DOM");
+  assert(metrics.domNodes <= 3_000, "the extreme scenario exceeded 3,000 DOM nodes");
   assert(
     metrics.settledDeferredBodies === 0,
-    "o cenário extremo deixou corpos adiados após estabilizar",
+    "the extreme scenario left deferred bodies after settling",
   );
   assert(
     metrics.settledLegacyPlaceholders === 0,
-    "o cenário extremo deixou placeholders legados após estabilizar",
+    "the extreme scenario left legacy placeholders after settling",
   );
-  assert(metrics.visualDriftPx !== null, "o cenário extremo não materializou sua âncora");
+  assert(metrics.visualDriftPx !== null, "the extreme scenario did not materialize its anchor");
   assert(
     Math.abs(metrics.visualDriftPx) <= tolerance,
-    `a âncora de 100 mil arquivos derivou ${metrics.visualDriftPx}px`,
+    `the 100,000-file anchor drifted ${metrics.visualDriftPx}px`,
   );
-  assert(metrics.horizontalOverflow <= tolerance, "100 mil arquivos criaram overflow horizontal");
+  assert(metrics.horizontalOverflow <= tolerance, "100,000 files created horizontal overflow");
 }
 
 function validateChromeMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `viewport inesperado em ${viewport.width}x${viewport.height}`,
+    `unexpected viewport at ${viewport.width}x${viewport.height}`,
   );
-  assert(Math.abs(metrics.chrome.top) <= tolerance, "o titlebar não começa no topo");
-  assert(Math.abs(metrics.chrome.height - 34) <= tolerance, "o titlebar não mede 34 px");
+  assert(Math.abs(metrics.chrome.top) <= tolerance, "the title bar does not begin at the top");
+  assert(Math.abs(metrics.chrome.height - 34) <= tolerance, "the title bar is not 34px high");
   assert(
     Math.abs(metrics.content.top - metrics.chrome.top) <= tolerance,
-    "a superfície da aplicação não continua sob o chrome",
+    "the application surface does not continue beneath window chrome",
   );
   assert(
     Math.abs(metrics.content.bottom - viewport.height) <= tolerance,
-    "a superfície da aplicação não ocupa toda a altura do viewport",
+    "the application surface does not occupy the full viewport height",
   );
-  assert(metrics.controls.top >= 0, "os controles da janela ficaram acima do viewport");
+  assert(metrics.controls.top >= 0, "window controls moved above the viewport");
   assert(
     metrics.controls.right <= viewport.width + tolerance,
-    "os controles da janela ultrapassam a borda direita",
+    "window controls exceed the right edge",
   );
-  assert(metrics.controls.width >= 138, "a área dos controles da janela ficou estreita");
+  assert(metrics.controls.width >= 138, "the window-control area became too narrow");
 }
 
 function assert(condition, message) {
   if (!condition) {
-    throw new Error(`Falha na auditoria visual: ${message}.`);
+    throw new Error(`Visual audit failed: ${message}.`);
   }
 }
 
@@ -7873,7 +8245,7 @@ function resolveBrowserPath() {
   ];
   const resolved = candidates.find((candidate) => existsSync(candidate));
   if (resolved === undefined) {
-    throw new Error("Edge ou Chrome não foi encontrado para a auditoria visual.");
+    throw new Error("Edge or Chrome was not found for the visual audit.");
   }
   return resolved;
 }
@@ -7881,7 +8253,7 @@ function resolveBrowserPath() {
 async function fetchJson(url, init) {
   const response = await fetch(url, init);
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status} ao acessar ${url}`);
+    throw new Error(`HTTP ${response.status} while accessing ${url}`);
   }
   return response.json();
 }
@@ -7963,7 +8335,7 @@ class CdpClient {
         }
         reject(
           new Error(
-            `O evento CDP "${method}" não aconteceu em ${EVENT_DEADLINE_MILLISECONDS} ms.`,
+            `CDP event "${method}" did not occur within ${EVENT_DEADLINE_MILLISECONDS} ms.`,
           ),
         );
       }, EVENT_DEADLINE_MILLISECONDS);
@@ -7981,7 +8353,7 @@ class CdpClient {
         response.exceptionDetails.exception?.description ??
         response.exceptionDetails.exception?.value ??
         response.exceptionDetails.text ??
-        "Falha ao avaliar a prévia.";
+        "Preview evaluation failed.";
       throw new Error(String(description));
     }
     return response.result.value;

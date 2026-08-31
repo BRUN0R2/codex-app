@@ -46,7 +46,7 @@ export function readDiffVirtualRows(input: {
   while (cache.size > MAXIMUM_WINDOWS_PER_DOCUMENT) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) {
-      throw new Error("O cache de janelas de diff perdeu sua entrada mais antiga.");
+      throw new Error("The diff window cache lost its oldest entry.");
     }
     cache.delete(oldest);
   }
@@ -62,7 +62,7 @@ function renderUnifiedRows(input: {
   for (let rowIndex = input.range.start; rowIndex < input.range.end; rowIndex += 1) {
     const row = input.document.unifiedRows[rowIndex];
     if (row === undefined) {
-      throw new Error(`A linha unificada ${rowIndex} não existe.`);
+      throw new Error(`Unified diff row ${rowIndex} does not exist.`);
     }
     markup += renderUnifiedRow(
       row,
@@ -93,7 +93,7 @@ function renderSplitRows(input: {
   for (let rowIndex = input.range.start; rowIndex < input.range.end; rowIndex += 1) {
     const row = projection.rows[rowIndex];
     if (row === undefined) {
-      throw new Error(`A linha dividida ${rowIndex} não existe.`);
+      throw new Error(`Split diff row ${rowIndex} does not exist.`);
     }
     markup += renderSplitRow(input.document, input.path, projection, row, rowIndex);
   }
@@ -124,7 +124,7 @@ function renderSplitRow(
 function readSplitSourceIndex(indexes: Uint32Array, rowIndex: number): number | null {
   const sourceIndex = indexes[rowIndex];
   if (sourceIndex === undefined) {
-    throw new Error(`O índice sintático dividido ${rowIndex} não existe.`);
+    throw new Error(`Split syntax index ${rowIndex} does not exist.`);
   }
   return sourceIndex === 0 ? null : sourceIndex - 1;
 }

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { CodexModel } from "../contracts/types";
+import type { CodexModel, ConfigUpdate } from "../contracts/types";
 import {
+  persistModelDefaults,
   reasoningEffortIsRuntimeCompatible,
+  resolveRuntimeCompatibleModelSelection,
   selectRuntimeCompatibleModel,
   selectRuntimeCompatibleReasoningEffort,
   selectRuntimeCompatibleServiceTier,
@@ -51,6 +53,38 @@ describe("model selection", () => {
     });
 
     expect(selectRuntimeCompatibleServiceTier(model, "unknown")).toBe("priority");
+  });
+
+  it("persists model, reasoning, and speed as one backend-owned preference", async () => {
+    const model = modelFixture({
+      id: "gpt-selected",
+      model: "gpt-selected",
+      serviceTiers: [{ id: "priority", name: "Priority", description: "Menor latência" }],
+    });
+    const updates: ConfigUpdate[] = [];
+    const selection = resolveRuntimeCompatibleModelSelection(
+      [model],
+      model.id,
+      "ultra",
+      "priority",
+    );
+
+    await expect(
+      persistModelDefaults(async (update) => {
+        updates.push(update);
+        return true;
+      }, selection),
+    ).resolves.toBe(true);
+    expect(updates).toEqual([
+      {
+        type: "modelDefaults",
+        value: {
+          model: "gpt-selected",
+          reasoningEffort: "ultra",
+          serviceTier: "priority",
+        },
+      },
+    ]);
   });
 });
 

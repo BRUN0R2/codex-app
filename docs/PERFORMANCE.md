@@ -1,93 +1,140 @@
-# Desempenho
+# Performance
 
-Os scripts são a fonte dos cenários e limites. Este documento mantém apenas o
-método e a última fotografia dos gates reproduzíveis; não acumula séries
-históricas.
+Scripts are authoritative for scenarios and limits. This document records the
+method and latest reproducible gate snapshot; it does not accumulate history.
 
-## Como medir
+## Measurement
 
 ```powershell
-pnpm verify:benchmarks  # regressões de UI, stream e comandos
-pnpm measure:tokens     # catálogo, contexto e compactação
-pnpm measure:release    # startup e memória do executável release
-pnpm measure:browser    # métricas capturadas pelo Browser Use
+pnpm verify:benchmarks         # UI, stream, and command regressions
+pnpm measure:code-mode-warmup # cold V8 runtime cost
+pnpm measure:tokens           # catalog, context, and compaction
+pnpm measure:release          # release startup and memory
+pnpm measure:browser          # Browser Use metrics
 ```
 
-Use release, máquina ociosa e o mesmo hardware. Registre sistema, modelo, esforço,
-tier e rede quando houver provider. Não compare condições diferentes nem trate
-um smoke funcional como benchmark.
+Use a release build, an idle machine, and identical hardware. Record operating
+system, model, effort, service tier, and network when a provider is involved.
+Never compare different conditions or treat a functional smoke test as a
+benchmark.
 
-`measure:release` abre o executável indicado, mede a primeira janela responsiva,
-aguarda a estabilização, coleta working set e memória privada e fecha a mesma
-instância normalmente. Nunca encerre outro processo para produzir a amostra.
+`measure:release` opens the selected executable, measures the first responsive
+window, waits for stabilization, records working set and private memory, and
+closes that same instance normally. It never terminates another process to
+produce a sample.
 
-Tempo até o primeiro delta exige uma tarefa autenticada e controlada. Erro,
-rate limit ou duração total não substituem essa medida.
+Time to first delta requires a controlled authenticated task. An error, rate
+limit, or total request duration is not a substitute.
 
-## Baseline atual
+## Solid transform analysis
 
-Coleta local de 28/08/2026 em Windows com 28 processadores lógicos. Os tempos são
-evidência desta execução, não garantias universais.
+The reported message
 
-### Contexto e ferramentas
+```text
+[PLUGIN_TIMINGS] ... solid transform ... 157 calls
+```
 
-| Cenário | Resultado |
+is Rolldown's aggregate time for the stable `vite-plugin-solid` transform hook.
+It is not evidence that 157 application modules were compiled by Babel. A local
+instrumented run on 2026-08-30 observed 157 hook callbacks but only 35 actual
+TSX/Babel transforms. The callbacks totaled about 1.47 seconds; the largest
+individual modules were the timeline, application entry, settings, icon,
+composer, and sidebar. Instrumentation was removed after measurement.
+
+An explicit TSX-only `include` produced no material improvement because it still
+filtered inside the JavaScript callback. The production and test configurations
+now wrap the plugin with Vite's native `withFilter` hook filter. Rolldown rejects
+non-JSX module identifiers before crossing the plugin boundary, while the
+plugin retains its own authoritative checks.
+
+The first measured build after this change transformed 161 modules but invoked
+the Solid hook only 36 times, down from 157. Solid took 1.7 seconds; the same
+cold run spent 1.6 seconds in the single CSS transform. Two immediately repeated
+builds completed in 2.15 and 2.12 seconds without a timing warning. This confirms
+that the original call count was callback fan-out and that the remaining cold
+cost is actual compiler and CSS initialization, not duplicate Solid transforms.
+
+Splitting components would not reduce the total Solid AST and would add
+boundaries without a measured runtime benefit. Suppressing Rolldown's warning
+would hide evidence rather than reduce work. The stable Solid 1 toolchain still
+uses the Babel-based compiler. Its OXC replacement belongs to the Solid 2
+integration, which remains prerelease in the currently audited dependency
+graph. The project will not replace a stable compiler with a prerelease solely
+to remove a timing warning. The migration criterion is tracked in
+[TODO.md](TODO.md).
+
+Recheck this diagnosis whenever Solid, the Vite plugin, or Rolldown changes.
+Compare at least three clean production builds on the same idle machine, inspect
+actual compiler invocations, and keep the warning enabled.
+
+## Current baseline
+
+Local sample from 2026-08-30 on Windows with 28 logical processors. These values
+describe that run; they are not universal guarantees.
+
+### Context and tools
+
+| Scenario | Result |
 | --- | ---: |
-| catálogo base, 20 tools | 13.977 B; ~3.495 tokens |
-| catálogo somente leitura, 16 tools | 9.598 B; ~2.400 tokens |
-| redução do catálogo somente leitura | 31,33% |
-| build + encode do catálogo | 0,0227 ms mediano |
-| output de provider, 2.439.995 B → 6.372 B | 99,7389% menor |
-| comando moderado, 3.216 B → 414 B | 87,1269% menor |
-| comando grande, 6.018 B → 633 B | 89,4816% menor |
-| histórico, 232,169 MiB → 0,957 MiB | 99,588% menor |
-| parse + decode do histórico inicial | 311,694× mais rápido |
-| heap inicial do histórico | 99,576% menor |
-| busca em output de 64 MiB, 65.536 B → 110 B | 99,8322% menor; 57,28 ms |
-| 8 leituras idênticas | 1 execução; 87,5% menos chamadas |
+| base catalog, 20 tools | 13,977 B; ~3,495 tokens |
+| read-only catalog, 16 tools | 9,598 B; ~2,400 tokens |
+| read-only catalog reduction | 31.33% |
+| catalog build and encode | 0.0227 ms median |
+| provider output, 2,439,995 B -> 6,372 B | 99.7389% smaller |
+| moderate command, 3,216 B -> 414 B | 87.1269% smaller |
+| large command, 6,018 B -> 633 B | 89.4816% smaller |
+| history, 232.169 MiB -> 0.957 MiB | 99.588% smaller |
+| initial history parse and decode | 311.694x faster |
+| initial history heap | 99.576% smaller |
+| search in 64 MiB output, 65,536 B -> 110 B | 99.8322% smaller; 57.28 ms |
+| eight identical reads | one execution; 87.5% fewer calls |
 
-### Interface e execução
+### Interface and execution
 
-| Cenário | Resultado |
+| Scenario | Result |
 | --- | ---: |
-| streaming de texto batched | 195,684× o caminho sequencial |
-| streaming de comando framed | 63,229× o caminho sequencial |
-| diff de 150.001 linhas | 45 linhas montadas; janela em 0,320 ms |
-| terminal incremental de 64 MiB | 1.368,10 ms; 46,8 MiB/s |
-| comando após yield | resposta em 262 ms; trabalho independente em 499 ms |
-| polling incremental | 146 B contra snapshot de 16.513 B |
-| 4 comandos independentes | 749,72 ms paralelo contra 2.900,67 ms sequencial |
+| batched text streaming | 168.746x the sequential path |
+| framed command streaming | 72.594x the sequential path |
+| cold Code Mode runtime warm-up | 6.362 ms; one initialization |
+| 150,001-line diff | 45 mounted rows; 0.324 ms window |
+| incremental 64 MiB terminal | 1,573.479 ms; 40.7 MiB/s |
+| command after yield | response in 258 ms; independent work in 486 ms |
+| incremental polling | 146 B versus a 16,513 B snapshot |
+| four independent commands | 735.12 ms parallel versus 2,880.681 ms sequential |
 
-O QA visual passou em 920×640, 1280×820 e 1920×1080 sem overflow horizontal.
-Ultra foi apresentado em `rgb(167, 139, 250)` (`#a78bfa`); aparência não altera
-o bloqueio de capability no engine.
+Visual QA passed at 920x640, 1280x820, and 1920x1080 without horizontal
+overflow. Ultra rendered as `rgb(167, 139, 250)` (`#a78bfa`); appearance does
+not alter the engine capability gate.
 
-### Gate completo
+### Complete gate
 
-| Verificação | Resultado |
+| Check | Result |
 | --- | ---: |
-| encoding | 388 arquivos UTF-8 válidos |
-| frontend | 80 arquivos; 449 testes aprovados |
-| bundle principal JS | 442,45 kB; 134,41 kB gzip |
-| CSS | 144,20 kB; 25,82 kB gzip |
-| Rust | 418 aprovados; 9 benchmarks ignorados; 0 falhas |
-| Cargo, formato e Clippy | aprovados sem warnings |
+| encoding | 411 valid UTF-8 files |
+| frontend | 92 files; 491 passing tests |
+| main JavaScript bundle | 449.16 kB; 133.81 kB gzip |
+| CSS | 144.93 kB; 25.99 kB gzip |
+| Rust | 434 passing; 10 ignored benchmarks; no failures |
+| Cargo, formatting, and Clippy | passed without warnings |
 
-## Proteções contra regressão
+## Regression protection
 
-| Risco | Proteção |
+| Risk | Protection |
 | --- | --- |
-| deltas bloquearem a UI | batching, worker e benchmarks de streaming |
-| histórico crescer com a conversa | paginação, virtualização e soak de 100 mil turnos |
-| output ocupar memória ou IPC | spool, cursor, compactação e cenário de 64 MiB |
-| diff montar o documento inteiro | janela virtual e corpus de 150 mil linhas |
-| comandos longos bloquearem o agente | yield, polling incremental e trabalho independente |
-| concorrência quebrar ordem | lote com barreiras e benchmark de comandos paralelos |
-| tools consumirem contexto sem controle | orçamento do catálogo e `measure:tokens` |
-| browser degradar layout | matrizes de viewport, métricas e smoke WebView2 |
-| taxa de atualização alterar o QA | sondagem de identidade controlada, separada do scroll rápido |
-| processos escaparem do turno | testes Windows com Job Object e descendente real |
+| deltas block the UI | batching, worker, and streaming benchmarks |
+| history grows with the conversation | pagination, virtualization, and a 100,000-turn soak |
+| output fills memory or IPC | spool, cursor, compaction, and a 64 MiB scenario |
+| diff mounts the whole document | virtual window and a 150,000-line corpus |
+| long commands block the agent | yield, incremental polling, and independent work |
+| first `exec` pays cold V8 cost | tracked prewarm, `OnceLock`, and release benchmark |
+| concurrency changes order | barriers and parallel-command benchmark |
+| tools consume unbounded context | catalog budget and `measure:tokens` |
+| local estimates compact early | provider-confirmed use plus post-model delta only |
+| browser degrades layout | viewport matrix, metrics, and WebView2 smoke test |
+| refresh rate distorts QA | controlled identity probe separate from fast scrolling |
+| processes escape a turn | Windows tests with Job Object and a real descendant |
+| translations diverge | exact catalog and placeholder validation tests |
 
-Os thresholds vivem nos scripts para que documentação e gate não divirjam.
-Qualquer alteração de cenário deve atualizar o teste, justificar o novo limite e
-substituir o baseline desta página após `pnpm verify` completo.
+Thresholds live in scripts so documentation and gates cannot diverge. Changing a
+scenario requires updating its test, justifying its limit, and replacing this
+snapshot after a complete `pnpm verify`.

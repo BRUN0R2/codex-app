@@ -58,6 +58,6 @@ describe("pinned threads", () => {
       PROFILE_STORAGE_KEYS.pinnedThreads,
       JSON.stringify({ version: 1, threadIds: ["duplicate", "duplicate"] }),
     );
-    expect(() => loadPinnedThreadIds()).toThrow(/duplicada/u);
+    expect(() => loadPinnedThreadIds()).toThrow(/duplicated/u);
   });
 });

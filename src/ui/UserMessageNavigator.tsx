@@ -1,5 +1,6 @@
 import { createSignal, For, Show } from "solid-js";
-
+import { useI18n } from "../i18n/context";
+import { formatMessage } from "../i18n/messages";
 import { userMessageMarkerWidth } from "./timelinePresentation";
 
 export interface UserMessageEntry {
@@ -14,12 +15,13 @@ export function UserMessageNavigator(props: {
   readonly messages: readonly UserMessageEntry[];
   readonly onSelect: (message: UserMessageEntry) => void;
 }) {
+  const i18n = useI18n();
   const [interactionIndex, setInteractionIndex] = createSignal<number | null>(null);
 
   return (
     <Show when={props.messages.length > 1}>
       <nav
-        aria-label="Mensagens do usuário"
+        aria-label={i18n.messages().userMessages.label}
         class="user-message-navigator"
         onPointerLeave={() => setInteractionIndex(null)}
       >
@@ -27,7 +29,9 @@ export function UserMessageNavigator(props: {
           {(message, index) => (
             <button
               aria-current={index() === props.activeIndex ? "true" : undefined}
-              aria-label={`Ir para a mensagem do usuário ${index() + 1}`}
+              aria-label={formatMessage(i18n.messages().userMessages.goTo, {
+                number: index() + 1,
+              })}
               classList={{ active: index() === props.activeIndex }}
               onBlur={() => setInteractionIndex(null)}
               onClick={() => props.onSelect(message)}

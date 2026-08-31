@@ -1,157 +1,137 @@
 @echo off
-setlocal EnableExtensions DisableDelayedExpansion
-chcp 65001 >nul 2>&1
+setlocal EnableExtensions
 
-set "APP_NAME=Codex App"
-set "INTERACTIVE=1"
 set "EXIT_CODE=0"
 
-pushd "%~dp0" >nul 2>&1
-if errorlevel 1 (
-  echo [ERRO] Não foi possível acessar o diretório do projeto.
-  endlocal
-  exit /b 1
-)
+cd /d "%~dp0"
 
-if "%~1"=="" goto menu
-
-set "INTERACTIVE=0"
 if /i "%~1"=="debug" goto debug
 if /i "%~1"=="dev" goto debug
 if /i "%~1"=="release" goto release
 if /i "%~1"=="build" goto release
-if /i "%~1"=="help" goto usage
-if /i "%~1"=="--help" goto usage
-if /i "%~1"=="/?" goto usage
+if "%~1"=="" goto menu
 
-echo [ERRO] Opção desconhecida: %~1
-echo.
+echo Unknown command: %~1
 set "EXIT_CODE=2"
-goto usage
+goto result
 
 :menu
-title %APP_NAME% - Launcher
 cls
 echo.
-echo  ============================================================
-echo    CODEX APP
-echo    Launcher de desenvolvimento para Windows
-echo  ============================================================
+echo  Codex App
+echo  ==============================
 echo.
-echo    [1] Iniciar em modo debug
-echo    [2] Compilar e iniciar release
-echo    [0] Sair
+echo  1. Start in debug mode
+echo  2. Build and start release
+echo  0. Exit
 echo.
-choice /c 120 /n /m "  Selecione uma opção: "
+choice /c 120 /n /m "Select an option: "
 
-if errorlevel 3 goto shutdown
+if errorlevel 3 goto end
 if errorlevel 2 goto release
 if errorlevel 1 goto debug
 
 :debug
-call :preflight
-if errorlevel 1 (
-  set "EXIT_CODE=1"
-  goto result
-)
-
-title %APP_NAME% - Debug
+call :prepare_node_dependencies || goto failure
 echo.
-echo [INFO] Iniciando ambiente de desenvolvimento...
+echo Starting Codex App in debug mode...
 echo.
 call pnpm dev:launch
 set "EXIT_CODE=%ERRORLEVEL%"
 goto result
 
 :release
-call :preflight
-if errorlevel 1 (
-  set "EXIT_CODE=1"
-  goto result
-)
-
-title %APP_NAME% - Release
+call :prepare_node_dependencies || goto failure
 echo.
-echo [INFO] Compilando e iniciando a versão release...
+echo Building and starting Codex App release...
 echo.
 call pnpm release
 set "EXIT_CODE=%ERRORLEVEL%"
 goto result
 
-:preflight
-where.exe node >nul 2>&1
+:prepare_node_dependencies
+call :require_pnpm || exit /b 1
+
+if not exist "pnpm-lock.yaml" (
+  echo pnpm-lock.yaml was not found. Dependencies cannot be installed reproducibly.
+  exit /b 1
+)
+
+if not exist "node_modules" goto install_node_dependencies
+
+call pnpm list --depth=0 >nul 2>nul
+if errorlevel 1 goto install_node_dependencies
+
+if not exist "node_modules\.bin\tauri.cmd" goto rebuild_node_shims
+goto node_dependencies_ready
+
+:install_node_dependencies
+echo.
+echo Local dependencies are missing or inconsistent.
+echo Installing the exact versions defined in pnpm-lock.yaml...
+echo.
+call pnpm install --frozen-lockfile
 if errorlevel 1 (
-  echo [ERRO] Node.js não foi encontrado no PATH.
+  echo.
+  echo Dependency installation failed.
   exit /b 1
 )
 
-where.exe pnpm >nul 2>&1
+call pnpm list --depth=0 >nul 2>nul
 if errorlevel 1 (
-  echo [ERRO] pnpm não foi encontrado no PATH.
+  echo The dependency tree remained inconsistent after installation.
   exit /b 1
 )
 
-where.exe pwsh >nul 2>&1
+if exist "node_modules\.bin\tauri.cmd" goto node_dependencies_ready
+
+:rebuild_node_shims
+echo.
+echo Recreating local dependency commands...
+echo.
+call pnpm rebuild
 if errorlevel 1 (
-  echo [ERRO] PowerShell 7 não foi encontrado no PATH.
+  echo.
+  echo Recreating local dependency commands failed.
   exit /b 1
 )
 
-pwsh -NoLogo -NoProfile -NonInteractive -Command "if ($PSVersionTable.PSVersion.Major -lt 7) { exit 1 }" >nul 2>&1
-if errorlevel 1 (
-  echo [ERRO] O executável pwsh precisa ser PowerShell 7 ou superior.
-  exit /b 1
-)
-
-where.exe cargo >nul 2>&1
-if errorlevel 1 (
-  echo [ERRO] Rust/Cargo não foi encontrado no PATH.
-  exit /b 1
-)
-
-if not exist "package.json" (
-  echo [ERRO] package.json não foi encontrado no diretório do projeto.
-  exit /b 1
-)
-
-if not exist "src-tauri\tauri.conf.json" (
-  echo [ERRO] src-tauri\tauri.conf.json não foi encontrado.
-  exit /b 1
-)
-
-if not exist "node_modules" (
-  echo [ERRO] As dependências ainda não foram instaladas.
-  echo        Execute: pnpm install --frozen-lockfile
+:node_dependencies_ready
+if not exist "node_modules\.bin\tauri.cmd" (
+  echo The local Tauri CLI was not found after dependency preparation.
   exit /b 1
 )
 
 exit /b 0
 
+:require_pnpm
+where pnpm.cmd >nul 2>nul
+if not errorlevel 1 exit /b 0
+
+where pnpm.exe >nul 2>nul
+if not errorlevel 1 exit /b 0
+
+echo pnpm was not found on PATH.
+echo Install pnpm 11.22.0 and make the command available on PATH.
+exit /b 1
+
+:failure
+set "EXIT_CODE=1"
+echo.
+echo Unable to start the operation.
+
 :result
 echo.
 if "%EXIT_CODE%"=="0" (
-  echo [OK] Operação concluída com sucesso.
+  echo Operation completed.
 ) else (
-  echo [ERRO] A operação terminou com o código %EXIT_CODE%.
+  echo The operation exited with code %EXIT_CODE%.
 )
 
-if "%INTERACTIVE%"=="1" (
+if "%~1"=="" (
   echo.
-  echo Pressione qualquer tecla para voltar ao menu...
-  pause >nul
-  goto menu
+  pause
 )
-goto shutdown
 
-:usage
-echo Uso: %~nx0 [comando]
-echo.
-echo Comandos:
-echo   debug, dev       Inicia o aplicativo em modo debug.
-echo   release, build   Compila e inicia a versão release.
-echo   help             Exibe esta ajuda.
-goto shutdown
-
-:shutdown
-popd >nul
+:end
 endlocal & exit /b %EXIT_CODE%

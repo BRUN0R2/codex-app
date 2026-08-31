@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
-
+import { useI18n } from "../i18n/context";
+import { formatMessage } from "../i18n/messages";
 import type { DiffDocument } from "./diffDocument";
 import {
   calculateDiffViewportIntrinsicHeight,
@@ -24,6 +25,7 @@ export function DiffView(props: {
   readonly path: string;
   readonly viewportSizing: DiffViewportSizing;
 }) {
+  const i18n = useI18n();
   let viewportElement: HTMLDivElement | undefined;
   let canvasElement: VirtualRowsCanvas | undefined;
   let releaseResizeObservation: (() => void) | undefined;
@@ -148,7 +150,7 @@ export function DiffView(props: {
     >
       {/* biome-ignore lint/a11y/useSemanticElements: native table formatting is not interoperable with absolutely positioned virtual rows in supported WebViews. */}
       <div
-        aria-label={`Diferenças em ${props.path}`}
+        aria-label={formatMessage(i18n.messages().timeline.diffIn, { path: props.path })}
         aria-colcount={props.mode === "split" ? 4 : 2}
         aria-rowcount={rowCount()}
         class="diff-virtual-table"

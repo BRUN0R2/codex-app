@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  chromiumAuditArguments,
   compareRetainedIdentities,
   loopbackHttpOrigin,
   type ObservedProcess,
@@ -26,6 +27,21 @@ afterEach(async () => {
 });
 
 describe("visual audit runtime", () => {
+  it("launches Edge without a compatibility relaunch and with one isolated profile", () => {
+    const profile = path.resolve("C:/temporary/codex-app-visual-test");
+    const arguments_ = chromiumAuditArguments(profile);
+
+    expect(arguments_).toContain("--edge-skip-compat-layer-relaunch");
+    expect(arguments_).toContain("--remote-debugging-port=0");
+    expect(arguments_.filter((argument) => argument.startsWith("--user-data-dir="))).toEqual([
+      `--user-data-dir=${profile}`,
+    ]);
+  });
+
+  it("rejects a relative browser profile", () => {
+    expect(() => chromiumAuditArguments("relative-profile")).toThrow(/absolute path/u);
+  });
+
   it("builds a loopback origin from an ephemeral server address", () => {
     expect(loopbackHttpOrigin({ address: "127.0.0.1", family: "IPv4", port: 43_123 })).toBe(
       "http://127.0.0.1:43123",
@@ -103,7 +119,7 @@ describe("visual audit runtime", () => {
       ["-e", "process.stderr.write('browser failed'); process.exit(23)"],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
-    const processObservation = observeProcess(child, "Navegador");
+    const processObservation = observeProcess(child, "Browser");
     await once(child, "close");
 
     const directory = await createTemporaryDirectory();
@@ -111,7 +127,25 @@ describe("visual audit runtime", () => {
       waitForDevToolsEndpoint(directory, processObservation, {
         timeoutMilliseconds: 500,
       }),
-    ).rejects.toThrow(/Navegador encerrou com código 23[\s\S]*browser failed/u);
+    ).rejects.toThrow(/Browser exited with code 23[\s\S]*browser failed/u);
+  });
+
+  it("waits for a detached browser after its launcher exits successfully", async () => {
+    const child = spawn(process.execPath, ["-e", "process.exit(0)"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const processObservation = observeProcess(child, "Browser");
+    await once(child, "close");
+
+    const directory = await createTemporaryDirectory();
+    const activePortPath = path.join(directory, "DevToolsActivePort");
+    const pendingEndpoint = waitForDevToolsEndpoint(directory, processObservation, {
+      pollIntervalMilliseconds: 5,
+      timeoutMilliseconds: 500,
+    });
+    await writeFile(activePortPath, "43123\n/devtools/browser/detached\n", "utf8");
+
+    await expect(pendingEndpoint).resolves.toMatchObject({ port: 43_123 });
   });
 });
 

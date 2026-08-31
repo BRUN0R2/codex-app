@@ -1,5 +1,5 @@
 import { onMount } from "solid-js";
-
+import { useI18n } from "../i18n/context";
 import { describeError } from "../infrastructure/errorDescription";
 
 import { CodexGlyph } from "./CodexGlyph";
@@ -9,6 +9,7 @@ export function ApplicationRenderFailure(props: {
   readonly onReport: (error: unknown) => void;
   readonly onReload: () => void;
 }) {
+  const i18n = useI18n();
   const message = renderFailureMessage(props.error);
 
   onMount(() => props.onReport(props.error));
@@ -19,11 +20,11 @@ export function ApplicationRenderFailure(props: {
         <span aria-hidden="true" class="brand-mark large">
           <CodexGlyph size={30} />
         </span>
-        <p class="eyebrow">Falha de renderização</p>
-        <h1>O shell do aplicativo falhou</h1>
+        <p class="eyebrow">{i18n.messages().renderFailure.eyebrow}</p>
+        <h1>{i18n.messages().renderFailure.applicationTitle}</h1>
         <p>{message}</p>
         <button class="primary-button" onClick={props.onReload} type="button">
-          Reiniciar interface
+          {i18n.messages().renderFailure.restart}
         </button>
       </div>
     </main>
@@ -36,23 +37,21 @@ export function TimelineTurnRenderFailure(props: {
   readonly onReset: () => void;
   readonly turnId: string;
 }) {
+  const i18n = useI18n();
   onMount(() => {
     props.onReport(
-      new Error(
-        `Falha ao renderizar o turno ${props.turnId}: ${renderFailureMessage(props.error)}`,
-        {
-          cause: props.error,
-        },
-      ),
+      new Error(`Failed to render turn ${props.turnId}: ${renderFailureMessage(props.error)}`, {
+        cause: props.error,
+      }),
     );
   });
 
   return (
     <section class="turn-failure" role="alert">
-      <strong>Não foi possível renderizar este turno</strong>
+      <strong>{i18n.messages().renderFailure.turnTitle}</strong>
       <p>{renderFailureMessage(props.error)}</p>
       <button class="secondary-button" onClick={props.onReset} type="button">
-        Tentar novamente
+        {i18n.messages().common.tryAgain}
       </button>
     </section>
   );

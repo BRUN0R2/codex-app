@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 
+import { useI18n } from "../i18n/context";
 import { calculateFixedRowVirtualRange } from "./fixedRowVirtualization";
 import { readSourceVirtualRows } from "./sourceVirtualRows";
 import type { SourceOutputProjection } from "./toolOutputProjection";
@@ -15,6 +16,7 @@ const SOURCE_VIEWPORT_HEIGHT_PX = 205;
 const MAX_SOURCE_CANVAS_HEIGHT_PX = 8_000_000;
 
 export function VirtualizedSourceOutput(props: { readonly projection: SourceOutputProjection }) {
+  const i18n = useI18n();
   let viewportElement: HTMLDivElement | undefined;
   let canvasElement: VirtualRowsCanvas | undefined;
   let rowsWindow: VirtualRowsWindow | undefined;
@@ -89,7 +91,7 @@ export function VirtualizedSourceOutput(props: { readonly projection: SourceOutp
     >
       {/* biome-ignore lint/a11y/useSemanticElements: native table formatting is not interoperable with absolutely positioned virtual rows in supported WebViews. */}
       <div
-        aria-label="Código lido do arquivo"
+        aria-label={i18n.messages().toolOutput.sourceCode}
         aria-colcount={2}
         aria-rowcount={props.projection.lines.length}
         class="tool-source-output tool-source-virtual-table"

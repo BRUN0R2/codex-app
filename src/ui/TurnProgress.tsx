@@ -1,6 +1,8 @@
 import { createMemo, For, Show } from "solid-js";
 
 import type { FileChange, PlanItem, PlanStepStatus } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage } from "../i18n/messages";
 
 import { Icon } from "./Icon";
 import { ReviewStatisticsStore } from "./reviewChanges";
@@ -16,6 +18,7 @@ interface TurnProgressProps {
 }
 
 export function TurnProgress(props: TurnProgressProps) {
+  const i18n = useI18n();
   const reviewStatistics = new ReviewStatisticsStore();
   const currentStepIndex = createMemo(() => {
     const plan = props.plan;
@@ -39,10 +42,13 @@ export function TurnProgress(props: TurnProgressProps) {
             <div class="plan-progress-plan">
               <span aria-hidden="true" class="plan-progress-current-mark" />
               <span>
-                Passo {(currentStepIndex() ?? 0) + 1} / {plan().steps.length}
+                {formatMessage(i18n.messages().turnProgress.step, {
+                  current: (currentStepIndex() ?? 0) + 1,
+                  total: plan().steps.length,
+                })}
               </span>
               <section
-                aria-label="Plano de trabalho"
+                aria-label={i18n.messages().turnProgress.plan}
                 class="plan-progress-popover"
                 id={POPOVER_ID}
                 role="tooltip"
@@ -71,12 +77,18 @@ export function TurnProgress(props: TurnProgressProps) {
             aria-expanded={props.reviewOpen}
             class="plan-review-trigger"
             onClick={props.onToggleReview}
-            title={props.reviewOpen ? "Fechar revisão" : "Revisar arquivos alterados"}
+            title={
+              props.reviewOpen
+                ? i18n.messages().turnProgress.closeReview
+                : i18n.messages().turnProgress.reviewFiles
+            }
             type="button"
           >
             <span>
               {reviewStats().fileCount}{" "}
-              {reviewStats().fileCount === 1 ? "arquivo alterado" : "arquivos alterados"}
+              {reviewStats().fileCount === 1
+                ? i18n.messages().common.changedFile
+                : i18n.messages().common.changedFiles}
             </span>
             <span class="plan-review-additions">+{reviewStats().additions}</span>
             <span class="plan-review-deletions">−{reviewStats().deletions}</span>

@@ -1,8 +1,8 @@
-export function formatShortDate(resetAt: number): string {
+export function formatShortDate(resetAt: number, locale: string, soonLabel: string): string {
   if (!Number.isFinite(resetAt)) {
-    return "em breve";
+    return soonLabel;
   }
-  return new Intl.DateTimeFormat("pt-BR", {
+  return new Intl.DateTimeFormat(locale, {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
@@ -10,11 +10,15 @@ export function formatShortDate(resetAt: number): string {
   }).format(new Date(resetAt));
 }
 
-export function formatShortDateWithTimeZone(timestamp: number): string {
+export function formatShortDateWithTimeZone(
+  timestamp: number,
+  locale: string,
+  soonLabel: string,
+): string {
   if (!Number.isFinite(timestamp)) {
-    return "em breve";
+    return soonLabel;
   }
-  return new Intl.DateTimeFormat("pt-BR", {
+  return new Intl.DateTimeFormat(locale, {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",

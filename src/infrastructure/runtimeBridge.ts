@@ -84,7 +84,7 @@ export function listenRuntime<T>(
 export function emitBrowserPreviewRuntimeEvent(event: string, payload: unknown): boolean {
   const preview = browserPreviewRuntime;
   if (preview === null) {
-    throw new Error("O runtime da visualização ainda não foi instalado.");
+    throw new Error("The preview runtime has not been installed yet.");
   }
   const listeners = preview.listeners.get(event) ?? [];
   for (const listener of listeners) {

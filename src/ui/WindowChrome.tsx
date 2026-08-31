@@ -1,5 +1,5 @@
 import { createSignal, onCleanup, onMount } from "solid-js";
-
+import { useI18n } from "../i18n/context";
 import {
   closeMainWindow,
   isMainWindowMaximized,
@@ -42,7 +42,7 @@ function DesktopWindowChrome(props: WindowChromeProps) {
 
   function reportControlFailure(operation: string, reason: unknown): void {
     const detail = reason instanceof Error ? reason.message : String(reason);
-    props.onError?.(new Error(`Não foi possível ${operation}: ${detail}`));
+    props.onError?.(new Error(`Could not ${operation}: ${detail}`));
   }
 
   async function synchronizeMaximizedState(): Promise<void> {
@@ -52,7 +52,7 @@ function DesktopWindowChrome(props: WindowChromeProps) {
         setMaximized(nextMaximized);
       }
     } catch (reason: unknown) {
-      reportControlFailure("consultar o estado da janela", reason);
+      reportControlFailure("read the window state", reason);
     }
   }
 
@@ -132,7 +132,7 @@ function DesktopWindowChrome(props: WindowChromeProps) {
           unlistenFocusChanged = unlisten;
         }
       })
-      .catch((reason: unknown) => reportControlFailure("acompanhar o foco da janela", reason));
+      .catch((reason: unknown) => reportControlFailure("track window focus", reason));
   });
 
   onCleanup(() => {
@@ -151,11 +151,11 @@ function DesktopWindowChrome(props: WindowChromeProps) {
     <WindowChromeLayout
       interactive={true}
       maximized={maximized()}
-      onClose={() => runControlAction("fechar a janela", closeMainWindow)}
-      onMinimize={() => runControlAction("minimizar a janela", minimizeMainWindow)}
+      onClose={() => runControlAction("close the window", closeMainWindow)}
+      onMinimize={() => runControlAction("minimize the window", minimizeMainWindow)}
       onToggleMaximize={() =>
         runControlAction(
-          maximized() ? "restaurar a janela" : "maximizar a janela",
+          maximized() ? "restore the window" : "maximize the window",
           toggleMainWindowMaximize,
           true,
         )
@@ -168,12 +168,14 @@ function DesktopWindowChrome(props: WindowChromeProps) {
 }
 
 function WindowChromeLayout(props: WindowChromeLayoutProps) {
-  const maximizeLabel = () => (props.maximized ? "Restaurar janela" : "Maximizar janela");
+  const i18n = useI18n();
+  const maximizeLabel = () =>
+    props.maximized ? i18n.messages().window.restoreWindow : i18n.messages().window.maximizeWindow;
 
   return (
     <header class="window-chrome" classList={{ preview: !props.interactive }}>
       <button
-        aria-label="Barra de título da janela"
+        aria-label={i18n.messages().window.titleBar}
         class="window-chrome-drag-region"
         data-tauri-drag-region={props.interactive ? "" : undefined}
         onDblClick={props.onToggleMaximize}
@@ -186,10 +188,10 @@ function WindowChromeLayout(props: WindowChromeLayoutProps) {
         ref={props.setControlsReference}
       >
         <button
-          aria-label="Minimizar janela"
+          aria-label={i18n.messages().window.minimizeWindow}
           onClick={props.onMinimize}
           tabIndex={props.interactive ? 0 : -1}
-          title="Minimizar"
+          title={i18n.messages().window.minimize}
           type="button"
         >
           <WindowChromeMinimizeIcon />
@@ -204,11 +206,11 @@ function WindowChromeLayout(props: WindowChromeLayoutProps) {
           {props.maximized ? <WindowChromeRestoreIcon /> : <WindowChromeMaximizeIcon />}
         </button>
         <button
-          aria-label="Fechar janela"
+          aria-label={i18n.messages().window.closeWindow}
           class="window-chrome-close"
           onClick={props.onClose}
           tabIndex={props.interactive ? 0 : -1}
-          title="Fechar"
+          title={i18n.messages().common.close}
           type="button"
         >
           <WindowChromeCloseIcon />

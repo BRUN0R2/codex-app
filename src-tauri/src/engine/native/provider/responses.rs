@@ -2063,7 +2063,7 @@ mod tests {
             protocol: ResponseProtocol::Lite,
             parallel_tool_calls: true,
             reasoning_effort: Some(ReasoningEffort::Ultra),
-            reasoning_summary: None,
+            reasoning_summary: Some(ReasoningSummarySetting::Auto),
             prompt_cache_key: Some("thread-1"),
             ..ResponseRequestSettings::default()
         };
@@ -2134,7 +2134,7 @@ mod tests {
         assert!(first.get("tools").is_none());
         assert_eq!(first["parallel_tool_calls"], false);
         assert_eq!(first["reasoning"]["context"], "all_turns");
-        assert!(first["reasoning"].get("summary").is_none());
+        assert_eq!(first["reasoning"]["summary"], "auto");
         assert_eq!(first["input"][0]["type"], "additional_tools");
         assert_eq!(first["input"][0]["role"], "developer");
         assert_eq!(first["input"][0]["tools"][0]["type"], "namespace");

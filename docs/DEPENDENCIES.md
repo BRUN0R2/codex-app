@@ -1,96 +1,93 @@
-# Dependências
+# Dependencies
 
-`package.json` e `src-tauri/Cargo.toml` são as fontes das dependências diretas;
-`pnpm-lock.yaml` e `src-tauri/Cargo.lock` travam as resoluções. Este documento
-registra somente o propósito e as exceções que exigem manutenção.
+`package.json` and `src-tauri/Cargo.toml` are the sources of direct
+dependencies. `pnpm-lock.yaml` and `src-tauri/Cargo.lock` lock their complete
+resolution. This document records only purpose and maintenance exceptions.
 
 ## Frontend
 
-| Dependência | Papel |
+| Dependency | Purpose |
 | --- | --- |
-| `solid-js` | reatividade e renderização |
-| `@tauri-apps/api` | commands e events do shell nativo |
-| `@tauri-apps/plugin-dialog` | seleção nativa de arquivos |
-| `@tauri-apps/plugin-opener` | links externos e diretórios já validados |
-| `marked` | parser de Markdown |
-| `dompurify` | sanitização antes do DOM |
+| `solid-js` | Reactive state and rendering |
+| `@tauri-apps/api` | Native-shell commands and events |
+| `@tauri-apps/plugin-dialog` | Native file selection |
+| `@tauri-apps/plugin-opener` | External links and validated directories |
+| `marked` | Markdown parsing |
+| `dompurify` | Sanitization before DOM insertion |
 
-Vite, TypeScript, Biome, Vitest e Tauri CLI existem apenas no ambiente de
-desenvolvimento e build.
+Vite, TypeScript, Biome, Vitest, and the Tauri CLI are development and build
+dependencies only. Translation discovery uses Vite's native
+`import.meta.glob`; it adds no runtime dependency.
 
 ## Backend
 
-| Grupo | Dependências | Papel |
+| Group | Dependencies | Purpose |
 | --- | --- | --- |
-| shell | `tauri`, plugins e `tauri-build` | janela, integração Windows e bundle |
-| Windows | `webview2-com`, `windows` | child WebView2, COM e Job Objects |
-| async | `tokio`, `futures-util` | tarefas, concorrência e SSE |
-| sandbox | `v8` | isolate JavaScript do Code Mode |
-| HTTP | `reqwest`, `url` | HTTPS rustls, cookies e URLs validadas |
-| storage | `rusqlite`, `r2d2`, `r2d2_sqlite` | SQLite WAL e pool |
-| secrets | `age`, `keyring-core`, `windows-native-keyring-store`, `zeroize`, `rand`, `sha2` | cofre, PKCE e hashes |
-| contratos | `serde`, `serde_json`, `base64`, `image` | IPC, envelopes e imagens |
-| domínio | `chrono`, `uuid`, `thiserror`, `tempfile`, `parking_lot` | tempo, IDs, erros, spool e locks |
+| shell | `tauri`, plugins, `tauri-build` | Window, Windows integration, and bundle |
+| Windows | `webview2-com`, `windows` | Child WebView2, COM, and Job Objects |
+| async | `tokio`, `futures-util` | Tasks, concurrency, and SSE |
+| sandbox | `v8` | Isolated Code Mode JavaScript runtime |
+| HTTP | `reqwest`, `url` | rustls HTTPS, cookies, and validated URLs |
+| storage | `rusqlite`, `r2d2`, `r2d2_sqlite` | SQLite WAL and pooling |
+| secrets | `age`, `keyring-core`, `windows-native-keyring-store`, `zeroize`, `rand`, `sha2` | Vault, PKCE, and hashes |
+| contracts | `serde`, `serde_json`, `base64`, `image` | IPC, envelopes, and images |
+| domain | `chrono`, `uuid`, `thiserror`, `tempfile`, `parking_lot` | Time, IDs, errors, spooling, and locks |
 
-`webview2-com` e `windows` são diretas porque o código nomeia e testa APIs
-específicas; nenhum objeto COM ou comando CDP genérico atravessa o contrato do
-agente.
+`webview2-com` and `windows` are direct dependencies because the code names
+and tests specific APIs. No COM object or generic CDP command crosses the agent
+contract.
 
 ## Rust
 
-Toolchain, MSRV e CI usam Rust 1.98.0. O projeto mantém `edition = "2024"` e
-`build.warnings = "deny"`; Clippy também trata warnings locais como erro.
+Toolchain, MSRV, and CI use Rust 1.98.0. The project uses `edition = "2024"`
+and `build.warnings = "deny"`; Clippy also treats local warnings as errors.
 
-Fontes:
+Sources:
 
 - [Rust 1.98.0](https://blog.rust-lang.org/2026/08/20/Rust-1.98.0/);
-- [notas de release](https://doc.rust-lang.org/releases.html#version-1980-2026-08-20);
+- [release notes](https://doc.rust-lang.org/releases.html#version-1980-2026-08-20);
 - [`build.warnings`](https://doc.rust-lang.org/cargo/reference/config.html#buildwarnings).
 
-Novas APIs ou lints só devem ser adotados quando reduzirem complexidade ou
-melhorarem correção no código real. Não use `allow` para esconder regressões.
+Adopt new APIs or lints only when they reduce real complexity or improve
+correctness. Never use `allow` to hide regressions. The Rust 1.98 review kept
+cross-platform floating-point behavior and simple existing APIs where newer
+alternatives had no measured benefit. The `filter_map_bool_then` and
+`obfuscated_if_else` diagnostics did simplify real multi-agent paths.
 
-A revisão do Rust 1.98 não adotou operações algébricas de ponto flutuante porque
-elas podem variar entre plataformas, nem trocou código simples por APIs novas sem
-ganho medido. O benefício aplicável é o toolchain atual, o MSRV explícito e
-warnings como erro. Os novos diagnósticos `filter_map_bool_then` e
-`obfuscated_if_else` simplificaram fluxos reais do multiagente; novas APIs entram
-somente quando houver uso real.
+## Transitive exception
 
-## Exceção transitiva
-
-O lockfile possui um único caminho conhecido para crates `unic-*` sem
-manutenção:
+The lockfile has one known path to unmaintained `unic-*` crates:
 
 ```text
 tauri-utils 2.9.3 -> urlpattern 0.3.0 -> unic-ucd-ident 0.9.0
 ```
 
-Ele é transitivo do Tauri estável. `pnpm verify:transitive` permite somente esse
-caminho e essas versões; qualquer desvio falha. Remova a exceção quando uma
-release estável do Tauri atualizar `urlpattern`.
+It is transitive from stable Tauri. `pnpm verify:transitive` allows only this
+path and these versions. Remove the exception when a stable Tauri release
+updates `urlpattern`.
 
-## Ripgrep embarcado
+## Bundled ripgrep
 
-`search_text` usa ripgrep 15.2.0 próprio, nunca uma instalação global ou o
-Codex CLI. `scripts/ripgrep-manifest.json` fixa arquitetura, assets e hashes.
+`search_text` uses its own ripgrep 15.2.0, never a global installation or the
+Codex CLI. `scripts/ripgrep-manifest.json` locks architecture, assets, and
+hashes.
 
 ```powershell
 pnpm tools:bootstrap
-pnpm rg -- -n "texto" src src-tauri/src
+pnpm rg -- -n "text" src src-tauri/src
 ```
 
-Bootstrap, build e runtime validam versão e SHA-256. O executável fica em
-`.tools/ripgrep`, entra no bundle como sidecar e é chamado por caminho absoluto,
-sem shell. O `PATH` global não é alterado.
+Bootstrap, build, and runtime validate the version and SHA-256. The executable
+lives in `.tools/ripgrep`, is bundled as a sidecar, and is invoked by absolute
+path without a shell. Global `PATH` is never modified.
 
-## Política de atualização
+## Update policy
 
-1. Atualize apenas dependências com uso confirmado.
-2. Revise release notes, features, MSRV, licenças e grafo transitivo.
-3. Preserve versões exatas e ambos os lockfiles.
-4. Remova features e dependências que deixaram de ser necessárias.
-5. Execute `pnpm verify:transitive` e `pnpm verify`.
+1. Add or update only dependencies with confirmed use.
+2. Review release notes, features, MSRV, licenses, and the transitive graph.
+3. Keep exact versions and both lockfiles.
+4. Remove unused features and dependencies.
+5. Run `pnpm verify:transitive` and `pnpm verify`.
 
-`.references` contém somente fontes de estudo ignoradas. Apagar esse diretório
-não pode alterar build, runtime ou testes.
+`.references` contains ignored study material only. Removing it must not affect
+builds, runtime behavior, or tests.

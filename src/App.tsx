@@ -1,6 +1,7 @@
-import { ErrorBoundary, Match, Show, Switch } from "solid-js";
-
-import { shouldRenderWindowChrome } from "./platform/desktopRuntime";
+import { createEffect, ErrorBoundary, Match, Show, Switch } from "solid-js";
+import { createI18nController, I18nProvider, useI18n } from "./i18n/context";
+import { synchronizeApplicationMenu } from "./infrastructure/desktopClient";
+import { isDesktopRuntime, shouldRenderWindowChrome } from "./platform/desktopRuntime";
 import { createAppController } from "./state/createAppController";
 import { AppShell } from "./ui/AppShell";
 import { CodexGlyph } from "./ui/CodexGlyph";
@@ -10,8 +11,30 @@ import { ApplicationRenderFailure } from "./ui/RenderFailure";
 import { WindowChrome } from "./ui/WindowChrome";
 
 export default function App() {
-  const controller = createAppController();
+  const i18n = createI18nController();
+
+  return (
+    <I18nProvider controller={i18n}>
+      <Application />
+    </I18nProvider>
+  );
+}
+
+function Application() {
+  const i18n = useI18n();
+  const controller = createAppController({
+    confirmations: () => i18n.messages().confirmations,
+  });
+  const desktopRuntime = isDesktopRuntime();
   const showWindowChrome = shouldRenderWindowChrome();
+
+  createEffect(() => {
+    if (!desktopRuntime) return;
+    const translation = i18n.messages().nativeMenu;
+    void synchronizeApplicationMenu(translation).catch((reason: unknown) => {
+      controller.reportError(reason);
+    });
+  });
 
   return (
     <div class="application-frame" classList={{ "with-window-chrome": showWindowChrome }}>
@@ -28,19 +51,19 @@ export default function App() {
                 <span aria-hidden="true" class="brand-mark large">
                   <CodexGlyph size={30} />
                 </span>
-                <p class="eyebrow">Falha de inicialização</p>
-                <h1>O engine nativo não iniciou</h1>
+                <p class="eyebrow">{i18n.messages().app.initializationEyebrow}</p>
+                <h1>{i18n.messages().app.initializationTitle}</h1>
                 <p>
                   {controller.runtimeStatus().message ??
                     controller.error() ??
-                    "Falha sem diagnóstico."}
+                    i18n.messages().app.missingDiagnostic}
                 </p>
                 <button
                   class="primary-button"
                   onClick={() => controller.retryInitialization()}
                   type="button"
                 >
-                  Tentar novamente
+                  {i18n.messages().app.retry}
                 </button>
               </div>
             </main>
@@ -52,7 +75,7 @@ export default function App() {
                   <CodexGlyph size={30} />
                 </span>
                 <i />
-                <p>Inicializando o engine nativo…</p>
+                <p>{i18n.messages().app.initializing}</p>
               </div>
             </main>
           </Match>

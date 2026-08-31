@@ -614,7 +614,7 @@ describe("decodificação dos contratos nativos", () => {
     );
 
     if (decoded.method !== "item.started" || decoded.params.item.type !== "commandExecution") {
-      throw new Error("A execução de comando ativa mudou de tipo.");
+      throw new Error("The active command execution changed type.");
     }
     expect(decoded.params.item.liveOutput).toEqual({
       stdout: "building...",
@@ -701,7 +701,7 @@ describe("decodificação dos contratos nativos", () => {
       notification.params.item.type !== "toolExecution" ||
       notification.params.item.output === null
     ) {
-      throw new Error("A referência de saída mudou de tipo.");
+      throw new Error("The output reference changed type.");
     }
     expect(notification.params.item.output).toEqual(output);
 
@@ -740,7 +740,7 @@ describe("decodificação dos contratos nativos", () => {
       notification({ type: "update", movePath: "src/new.ts" }),
     );
     if (decoded.method !== "item.completed" || decoded.params.item.type !== "fileChange") {
-      throw new Error("A alteração de arquivo decodificada mudou de tipo.");
+      throw new Error("The decoded file change changed type.");
     }
     expect(decoded.params.item.changes[0]?.kind).toEqual({
       type: "update",
@@ -774,7 +774,7 @@ describe("decodificação dos contratos nativos", () => {
       ]),
     );
     if (decoded.method !== "item.completed" || decoded.params.item.type !== "plan") {
-      throw new Error("O plano decodificado mudou de tipo.");
+      throw new Error("The decoded plan changed type.");
     }
     expect(decoded.params.item.steps[1]?.status).toBe("inProgress");
     expect(() => decodeEngineNotification(notification([]))).toThrow(ContractError);
@@ -819,7 +819,7 @@ describe("decodificação dos contratos nativos", () => {
     });
 
     if (decoded.method !== "item.completed") {
-      throw new Error("A notificação decodificada mudou de método.");
+      throw new Error("The decoded notification changed method.");
     }
     expect(decoded.params.item.type).toBe("contextUsage");
   });
@@ -835,7 +835,7 @@ describe("decodificação dos contratos nativos", () => {
     });
 
     if (decoded.method !== "item.completed") {
-      throw new Error("A notificação decodificada mudou de método.");
+      throw new Error("The decoded notification changed method.");
     }
     expect(decoded.params.item).toEqual({ type: "contextCompaction", id: "compaction-1" });
   });
@@ -874,7 +874,7 @@ describe("decodificação dos contratos nativos", () => {
     });
     expect(decoded.method).toBe("item.streamDeltas");
     if (decoded.method !== "item.streamDeltas") {
-      throw new Error("O lote de deltas mudou de método.");
+      throw new Error("The delta batch changed method.");
     }
     expect(decoded.params.deltas).toHaveLength(3);
     expect(decoded.params.deltas[2]).toEqual({
@@ -914,7 +914,7 @@ describe("decodificação dos contratos nativos", () => {
     );
 
     if (decoded.method !== "turn.completed") {
-      throw new Error("A notificação terminal mudou de método.");
+      throw new Error("The terminal notification changed method.");
     }
     expect(decoded.params.turn).toEqual({
       id: "turn-1",

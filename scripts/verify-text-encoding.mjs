@@ -14,14 +14,14 @@ const candidateFilesResult = spawnSync(
     windowsHide: true,
   },
 );
-assertCommandSucceeded(candidateFilesResult, "Não foi possível listar os arquivos versionados.");
+assertCommandSucceeded(candidateFilesResult, "Could not list repository files.");
 const deletedFilesResult = spawnSync("git", ["ls-files", "--deleted", "-z"], {
   cwd: projectRoot,
   encoding: "buffer",
   maxBuffer: 16 * 1_024 * 1_024,
   windowsHide: true,
 });
-assertCommandSucceeded(deletedFilesResult, "Não foi possível listar os arquivos removidos.");
+assertCommandSucceeded(deletedFilesResult, "Could not list deleted files.");
 
 const deletedFiles = new Set(parseNullSeparated(deletedFilesResult.stdout));
 const existingFiles = parseNullSeparated(candidateFilesResult.stdout).filter(
@@ -39,7 +39,7 @@ const attributesResult = spawnSync("git", ["check-attr", "-z", "--stdin", "text"
   maxBuffer: 16 * 1_024 * 1_024,
   windowsHide: true,
 });
-assertCommandSucceeded(attributesResult, "Não foi possível consultar os atributos de texto.");
+assertCommandSucceeded(attributesResult, "Could not inspect text attributes.");
 
 const textAttributes = parseTextAttributes(attributesResult.stdout);
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -56,7 +56,7 @@ for (const [file, textAttribute] of textAttributes) {
     continue;
   }
   if (startsWith(bytes, [0xef, 0xbb, 0xbf])) {
-    failures.push(`${file}: contém BOM UTF-8; salve como UTF-8 sem BOM.`);
+    failures.push(`${file}: contains a UTF-8 BOM; save it as UTF-8 without a BOM.`);
     continue;
   }
   if (
@@ -65,7 +65,7 @@ for (const [file, textAttribute] of textAttributes) {
     startsWith(bytes, [0xff, 0xfe, 0x00, 0x00]) ||
     startsWith(bytes, [0x00, 0x00, 0xfe, 0xff])
   ) {
-    failures.push(`${file}: está em UTF-16/UTF-32; converta para UTF-8 sem BOM.`);
+    failures.push(`${file}: uses UTF-16/UTF-32; convert it to UTF-8 without a BOM.`);
     continue;
   }
   if (bytes.includes(0)) {
@@ -75,22 +75,22 @@ for (const [file, textAttribute] of textAttributes) {
     decoder.decode(bytes);
     validatedFiles += 1;
   } catch {
-    failures.push(`${file}: não contém UTF-8 válido.`);
+    failures.push(`${file}: does not contain valid UTF-8.`);
   }
 }
 
 if (failures.length > 0) {
-  throw new Error(`Política de codificação violada:\n${failures.join("\n")}`);
+  throw new Error(`Encoding policy violation:\n${failures.join("\n")}`);
 }
 
 process.stdout.write(
-  `UTF-8 sem BOM validado em ${validatedFiles} arquivos de texto versionados.\n`,
+  `Validated UTF-8 without BOM in ${validatedFiles} repository text files.\n`,
 );
 
 function parseTextAttributes(output) {
   const fields = parseNullSeparated(output);
   if (fields.length % 3 !== 0) {
-    throw new Error("O resultado de git check-attr está malformado.");
+    throw new Error("The git check-attr result is malformed.");
   }
   const attributes = new Map();
   for (let index = 0; index < fields.length; index += 3) {
@@ -98,7 +98,7 @@ function parseTextAttributes(output) {
     const attribute = fields[index + 1];
     const value = fields[index + 2];
     if (attribute !== "text" || file === undefined || value === undefined) {
-      throw new Error("O resultado de git check-attr contém campos inesperados.");
+      throw new Error("The git check-attr result contains unexpected fields.");
     }
     attributes.set(file, value);
   }

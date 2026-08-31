@@ -27,6 +27,21 @@ export function readLatestContextUsage(thread: CodexThread): ContextUsageItem | 
   return contextUsage;
 }
 
+export function readTurnOutputTokens(turn: Pick<ThreadTurn, "items">): number {
+  let outputTokens = 0;
+  for (const item of turn.items) {
+    if (item.type !== "contextUsage") {
+      continue;
+    }
+    const next = outputTokens + item.usage.outputTokens;
+    if (!Number.isSafeInteger(next)) {
+      throw new Error("The turn output-token sum exceeded the safe numeric limit.");
+    }
+    outputTokens = next;
+  }
+  return outputTokens;
+}
+
 export function upsertItem(
   items: readonly VisibleThreadItem[],
   incoming: VisibleThreadItem,
@@ -37,11 +52,11 @@ export function upsertItem(
   }
   const current = items[index];
   if (current === undefined) {
-    throw new Error("O índice do item ativo ficou inconsistente.");
+    throw new Error("The active-item index became inconsistent.");
   }
   if (current.type !== incoming.type) {
     throw new Error(
-      `O item ${incoming.id} mudou de ${current.type} para ${incoming.type}, violando o contrato.`,
+      `Item ${incoming.id} changed from ${current.type} to ${incoming.type}, violating the contract.`,
     );
   }
   if (current === incoming) {
@@ -84,7 +99,7 @@ export function applyStreamDeltas(
     indexes.set(delta.itemId, itemIndex);
     const current = next[itemIndex];
     if (current === undefined) {
-      throw new Error("O índice do lote de deltas ficou inconsistente.");
+      throw new Error("The delta-batch index became inconsistent.");
     }
     next[itemIndex] = applyStreamDelta(current, delta);
   }
@@ -108,7 +123,7 @@ export function applyCommandStreamDeltasToThread(
     }
     const turn = sourceTurns[turnIndex];
     if (turn === undefined) {
-      throw new Error("O turno do delta de comando ficou inconsistente.");
+      throw new Error("The command-delta turn became inconsistent.");
     }
     const itemIndex = turn.items.findIndex((item) => item.id === delta.itemId);
     if (itemIndex === -1) {
@@ -116,7 +131,7 @@ export function applyCommandStreamDeltasToThread(
     }
     const item = turn.items[itemIndex];
     if (item === undefined) {
-      throw new Error("O item persistido do delta de comando ficou inconsistente.");
+      throw new Error("The persisted command delta item became inconsistent.");
     }
     if (item.type !== "commandExecution") {
       throw new Error(`O delta de comando persistido aponta para um item ${item.type}.`);
@@ -136,7 +151,7 @@ function createItemFromDelta(delta: StreamDelta): VisibleThreadItem {
     case "agentText":
       return { type: "agentMessage", id: delta.itemId, text: delta.delta, phase: null };
     case "commandOutput":
-      throw new Error("O delta de comando chegou antes do item commandExecution.");
+      throw new Error("The command delta arrived before the commandExecution item.");
     case "reasoningText": {
       const parts = Array.from({ length: delta.index + 1 }, () => "");
       parts[delta.index] = delta.delta;
@@ -159,7 +174,7 @@ function applyStreamDelta(current: VisibleThreadItem, delta: StreamDelta): Visib
       return { ...current, text: current.text + delta.delta };
     case "commandOutput": {
       if (current.type !== "commandExecution" || current.liveOutput === null) {
-        throw new Error(`O delta de comando aponta para um item ${current.type} não ativo.`);
+        throw new Error(`The command delta points to an inactive ${current.type} item.`);
       }
       const output = applyCommandOutputOperation(
         current.liveOutput[delta.stream],
@@ -177,7 +192,7 @@ function applyStreamDelta(current: VisibleThreadItem, delta: StreamDelta): Visib
     }
     case "reasoningText": {
       if (current.type !== "reasoning") {
-        throw new Error(`O delta de raciocínio aponta para um item ${current.type}.`);
+        throw new Error(`The reasoning delta points to a ${current.type} item.`);
       }
       const parts = [...current[delta.target]];
       while (parts.length <= delta.index) {
@@ -185,7 +200,7 @@ function applyStreamDelta(current: VisibleThreadItem, delta: StreamDelta): Visib
       }
       const existing = parts[delta.index];
       if (existing === undefined) {
-        throw new Error("O índice do delta de raciocínio ficou inconsistente.");
+        throw new Error("The reasoning-delta index became inconsistent.");
       }
       parts[delta.index] = existing + delta.delta;
       return { ...current, [delta.target]: parts };

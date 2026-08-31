@@ -161,7 +161,7 @@ impl CodeModeToolDelegate {
         );
         let supports_parallel_execution = prepared.supports_parallel_execution(self.permissions);
         let invalidates_read_cache = prepared.invalidates_read_cache(self.permissions);
-        let mut result = match self
+        let execution = self
             .execution_gate
             .run(
                 supports_parallel_execution && !invalidates_read_cache,
@@ -196,12 +196,11 @@ impl CodeModeToolDelegate {
                     result
                 },
             )
-            .await
-        {
-            Ok(result) => result,
-            Err(AppError::Cancelled(message)) => return Err(message),
-            Err(error) => prepared.failed_result(&self.workspace, &error),
-        };
+            .await;
+        let NestedExecutionSettlement {
+            mut result,
+            cancellation_error,
+        } = settle_nested_execution(&prepared, &self.workspace, execution);
         stream_deltas
             .flush()
             .await
@@ -240,7 +239,36 @@ impl CodeModeToolDelegate {
             command.commit();
         }
         notification.map_err(|error| error.to_string())?;
-        Ok(nested_result)
+        match cancellation_error {
+            Some(message) => Err(message),
+            None => Ok(nested_result),
+        }
+    }
+}
+
+struct NestedExecutionSettlement {
+    result: ToolExecutionResult,
+    cancellation_error: Option<String>,
+}
+
+fn settle_nested_execution(
+    prepared: &PreparedTool,
+    workspace: &std::path::Path,
+    execution: Result<ToolExecutionResult, AppError>,
+) -> NestedExecutionSettlement {
+    match execution {
+        Ok(result) => NestedExecutionSettlement {
+            result,
+            cancellation_error: None,
+        },
+        Err(AppError::Cancelled(message)) => NestedExecutionSettlement {
+            result: prepared.failed_result(workspace, &AppError::Cancelled(message.clone())),
+            cancellation_error: Some(message),
+        },
+        Err(error) => NestedExecutionSettlement {
+            result: prepared.failed_result(workspace, &error),
+            cancellation_error: None,
+        },
     }
 }
 
@@ -529,17 +557,48 @@ fn elapsed(started_at: Instant) -> Result<Option<u64>, AppError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::Duration;
 
     use tokio::sync::{Barrier, Notify};
 
     use super::*;
+    use crate::engine::ThreadItem;
+    use crate::engine::native::tools::ToolRegistry;
 
     #[test]
     fn nested_function_tools_reject_non_object_arguments() {
         let error = function_arguments("read_file", Some(json!("bad")))
             .expect_err("non-object input must fail");
         assert!(error.contains("expects an object"));
+    }
+
+    #[test]
+    fn cancelled_nested_tools_produce_a_terminal_failed_item_before_propagation() {
+        let prepared = ToolRegistry
+            .prepare(
+                "read-cancelled".into(),
+                "read_file",
+                r#"{"path":"src/main.rs","start_line":1,"end_line":1}"#,
+            )
+            .expect("read_file should prepare");
+        let settlement = settle_nested_execution(
+            &prepared,
+            Path::new("C:\\workspace"),
+            Err(AppError::Cancelled("turn interrupted".into())),
+        );
+
+        assert_eq!(
+            settlement.cancellation_error.as_deref(),
+            Some("turn interrupted")
+        );
+        assert!(matches!(
+            settlement.result.completed_item,
+            ThreadItem::ToolExecution {
+                status: ActivityStatus::Failed,
+                ..
+            }
+        ));
     }
 
     #[test]

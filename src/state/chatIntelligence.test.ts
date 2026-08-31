@@ -135,7 +135,7 @@ describe("seleção de inteligência do Chat", () => {
     );
 
     expect(() => loadChatIntelligenceSelection()).toThrow(
-      "A seleção de modelo do Chat possui campos incompatíveis.",
+      "The Chat model selection has incompatible fields.",
     );
     expect(localStorage.length).toBe(1);
   });

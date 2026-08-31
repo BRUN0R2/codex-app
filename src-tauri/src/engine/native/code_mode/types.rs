@@ -86,6 +86,8 @@ pub(crate) type DelegateFuture<T> =
     Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'static>>;
 
 pub(crate) trait ToolDelegate: Send + Sync + 'static {
+    /// Owns the full lifecycle of a nested tool call. Once the delegate publishes a visible
+    /// start, it must observe cancellation and publish the matching terminal item before return.
     fn invoke(
         &self,
         call: NestedToolCall,

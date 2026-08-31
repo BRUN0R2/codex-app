@@ -1,8 +1,9 @@
-import solid from "vite-plugin-solid";
 import { defineConfig } from "vitest/config";
 
+import { createSolidTransformPlugin } from "./src/tooling/solidTransformPlugin.ts";
+
 export default defineConfig({
-  plugins: [solid()],
+  plugins: [createSolidTransformPlugin()],
   test: {
     environment: "node",
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],

@@ -1,5 +1,9 @@
 import type { ActivityStatus, CommandLiveOutput, FileChange, TurnStatus } from "../contracts/types";
+import { formatMessage, type TranslationMessages } from "../i18n/messages";
 
+export type TimelineMessages = TranslationMessages["timeline"];
+
+export type ReasoningItemState = "completed" | "streaming";
 export type ThinkingPresentation = "activity" | "none" | "standalone";
 export const LONG_COMMAND_DURATION_THRESHOLD_MS = 10_000;
 const SECONDS_PER_MINUTE = 60;
@@ -23,17 +27,33 @@ export function thinkingPresentation(
   return latestWorkOwnsHeadline ? "activity" : "standalone";
 }
 
-export function turnDurationLabel(status: TurnStatus, duration: string): string {
+export function turnDurationLabel(
+  status: TurnStatus,
+  duration: string,
+  messages: TimelineMessages,
+): string {
   switch (status) {
     case "completed":
-      return `Trabalhou por ${duration}`;
+      return formatMessage(messages.workedFor, { duration });
     case "failed":
-      return `Falhou após ${duration}`;
+      return formatMessage(messages.failedAfter, { duration });
     case "inProgress":
-      return `Processando há ${duration}`;
+      return formatMessage(messages.processingFor, { duration });
     case "interrupted":
-      return `Interrompido após ${duration}`;
+      return formatMessage(messages.interruptedAfter, { duration });
   }
+}
+
+export function confirmedOutputTokenLabel(
+  tokens: number,
+  messages: TimelineMessages,
+  locale: string,
+): string {
+  if (!Number.isSafeInteger(tokens) || tokens < 0) {
+    throw new RangeError("The confirmed token count must be a non-negative safe integer.");
+  }
+  const count = new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(tokens);
+  return formatMessage(tokens === 1 ? messages.oneToken : messages.manyTokens, { count });
 }
 
 export function formatElapsedSeconds(seconds: number): string {
@@ -64,49 +84,70 @@ export function formatCompactElapsedSeconds(seconds: number): string {
   return `${hours}h ${minutes}m ${remainder}s`;
 }
 
-export function runningCommandHeadline(duration: string | null, fallback: string): string {
-  return duration === null ? fallback : `Comando em execução há ${duration}`;
+export function runningCommandHeadline(
+  duration: string | null,
+  fallback: string,
+  messages: TimelineMessages,
+): string {
+  return duration === null ? fallback : formatMessage(messages.runningCommandFor, { duration });
 }
 
-export function reasoningTitle(summary: readonly string[], content: readonly string[]): string {
-  const source = lastNonEmpty(summary) ?? lastNonEmpty(content);
-  if (source === null) {
-    return "Pensamento do assistente";
-  }
-  const firstLine = source
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .find(Boolean);
-  if (firstLine === undefined) {
-    return "Pensamento do assistente";
-  }
-  if (firstLine.startsWith("**")) {
-    const closingMarker = firstLine.indexOf("**", 2);
-    if (closingMarker > 2) {
-      return firstLine.slice(2, closingMarker).trim();
+export function reasoningTitle(
+  summary: readonly string[],
+  state: ReasoningItemState,
+): string | null {
+  for (let index = summary.length - 1; index >= 0; index -= 1) {
+    const part = summary[index];
+    if (part === undefined || part.trim().length === 0) {
+      continue;
+    }
+    const structuredTitle = firstCompleteBoldElement(part);
+    if (structuredTitle !== null) {
+      return normalizeReasoningTitle(structuredTitle);
+    }
+    if (state === "completed") {
+      return firstPlainReasoningLine(part);
     }
   }
-  return firstLine.replace(/^#{1,6}\s+/u, "").replace(/\s+/gu, " ");
+  return null;
 }
 
 export function commandActivityTitle(
   command: string,
   status: ActivityStatus,
   expanded: boolean,
+  messages: TimelineMessages,
 ): string {
   if (expanded) {
-    return activityStateTitle("comando", status);
+    return activityStateTitle("command", status, messages);
   }
   switch (status) {
     case "completed":
-      return `Comando executado: ${command}`;
+      return formatMessage(messages.executedCommand, { command });
     case "declined":
-      return `Comando recusado: ${command}`;
+      return formatMessage(messages.commandDeclinedWithValue, { command });
     case "failed":
-      return `Falha ao executar comando: ${command}`;
+      return formatMessage(messages.commandFailedWithValue, { command });
     case "inProgress":
-      return `Executando comando: ${command}`;
+      return messages.commandRunning;
   }
+}
+
+export function commandHeadline(
+  command: string,
+  status: ActivityStatus,
+  expanded: boolean,
+  runningDuration: string | null,
+  messages: TimelineMessages,
+): string {
+  const fallback = commandActivityTitle(command, status, expanded, messages);
+  return status === "inProgress"
+    ? runningCommandHeadline(runningDuration, fallback, messages)
+    : fallback;
+}
+
+export function shouldShowCommandDurationSuffix(status: ActivityStatus): boolean {
+  return status !== "inProgress";
 }
 
 export function visibleCommandDurationMs(
@@ -128,70 +169,101 @@ export function toolActivityTitle(
   description: string,
   status: ActivityStatus,
   expanded: boolean,
+  messages: TimelineMessages,
 ): string {
   if (status === "inProgress") {
-    return expanded ? "Executando ferramenta" : description;
+    return expanded ? messages.executingTool : description;
   }
   if (!expanded) {
     return status === "completed"
-      ? `Executou ${description}`
-      : activityFailureTitle(description, status);
+      ? formatMessage(messages.executedTool, { description })
+      : activityFailureTitle(description, status, messages);
   }
-  return activityStateTitle("ferramenta", status);
+  return activityStateTitle("tool", status, messages);
 }
 
-export function commandPollActivityTitle(status: ActivityStatus): string {
+export function commandPollActivityTitle(
+  status: ActivityStatus,
+  messages: TimelineMessages,
+): string {
   switch (status) {
     case "completed":
-      return "Comando verificado";
+      return messages.commandVerified;
     case "declined":
-      return "Verificação do comando recusada";
+      return messages.commandCheckDeclined;
     case "failed":
-      return "Falha ao verificar comando";
+      return messages.commandCheckFailed;
     case "inProgress":
-      return "Verificando comando";
+      return messages.checkingCommand;
   }
 }
 
-export function terminalReadActivityTitle(status: ActivityStatus): string {
+export function terminalReadActivityTitle(
+  status: ActivityStatus,
+  messages: TimelineMessages,
+): string {
   switch (status) {
     case "completed":
-      return "Terminal do chat lido";
+      return messages.terminalRead;
     case "declined":
-      return "Leitura do terminal do chat recusada";
+      return messages.terminalReadDeclined;
     case "failed":
-      return "Falha ao ler o terminal do chat";
+      return messages.terminalReadFailed;
     case "inProgress":
-      return "Lendo terminal do chat";
+      return messages.readingTerminal;
   }
 }
 
-export function fileReadActivityTitle(status: ActivityStatus, count?: number): string {
-  const target = fileReadTarget(count);
+export function fileReadActivityTitle(
+  status: ActivityStatus,
+  messages: TimelineMessages,
+  count?: number,
+): string {
+  const target = fileReadTarget(count, messages);
   switch (status) {
-    case "completed":
-      return `Executou leitura de ${target}`;
+    case "completed": {
+      if (count === undefined) {
+        return messages.readFile;
+      }
+      return count === 1 ? messages.readOneFile : messages.readFiles;
+    }
     case "declined":
-      return `Leitura de ${target} recusada`;
+      return formatMessage(messages.fileReadDeclined, { target });
     case "failed":
-      return `Falha ao ler ${target}`;
+      return formatMessage(messages.fileReadFailed, { target });
     case "inProgress":
-      return `Lendo ${target}`;
+      return formatMessage(messages.readingFiles, { target });
   }
 }
 
-export function fileChangeGroupTitle(changeCount: number): string {
-  return changeCount === 1 ? "1 arquivo alterado" : `${changeCount} arquivos alterados`;
+export function fileReadItemTitle(
+  status: ActivityStatus,
+  name: string,
+  messages: TimelineMessages,
+): string {
+  const base = fileReadActivityTitle(status, messages);
+  return status === "completed"
+    ? formatMessage(messages.fileItemRead, { name })
+    : formatMessage(messages.fileItemStatus, { name, status: base });
 }
 
-export function fileChangeActionLabel(kind: FileChange["kind"]["type"]): string {
+export function fileChangeGroupTitle(changeCount: number, messages: TimelineMessages): string {
+  return changeCount === 1
+    ? messages.oneChangedFile
+    : formatMessage(messages.manyChangedFiles, { count: changeCount });
+}
+
+export function fileChangeActionLabel(
+  kind: FileChange["kind"]["type"],
+  messages: TimelineMessages,
+): string {
   switch (kind) {
     case "add":
-      return "Arquivo criado";
+      return messages.fileCreated;
     case "delete":
-      return "Arquivo excluído";
+      return messages.fileDeleted;
     case "update":
-      return "Arquivo editado";
+      return messages.fileEdited;
   }
 }
 
@@ -219,7 +291,10 @@ export function commandOutputText(output: string | null | undefined): string | n
   return visible.length > 0 ? visible : null;
 }
 
-export function commandLiveOutputText(output: CommandLiveOutput | null): string | null {
+export function commandLiveOutputText(
+  output: CommandLiveOutput | null,
+  messages: TimelineMessages,
+): string | null {
   if (output === null) {
     return null;
   }
@@ -231,7 +306,7 @@ export function commandLiveOutputText(output: CommandLiveOutput | null): string 
     sections.push(`stderr:\n${output.stderr}`);
   }
   if (output.truncated) {
-    sections.push("[Prévia ao vivo limitada; a saída completa estará disponível ao concluir.]");
+    sections.push(messages.limitedLivePreview);
   }
   return sections.length === 0 ? null : sections.join("\n");
 }
@@ -258,43 +333,74 @@ export function userMessageMarkerWidth(index: number, interactionIndex: number |
   }
 }
 
-function lastNonEmpty(values: readonly string[]): string | null {
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    const value = values[index]?.trim();
-    if (value) {
-      return value;
+function firstCompleteBoldElement(value: string): string | null {
+  const openingMarker = value.indexOf("**");
+  if (openingMarker === -1) {
+    return null;
+  }
+  const contentStart = openingMarker + 2;
+  const closingMarker = value.indexOf("**", contentStart);
+  if (closingMarker === -1) {
+    return null;
+  }
+  const content = value.slice(contentStart, closingMarker).trim();
+  return content.length === 0 ? null : content;
+}
+
+function firstPlainReasoningLine(value: string): string | null {
+  for (const sourceLine of value.split(/\r?\n/u)) {
+    const line = sourceLine.trim();
+    if (line.length > 0) {
+      const withoutMarkdown = line
+        .replace(/^#{1,6}\s+/u, "")
+        .replace(/^\*{1,2}/u, "")
+        .replace(/\*{1,2}$/u, "");
+      const title = normalizeReasoningTitle(withoutMarkdown);
+      return title.length === 0 ? null : title;
     }
   }
   return null;
 }
 
-function activityStateTitle(kind: "comando" | "ferramenta", status: ActivityStatus): string {
-  const feminine = kind === "ferramenta";
+function normalizeReasoningTitle(value: string): string {
+  return value.trim().replace(/\s+/gu, " ");
+}
+
+function activityStateTitle(
+  kind: "command" | "tool",
+  status: ActivityStatus,
+  messages: TimelineMessages,
+): string {
+  const tool = kind === "tool";
   switch (status) {
     case "completed":
-      return feminine ? "Ferramenta executada" : "Comando executado";
+      return tool ? messages.toolExecuted : messages.commandExecuted;
     case "declined":
-      return feminine ? "Ferramenta recusada" : "Comando recusado";
+      return tool ? messages.toolDeclined : messages.commandDeclined;
     case "failed":
-      return feminine ? "Ferramenta falhou" : "Comando falhou";
+      return tool ? messages.toolFailed : messages.commandFailed;
     case "inProgress":
-      return feminine ? "Executando ferramenta" : "Executando comando";
+      return tool ? messages.executingTool : messages.executingCommand;
   }
 }
 
-function fileReadTarget(count: number | undefined): string {
+function fileReadTarget(count: number | undefined, messages: TimelineMessages): string {
   if (count === undefined) {
-    return "arquivo";
+    return messages.file;
   }
   if (!Number.isSafeInteger(count) || count < 1) {
-    throw new RangeError(`A quantidade de arquivos lidos deve ser um inteiro positivo: ${count}.`);
+    throw new RangeError(`The file-read count must be a positive integer; received ${count}.`);
   }
-  return count === 1 ? "um arquivo" : `${count} arquivos`;
+  return count === 1 ? messages.oneFile : formatMessage(messages.manyFiles, { count });
 }
 
 function activityFailureTitle(
   label: string,
   status: Exclude<ActivityStatus, "completed" | "inProgress">,
+  messages: TimelineMessages,
 ): string {
-  return status === "declined" ? `Recusou ${label}` : `Falhou ao executar ${label}`;
+  return formatMessage(
+    status === "declined" ? messages.declinedActivity : messages.failedActivity,
+    { description: label },
+  );
 }

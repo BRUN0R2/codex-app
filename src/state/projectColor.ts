@@ -6,7 +6,7 @@ export interface HsvColor {
 
 export function hueFromHorizontalPosition(offset: number, width: number): number {
   if (!Number.isFinite(offset) || !Number.isFinite(width) || width <= 0) {
-    throw new Error("A geometria do seletor de matiz é inválida.");
+    throw new Error("The hue-picker geometry is invalid.");
   }
   const ratio = Math.min(1, Math.max(0, offset / width));
   return Math.round(ratio * 359);
@@ -32,7 +32,7 @@ export function hsvToHex(hue: number, saturation: number, value: number): string
   ] as const;
   const selected = channels[index];
   if (selected === undefined) {
-    throw new Error("A matiz normalizada saiu do domínio HSV.");
+    throw new Error("The normalized hue is outside the HSV domain.");
   }
   return `#${selected.map(channelToHex).join("")}`;
 }
@@ -65,21 +65,21 @@ export function hexToHsv(input: string): HsvColor {
 
 export function normalizeProjectColor(value: unknown): string {
   if (typeof value !== "string" || !/^#[\dA-Fa-f]{6}$/u.test(value)) {
-    throw new Error("A cor do projeto deve usar o formato hexadecimal #RRGGBB.");
+    throw new Error("The project color must use #RRGGBB hexadecimal format.");
   }
   return value.toLowerCase();
 }
 
 function normalizeHue(value: number): number {
   if (!Number.isFinite(value)) {
-    throw new Error("A matiz deve ser um número finito.");
+    throw new Error("The hue must be a finite number.");
   }
   return ((value % 360) + 360) % 360;
 }
 
 function clampPercent(value: number): number {
   if (!Number.isFinite(value)) {
-    throw new Error("Saturação e valor devem ser números finitos.");
+    throw new Error("Saturation and value must be finite numbers.");
   }
   return Math.min(100, Math.max(0, value));
 }

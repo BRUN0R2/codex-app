@@ -25,7 +25,7 @@ export function loadPinnedProjectPaths(): readonly string[] {
     value = JSON.parse(raw);
   } catch (reason) {
     throw new Error(
-      `A lista de projetos fixados contém JSON inválido: ${reason instanceof Error ? reason.message : "erro desconhecido"}`,
+      `The pinned-project list contains invalid JSON: ${reason instanceof Error ? reason.message : "unknown error"}`,
     );
   }
   return decodeProjectPins(value).projectPaths;
@@ -45,7 +45,7 @@ export function togglePinnedProjectPath(
     return projectPaths.filter((entry) => !pathsEqual(entry, normalized));
   }
   if (projectPaths.length >= MAX_PINNED_PROJECTS) {
-    throw new Error(`O aplicativo aceita no máximo ${MAX_PINNED_PROJECTS} projetos fixados.`);
+    throw new Error(`The application accepts at most ${MAX_PINNED_PROJECTS} pinned projects.`);
   }
   return [normalized, ...projectPaths];
 }
@@ -74,15 +74,15 @@ export function partitionProjectsByPinnedPaths(
 
 function decodeProjectPins(value: unknown): StoredProjectPins {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("A lista de projetos fixados não é um objeto.");
+    throw new Error("The pinned-project list is not an object.");
   }
   const object = value as Record<"projectPaths" | "version", unknown>;
   const keys = Object.keys(object).sort();
   if (keys.length !== 2 || keys[0] !== "projectPaths" || keys[1] !== "version") {
-    throw new Error("A lista de projetos fixados possui campos incompatíveis.");
+    throw new Error("The pinned-project list has incompatible fields.");
   }
   if (object.version !== 1 || !Array.isArray(object.projectPaths)) {
-    throw new Error("A versão da lista de projetos fixados não é suportada.");
+    throw new Error("The pinned-project list version is unsupported.");
   }
   if (object.projectPaths.length > MAX_PINNED_PROJECTS) {
     throw new Error(`A lista excede ${MAX_PINNED_PROJECTS} projetos fixados.`);
@@ -91,7 +91,7 @@ function decodeProjectPins(value: unknown): StoredProjectPins {
   const projectPaths = object.projectPaths.map((entry, index) => {
     const path = normalizeProjectPath(entry);
     if (seen.some((existing) => pathsEqual(existing, path))) {
-      throw new Error(`O projeto fixado ${index + 1} está duplicado.`);
+      throw new Error(`Pinned project ${index + 1} is duplicated.`);
     }
     seen.push(path);
     return path;

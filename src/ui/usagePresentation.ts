@@ -3,6 +3,24 @@ import type {
   RateLimitSnapshot,
   RateLimitWindow,
 } from "../contracts/types";
+import { formatMessage, type TranslationMessages } from "../i18n/messages";
+
+type UsagePresentationMessages = Pick<
+  TranslationMessages["settings"],
+  | "annualUsageLimit"
+  | "dailyUsageLimit"
+  | "manyDaysUsageLimit"
+  | "manyHoursUsageLimit"
+  | "manyMinutesUsageLimit"
+  | "manyWeeksUsageLimit"
+  | "monthlyUsageLimit"
+  | "oneDayUsageLimit"
+  | "oneHourUsageLimit"
+  | "oneMinuteUsageLimit"
+  | "oneWeekUsageLimit"
+  | "usageLimit"
+  | "weeklyUsageLimit"
+>;
 
 const MINUTES_PER_HOUR = 60;
 const MINUTES_PER_DAY = 24 * MINUTES_PER_HOUR;
@@ -29,66 +47,87 @@ export interface UsageLimitGroup {
 
 export function presentUsageLimits(
   response: AccountRateLimitsResponse | null | undefined,
+  messages: UsagePresentationMessages,
+  locale: string,
 ): readonly UsageLimitGroup[] {
   if (response === null || response === undefined) {
     return [];
   }
 
   const groups = [
-    presentSnapshot("codex", response.rateLimits),
+    presentSnapshot("codex", response.rateLimits, messages),
     ...Object.entries(response.rateLimitsByLimitId)
       .filter(([limitId]) => limitId !== "codex")
       .sort(([leftId, left], [rightId, right]) =>
-        displayLimitName(leftId, left).localeCompare(displayLimitName(rightId, right), "pt-BR"),
+        displayLimitName(leftId, left).localeCompare(displayLimitName(rightId, right), locale),
       )
-      .map(([limitId, snapshot]) => presentSnapshot(limitId, snapshot)),
+      .map(([limitId, snapshot]) => presentSnapshot(limitId, snapshot, messages)),
   ].filter((group): group is UsageLimitGroup => group !== null);
 
   return groups;
 }
 
-export function usageWindowLabel(windowDurationMins: number | null): string {
+export function usageWindowLabel(
+  windowDurationMins: number | null,
+  messages: UsagePresentationMessages,
+): string {
   if (windowDurationMins === null) {
-    return "Limite de uso";
+    return messages.usageLimit;
   }
   if (windowDurationMins === MINUTES_PER_DAY) {
-    return "Limite de uso diário";
+    return messages.dailyUsageLimit;
   }
   if (windowDurationMins === MINUTES_PER_WEEK) {
-    return "Limite de uso semanal";
+    return messages.weeklyUsageLimit;
   }
   if (
     windowDurationMins >= MINIMUM_MONTH_WINDOW_MINUTES &&
     windowDurationMins <= MAXIMUM_MONTH_WINDOW_MINUTES
   ) {
-    return "Limite de uso mensal";
+    return messages.monthlyUsageLimit;
   }
   if (windowDurationMins === MINUTES_PER_YEAR || windowDurationMins === MINUTES_PER_LEAP_YEAR) {
-    return "Limite de uso anual";
+    return messages.annualUsageLimit;
   }
   if (windowDurationMins % MINUTES_PER_WEEK === 0) {
-    return `Limite de uso de ${windowDurationMins / MINUTES_PER_WEEK} semanas`;
+    const weeks = windowDurationMins / MINUTES_PER_WEEK;
+    return weeks === 1
+      ? messages.oneWeekUsageLimit
+      : formatMessage(messages.manyWeeksUsageLimit, { count: weeks });
   }
   if (windowDurationMins % MINUTES_PER_DAY === 0) {
-    return `Limite de uso de ${windowDurationMins / MINUTES_PER_DAY} dias`;
+    const days = windowDurationMins / MINUTES_PER_DAY;
+    return days === 1
+      ? messages.oneDayUsageLimit
+      : formatMessage(messages.manyDaysUsageLimit, { count: days });
   }
   if (windowDurationMins % MINUTES_PER_HOUR === 0) {
     const hours = windowDurationMins / MINUTES_PER_HOUR;
-    return `Limite de uso de ${hours} ${hours === 1 ? "hora" : "horas"}`;
+    return hours === 1
+      ? messages.oneHourUsageLimit
+      : formatMessage(messages.manyHoursUsageLimit, { count: hours });
   }
-  return `Limite de uso de ${windowDurationMins} ${
-    windowDurationMins === 1 ? "minuto" : "minutos"
-  }`;
+  return windowDurationMins === 1
+    ? messages.oneMinuteUsageLimit
+    : formatMessage(messages.manyMinutesUsageLimit, { count: windowDurationMins });
 }
 
 export function usagePercentLabel(percent: number): string {
   return `${Math.round(clampPercent(percent))}%`;
 }
 
-function presentSnapshot(limitId: string, snapshot: RateLimitSnapshot): UsageLimitGroup | null {
+function presentSnapshot(
+  limitId: string,
+  snapshot: RateLimitSnapshot,
+  messages: UsagePresentationMessages,
+): UsageLimitGroup | null {
   const limits = [
-    snapshot.primary === null ? null : presentWindow(limitId, "primary", snapshot.primary),
-    snapshot.secondary === null ? null : presentWindow(limitId, "secondary", snapshot.secondary),
+    snapshot.primary === null
+      ? null
+      : presentWindow(limitId, "primary", snapshot.primary, messages),
+    snapshot.secondary === null
+      ? null
+      : presentWindow(limitId, "secondary", snapshot.secondary, messages),
   ].filter((limit): limit is UsageLimitEntry => limit !== null);
 
   if (limits.length === 0) {
@@ -105,11 +144,12 @@ function presentWindow(
   limitId: string,
   windowKind: "primary" | "secondary",
   window: RateLimitWindow,
+  messages: UsagePresentationMessages,
 ): UsageLimitEntry {
   const usedPercent = clampPercent(window.usedPercent);
   return {
     id: `${limitId}:${windowKind}`,
-    label: usageWindowLabel(window.windowDurationMins),
+    label: usageWindowLabel(window.windowDurationMins, messages),
     remainingPercent: clampPercent(100 - usedPercent),
     resetAt: window.resetsAt,
     usedPercent,

@@ -17,6 +17,10 @@ const visualAuditScript = readFileSync(
   new URL("../scripts/verify-visual-preview.mjs", import.meta.url),
   "utf8",
 );
+const visualAuditRuntime = readFileSync(
+  new URL("./tooling/visualAuditRuntime.ts", import.meta.url),
+  "utf8",
+);
 const projectToolsScript = readFileSync(
   new URL("../scripts/project-tools.ps1", import.meta.url),
   "utf8",
@@ -49,8 +53,8 @@ describe("tooling bootstrap contract", () => {
   });
 
   it("normalizes native and page motion for deterministic visual checks", () => {
-    expect(visualAuditScript).toContain('"--enable-smooth-scrolling"');
-    expect(visualAuditScript).toContain('"--force-prefers-no-reduced-motion"');
+    expect(visualAuditRuntime).toContain('"--enable-smooth-scrolling"');
+    expect(visualAuditRuntime).toContain('"--force-prefers-no-reduced-motion"');
     expect(visualAuditScript).toContain(
       'features: [{ name: "prefers-reduced-motion", value: "no-preference" }]',
     );
@@ -60,7 +64,9 @@ describe("tooling bootstrap contract", () => {
     expect(packageManifest.scripts?.["verify:visual"]).toContain(
       "node --experimental-strip-types scripts/verify-visual-preview.mjs",
     );
-    expect(visualAuditScript).toContain('"--remote-debugging-port=0"');
+    expect(visualAuditRuntime).toContain('"--remote-debugging-port=0"');
+    expect(visualAuditRuntime).toContain('"--edge-skip-compat-layer-relaunch"');
+    expect(visualAuditScript).toContain("chromiumAuditArguments(browserProfile)");
     expect(visualAuditScript).toContain("waitForDevToolsEndpoint");
     expect(visualAuditScript).not.toContain("/json/version");
     expect(visualAuditScript).not.toContain("reservePort");
@@ -79,7 +85,7 @@ describe("tooling bootstrap contract", () => {
     expect(visualAuditScript).toContain("summaryIdentityProbeComparisons");
     expect(visualAuditScript).toContain("rapidSummaryComparisons");
     expect(visualAuditScript).not.toContain(
-      "o teste rápido não comparou a identidade de nenhum resumo entre frames consecutivos",
+      "the rapid test did not compare any summary identity between consecutive frames",
     );
   });
 });

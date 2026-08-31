@@ -34,15 +34,13 @@ export function loadProjectSidebarState(): ProjectSidebarState {
     return defaultProjectSidebarState();
   }
   if (raw.length > MAX_STORED_VALUE_CHARACTERS) {
-    throw new Error("O estado da barra lateral de projetos excede o limite permitido.");
+    throw new Error("The project sidebar state exceeds the allowed limit.");
   }
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch (reason) {
-    throw new Error(
-      `O estado da barra lateral de projetos contém JSON inválido: ${describe(reason)}`,
-    );
+    throw new Error(`The project sidebar state contains invalid JSON: ${describe(reason)}`);
   }
   return decodeProjectSidebarState(value);
 }
@@ -135,7 +133,7 @@ function withPath(paths: readonly string[], path: string): readonly string[] {
   }
   if (paths.length >= MAX_PROJECT_STATE_ENTRIES) {
     throw new Error(
-      `O aplicativo aceita no máximo ${MAX_PROJECT_STATE_ENTRIES} estados de projeto salvos.`,
+      `The application accepts at most ${MAX_PROJECT_STATE_ENTRIES} saved project states.`,
     );
   }
   return [...paths, normalized];
@@ -149,18 +147,18 @@ function withoutPath(paths: readonly string[], path: string): readonly string[] 
 function decodeProjectSidebarState(value: unknown): StoredProjectSidebarState {
   const object = exactObject(value);
   if (object.version !== 1) {
-    throw new Error("A versão do estado da barra lateral de projetos não é suportada.");
+    throw new Error("The project sidebar state version is not supported.");
   }
   if (typeof object.projectsExpanded !== "boolean") {
-    throw new Error("O estado da seção de projetos é inválido.");
+    throw new Error("The project section state is invalid.");
   }
   return {
     version: 1,
     projectsExpanded: object.projectsExpanded,
-    collapsedProjectPaths: decodePaths(object.collapsedProjectPaths, "projetos recolhidos"),
+    collapsedProjectPaths: decodePaths(object.collapsedProjectPaths, "collapsed projects"),
     expandedProjectThreadListPaths: decodePaths(
       object.expandedProjectThreadListPaths,
-      "listas de chats expandidas",
+      "expanded chat lists",
     ),
   };
 }
@@ -172,7 +170,7 @@ function exactObject(
   unknown
 > {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("O estado da barra lateral de projetos não é um objeto.");
+    throw new Error("The project sidebar state is not an object.");
   }
   const object = value as Record<string, unknown>;
   const keys = Object.keys(object).sort();
@@ -183,7 +181,7 @@ function exactObject(
     "version",
   ];
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
-    throw new Error("O estado da barra lateral de projetos possui campos incompatíveis.");
+    throw new Error("The project sidebar state has incompatible fields.");
   }
   return object as Record<
     "collapsedProjectPaths" | "expandedProjectThreadListPaths" | "projectsExpanded" | "version",
@@ -193,16 +191,16 @@ function exactObject(
 
 function decodePaths(value: unknown, label: string): readonly string[] {
   if (!Array.isArray(value)) {
-    throw new Error(`A lista de ${label} é inválida.`);
+    throw new Error(`The ${label} list is invalid.`);
   }
   if (value.length > MAX_PROJECT_STATE_ENTRIES) {
-    throw new Error(`A lista de ${label} excede ${MAX_PROJECT_STATE_ENTRIES} projetos.`);
+    throw new Error(`The ${label} list exceeds ${MAX_PROJECT_STATE_ENTRIES} projects.`);
   }
   const paths: string[] = [];
   for (const [index, entry] of value.entries()) {
     const path = normalizeProjectPath(entry);
     if (paths.some((current) => pathsEqual(current, path))) {
-      throw new Error(`O projeto ${index + 1} em ${label} está duplicado.`);
+      throw new Error(`Project ${index + 1} in ${label} is duplicated.`);
     }
     paths.push(path);
   }
@@ -210,5 +208,5 @@ function decodePaths(value: unknown, label: string): readonly string[] {
 }
 
 function describe(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "erro desconhecido";
+  return reason instanceof Error ? reason.message : "unknown error";
 }

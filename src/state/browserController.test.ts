@@ -14,7 +14,9 @@ describe("browser address normalization", () => {
 
   it("rejects executable schemes and embedded credentials", () => {
     expect(() => normalizeBrowserAddress("javascript:alert(1)")).toThrow("HTTP(S)");
-    expect(() => normalizeBrowserAddress("https://user:secret@example.com")).toThrow("credenciais");
-    expect(() => normalizeBrowserAddress("\n")).toThrow("vazio ou inválido");
+    expect(() => normalizeBrowserAddress("https://user:secret@example.com")).toThrow(
+      "credential-free",
+    );
+    expect(() => normalizeBrowserAddress("\n")).toThrow("empty or invalid");
   });
 });

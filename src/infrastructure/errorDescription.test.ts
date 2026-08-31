@@ -7,32 +7,32 @@ describe("error descriptions", () => {
     expect(
       describeError({
         code: "invalid_request",
-        message: "A solicitação é inválida.",
+        message: "The request is invalid.",
         retryable: false,
       }),
-    ).toBe("A solicitação é inválida.");
+    ).toBe("The request is invalid.");
   });
 
   it("unwraps generic framework errors to the original command failure", () => {
     const commandError = {
       code: "invalid_attachment",
-      message: "O arquivo anexado não está mais disponível.",
+      message: "The attached file is no longer available.",
       retryable: false,
     };
     const wrapped = new Error("Unknown error", { cause: commandError });
 
-    expect(describeError(wrapped)).toBe("O arquivo anexado não está mais disponível.");
+    expect(describeError(wrapped)).toBe("The attached file is no longer available.");
   });
 
   it("preserves the complete error cause chain for diagnostics", () => {
-    const root = new Error("falha original");
-    const wrapped = new Error("falha ao renderizar o turno", { cause: root });
+    const root = new Error("original failure");
+    const wrapped = new Error("failed to render the turn", { cause: root });
 
     const diagnostic = describeDiagnosticError(wrapped);
 
-    expect(diagnostic).toContain("falha ao renderizar o turno");
+    expect(diagnostic).toContain("failed to render the turn");
     expect(diagnostic).toContain("Causado por:");
-    expect(diagnostic).toContain("falha original");
+    expect(diagnostic).toContain("original failure");
   });
 
   it("bounds diagnostics and terminates circular causes", () => {

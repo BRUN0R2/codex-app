@@ -1,4 +1,5 @@
 import type { ModelVerbosity } from "../contracts/types";
+import type { TranslationMessages } from "../i18n/messages";
 
 export interface OutputDetailOption {
   readonly description: string | null;
@@ -6,34 +7,48 @@ export interface OutputDetailOption {
   readonly value: ModelVerbosity | null;
 }
 
-const DEFAULT_OUTPUT_DETAIL_LABEL = "Padrão do modelo";
+type OutputDetailMessages = Pick<
+  TranslationMessages["settings"],
+  | "outputDefault"
+  | "outputHigh"
+  | "outputHighDescription"
+  | "outputLow"
+  | "outputLowDescription"
+  | "outputMedium"
+  | "outputMediumDescription"
+>;
 
-export const OUTPUT_DETAIL_OPTIONS: readonly OutputDetailOption[] = [
-  {
-    value: null,
-    label: DEFAULT_OUTPUT_DETAIL_LABEL,
-    description: null,
-  },
-  {
-    value: "low",
-    label: "Baixo",
-    description: "Mantenha as respostas concisas",
-  },
-  {
-    value: "medium",
-    label: "Médio",
-    description: "Equilibre detalhamento e concisão",
-  },
-  {
-    value: "high",
-    label: "Alto",
-    description: "Inclua mais detalhes nas respostas",
-  },
-];
+export function outputDetailOptions(messages: OutputDetailMessages): readonly OutputDetailOption[] {
+  return [
+    {
+      value: null,
+      label: messages.outputDefault,
+      description: null,
+    },
+    {
+      value: "low",
+      label: messages.outputLow,
+      description: messages.outputLowDescription,
+    },
+    {
+      value: "medium",
+      label: messages.outputMedium,
+      description: messages.outputMediumDescription,
+    },
+    {
+      value: "high",
+      label: messages.outputHigh,
+      description: messages.outputHighDescription,
+    },
+  ];
+}
 
-export function outputDetailLabel(value: ModelVerbosity | null): string {
+export function outputDetailLabel(
+  value: ModelVerbosity | null,
+  messages: OutputDetailMessages,
+): string {
   return (
-    OUTPUT_DETAIL_OPTIONS.find((option) => option.value === value)?.label ??
-    DEFAULT_OUTPUT_DETAIL_LABEL
+    outputDetailOptions(messages).find((option) => option.value === value)?.label ??
+    messages.outputDefault
   );
 }

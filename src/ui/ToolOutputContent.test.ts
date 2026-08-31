@@ -23,7 +23,7 @@ describe("tool output content", () => {
       [22, "       continua */"],
     ]);
     if (projection === null) {
-      throw new Error("A projeção válida de leitura não foi criada.");
+      throw new Error("The valid read projection was not created.");
     }
     expect(projection.tokensAt(0)?.some((token) => token.kind === "keyword")).toBe(true);
     expect(projection.tokensAt(1)?.some((token) => token.kind === "comment")).toBe(true);

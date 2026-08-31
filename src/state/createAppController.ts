@@ -1,4 +1,12 @@
-import { batch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import {
+  type Accessor,
+  batch,
+  createEffect,
+  createMemo,
+  createSignal,
+  onCleanup,
+  onMount,
+} from "solid-js";
 
 import type {
   AccountProfileResponse,
@@ -28,6 +36,7 @@ import type {
   UsageResetCreditsResponse,
   UsageResetRedemptionResponse,
 } from "../contracts/types";
+import { formatMessage, type TranslationMessages } from "../i18n/messages";
 import {
   archiveThread as archiveThreadCommand,
   cancelLogin as cancelLoginCommand,
@@ -152,6 +161,7 @@ import {
   createBrowserRateLimitRefreshHost,
   createRateLimitRefreshCoordinator,
 } from "./rateLimitRefresh";
+import { SingleFlightOperations } from "./singleFlightOperations";
 import {
   createBrowserStreamDeltaScheduler,
   createStreamDeltaBatcher,
@@ -169,11 +179,13 @@ import {
   readActiveTurnPlan,
   readPersistedVisibleTurns,
   isThreadActive as readThreadActive,
-  readThreadRuntimeItems,
+  readThreadRuntimeItemIds,
+  recordThreadRuntimeItemOrder,
   deleteThreadRuntime as reduceDeleteThreadRuntime,
   synchronizeThreadRuntime as reduceSynchronizeThreadRuntime,
   updateThreadRuntime as reduceUpdateThreadRuntime,
   removeThreadRuntimeItemOverlay,
+  shouldMaterializeThreadItemNotification,
   type ThreadRuntimeState,
   upsertThreadRuntimeItemOverlay,
 } from "./threadRuntime";
@@ -192,7 +204,11 @@ const ENGINE_START_TIMEOUT_MS = 120_000;
 const ACCOUNT_READ_TIMEOUT_MS = 45_000;
 const THREAD_PAGE_CACHE_CAPACITY = 8;
 
-export function createAppController(): AppController {
+interface AppControllerLocalization {
+  readonly confirmations: Accessor<TranslationMessages["confirmations"]>;
+}
+
+export function createAppController(localization: AppControllerLocalization): AppController {
   const capturedProductFlow = captureInitialization(() => loadProductFlowState());
   const initialProductFlow =
     capturedProductFlow.failure === undefined
@@ -287,6 +303,7 @@ export function createAppController(): AppController {
   let initializationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let configQueue: Promise<void> = Promise.resolve();
   const queuedDispatchTails = new Map<string, Promise<void>>();
+  const singleFlightOperations = new SingleFlightOperations<string, boolean>();
   let authenticationSync: {
     readonly expectedSignedIn: boolean;
     readonly promise: Promise<void>;
@@ -294,10 +311,6 @@ export function createAppController(): AppController {
   let authenticatedStateLoaded = false;
   let authenticatedStateRequest: Promise<void> | null = null;
   let persistedQueuesResumed = false;
-  let modelCatalogLoaded = false;
-  let chatModelCatalogLoaded = false;
-  let modelCatalogRequest: Promise<boolean> | null = null;
-  let chatModelCatalogRequest: Promise<boolean> | null = null;
   let modelCatalogSessionRevision = 0;
   const capturedProjects = captureInitialization(loadProjects);
   const initialProjects = capturedProjects.failure === undefined ? capturedProjects.value : [];
@@ -417,13 +430,8 @@ export function createAppController(): AppController {
   });
   const activeTurnId = createMemo(() => selectedRuntime()?.activeTurnId ?? null);
   const contextUsage = createMemo(() => selectedRuntime()?.contextUsage ?? null);
-  const streamingItemIds = createMemo<ReadonlySet<string>>(
-    () =>
-      new Set(
-        readThreadRuntimeItems(selectedRuntime())
-          .filter((item) => item.type === "agentMessage")
-          .map((item) => item.id),
-      ),
+  const streamingItemIds = createMemo<ReadonlySet<string>>(() =>
+    readThreadRuntimeItemIds(selectedRuntime()),
   );
   const persistedTurns = createMemo<readonly VisibleThreadTurn[]>(() => {
     const thread = currentThread();
@@ -439,6 +447,7 @@ export function createAppController(): AppController {
           persistedTurns(),
           runtime?.itemOverlaysByTurn ?? new Map(),
           runtime?.activeTurnId ?? null,
+          runtime?.itemOrderByTurn ?? new Map(),
         );
   });
   const activePlan = createMemo(() => readActiveTurnPlan(turns(), activeTurnId()));
@@ -557,7 +566,7 @@ export function createAppController(): AppController {
       releaseEvents = release;
       unsubscribe = release;
       stage = "engine";
-      const started = await withBootTimeout("iniciar o engine", ENGINE_START_TIMEOUT_MS, () =>
+      const started = await withBootTimeout("start the engine", ENGINE_START_TIMEOUT_MS, () =>
         startEngine(),
       );
       if (!isCurrentInitialization(revision)) {
@@ -610,7 +619,7 @@ export function createAppController(): AppController {
           setError(null);
           setRuntimeStatus({
             state: "starting",
-            message: `${message} Nova tentativa automática em ${delay / 1000}s.`,
+            message: `${message} Retrying automatically in ${delay / 1000}s.`,
           });
         });
         initializationRetryTimer = setTimeout(() => {
@@ -770,10 +779,16 @@ export function createAppController(): AppController {
     }
   }
 
-  async function deleteAutomation(automationId: string): Promise<boolean> {
+  function deleteAutomation(automationId: string): Promise<boolean> {
+    return singleFlightOperations.run(`automation:delete:${automationId}`, () =>
+      deleteAutomationOnce(automationId),
+    );
+  }
+
+  async function deleteAutomationOnce(automationId: string): Promise<boolean> {
     const automation = automations().find((entry) => entry.id === automationId);
     if (automation === undefined) {
-      setError("A automação que seria excluída não está mais disponível.");
+      setError("The automation to delete is no longer available.");
       return false;
     }
     const hasActiveRun = automationRuns().some(
@@ -781,17 +796,19 @@ export function createAppController(): AppController {
         run.automationId === automationId && (run.status === "queued" || run.status === "running"),
     );
     if (hasActiveRun) {
-      setError("Aguarde a execução ativa terminar antes de excluir esta automação.");
+      setError("Wait for the active run to finish before deleting this automation.");
       return false;
     }
     try {
       const confirmed = await confirm(
-        `A automação “${automation.name}” e seu histórico de execuções serão excluídos permanentemente. As conversas já criadas serão preservadas.`,
+        formatMessage(localization.confirmations().deleteAutomationDescription, {
+          name: automation.name,
+        }),
         {
-          cancelLabel: "Cancelar",
+          cancelLabel: localization.confirmations().cancel,
           kind: "warning",
-          okLabel: "Excluir",
-          title: "Excluir automação?",
+          okLabel: localization.confirmations().delete,
+          title: localization.confirmations().deleteAutomationTitle,
         },
       );
       if (!confirmed) {
@@ -809,7 +826,13 @@ export function createAppController(): AppController {
     }
   }
 
-  async function runAutomationNow(automationId: string): Promise<boolean> {
+  function runAutomationNow(automationId: string): Promise<boolean> {
+    return singleFlightOperations.run(`automation:run:${automationId}`, () =>
+      runAutomationNowOnce(automationId),
+    );
+  }
+
+  async function runAutomationNowOnce(automationId: string): Promise<boolean> {
     try {
       const run = await withPending(() => runAutomationNowCommand(automationId));
       setAutomationRuns((current) => upsertAutomationRun(current, run));
@@ -820,7 +843,13 @@ export function createAppController(): AppController {
     }
   }
 
-  async function markAutomationRunReviewed(runId: string): Promise<boolean> {
+  function markAutomationRunReviewed(runId: string): Promise<boolean> {
+    return singleFlightOperations.run(`automation:review:${runId}`, () =>
+      markAutomationRunReviewedOnce(runId),
+    );
+  }
+
+  async function markAutomationRunReviewedOnce(runId: string): Promise<boolean> {
     try {
       await withPending(() => markAutomationRunReviewedCommand(runId));
       const run = automationRuns().find((entry) => entry.id === runId);
@@ -839,75 +868,45 @@ export function createAppController(): AppController {
   }
 
   function loadModelCatalog(): Promise<boolean> {
-    if (modelCatalogLoaded) {
-      return Promise.resolve(true);
-    }
-    if (modelCatalogRequest !== null) {
-      return modelCatalogRequest;
-    }
     const revision = modelCatalogSessionRevision;
-    const request = listModels()
-      .then((catalog) => {
+    return singleFlightOperations.run(`models:codex:${revision}`, async () => {
+      try {
+        const catalog = await listModels();
         if (disposed || revision !== modelCatalogSessionRevision || !signedIn()) {
           return false;
         }
-        modelCatalogLoaded = true;
         setModels(catalog.data.filter((model) => !model.hidden));
         return true;
-      })
-      .catch((reason: unknown) => {
+      } catch (reason) {
         if (!disposed && revision === modelCatalogSessionRevision) {
           reportError(reason);
         }
         return false;
-      })
-      .finally(() => {
-        if (modelCatalogRequest === request) {
-          modelCatalogRequest = null;
-        }
-      });
-    modelCatalogRequest = request;
-    return request;
+      }
+    });
   }
 
   function loadChatModelCatalog(): Promise<boolean> {
-    if (chatModelCatalogLoaded) {
-      return Promise.resolve(true);
-    }
-    if (chatModelCatalogRequest !== null) {
-      return chatModelCatalogRequest;
-    }
     const revision = modelCatalogSessionRevision;
-    const request = listChatModels()
-      .then((catalog) => {
+    return singleFlightOperations.run(`models:chat:${revision}`, async () => {
+      try {
+        const catalog = await listChatModels();
         if (disposed || revision !== modelCatalogSessionRevision || !signedIn()) {
           return false;
         }
-        chatModelCatalogLoaded = true;
         setChatModels(catalog.data);
         return true;
-      })
-      .catch((reason: unknown) => {
+      } catch (reason) {
         if (!disposed && revision === modelCatalogSessionRevision) {
           reportError(reason);
         }
         return false;
-      })
-      .finally(() => {
-        if (chatModelCatalogRequest === request) {
-          chatModelCatalogRequest = null;
-        }
-      });
-    chatModelCatalogRequest = request;
-    return request;
+      }
+    });
   }
 
   function invalidateModelCatalogs(): void {
     modelCatalogSessionRevision += 1;
-    modelCatalogLoaded = false;
-    chatModelCatalogLoaded = false;
-    modelCatalogRequest = null;
-    chatModelCatalogRequest = null;
     batch(() => {
       setModels([]);
       setChatModels([]);
@@ -959,12 +958,12 @@ export function createAppController(): AppController {
     switch (notification.method) {
       case "auth.loginCompleted":
         if (notification.params.loginId !== loginId) {
-          throw new Error("O engine concluiu um login diferente do fluxo ativo.");
+          throw new Error("The engine completed a login other than the active flow.");
         }
         loginId = null;
         setLoginPending(false);
         if (!notification.params.success) {
-          setError(notification.params.error ?? "O login do ChatGPT não foi concluído.");
+          setError(notification.params.error ?? "The ChatGPT login did not complete.");
           return;
         }
         void synchronizeAuthentication(true);
@@ -1060,6 +1059,7 @@ export function createAppController(): AppController {
         updateThreadRuntime(notification.params.threadId, (runtime) => ({
           ...runtime,
           activeTurnId: notification.params.turn.id,
+          itemOrderByTurn: new Map(),
           modelReroute: null,
           modelVerifications: [],
           safetyBuffering: null,
@@ -1131,58 +1131,67 @@ export function createAppController(): AppController {
       case "item.completed":
         {
           const item = notification.params.item;
-          const materializeInThread =
-            notification.method === "item.completed" || isTimelineVisibleItem(item);
+          const itemOrderByTurn = recordThreadRuntimeItemOrder(
+            threadRuntime().get(notification.params.threadId)?.itemOrderByTurn ?? new Map(),
+            notification.params.turnId,
+            item.id,
+          );
+          const causalOrder = itemOrderByTurn.get(notification.params.turnId);
+          if (causalOrder === undefined) {
+            throw new Error("The notified item's causal order became inconsistent.");
+          }
+          const materializeInThread = shouldMaterializeThreadItemNotification(notification.method);
           if (materializeInThread) {
             updateCachedThread(notification.params.threadId, (thread) =>
-              applyTurnItem(thread, notification.params.turnId, item),
+              applyTurnItem(thread, notification.params.turnId, item, causalOrder),
             );
             setCurrentThread((current) =>
               current?.id === notification.params.threadId
-                ? applyTurnItem(current, notification.params.turnId, item)
+                ? applyTurnItem(current, notification.params.turnId, item, causalOrder)
                 : current,
             );
           }
-        }
-        if (notification.method === "item.completed") {
-          streamDeltas.releaseItem(
-            notification.params.threadId,
-            notification.params.turnId,
-            notification.params.item.id,
-          );
-        }
-        updateThreadRuntime(notification.params.threadId, (runtime) => {
-          const item = notification.params.item;
-          if (item.type === "contextUsage") {
-            return { ...runtime, contextUsage: item };
+          if (notification.method === "item.completed") {
+            streamDeltas.releaseItem(
+              notification.params.threadId,
+              notification.params.turnId,
+              notification.params.item.id,
+            );
           }
-          if (!isTimelineVisibleItem(item)) {
+          updateThreadRuntime(notification.params.threadId, (runtime) => {
+            if (item.type === "contextUsage") {
+              return { ...runtime, contextUsage: item, itemOrderByTurn };
+            }
+            if (!isTimelineVisibleItem(item)) {
+              return {
+                ...runtime,
+                itemOrderByTurn,
+                itemOverlaysByTurn: removeThreadRuntimeItemOverlay(
+                  runtime.itemOverlaysByTurn,
+                  notification.params.turnId,
+                  item.id,
+                ),
+              };
+            }
             return {
               ...runtime,
-              itemOverlaysByTurn: removeThreadRuntimeItemOverlay(
-                runtime.itemOverlaysByTurn,
-                notification.params.turnId,
-                item.id,
-              ),
+              contextUsage: item.type === "contextCompaction" ? null : runtime.contextUsage,
+              itemOrderByTurn,
+              itemOverlaysByTurn:
+                notification.method === "item.completed"
+                  ? removeThreadRuntimeItemOverlay(
+                      runtime.itemOverlaysByTurn,
+                      notification.params.turnId,
+                      item.id,
+                    )
+                  : upsertThreadRuntimeItemOverlay(
+                      runtime.itemOverlaysByTurn,
+                      notification.params.turnId,
+                      item,
+                    ),
             };
-          }
-          return {
-            ...runtime,
-            contextUsage: item.type === "contextCompaction" ? null : runtime.contextUsage,
-            itemOverlaysByTurn:
-              notification.method === "item.completed"
-                ? removeThreadRuntimeItemOverlay(
-                    runtime.itemOverlaysByTurn,
-                    notification.params.turnId,
-                    item.id,
-                  )
-                : upsertThreadRuntimeItemOverlay(
-                    runtime.itemOverlaysByTurn,
-                    notification.params.turnId,
-                    item,
-                  ),
-          };
-        });
+          });
+        }
         if (
           notification.method === "item.completed" &&
           notification.params.item.type === "commandExecution" &&
@@ -1204,7 +1213,7 @@ export function createAppController(): AppController {
   function handleServerRequest(request: EngineServerRequest): void {
     setPendingApprovals((current) => {
       if (current.some((entry) => entry.id === request.id)) {
-        throw new Error(`A aprovação ${request.id} foi recebida duas vezes.`);
+        throw new Error(`Approval ${request.id} was received twice.`);
       }
       return [...current, request];
     });
@@ -1230,7 +1239,7 @@ export function createAppController(): AppController {
         surfaceRefreshFailure(currentAccount);
         if ((currentAccount.account !== null) !== expectedSignedIn) {
           throw new Error(
-            "O estado de autenticação lido diverge da transição emitida pelo engine.",
+            "The authentication state differs from the transition emitted by the engine.",
           );
         }
         if (expectedSignedIn) {
@@ -1271,7 +1280,7 @@ export function createAppController(): AppController {
         loginId = null;
         setLoginPending(false);
         throw new Error(
-          `Não foi possível abrir o navegador; login ${cancelResponse.status}: ${describeError(openError)}`,
+          `The browser could not be opened; login ${cancelResponse.status}: ${describeError(openError)}`,
         );
       }
       return true;
@@ -1292,7 +1301,7 @@ export function createAppController(): AppController {
     try {
       const response = await cancelLoginCommand(currentLoginId);
       if (response.status !== "canceled") {
-        throw new Error("O fluxo de login já não estava ativo.");
+        throw new Error("The login flow was no longer active.");
       }
     } catch (reason) {
       reportError(reason);
@@ -1337,7 +1346,7 @@ export function createAppController(): AppController {
       if (response.remoteRevocation === "failed") {
         setError(
           response.remoteRevocationError ??
-            "A sessão local foi removida, mas a revogação remota falhou.",
+            "The local session was removed, but remote revocation failed.",
         );
       }
       return true;
@@ -1349,7 +1358,7 @@ export function createAppController(): AppController {
 
   async function chooseWorkspace(): Promise<string | null> {
     if (conversationMode() === "chat") {
-      setError("O Chat usa conversas sem acesso a projetos locais. Troque para Work ou Codex.");
+      setError("Chat conversations cannot access local projects. Switch to Work or Codex.");
       return null;
     }
     try {
@@ -1358,7 +1367,7 @@ export function createAppController(): AppController {
         return null;
       }
       if (Array.isArray(selection)) {
-        throw new Error("O seletor retornou múltiplos diretórios para uma seleção única.");
+        throw new Error("The picker returned multiple directories for a single selection.");
       }
       return selectProject(selection) ? selection : null;
     } catch (reason) {
@@ -1450,7 +1459,7 @@ export function createAppController(): AppController {
       const cached = readCurrentCachedThreadPage(threadId);
       if (cached !== null) {
         if (cached.thread.mode !== mode) {
-          throw new Error("A conversa armazenada pertence a outro modo do aplicativo.");
+          throw new Error("The stored conversation belongs to another application mode.");
         }
         if (!selectThreadProject(cached.thread)) {
           return false;
@@ -1464,7 +1473,7 @@ export function createAppController(): AppController {
         return false;
       }
       if (response.thread.mode !== mode) {
-        throw new Error("A conversa restaurada pertence a outro modo do aplicativo.");
+        throw new Error("The restored conversation belongs to another application mode.");
       }
       if (!selectThreadProject(response.thread)) {
         return false;
@@ -1509,7 +1518,7 @@ export function createAppController(): AppController {
 
   function selectProject(path: string): boolean {
     if (conversationMode() === "chat") {
-      setError("O Chat não associa conversas a projetos locais.");
+      setError("Chat does not associate conversations with local projects.");
       return false;
     }
     const thread = currentThread();
@@ -1593,7 +1602,7 @@ export function createAppController(): AppController {
 
   function togglePinnedThread(threadId: string): void {
     if (!threads().some((thread) => thread.id === threadId)) {
-      setError("A tarefa precisa estar disponível antes de ser fixada.");
+      setError("The task must be available before it can be pinned.");
       return;
     }
     try {
@@ -1620,7 +1629,7 @@ export function createAppController(): AppController {
 
   function togglePinnedProject(path: string): void {
     if (!projects().some((project) => pathsEqual(project.path, path))) {
-      setError("O projeto precisa estar disponível antes de ser fixado.");
+      setError("The project must be available before it can be pinned.");
       return;
     }
     try {
@@ -1647,6 +1656,9 @@ export function createAppController(): AppController {
 
   function newThread(targetWorkspace?: string): boolean {
     const mode = conversationMode();
+    if (signedIn()) {
+      void ensureModelsForMode(mode);
+    }
     const requestedWorkspace = mode === "chat" ? null : (targetWorkspace ?? null);
     if (requestedWorkspace === null) {
       batch(() => {
@@ -1688,16 +1700,16 @@ export function createAppController(): AppController {
     try {
       const response = await withPending(() => startThread(projectPath, mode));
       if (response.thread.mode !== mode) {
-        throw new Error("O engine criou a conversa em um modo diferente do solicitado.");
+        throw new Error("The engine created the conversation in a mode other than requested.");
       }
       if (!pathsEqual(response.thread.projectPath, projectPath)) {
-        throw new Error("O engine criou a tarefa com uma associação de projeto diferente.");
+        throw new Error("The engine created the task with a different project association.");
       }
       if (
         response.thread.projectPath !== null &&
         !pathsEqual(response.thread.cwd, response.thread.projectPath)
       ) {
-        throw new Error("O diretório de execução da tarefa diverge do projeto associado.");
+        throw new Error("The task working directory differs from its associated project.");
       }
       if (!selectThreadProject(response.thread)) {
         return null;
@@ -1725,7 +1737,7 @@ export function createAppController(): AppController {
       const cached = readCurrentCachedThreadPage(threadId);
       if (cached !== null) {
         if (!alignProductFlowToThread(cached.thread.mode)) {
-          throw new Error("A conversa selecionada pertence a outro produto do aplicativo.");
+          throw new Error("The selected conversation belongs to another application product.");
         }
         if (!selectThreadProject(cached.thread)) {
           return false;
@@ -1739,10 +1751,10 @@ export function createAppController(): AppController {
         return false;
       }
       if (!pathsEqual(response.cwd, response.thread.cwd)) {
-        throw new Error("O engine retomou a tarefa em um diretório inconsistente.");
+        throw new Error("The engine resumed the task in an inconsistent directory.");
       }
       if (!alignProductFlowToThread(response.thread.mode)) {
-        throw new Error("A conversa selecionada pertence a outro produto do aplicativo.");
+        throw new Error("The selected conversation belongs to another application product.");
       }
       if (!selectThreadProject(response.thread)) {
         return false;
@@ -1762,9 +1774,15 @@ export function createAppController(): AppController {
     }
   }
 
-  async function renameThread(threadId: string, name: string): Promise<boolean> {
+  function renameThread(threadId: string, name: string): Promise<boolean> {
+    return singleFlightOperations.run(`thread:rename:${threadId}:${name.trim()}`, () =>
+      renameThreadOnce(threadId, name),
+    );
+  }
+
+  async function renameThreadOnce(threadId: string, name: string): Promise<boolean> {
     if (name.trim().length === 0) {
-      setError("O nome da tarefa não pode ficar vazio.");
+      setError("The task name cannot be empty.");
       return false;
     }
     try {
@@ -1776,7 +1794,13 @@ export function createAppController(): AppController {
     }
   }
 
-  async function archiveThread(threadId: string): Promise<boolean> {
+  function archiveThread(threadId: string): Promise<boolean> {
+    return singleFlightOperations.run(`thread:archive:${threadId}`, () =>
+      archiveThreadOnce(threadId),
+    );
+  }
+
+  async function archiveThreadOnce(threadId: string): Promise<boolean> {
     try {
       await withPending(() => archiveThreadCommand(threadId));
       return true;
@@ -1786,7 +1810,13 @@ export function createAppController(): AppController {
     }
   }
 
-  async function unarchiveThread(threadId: string): Promise<boolean> {
+  function unarchiveThread(threadId: string): Promise<boolean> {
+    return singleFlightOperations.run(`thread:unarchive:${threadId}`, () =>
+      unarchiveThreadOnce(threadId),
+    );
+  }
+
+  async function unarchiveThreadOnce(threadId: string): Promise<boolean> {
     try {
       const response = await withPending(() => unarchiveThreadCommand(threadId));
       threadPages.write({ thread: response.thread, nextCursor: response.nextCursor });
@@ -1807,22 +1837,28 @@ export function createAppController(): AppController {
     return streamingItemIds().has(itemId);
   }
 
-  async function deleteThread(threadId: string): Promise<boolean> {
+  function deleteThread(threadId: string): Promise<boolean> {
+    return singleFlightOperations.run(`thread:delete:${threadId}`, () =>
+      deleteThreadOnce(threadId),
+    );
+  }
+
+  async function deleteThreadOnce(threadId: string): Promise<boolean> {
     const thread = [...threads(), ...archivedThreads()].find((entry) => entry.id === threadId);
     if (thread === undefined) {
-      setError("A tarefa que seria excluída não está mais disponível.");
+      setError("The task to delete is no longer available.");
       return false;
     }
     try {
-      const title = thread.name ?? thread.preview ?? "Nova tarefa";
+      const title = thread.name ?? thread.preview ?? localization.confirmations().newTask;
       const description = isThreadActive(threadId)
-        ? `A tarefa “${title}” está ativa. O turno em andamento será interrompido e todo o histórico será excluído permanentemente.`
-        : `A tarefa “${title}” e todo o histórico serão excluídos permanentemente.`;
+        ? formatMessage(localization.confirmations().deleteActiveTaskDescription, { name: title })
+        : formatMessage(localization.confirmations().deleteTaskDescription, { name: title });
       const confirmed = await confirm(description, {
-        cancelLabel: "Cancelar",
+        cancelLabel: localization.confirmations().cancel,
         kind: "warning",
-        okLabel: "Excluir",
-        title: "Excluir tarefa?",
+        okLabel: localization.confirmations().delete,
+        title: localization.confirmations().deleteTaskTitle,
       });
       if (!confirmed) {
         return false;
@@ -1836,7 +1872,11 @@ export function createAppController(): AppController {
     }
   }
 
-  async function forkThread(threadId: string): Promise<boolean> {
+  function forkThread(threadId: string): Promise<boolean> {
+    return singleFlightOperations.run(`thread:fork:${threadId}`, () => forkThreadOnce(threadId));
+  }
+
+  async function forkThreadOnce(threadId: string): Promise<boolean> {
     try {
       const response = await withPending(() => forkThreadCommand(threadId));
       if (!selectThreadProject(response.thread)) {
@@ -1936,7 +1976,7 @@ export function createAppController(): AppController {
     if (runningTurnId !== null) {
       const thread = currentThread();
       if (thread === null) {
-        setError("O turno ativo não está associado a uma tarefa aberta.");
+        setError("The active turn is not associated with an open task.");
         return false;
       }
       try {
@@ -1988,7 +2028,7 @@ export function createAppController(): AppController {
     }
     const thread = currentThread();
     if (thread === null) {
-      setError("Abra uma tarefa antes de adicionar mensagens à fila.");
+      setError("Open a task before adding messages to the queue.");
       return false;
     }
     const message: QueuedMessage = {
@@ -2097,14 +2137,20 @@ export function createAppController(): AppController {
     }
   }
 
-  async function interrupt(): Promise<boolean> {
+  function interrupt(): Promise<boolean> {
     const thread = currentThread();
     const turnId = activeTurnId();
     if (thread === null || turnId === null) {
-      return false;
+      return Promise.resolve(false);
     }
+    return singleFlightOperations.run(`turn:interrupt:${thread.id}:${turnId}`, () =>
+      interruptOnce(thread.id, turnId),
+    );
+  }
+
+  async function interruptOnce(threadId: string, turnId: string): Promise<boolean> {
     try {
-      await interruptTurn(thread.id, turnId);
+      await interruptTurn(threadId, turnId);
       return true;
     } catch (reason) {
       reportError(reason);
@@ -2112,7 +2158,13 @@ export function createAppController(): AppController {
     }
   }
 
-  async function respondToApproval(
+  function respondToApproval(requestId: string, decision: ApprovalDecision): Promise<boolean> {
+    return singleFlightOperations.run(`approval:respond:${requestId}`, () =>
+      respondToApprovalOnce(requestId, decision),
+    );
+  }
+
+  async function respondToApprovalOnce(
     requestId: string,
     decision: ApprovalDecision,
   ): Promise<boolean> {
@@ -2131,7 +2183,7 @@ export function createAppController(): AppController {
     const operation = configQueue.then(async () => {
       const current = config();
       if (current === null) {
-        throw new Error("A configuração ainda não foi carregada.");
+        throw new Error("The configuration has not loaded yet.");
       }
       const response = await updateConfig(current.version, update);
       setConfig(response);
@@ -2473,7 +2525,7 @@ export function createAppController(): AppController {
 
   function surfaceRefreshFailure(value: AccountReadResponse): void {
     if (value.refresh.status === "failed") {
-      setError(value.refresh.error ?? "A renovação da sessão ChatGPT falhou.");
+      setError(value.refresh.error ?? "The ChatGPT session refresh failed.");
     }
   }
 
@@ -2496,7 +2548,7 @@ export function createAppController(): AppController {
       void reportFrontendDiagnostic(diagnostic).catch((persistenceFailure: unknown) => {
         addDiagnostic({
           stream: "runtime",
-          message: `Falha ao persistir diagnóstico do frontend: ${describeError(persistenceFailure)}`,
+          message: `Failed to persist frontend diagnostic: ${describeError(persistenceFailure)}`,
         });
       });
     }
@@ -2645,15 +2697,15 @@ function usageResetRedemptionError(code: string): string {
   switch (code) {
     case "expired":
     case "credit_expired":
-      return "Esta redefinição expirou e não pode mais ser usada.";
+      return "This reset has expired and can no longer be used.";
     case "not_available":
     case "no_credits_available":
-      return "Não há uma redefinição disponível para usar.";
+      return "No reset is available to use.";
     case "ineligible":
     case "not_eligible":
-      return "Esta conta não está elegível para usar a redefinição.";
+      return "This account is not eligible to use the reset.";
     default:
-      return `Não foi possível usar a redefinição da conta (${code}).`;
+      return `The account reset could not be used (${code}).`;
   }
 }
 
@@ -2717,7 +2769,7 @@ function withBootTimeout<T>(
     timer = setTimeout(() => {
       reject(
         new InitializationTimeoutError(
-          `O engine não respondeu em ${timeoutMs / 1000} segundos ao ${label}. Tente novamente.`,
+          `The engine did not respond to ${label} within ${timeoutMs / 1000} seconds. Try again.`,
         ),
       );
     }, timeoutMs);
@@ -2737,7 +2789,7 @@ function mergeThreadPages(
 }
 
 function assertNever(value: never): never {
-  throw new Error(`Estado de notificação não tratado: ${JSON.stringify(value)}`);
+  throw new Error(`Unhandled notification state: ${JSON.stringify(value)}`);
 }
 
 function asError(reason: unknown): Error {

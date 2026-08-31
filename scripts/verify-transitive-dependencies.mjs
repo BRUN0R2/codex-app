@@ -12,7 +12,7 @@ if (result.error !== undefined) {
   throw result.error;
 }
 if (result.status !== 0) {
-  throw new Error(result.stderr.trim() || "Não foi possível inspecionar o grafo Cargo.");
+  throw new Error(result.stderr.trim() || "Could not inspect the Cargo dependency graph.");
 }
 
 const metadata = JSON.parse(result.stdout);
@@ -34,7 +34,7 @@ const unexpectedUnic09 = packageLabels.filter(
 );
 
 if (presentUnic.length === 0 && unexpectedUnic09.length === 0) {
-  process.stdout.write("O grafo Cargo não contém mais os crates UNIC 0.9 não mantidos.\n");
+  process.stdout.write("The Cargo graph no longer contains the unmaintained UNIC 0.9 crates.\n");
   process.exit(0);
 }
 if (
@@ -43,7 +43,7 @@ if (
   unexpectedUnic09.length > 0
 ) {
   throw new Error(
-    "O conjunto transitivo UNIC 0.9 mudou. Revise-o e remova a exceção documentada antes de atualizar o lockfile.",
+    "The transitive UNIC 0.9 set changed. Review it and remove the documented exception before updating the lockfile.",
   );
 }
 
@@ -65,19 +65,19 @@ for (const [dependencyLabel, expected] of expectedParents) {
     (entry) => packageLabel(entry) === dependencyLabel,
   );
   if (dependency === undefined) {
-    throw new Error(`Dependência esperada ausente: ${dependencyLabel}.`);
+    throw new Error(`Expected dependency is missing: ${dependencyLabel}.`);
   }
   const actual = [...(directParents.get(dependency.id) ?? [])].sort();
   const sortedExpected = [...expected].sort();
   if (JSON.stringify(actual) !== JSON.stringify(sortedExpected)) {
     throw new Error(
-      `O caminho de ${dependencyLabel} mudou: ${actual.join(", ") || "sem dependentes"}.`,
+      `The ${dependencyLabel} path changed: ${actual.join(", ") || "no dependents"}.`,
     );
   }
 }
 
 process.stdout.write(
-  "Exceção transitiva conhecida: tauri-utils 2.9.3 -> urlpattern 0.3.0 -> UNIC 0.9.0.\n",
+  "Known transitive exception: tauri-utils 2.9.3 -> urlpattern 0.3.0 -> UNIC 0.9.0.\n",
 );
 
 function packageLabel(entry) {

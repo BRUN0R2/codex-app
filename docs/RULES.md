@@ -1,169 +1,167 @@
-# Regras do projeto
+# Project rules
 
-Este documento é o contrato máximo do repositório. Nenhuma implementação,
-refatoração, dependência ou atalho pode contrariá-lo.
+This document is the repository's highest-level contract. No implementation,
+refactor, dependency, or shortcut may contradict it.
 
-Em caso de conflito, priorize: regras do projeto, integridade arquitetural,
-manutenção, previsibilidade, segurança, desempenho e, por último, velocidade de
-entrega. Informe o conflito antes de continuar.
+When requirements conflict, prioritize project rules, architectural integrity,
+maintainability, predictability, security, performance, and finally delivery
+speed. Report the conflict before proceeding.
 
-## Princípios
+## Principles
 
-- Resolva a causa, nunca apenas o sintoma.
-- Use a menor complexidade capaz de resolver o problema completo.
-- Prefira código explícito, coeso, previsível, modular e pronto para produção.
-- Prefira composição, contratos pequenos e fluxos determinísticos.
-- Evite abstrações prematuras, camadas profundas, estado oculto e fallbacks
-  silenciosos.
-- Remova código morto, duplicado, obsoleto e compatibilidade sem uso real.
-- Uma refatoração deve reduzir complexidade total, não apenas movê-la.
-- Entradas, saídas, efeitos, ownership, transições e falhas devem ser visíveis.
+- Fix causes, never only symptoms.
+- Use the least complexity that solves the complete problem.
+- Prefer explicit, cohesive, predictable, modular, production-ready code.
+- Prefer composition, narrow contracts, and deterministic flows.
+- Avoid premature abstraction, deep layers, hidden state, and silent fallbacks.
+- Remove dead, duplicated, obsolete, and unused compatibility code.
+- A refactor must reduce total complexity, not merely move it.
+- Inputs, outputs, effects, ownership, transitions, and failures must be visible.
 
-## Produto e stack
+## Product and stack
 
-- O alvo operacional é Windows, com Tauri 2, Rust edition 2024, TypeScript
-  estrito e Vite.
-- A toolchain Rust é a versão estável fixada em `rust-toolchain.toml`.
-- `NativeEngine` é o dono da composição do agente.
-- OAuth ChatGPT, provider, ferramentas, configuração, secrets e persistência
-  pertencem ao backend Rust deste aplicativo.
-- O Codex CLI pode ser estudado como referência, mas nunca pode ser dependência
-  de build, runtime, configuração, armazenamento ou credenciais.
-- A interface nunca deve receber tokens ou reinterpretar credenciais.
-- Não crie aliases, adaptadores ou caminhos gerais para formatos externos ou
-  protocolos obsoletos.
-- Toda tecnologia nova precisa de benefício comprovado, fronteira isolada e
-  custo de manutenção proporcional.
+- The operational target is Windows with Tauri 2, Rust edition 2024, strict
+  TypeScript, and Vite.
+- Rust uses the stable toolchain pinned in `rust-toolchain.toml`.
+- `NativeEngine` owns agent composition.
+- ChatGPT OAuth, providers, tools, configuration, secrets, and persistence
+  belong to this application's Rust backend.
+- The Codex CLI may be studied as a reference but must never become a build,
+  runtime, configuration, storage, or credential dependency.
+- The interface must never receive tokens or reinterpret credentials.
+- Do not create aliases, adapters, or general paths for external formats or
+  obsolete protocols.
+- Every new technology requires a demonstrated benefit, an isolated boundary,
+  and proportionate maintenance cost.
 
-## Arquitetura
+## Architecture
 
-- Organize o sistema em módulos pequenos, coesos e com um dono claro.
-- Mantenha regras de negócio no domínio responsável, sem duplicá-las entre
-  backend, infraestrutura e UI.
-- Use tipos de domínio para estados e valores com semântica própria.
-- APIs devem ser mínimas; não exponha detalhes internos por conveniência.
-- Estado global mutável exige ownership explícito e justificativa.
-- Recursos concorrentes precisam de lifecycle, cancelamento e encerramento
-  definidos.
-- Erros operacionais devem ser estruturados, observáveis e previsíveis.
-- Não esconda falhas de inicialização nem simule resiliência com recuperação
-  implícita.
+- Organize the system into small, cohesive modules with one clear owner.
+- Keep business rules in their owning domain; do not duplicate them across the
+  backend, infrastructure, and UI.
+- Use domain types for states and values with distinct semantics.
+- Keep APIs minimal; never expose internals for convenience.
+- Global mutable state requires explicit ownership and justification.
+- Concurrent resources require defined lifecycle, cancellation, and shutdown.
+- Operational errors must be structured, observable, predictable, and written
+  in English.
+- Do not hide initialization failures or simulate resilience with implicit
+  recovery.
 
-Migrações internas são permitidas apenas para dados deste aplicativo. Cada
-migração deve ter versão e escopo explícitos, validar identidade e schema,
-executar atomicamente, preservar dados ou falhar de forma visível e possuir
-testes de sucesso, falha e integridade. Nunca importe formatos da CLI por essa
-via.
+Internal migrations are allowed only for this application's data. Every
+migration must have an explicit version and scope, validate identity and schema,
+run atomically, preserve data or fail visibly, and test success, failure, and
+integrity. Never use migrations to import Codex CLI formats.
 
 ## Rust
 
-- Use Rust idiomático, ownership explícito e erros estruturados.
-- Use `Result` para falhas recuperáveis; não descarte erros operacionais.
-- Evite `panic!`, `unwrap` e `expect` fora de inicialização comprovadamente
-  irrecuperável.
-- Evite `unsafe`. Quando inevitável, isole-o, documente as invariantes e valide
-  as pré-condições.
-- Prefira enums, newtypes e estruturas validadas a strings ou mapas soltos.
-- Recursos do sistema operacional devem ser liberados de forma determinística.
+- Use idiomatic Rust, explicit ownership, and structured errors.
+- Use `Result` for recoverable failures; never discard operational errors.
+- Avoid `panic!`, `unwrap`, and `expect` outside demonstrably unrecoverable
+  initialization.
+- Avoid `unsafe`. When unavoidable, isolate it, document invariants, and
+  validate preconditions.
+- Prefer enums, newtypes, and validated structures over loose strings or maps.
+- Release operating-system resources deterministically.
 
-## TypeScript e interface
+## TypeScript and interface
 
-- Mantenha `strict` ativo e não contorne o compilador com tipos amplos.
-- Decodifique toda resposta e evento Tauri antes de alterar estado.
-- Mantenha os contratos TypeScript sincronizados com os contratos Rust.
-- Componentes de UI não acessam IPC diretamente; infraestrutura e estado são as
-  fronteiras responsáveis.
-- A interface deve ser limpa, direta, acessível e sem controles sem função.
-- Estados de carregamento, erro, vazio, aprovação e cancelamento devem ser
-  explícitos.
-- Densidade visual e animação precisam de utilidade prática e comportamento
-  estável.
+- Keep `strict` enabled and do not bypass the compiler with broad types.
+- Decode every Tauri response and event before mutating state.
+- Keep TypeScript and Rust contracts synchronized.
+- UI components must not access IPC directly; infrastructure and state own that
+  boundary.
+- Keep the interface direct, accessible, and free of nonfunctional controls.
+- Loading, error, empty, approval, and cancellation states must be explicit.
+- Visual density and animation require practical value and stable behavior.
+- All owned user-interface copy must come from the validated translation
+  catalog. Dynamic provider or user content remains unchanged.
+- Translation catalogs must be auto-discovered, exact, bounded, and placeholder
+  compatible. Never fill missing keys with a silent fallback.
 
-## Código
+## Code
 
-- Use nomes descritivos e as convenções nativas de cada linguagem.
-- Evite abreviações não universais, números mágicos e comentários obsoletos.
-- Constantes precisam de nome semântico, tipo adequado e contexto claro.
-- Aplique responsabilidade única e elimine duplicação real; não force DRY entre
-  conceitos apenas parecidos.
-- Não use God Classes, Service Locator, globais ocultos, ciclos, herança
-  profunda, reflection indiscriminada ou ownership implícito.
-- Logs devem ser úteis para operação, estruturados quando necessário e nunca
-  conter dados privados.
+- Use descriptive names and each language's native conventions.
+- Avoid non-universal abbreviations, magic numbers, and stale comments.
+- Constants require semantic names, appropriate types, and clear context.
+- Apply single responsibility and remove real duplication; do not force DRY
+  across merely similar concepts.
+- Do not use God classes, service locators, hidden globals, cycles, deep
+  inheritance, indiscriminate reflection, or implicit ownership.
+- Logs must be operationally useful, in English, structured when needed, and
+  free of private data.
 
-## Segurança e persistência
+## Security and persistence
 
-- Nunca versione secrets, credenciais, tokens ou dados privados.
-- Secrets ficam no cofre e no diretório privado deste aplicativo.
-- SQLite armazena apenas dados adequados ao seu domínio, com transações nas
-  alterações compostas.
-- Valide tamanho, formato, identidade e destino de toda entrada externa.
-- Alterações de arquivo ou configuração devem ter alvo validado, efeito
-  explícito e ser reversíveis quando possível.
-- Permissões são fechadas por padrão e não podem ser ampliadas implicitamente.
-- Limites de memória, saída, arquivos, processos, streams e concorrência devem
-  ser explícitos e testados.
+- Never commit secrets, credentials, tokens, or private data.
+- Secrets belong in this application's vault and private directory.
+- SQLite stores only domain-appropriate data and uses transactions for compound
+  changes.
+- Validate size, format, identity, and destination for every external input.
+- File and configuration changes require validated targets, explicit effects,
+  and reversibility where practical.
+- Permissions are closed by default and cannot expand implicitly.
+- Memory, output, file, process, stream, and concurrency limits must be explicit
+  and tested.
 
-## Testes e validação
+## Tests and validation
 
-- Valide em runtime todas as fronteiras externas e invariantes que dependem do
-  ambiente.
-- Cada defeito corrigido deve receber um teste de regressão focado no contrato
-  violado.
-- Teste caminhos de sucesso, erro, cancelamento e concorrência quando forem
-  relevantes.
-- Evite testes duplicados, frágeis ou sem valor observável.
-- `pnpm verify` é o gate completo antes de concluir ou publicar mudanças.
-- Não enfraqueça lint, tipagem, Clippy, testes ou medições para fazer o gate
-  passar.
+- Validate every external boundary and environment-dependent invariant at
+  runtime.
+- Add focused regression coverage for every corrected defect at the violated
+  contract.
+- Test success, failure, cancellation, and concurrency when relevant.
+- Avoid duplicated, brittle, or behavior-free tests.
+- `pnpm verify` is the complete gate before completion or publication.
+- Never weaken lint, typing, Clippy, tests, or measurements to pass the gate.
 
-## Desempenho
+## Performance
 
-- Meça antes e depois de otimizações relevantes com cenário reproduzível.
-- Proteja regressões críticas com limites ou benchmarks estáveis.
-- Prefira latência e uso de memória previsíveis a micro-otimizações complexas.
-- Evite cópias, alocações, serializações e trabalho no thread principal sem
-  necessidade.
-- Uma otimização não pode degradar clareza, correção ou manutenção sem benefício
-  mensurável e documentado.
+- Measure before and after meaningful optimization with a reproducible scenario.
+- Protect critical regressions with stable limits or benchmarks.
+- Prefer predictable latency and memory over complex micro-optimizations.
+- Avoid unnecessary copies, allocations, serialization, and main-thread work.
+- An optimization may trade clarity or maintainability only for a measured and
+  documented benefit.
+- Do not suppress performance diagnostics or narrow inputs when the measured
+  work remains unchanged.
 
-## Dependências
+## Dependencies
 
-- Cada dependência direta deve justificar seu custo e permanecer fixada no
-  manifesto e no lockfile.
-- Prefira implementação local quando ela for pequena, segura e mais simples de
-  manter.
-- Isole integrações externas e atualize dependências regularmente.
-- Exceções transitivas precisam de justificativa, versão exata e gate de
-  regressão.
-- Não mantenha assets, ferramentas ou pacotes sem uso real.
+- Every direct dependency must justify its cost and remain locked in the
+  manifest and lockfile.
+- Prefer a local implementation when it is small, safe, and easier to maintain.
+- Isolate external integrations and update dependencies regularly.
+- Transitive exceptions require justification, exact versions, and a regression
+  gate.
+- Do not retain unused assets, tools, or packages.
 
-## Git e documentação
+## Git and documentation
 
-- Preserve mudanças do usuário e não reescreva histórico sem autorização.
-- Faça um commit para cada mudança lógica concluída.
-- Mensagens de commit são curtas, em inglês, no imperativo e descrevem a mudança
-  real.
-- Mantenha `docs/TODO.md` curto, atual e acionável.
-- Documente contratos e decisões duráveis; detalhes que o código expressa com
-  mais precisão pertencem ao código e aos testes.
-- Atualize números medidos, versões e capacidades junto com a mudança que os
-  altera. Não acumule cronologias em documentos de estado atual.
+- Preserve user changes and never rewrite history without authorization.
+- Create one commit for each completed logical change.
+- Commit messages are short English imperatives that describe the actual change.
+- Keep `docs/TODO.md` short, current, and actionable.
+- Document durable contracts and decisions; details expressed more accurately by
+  code belong in code and tests.
+- Update measured numbers, versions, and capabilities with the change that
+  affects them. State documents must not accumulate history.
+- Keep repository documentation concise and in English.
 
-## Processo de mudança
+## Change process
 
-Antes de implementar:
+Before implementation:
 
-1. leia estas regras e identifique o dono do comportamento;
-2. confirme o estado real no código, nos testes e nos manifestos;
-3. escolha a solução com menos acoplamento e partes móveis.
+1. read these rules and identify the behavior owner;
+2. confirm reality in code, tests, and manifests;
+3. choose the solution with the least coupling and fewest moving parts.
 
-Antes de concluir:
+Before completion:
 
-1. revise duplicação, código morto, ambiguidades, ownership e falhas;
-2. adicione a cobertura de regressão necessária;
-3. atualize documentação e TODO afetados;
-4. execute `pnpm verify` e revise o diff completo.
+1. review duplication, dead code, ambiguity, ownership, and failures;
+2. add the required regression coverage;
+3. update affected documentation and TODO items;
+4. run `pnpm verify` and review the complete diff.
 
-Não invente APIs ou comportamentos, não entregue soluções parciais e não troque
-integridade de longo prazo por velocidade.
+Do not invent APIs or behaviors, ship partial solutions, or trade long-term
+integrity for speed.

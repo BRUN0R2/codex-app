@@ -1,37 +1,37 @@
-# Release para Windows
+# Windows release
 
-`.github/workflows/release.yml` é a única rota oficial. O workflow valida o
-repositório, gera o instalador NSIS, aplica Authenticode e publica a release da
-tag. Builds locais não são publicações oficiais.
+`.github/workflows/release.yml` is the only official release path. It validates
+the repository, builds the NSIS installer, applies Authenticode, and publishes
+the tagged release. Local builds are not official publications.
 
-## Secrets obrigatórios
+## Required secrets
 
-- `WINDOWS_CERTIFICATE_BASE64`: certificado PFX em Base64;
-- `WINDOWS_CERTIFICATE_PASSWORD`: senha do PFX;
-- `WINDOWS_CERTIFICATE_THUMBPRINT`: impressão digital do certificado;
-- `WINDOWS_PUBLISHER`: publicador legal presente no certificado.
+- `WINDOWS_CERTIFICATE_BASE64`: Base64-encoded PFX certificate;
+- `WINDOWS_CERTIFICATE_PASSWORD`: PFX password;
+- `WINDOWS_CERTIFICATE_THUMBPRINT`: certificate thumbprint;
+- `WINDOWS_PUBLISHER`: legal publisher identity in the certificate.
 
-O job encerra antes do bundle se algum valor estiver ausente ou se a identidade
-importada não corresponder aos secrets.
+The job stops before bundling if a value is missing or the imported identity
+does not match the configured secrets.
 
-## Publicação
+## Publishing
 
-1. Use a mesma versão em `package.json`, `src-tauri/Cargo.toml` e
+1. Use the same version in `package.json`, `src-tauri/Cargo.toml`, and
    `src-tauri/tauri.conf.json`.
-2. Execute `pnpm verify:version` e `pnpm verify`.
-3. Crie a tag `vMAJOR.MINOR.PATCH` no commit validado e envie-a ao GitHub.
+2. Run `pnpm verify:version` and `pnpm verify`.
+3. Create `vMAJOR.MINOR.PATCH` on the verified commit and push the tag.
 
-O pipeline confere a tag, os três manifestos, o sidecar `rg.exe`, a assinatura e
-o timestamp antes de publicar.
+The pipeline verifies the tag, all three manifests, the `rg.exe` sidecar,
+signature, and timestamp before publishing.
 
-## Build local
+## Local builds
 
 ```powershell
-pnpm release:check  # valida conflitos com outra instância release
-pnpm release:build  # recompila sem abrir o aplicativo
-pnpm release        # recompila e inicia o binário resultante
+pnpm release:check  # detect conflicts with another release instance
+pnpm release:build  # rebuild without opening the application
+pnpm release        # rebuild and start the resulting executable
 ```
 
-Não encerre uma instância canônica para substituir seu executável. Para uma
-validação descartável, use um `CARGO_TARGET_DIR` temporário e ignorado; a release
-oficial sempre usa o workflow e o target canônico.
+Never terminate a canonical instance to replace its executable. For disposable
+validation, use a temporary ignored `CARGO_TARGET_DIR`. Official releases
+always use the workflow and canonical target.

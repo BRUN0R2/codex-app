@@ -4724,7 +4724,8 @@ mod tests {
     use crate::engine::{
         ActivityStatus, AutomationRunStatus, AutomationRunTrigger, CommandLiveOutput,
         CommandSource, ConfigUpdate, ConversationMode, ImageDetail, ModelContextWindowPreference,
-        ModelVerbosity, ThreadItem, ThreadOutput, TokenUsage, TurnStatus, UserContent,
+        ModelDefaults, ModelVerbosity, ReasoningEffort, ThreadItem, ThreadOutput, TokenUsage,
+        TurnStatus, UserContent,
     };
 
     #[test]
@@ -5077,7 +5078,7 @@ mod tests {
                 id: created.id,
                 expected_version: 1,
                 name: "Atualização obsoleta".into(),
-                prompt: "Não deve ser aplicada.".into(),
+                prompt: "Must not be applied.".into(),
                 project_path: created.project_path,
                 enabled: true,
                 interval_minutes: 15,
@@ -5186,7 +5187,7 @@ mod tests {
                 .contains("concurrency limit")
         );
         storage
-            .fail_automation_run(first_run.run.id, "falha de teste".into())
+            .fail_automation_run(first_run.run.id, "test failure".into())
             .await
             .expect("first run should fail");
         storage
@@ -5395,6 +5396,52 @@ mod tests {
         assert_eq!(turn_ids.len(), TURN_COUNT);
         assert_eq!(turn_ids.first().map(String::as_str), Some("turn-0000"));
         assert_eq!(turn_ids.last().map(String::as_str), Some("turn-1199"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persists_model_defaults_atomically_across_reads() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("model-defaults.sqlite3"))
+            .await
+            .expect("storage should initialize");
+
+        let initial = storage
+            .read_config()
+            .await
+            .expect("default configuration should load");
+        let updated = storage
+            .update_config(
+                initial.version,
+                ConfigUpdate::ModelDefaults {
+                    value: ModelDefaults {
+                        model: Some("gpt-selected".into()),
+                        reasoning_effort: Some(ReasoningEffort::High),
+                        service_tier: Some("priority".into()),
+                    },
+                },
+            )
+            .await
+            .expect("model defaults should persist");
+
+        assert_eq!(updated.config.model.as_deref(), Some("gpt-selected"));
+        assert_eq!(
+            updated.config.model_reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(updated.config.service_tier.as_deref(), Some("priority"));
+
+        let reloaded = storage
+            .read_config()
+            .await
+            .expect("model defaults should reload");
+        assert_eq!(reloaded.config.model, updated.config.model);
+        assert_eq!(
+            reloaded.config.model_reasoning_effort,
+            updated.config.model_reasoning_effort
+        );
+        assert_eq!(reloaded.config.service_tier, updated.config.service_tier);
     }
 
     #[tokio::test(flavor = "current_thread")]

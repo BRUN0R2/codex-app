@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,6 +15,38 @@ use crate::engine::native::provider::FunctionCallOutputContent;
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TEST_YIELD_MILLISECONDS: u64 = 30_000;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_runtime_warmups_share_one_process_initialization() {
+    let tasks = (0..32)
+        .map(|_| tokio::spawn(super::warm_runtime()))
+        .collect::<Vec<_>>();
+
+    for task in tasks {
+        task.await
+            .expect("warmup task should remain joinable")
+            .expect("Code Mode runtime should warm successfully");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "performance benchmark"]
+async fn benchmark_code_mode_runtime_warmup() {
+    let started_at = std::time::Instant::now();
+    super::warm_runtime()
+        .await
+        .expect("Code Mode runtime should warm successfully");
+    let elapsed = started_at.elapsed();
+
+    println!(
+        "Code Mode runtime warmup: {:.3} ms",
+        elapsed.as_secs_f64() * 1_000.0
+    );
+    assert!(
+        elapsed <= Duration::from_secs(2),
+        "Code Mode runtime warmup exceeded two seconds: {elapsed:?}"
+    );
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct RecordedToolCall {
     name: String,
@@ -28,6 +61,22 @@ struct RecordingDelegate {
 }
 
 struct PanickingDelegate;
+
+#[derive(Default)]
+struct CancellationSettlingDelegate {
+    started_calls: Arc<AtomicUsize>,
+    settled_calls: Arc<AtomicUsize>,
+}
+
+impl CancellationSettlingDelegate {
+    fn started_calls(&self) -> usize {
+        self.started_calls.load(Ordering::SeqCst)
+    }
+
+    fn settled_calls(&self) -> usize {
+        self.settled_calls.load(Ordering::SeqCst)
+    }
+}
 
 impl ToolDelegate for PanickingDelegate {
     fn invoke(
@@ -46,6 +95,38 @@ impl ToolDelegate for PanickingDelegate {
         _cancellation: watch::Receiver<bool>,
     ) -> DelegateFuture<()> {
         Box::pin(async { panic!("notification callback panic probe") })
+    }
+}
+
+impl ToolDelegate for CancellationSettlingDelegate {
+    fn invoke(
+        &self,
+        _call: NestedToolCall,
+        mut cancellation: watch::Receiver<bool>,
+    ) -> DelegateFuture<Value> {
+        let started_calls = Arc::clone(&self.started_calls);
+        let settled_calls = Arc::clone(&self.settled_calls);
+        Box::pin(async move {
+            started_calls.fetch_add(1, Ordering::SeqCst);
+            while !*cancellation.borrow() {
+                cancellation
+                    .changed()
+                    .await
+                    .map_err(|_| "tool cancellation channel closed".to_string())?;
+            }
+            settled_calls.fetch_add(1, Ordering::SeqCst);
+            Err("nested tool call was cancelled".into())
+        })
+    }
+
+    fn notify(
+        &self,
+        _call_id: String,
+        _cell_id: CellId,
+        _text: String,
+        _cancellation: watch::Receiver<bool>,
+    ) -> DelegateFuture<()> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -537,6 +618,85 @@ async fn bounds_unawaited_nested_tool_calls_inside_the_isolate() {
 
     assert!(content.is_empty());
     assert!(error.is_some_and(|error| error.contains("concurrent calls exceeded")));
+    shutdown(&session).await;
+}
+
+#[tokio::test]
+async fn cell_completion_settles_unawaited_nested_tool_callbacks() {
+    let delegate = Arc::new(CancellationSettlingDelegate::default());
+    let (session, _cancellation) = session(delegate.clone());
+    let mut execution = request(
+        r#"
+tools.read({ path: "Icon.tsx" });
+tools.read({ path: "Icon.tsx" });
+tools.read({ path: "Timeline.tsx" });
+yield_control();
+await new Promise((resolve) => setTimeout(resolve, 1));
+"#,
+    );
+    execution.enabled_tools = vec![ToolDefinition {
+        name: "read".into(),
+        description: "Read a file".into(),
+        kind: ToolKind::Function,
+        input_schema: None,
+        output_schema: None,
+    }];
+
+    let (cell_id, content) = yielded(execute(&session, execution).await);
+    assert!(content.is_empty());
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while delegate.started_calls() != 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("all nested tool callbacks should start before resuming the cell");
+
+    let response =
+        tokio::time::timeout(TEST_TIMEOUT, session.wait(cell_id, TEST_YIELD_MILLISECONDS))
+            .await
+            .expect("Code Mode completion timed out")
+            .expect("Code Mode cell should remain observable");
+    let (content, error) = completed(response);
+
+    assert!(content.is_empty());
+    assert_eq!(error, None);
+    assert_eq!(delegate.started_calls(), 3);
+    assert_eq!(delegate.settled_calls(), 3);
+    shutdown(&session).await;
+}
+
+#[tokio::test]
+async fn owner_cancellation_settles_active_nested_tool_callbacks() {
+    let delegate = Arc::new(CancellationSettlingDelegate::default());
+    let (session, _cancellation) = session(delegate.clone());
+    let mut execution = request("await tools.read({ path: \"Icon.tsx\" });");
+    execution.yield_time_ms = 0;
+    execution.enabled_tools = vec![ToolDefinition {
+        name: "read".into(),
+        description: "Read a file".into(),
+        kind: ToolKind::Function,
+        input_schema: None,
+        output_schema: None,
+    }];
+
+    let (cell_id, content) = yielded(execute(&session, execution).await);
+    assert!(content.is_empty());
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while delegate.started_calls() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the nested tool callback should start before owner cancellation");
+
+    tokio::time::timeout(TEST_TIMEOUT, session.cancel_owner("test-turn"))
+        .await
+        .expect("owner cancellation timed out");
+
+    assert_eq!(delegate.started_calls(), 1);
+    assert_eq!(delegate.settled_calls(), 1);
+    assert!(session.wait(cell_id, 0).await.is_err());
     shutdown(&session).await;
 }
 

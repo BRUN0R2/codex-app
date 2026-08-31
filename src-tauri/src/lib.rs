@@ -12,9 +12,8 @@ mod engine;
 mod error;
 mod process;
 
-use desktop_integration::{ApplicationPreferencesState, restore_main_window};
+use desktop_integration::{ApplicationMenuState, ApplicationPreferencesState, restore_main_window};
 use engine::{EngineManager, RuntimeDiagnosticSubsystem};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter as _, Manager as _};
 
 fn focus_main_window(app: &tauri::AppHandle) -> Result<(), String> {
@@ -44,17 +43,7 @@ fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) -> Result<(), Strin
                 .eval("window.location.reload()")
                 .map_err(|error| format!("could not reload the main window: {error}"))
         }
-        "about" => {
-            use tauri_plugin_dialog::DialogExt as _;
-            app.dialog()
-                .message(format!(
-                    "Codex App {} — cliente desktop nativo para o Codex.",
-                    env!("CARGO_PKG_VERSION")
-                ))
-                .title("Sobre o Codex App")
-                .show(|_| {});
-            Ok(())
-        }
+        "about" => desktop_integration::menu::show_about_dialog(app),
         "quit" => {
             app.exit(0);
             Ok(())
@@ -70,67 +59,6 @@ fn report_runtime_error(
 ) {
     app.state::<EngineManager>()
         .report_runtime_error(app, subsystem, message);
-}
-
-fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let novo_chat = MenuItem::with_id(app, "new-thread", "Novo chat", true, Some("Ctrl+N"))?;
-    let sair = MenuItem::with_id(app, "quit", "Sair", true, None::<&str>)?;
-    let separador = PredefinedMenuItem::separator(app)?;
-    let arquivo = Submenu::with_items(app, "Arquivo", true, &[&novo_chat, &separador, &sair])?;
-
-    let desfazer = PredefinedMenuItem::undo(app, None)?;
-    let refazer = PredefinedMenuItem::redo(app, None)?;
-    let recortar = PredefinedMenuItem::cut(app, None)?;
-    let copiar = PredefinedMenuItem::copy(app, None)?;
-    let colar = PredefinedMenuItem::paste(app, None)?;
-    let selecionar_tudo = PredefinedMenuItem::select_all(app, None)?;
-    let editar = Submenu::with_items(
-        app,
-        "Editar",
-        true,
-        &[
-            &desfazer,
-            &refazer,
-            &separador,
-            &recortar,
-            &copiar,
-            &colar,
-            &selecionar_tudo,
-        ],
-    )?;
-
-    let alternar_sidebar = MenuItem::with_id(
-        app,
-        "toggle-sidebar",
-        "Alternar barra lateral",
-        true,
-        Some("Ctrl+B"),
-    )?;
-    let recarregar = MenuItem::with_id(app, "reload", "Recarregar", true, Some("Ctrl+R"))?;
-    let tela_cheia = PredefinedMenuItem::fullscreen(app, None)?;
-    let minimizar = PredefinedMenuItem::minimize(app, None)?;
-    let maximizar = PredefinedMenuItem::maximize(app, None)?;
-    let fechar_janela = PredefinedMenuItem::close_window(app, None)?;
-    let exibir = Submenu::with_items(
-        app,
-        "Exibir",
-        true,
-        &[
-            &alternar_sidebar,
-            &recarregar,
-            &separador,
-            &tela_cheia,
-            &minimizar,
-            &maximizar,
-            &fechar_janela,
-        ],
-    )?;
-
-    let configuracoes = MenuItem::with_id(app, "settings", "Configurações", true, Some("Ctrl+,"))?;
-    let sobre = MenuItem::with_id(app, "about", "Sobre o Codex App", true, None::<&str>)?;
-    let ajuda = Submenu::with_items(app, "Ajuda", true, &[&configuracoes, &sobre])?;
-
-    Menu::with_items(app, &[&arquivo, &editar, &exibir, &ajuda])
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -154,7 +82,7 @@ pub fn run() {
             Some(vec![desktop_integration::MINIMIZED_STARTUP_ARGUMENT]),
         ))
         .plugin(tauri_plugin_opener::init())
-        .menu(build_menu)
+        .menu(desktop_integration::menu::build_default)
         .on_menu_event(|app, event| {
             if let Err(error) = handle_menu_event(app, event.id().as_ref()) {
                 report_runtime_error(app, RuntimeDiagnosticSubsystem::Menu, error);
@@ -165,6 +93,12 @@ pub fn run() {
         .setup(|app| {
             app.state::<browser::BrowserManager>()
                 .initialize(app.handle())?;
+            if !app.manage(ApplicationMenuState::default()) {
+                return Err(crate::error::AppError::State(
+                    "application menu state is already managed".to_string(),
+                )
+                .into());
+            }
             let preferences = ApplicationPreferencesState::load(app.handle())?;
             if !app.manage(preferences) {
                 return Err(crate::error::AppError::State(
@@ -196,6 +130,7 @@ pub fn run() {
             browser::browser_surface_sync,
             desktop_integration::preferences::application_preferences_read,
             desktop_integration::preferences::application_preferences_update,
+            desktop_integration::menu::application_menu_update,
             commands::application_workspace_open,
             commands::engine_start,
             commands::engine_runtime_diagnostic_report,

@@ -1,6 +1,8 @@
 import { For, Show } from "solid-js";
 
 import type { FileChange } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage } from "../i18n/messages";
 import type { BrowserController } from "../state/browserController";
 import { BrowserPanel } from "./BrowserPanel";
 import type { DiffDisplayMode } from "./DiffView";
@@ -26,13 +28,18 @@ interface WorkspacePanelProps {
 }
 
 export function WorkspacePanel(props: WorkspacePanelProps) {
+  const i18n = useI18n();
   const active = () => activeWorkspaceTab(props.state);
   const panelId = (tabId: WorkspaceTabId): string => `workspace-surface-${tabId}`;
 
   return (
-    <section aria-label="Área de trabalho" class="workspace-panel">
+    <section aria-label={i18n.messages().workspace.label} class="workspace-panel">
       <header class="workspace-tab-bar">
-        <div aria-label="Abas da área de trabalho" class="workspace-tabs-scroll" role="tablist">
+        <div
+          aria-label={i18n.messages().workspace.tabs}
+          class="workspace-tabs-scroll"
+          role="tablist"
+        >
           <For each={props.state.tabs}>
             {(tab) => (
               <div
@@ -48,20 +55,36 @@ export function WorkspacePanel(props: WorkspacePanelProps) {
                   id={`workspace-tab-${tab.id}`}
                   onClick={() => props.onActivate(tab)}
                   role="tab"
-                  title={workspaceTabTitle(tab, props.browserController, props.conversationId)}
+                  title={workspaceTabTitle(
+                    tab,
+                    props.browserController,
+                    props.conversationId,
+                    i18n.messages().workspace.reviewTitle,
+                    i18n.messages().workspace.newTab,
+                  )}
                   type="button"
                 >
                   <Icon name={tab.kind === "browser" ? "globe" : "file"} size={13} />
                   <span>
-                    {workspaceTabLabel(tab, props.browserController, props.conversationId)}
+                    {workspaceTabLabel(
+                      tab,
+                      props.browserController,
+                      props.conversationId,
+                      i18n.messages().workspace.review,
+                      i18n.messages().workspace.newTab,
+                    )}
                   </span>
                 </button>
                 <button
-                  aria-label={`Fechar ${workspaceTabLabel(
-                    tab,
-                    props.browserController,
-                    props.conversationId,
-                  )}`}
+                  aria-label={formatMessage(i18n.messages().common.closeNamed, {
+                    name: workspaceTabLabel(
+                      tab,
+                      props.browserController,
+                      props.conversationId,
+                      i18n.messages().workspace.review,
+                      i18n.messages().workspace.newTab,
+                    ),
+                  })}
                   class="workspace-tab-close"
                   onClick={() => props.onClose(tab)}
                   tabindex={props.state.activeTabId === tab.id ? 0 : -1}
@@ -74,20 +97,20 @@ export function WorkspacePanel(props: WorkspacePanelProps) {
           </For>
         </div>
         <button
-          aria-label="Nova aba do navegador"
+          aria-label={i18n.messages().workspace.newTab}
           class="workspace-bar-button"
           onClick={props.onNewBrowserTab}
-          title="Nova aba do navegador"
+          title={i18n.messages().workspace.newTab}
           type="button"
         >
           <Icon name="plus" size={15} />
         </button>
         <span aria-hidden="true" class="workspace-bar-spacer" />
         <button
-          aria-label="Fechar área de trabalho"
+          aria-label={i18n.messages().workspace.closeWorkspace}
           class="workspace-bar-button workspace-panel-close"
           onClick={props.onHide}
-          title="Voltar ao chat"
+          title={i18n.messages().workspace.backToChat}
           type="button"
         >
           <Icon name="panel" size={15} />
@@ -122,36 +145,40 @@ function workspaceTabLabel(
   tab: WorkspaceTab,
   controller: BrowserController,
   conversationId: string,
+  reviewLabel: string,
+  newTabLabel: string,
 ): string {
   if (tab.kind === "review") {
-    return "Revisão";
+    return reviewLabel;
   }
   const snapshot = controller
     .tabs(conversationId)
     .find(({ browserTabId }) => browserTabId === tab.browserTabId);
-  return browserTabLabel(snapshot?.title ?? null, snapshot?.url ?? "about:blank");
+  return browserTabLabel(snapshot?.title ?? null, snapshot?.url ?? "about:blank", newTabLabel);
 }
 
 function workspaceTabTitle(
   tab: WorkspaceTab,
   controller: BrowserController,
   conversationId: string,
+  reviewTitle: string,
+  newTabLabel: string,
 ): string {
   if (tab.kind === "review") {
-    return "Revisão dos arquivos alterados";
+    return reviewTitle;
   }
   const snapshot = controller
     .tabs(conversationId)
     .find(({ browserTabId }) => browserTabId === tab.browserTabId);
-  return snapshot?.title ?? snapshot?.url ?? "Nova aba";
+  return snapshot?.title ?? snapshot?.url ?? newTabLabel;
 }
 
-function browserTabLabel(title: string | null, url: string): string {
+function browserTabLabel(title: string | null, url: string, newTabLabel: string): string {
   if (title !== null && title.trim().length > 0) {
     return title;
   }
   if (url === "about:blank") {
-    return "Nova aba";
+    return newTabLabel;
   }
   try {
     return new URL(url).hostname || url;

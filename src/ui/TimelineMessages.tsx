@@ -1,6 +1,8 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 
 import type { ThreadItem, UserContent } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage, type TranslationMessages } from "../i18n/messages";
 import { fileName } from "./activityLabels";
 import { presentAssistantText } from "./contentReferenceMarkers";
 import { observeElementResize } from "./elementResize";
@@ -19,6 +21,8 @@ const FALLBACK_TITLE_LIMIT_CHARACTERS: number = 160;
 export function UserMessage(props: {
   readonly item: Extract<ThreadItem, { type: "userMessage" }>;
 }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().timeline;
   let bubble: HTMLDivElement | undefined;
   let releaseResizeObservation: (() => void) | undefined;
   let measurementFrame: number | undefined;
@@ -67,15 +71,15 @@ export function UserMessage(props: {
   return (
     <article class="message-row user-message-row" id={userMessageAnchor(props.item.id)}>
       <div class="message-content">
-        <span class="visually-hidden">Você disse:</span>
+        <span class="visually-hidden">{messages().youSaid}</span>
         <Show when={imageContent().length > 0}>
           <div class="message-image-grid user-message-images">
             <For each={imageContent()}>
               {(content) => (
                 <ImagePreview
-                  alt={imageContentName(content.path)}
+                  alt={imageContentName(content.path, messages())}
                   class="message-image-preview"
-                  name={imageContentName(content.path)}
+                  name={imageContentName(content.path, messages())}
                   source={content.path}
                 />
               )}
@@ -103,11 +107,11 @@ export function UserMessage(props: {
             onClick={disclosure.toggle}
             type="button"
           >
-            {disclosure.isOpen() ? "Mostrar menos" : "Mostrar mais"}
+            {disclosure.isOpen() ? messages().showLess : messages().showMore}
           </button>
         </Show>
         <div class="message-actions user-message-actions">
-          <CopyMessageButton text={userMessageCopyText(props.item.content)} />
+          <CopyMessageButton text={userMessageCopyText(props.item.content, messages())} />
         </div>
       </div>
     </article>
@@ -118,13 +122,15 @@ export function CommentaryMessage(props: {
   readonly item: Extract<ThreadItem, { type: "agentMessage" }>;
   readonly streaming: boolean;
 }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().timeline;
   const presentation = createMemo(() => createCommentaryPresentation(props.item.text));
 
   return (
     <Show when={presentation().visible}>
       <article class="message-row agent-message-row commentary">
         <div class="message-content">
-          <span class="visually-hidden">Codex disse:</span>
+          <span class="visually-hidden">{messages().codexSaid}</span>
           <div class="commentary-content">
             <Markdown streaming={props.streaming} text={presentation().text} />
           </div>
@@ -138,13 +144,15 @@ export function AgentMessage(props: {
   readonly item: Extract<ThreadItem, { type: "agentMessage" }>;
   readonly streaming: boolean;
 }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().timeline;
   const content = () => presentAssistantText(props.item.text);
   const visibleContent = () => content().trim().length > 0;
   return (
     <Show when={visibleContent()}>
       <article class="message-row agent-message-row">
         <div class="message-content">
-          <span class="visually-hidden">Codex disse:</span>
+          <span class="visually-hidden">{messages().codexSaid}</span>
           <Markdown
             class="agent-message-markdown"
             streaming={props.streaming}
@@ -159,12 +167,15 @@ export function AgentMessage(props: {
   );
 }
 
-export function userMessageCopyText(content: readonly UserContent[]): string {
-  return content.map(userContentPartCopyText).join("\n");
+export function userMessageCopyText(
+  content: readonly UserContent[],
+  messages: TranslationMessages["timeline"],
+): string {
+  return content.map((part) => userContentPartCopyText(part, messages)).join("\n");
 }
 
-export function inlinePreview(text: string, maximumLength: number): string {
-  const normalized = text.replace(/\s+/gu, " ").trim() || "Mensagem sem texto";
+export function inlinePreview(text: string, maximumLength: number, fallback: string): string {
+  const normalized = text.replace(/\s+/gu, " ").trim() || fallback;
   return normalized.length <= maximumLength
     ? normalized
     : `${normalized.slice(0, maximumLength - 1)}…`;
@@ -201,6 +212,8 @@ function UserContentPart(props: { readonly content: UserContent }) {
 }
 
 function CopyMessageButton(props: { readonly text: string }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().timeline;
   const reportFailure = useFrontendFailureReporter();
   const [state, setState] = createSignal<"copied" | "failed" | "idle">("idle");
   let resetTimer: number | undefined;
@@ -216,7 +229,7 @@ function CopyMessageButton(props: { readonly text: string }) {
       await navigator.clipboard.writeText(props.text);
       setState("copied");
     } catch (reason) {
-      reportFailure(frontendFailureMessage("Falha ao copiar uma mensagem", reason));
+      reportFailure(frontendFailureMessage("Failed to copy a message", reason));
       setState("failed");
     }
     resetTimer = window.setTimeout(() => setState("idle"), COPY_FEEDBACK_RESET_MILLISECONDS);
@@ -225,11 +238,11 @@ function CopyMessageButton(props: { readonly text: string }) {
   const label = () => {
     switch (state()) {
       case "copied":
-        return "Copiado";
+        return messages().copied;
       case "failed":
-        return "Falha ao copiar";
+        return messages().copyFailed;
       case "idle":
-        return "Copiar";
+        return messages().copy;
     }
   };
 
@@ -249,18 +262,23 @@ function CopyMessageButton(props: { readonly text: string }) {
   );
 }
 
-function userContentPartCopyText(part: UserContent): string {
+function userContentPartCopyText(
+  part: UserContent,
+  messages: TranslationMessages["timeline"],
+): string {
   switch (part.type) {
     case "text":
       return part.text;
     case "localImage":
-      return `Imagem: ${imageContentName(part.path)}`;
+      return formatMessage(messages.imageAttachment, {
+        name: imageContentName(part.path, messages),
+      });
     case "mention":
       return part.name;
   }
 }
 
-function imageContentName(path: string): string {
+function imageContentName(path: string, messages: TranslationMessages["timeline"]): string {
   const name = fileName(path);
-  return name.length <= FALLBACK_TITLE_LIMIT_CHARACTERS ? name : "Imagem anexada";
+  return name.length <= FALLBACK_TITLE_LIMIT_CHARACTERS ? name : messages.attachedImage;
 }

@@ -21,6 +21,8 @@ import type {
   UsageResetCredit,
   WebSearchMode,
 } from "../contracts/types";
+import { useI18n } from "../i18n/context";
+import { formatMessage, type TranslationMessages } from "../i18n/messages";
 import {
   describeError,
   openExternalUrl,
@@ -84,7 +86,7 @@ import {
   modelContextWindowPreference,
   modelSupportsMaximumContext,
 } from "./modelContextWindow";
-import { OUTPUT_DETAIL_OPTIONS, outputDetailLabel } from "./outputDetail";
+import { outputDetailLabel, outputDetailOptions } from "./outputDetail";
 import { ProfileView } from "./ProfileView";
 import { threadTitle } from "./Sidebar";
 import { SurfaceScrollbar } from "./SurfaceScrollbar";
@@ -110,26 +112,30 @@ interface SettingsNavigationSection {
   readonly label: string;
 }
 
-const SETTINGS_NAVIGATION: readonly SettingsNavigationSection[] = [
-  {
-    label: "Pessoais",
-    items: [
-      { icon: "settings", label: "Geral", page: "general" },
-      { icon: "user", label: "Perfil", page: "profile" },
-      { icon: "sparkles", label: "Personalização", page: "personalization" },
-      { icon: "keyboard", label: "Atalhos de teclado", page: "shortcuts" },
-      { icon: "creditCard", label: "Uso e faturamento", page: "usage" },
-    ],
-  },
-  {
-    label: "Sistema",
-    items: [{ icon: "bug", label: "Diagnósticos", page: "diagnostics" }],
-  },
-  {
-    label: "Arquivadas",
-    items: [{ icon: "archive", label: "Chats arquivados", page: "archived" }],
-  },
-];
+type SettingsMessages = TranslationMessages["settings"];
+
+function settingsNavigation(messages: SettingsMessages): readonly SettingsNavigationSection[] {
+  return [
+    {
+      label: messages.personalSection,
+      items: [
+        { icon: "settings", label: messages.general, page: "general" },
+        { icon: "user", label: messages.profile, page: "profile" },
+        { icon: "sparkles", label: messages.personalization, page: "personalization" },
+        { icon: "keyboard", label: messages.shortcuts, page: "shortcuts" },
+        { icon: "creditCard", label: messages.usageBilling, page: "usage" },
+      ],
+    },
+    {
+      label: messages.systemSection,
+      items: [{ icon: "bug", label: messages.diagnostics, page: "diagnostics" }],
+    },
+    {
+      label: messages.archivedSection,
+      items: [{ icon: "archive", label: messages.archivedChats, page: "archived" }],
+    },
+  ];
+}
 
 const AUTO_TOP_UP_DEFAULT_RECHARGE_TARGET: string = "250";
 const AUTO_TOP_UP_DEFAULT_RECHARGE_THRESHOLD: string = "125";
@@ -141,6 +147,9 @@ export function SettingsDialog(props: {
   readonly initialPage?: SettingsPage | undefined;
   readonly onClose: () => void;
 }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().settings;
+  const navigation = createMemo(() => settingsNavigation(messages()));
   const [page, setPage] = createSignal<SettingsPage>(props.initialPage ?? "general");
   const [query, setQuery] = createSignal("");
   const [developerInstructions, setDeveloperInstructions] = createSignal("");
@@ -150,14 +159,18 @@ export function SettingsDialog(props: {
   let searchInput: HTMLInputElement | undefined;
   let previouslyFocusedElement: HTMLElement | null = null;
   const visibleNavigation = createMemo(() => {
-    const normalizedQuery = normalizeSearch(query());
+    const normalizedQuery = normalizeSearch(query(), i18n.locale());
     if (normalizedQuery.length === 0) {
-      return SETTINGS_NAVIGATION;
+      return navigation();
     }
-    return SETTINGS_NAVIGATION.map((section) => ({
-      ...section,
-      items: section.items.filter((item) => normalizeSearch(item.label).includes(normalizedQuery)),
-    })).filter((section) => section.items.length > 0);
+    return navigation()
+      .map((section) => ({
+        ...section,
+        items: section.items.filter((item) =>
+          normalizeSearch(item.label, i18n.locale()).includes(normalizedQuery),
+        ),
+      }))
+      .filter((section) => section.items.length > 0);
   });
 
   createEffect(() => {
@@ -202,7 +215,7 @@ export function SettingsDialog(props: {
   return (
     <div class="settings-overlay">
       <section
-        aria-label="Configurações"
+        aria-label={messages().title}
         aria-modal="true"
         class="settings-dialog"
         onKeyDown={handleDialogKeyDown}
@@ -212,20 +225,20 @@ export function SettingsDialog(props: {
         <aside class="settings-nav">
           <button class="settings-back" onClick={props.onClose} type="button">
             <Icon name="arrowLeft" size={15} />
-            <span>Voltar ao aplicativo</span>
+            <span>{messages().back}</span>
           </button>
           <label class="settings-search">
             <Icon name="search" size={14} />
             <input
-              aria-label="Pesquisar configurações"
+              aria-label={messages().search}
               onInput={(event) => setQuery(event.currentTarget.value)}
-              placeholder="Pesquisar configurações..."
+              placeholder={messages().searchPlaceholder}
               ref={searchInput}
               type="search"
               value={query()}
             />
           </label>
-          <nav aria-label="Seções de configurações">
+          <nav aria-label={messages().sections}>
             <For each={visibleNavigation()}>
               {(section) => (
                 <section class="settings-nav-section">
@@ -245,7 +258,7 @@ export function SettingsDialog(props: {
               )}
             </For>
             <Show when={visibleNavigation().length === 0}>
-              <p class="settings-search-empty">Nenhuma configuração encontrada.</p>
+              <p class="settings-search-empty">{messages().noResults}</p>
             </Show>
           </nav>
         </aside>
@@ -285,7 +298,7 @@ export function SettingsDialog(props: {
             className="settings-scrollbar"
             contentElement={() => settingsMainContentElement}
             controls="settings-main-scroll"
-            label="configurações"
+            label={messages().scrollArea}
             scrollElement={() => settingsMainElement}
           />
         </div>
@@ -323,12 +336,12 @@ function SettingsNavButton(props: {
   );
 }
 
-function normalizeSearch(value: string): string {
+function normalizeSearch(value: string, locale: string): string {
   return value
     .trim()
     .normalize("NFD")
     .replace(/\p{Diacritic}/gu, "")
-    .toLocaleLowerCase("pt-BR");
+    .toLocaleLowerCase(locale);
 }
 
 function SettingsHeading(props: { readonly title: string; readonly description: string }) {
@@ -365,6 +378,8 @@ function SettingsSection(props: {
 }
 
 function ApplicationPreferencesSettings(props: { readonly controller: SettingsDialogController }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().settings;
   const desktopRuntime = isDesktopRuntime() || isBrowserPreview();
   const [preferences, setPreferences] = createSignal<ApplicationPreferences>(
     DEFAULT_APPLICATION_PREFERENCES,
@@ -442,10 +457,10 @@ function ApplicationPreferencesSettings(props: { readonly controller: SettingsDi
   const controlsDisabled = () => !desktopRuntime || !loaded() || loading();
   const status = () => {
     if (!desktopRuntime) {
-      return "Disponível apenas no aplicativo desktop.";
+      return messages().desktopOnly;
     }
     if (loading()) {
-      return "Carregando preferências do aplicativo…";
+      return messages().loadingAppPreferences;
     }
     return operationError() ?? "";
   };
@@ -454,33 +469,33 @@ function ApplicationPreferencesSettings(props: { readonly controller: SettingsDi
     <>
       <SettingsSection
         busy={loading()}
-        description="Escolha como o Codex App inicia e se comporta ao fechar a janela principal."
-        title="Aplicativo"
+        description={messages().applicationDescription}
+        title={messages().application}
       >
         <PreferenceCheckbox
           checked={preferences().startWithWindows}
-          description="Abre o Codex App automaticamente ao entrar na sua conta do Windows."
+          description={messages().startWithWindowsDescription}
           disabled={controlsDisabled()}
-          label="Iniciar com o Windows"
+          label={messages().startWithWindows}
           onChange={(startWithWindows) => save({ startWithWindows })}
         />
         <PreferenceCheckbox
           checked={preferences().startMinimized}
-          description="Quando iniciado com o Windows, mantém o Codex App na bandeja do sistema."
+          description={messages().startMinimizedDescription}
           disabled={controlsDisabled() || !preferences().startWithWindows}
-          label="Iniciar minimizado"
+          label={messages().startMinimized}
           onChange={(startMinimized) => save({ startMinimized })}
         />
         <PreferenceCheckbox
           checked={preferences().closeToTray}
-          description="Mantém o Codex App em segundo plano quando a janela principal é fechada."
+          description={messages().closeToTrayDescription}
           disabled={controlsDisabled()}
-          label="Ir para a bandeja ao fechar"
+          label={messages().closeToTray}
           onChange={(closeToTray) => save({ closeToTray })}
         />
       </SettingsSection>
       <span aria-live="polite" class="visually-hidden">
-        {saving() ? "Salvando preferências do aplicativo." : ""}
+        {saving() ? messages().savingAppPreferences : ""}
       </span>
       <Show when={status().length > 0}>
         <p
@@ -525,6 +540,8 @@ function PreferenceCheckbox(props: {
 }
 
 function GeneralSettings(props: { readonly controller: SettingsDialogController }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().settings;
   const configuration = () => props.controller.config()?.config;
   const expandedContextModels = createMemo(() =>
     props.controller
@@ -534,15 +551,13 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
 
   return (
     <div class="settings-page">
-      <SettingsHeading
-        title="Geral"
-        description="Preferências do aplicativo e padrões usados ao iniciar novos turnos."
-      />
+      <SettingsHeading title={messages().general} description={messages().generalDescription} />
+      <LanguageSettings controller={props.controller} />
       <ApplicationPreferencesSettings controller={props.controller} />
-      <SettingsSection allowOverflow title="Modelo">
+      <SettingsSection allowOverflow title={messages().model}>
         <SettingsRow
-          label="Detalhamento da saída"
-          description="Escolha o nível de detalhe que o Codex inclui nas respostas."
+          label={messages().outputDetail}
+          description={messages().outputDetailDescription}
         >
           <OutputDetailSelect
             disabled={configuration() === undefined}
@@ -555,8 +570,8 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
       </SettingsSection>
       <Show when={expandedContextModels().length > 0}>
         <SettingsSection
-          title="Janela de contexto"
-          description="As capacidades são carregadas do catálogo oficial do Codex para a sua conta."
+          title={messages().contextWindow}
+          description={messages().contextWindowDescription}
         >
           <For each={expandedContextModels()}>
             {(model) => {
@@ -572,8 +587,11 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
                   label={model.displayName}
                   description={
                     contextWindow === null || maximumTokens === null
-                      ? "O catálogo não anunciou uma janela configurável."
-                      : `Padrão de ${formatModelContextTokens(contextWindow.tokens)}; máximo de ${formatModelContextTokens(maximumTokens)}. A opção máxima pode aumentar latência e uso de tokens.`
+                      ? messages().contextUnavailable
+                      : formatMessage(messages().contextRange, {
+                          defaultTokens: formatModelContextTokens(contextWindow.tokens),
+                          maximumTokens: formatModelContextTokens(maximumTokens),
+                        })
                   }
                 >
                   <select
@@ -591,13 +609,13 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
                     value={preference()}
                   >
                     <option value="default">
-                      Padrão
+                      {messages().contextDefault}
                       {contextWindow === null
                         ? ""
                         : ` — ${formatModelContextTokens(contextWindow.tokens)}`}
                     </option>
                     <option value="maximum">
-                      Máxima
+                      {messages().contextMaximum}
                       {maximumTokens === null
                         ? ""
                         : ` — ${formatModelContextTokens(maximumTokens)}`}
@@ -607,17 +625,11 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
               );
             }}
           </For>
-          <div class="settings-note">
-            A preferência é salva por modelo e aplicada a novos turnos. Se o catálogo mudar, o
-            aplicativo usa automaticamente o novo limite anunciado.
-          </div>
+          <div class="settings-note">{messages().contextNote}</div>
         </SettingsSection>
       </Show>
-      <SettingsSection title="Ferramentas">
-        <SettingsRow
-          label="Pesquisa na web"
-          description="Usa a ferramenta hospedada oficial quando habilitada."
-        >
+      <SettingsSection title={messages().tools}>
+        <SettingsRow label={messages().webSearch} description={messages().webSearchDescription}>
           <select
             onChange={(event) => {
               const value = parseWebSearch(event.currentTarget.value);
@@ -626,12 +638,61 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
             }}
             value={configuration()?.webSearch ?? "disabled"}
           >
-            <option value="disabled">Desativada</option>
-            <option value="live">Internet ao vivo</option>
+            <option value="disabled">{messages().webSearchDisabled}</option>
+            <option value="live">{messages().webSearchLive}</option>
           </select>
         </SettingsRow>
       </SettingsSection>
     </div>
+  );
+}
+
+function LanguageSettings(props: { readonly controller: SettingsDialogController }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().language;
+  const issueMessage = () => {
+    const issue = i18n.storageIssue();
+    return issue === null ? null : messages()[issue];
+  };
+
+  function selectLanguage(value: string): void {
+    if (value === "auto") {
+      i18n.setPreference("auto");
+      return;
+    }
+    const catalog = i18n.availableCatalogs.find((candidate) => candidate.locale === value);
+    if (catalog === undefined) {
+      props.controller.reportError(
+        new Error(`Translation locale ${JSON.stringify(value)} is unavailable.`),
+      );
+      return;
+    }
+    i18n.setPreference(catalog.locale);
+  }
+
+  return (
+    <SettingsSection description={messages().sectionDescription} title={messages().sectionTitle}>
+      <SettingsRow description={messages().fieldDescription} label={messages().fieldLabel}>
+        <select
+          aria-label={messages().fieldLabel}
+          class="language-preference-select"
+          onChange={(event) => selectLanguage(event.currentTarget.value)}
+          value={i18n.preference()}
+        >
+          <option value="auto">{messages().autoDetect}</option>
+          <For each={i18n.availableCatalogs}>
+            {(catalog) => <option value={catalog.locale}>{catalog.name}</option>}
+          </For>
+        </select>
+      </SettingsRow>
+      <Show when={issueMessage()}>
+        {(message) => (
+          <p aria-live="polite" class="application-preferences-status error">
+            {message()}
+          </p>
+        )}
+      </Show>
+    </SettingsSection>
   );
 }
 
@@ -640,17 +701,16 @@ function PersonalizationSettings(props: {
   readonly developerInstructions: string;
   readonly setDeveloperInstructions: (value: string) => void;
 }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().settings;
   const personality = () => props.controller.config()?.config.personality ?? "pragmatic";
   return (
     <div class="settings-page">
       <SettingsHeading
-        title="Personalização"
-        description="Tom e instruções próprias acrescentadas ao contrato do modelo."
+        title={messages().personalization}
+        description={messages().personalizationDescription}
       />
-      <SettingsRow
-        label="Personalidade"
-        description="Estilo de comunicação, sem alterar regras de segurança."
-      >
+      <SettingsRow label={messages().personality} description={messages().personalityDescription}>
         <select
           onChange={(event) => {
             const value = parsePersonality(event.currentTarget.value);
@@ -659,20 +719,20 @@ function PersonalizationSettings(props: {
           }}
           value={personality()}
         >
-          <option value="pragmatic">Pragmática</option>
-          <option value="friendly">Amigável</option>
-          <option value="none">Sem estilo adicional</option>
+          <option value="pragmatic">{messages().pragmatic}</option>
+          <option value="friendly">{messages().friendly}</option>
+          <option value="none">{messages().noPersonality}</option>
         </select>
       </SettingsRow>
       <label class="settings-textarea-row">
         <span>
-          <strong>Instruções do desenvolvedor</strong>
-          <small>Até 256 KiB, armazenadas localmente no SQLite do app.</small>
+          <strong>{messages().developerInstructions}</strong>
+          <small>{messages().developerInstructionsDescription}</small>
         </span>
         <textarea
           maxlength={DEVELOPER_INSTRUCTIONS_MAXIMUM_BYTES}
           onInput={(event) => props.setDeveloperInstructions(event.currentTarget.value)}
-          placeholder="Ex.: prefira APIs pequenas e explique decisões arquiteturais importantes."
+          placeholder={messages().developerInstructionsPlaceholder}
           rows={9}
           value={props.developerInstructions}
         />
@@ -688,7 +748,7 @@ function PersonalizationSettings(props: {
           }
           type="button"
         >
-          Salvar instruções
+          {messages().saveInstructions}
         </button>
       </div>
     </div>
@@ -696,23 +756,22 @@ function PersonalizationSettings(props: {
 }
 
 function ShortcutsSettings() {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().settings;
   return (
     <div class="settings-page">
-      <SettingsHeading
-        title="Atalhos de teclado"
-        description="Atalhos disponíveis no aplicativo de desktop."
-      />
-      <SettingsSection title="Geral">
-        <ShortcutRow keys={["Ctrl", "N"]} label="Novo chat" />
-        <ShortcutRow keys={["Ctrl", "K"]} label="Pesquisar na barra lateral" />
-        <ShortcutRow keys={["Ctrl", ","]} label="Abrir configurações" />
-        <ShortcutRow keys={["Ctrl", "B"]} label="Alternar barra lateral" />
-        <ShortcutRow keys={["Ctrl", "R"]} label="Recarregar a janela" />
+      <SettingsHeading title={messages().shortcuts} description={messages().shortcutsDescription} />
+      <SettingsSection title={messages().shortcutGeneral}>
+        <ShortcutRow keys={["Ctrl", "N"]} label={messages().newChat} />
+        <ShortcutRow keys={["Ctrl", "K"]} label={messages().searchSidebar} />
+        <ShortcutRow keys={["Ctrl", ","]} label={messages().openSettings} />
+        <ShortcutRow keys={["Ctrl", "B"]} label={messages().toggleSidebar} />
+        <ShortcutRow keys={["Ctrl", "R"]} label={messages().reloadWindow} />
       </SettingsSection>
-      <SettingsSection title="Conversa">
-        <ShortcutRow keys={["Enter"]} label="Enviar mensagem" />
-        <ShortcutRow keys={["Shift", "Enter"]} label="Inserir nova linha" />
-        <ShortcutRow keys={["Esc"]} label="Fechar menus e diálogos" />
+      <SettingsSection title={messages().conversation}>
+        <ShortcutRow keys={["Enter"]} label={messages().sendMessage} />
+        <ShortcutRow keys={["Shift", "Enter"]} label={messages().newLine} />
+        <ShortcutRow keys={["Esc"]} label={messages().closeMenus} />
       </SettingsSection>
     </div>
   );
@@ -732,6 +791,8 @@ function ShortcutRow(props: { readonly keys: readonly string[]; readonly label: 
 }
 
 function UsageSettings(props: { readonly controller: SettingsDialogController }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().settings;
   const rateLimits = () => props.controller.rateLimits();
   const snapshot = () => rateLimits()?.rateLimits;
   const autoTopUp = () => props.controller.autoTopUpSettings();
@@ -764,7 +825,7 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
     setRechargeMonthlyLimit(settings.rechargeMonthlyLimit ?? "");
   });
 
-  const limitGroups = () => presentUsageLimits(rateLimits());
+  const limitGroups = () => presentUsageLimits(rateLimits(), messages(), i18n.locale());
   const credits = () => snapshot()?.credits ?? null;
   const planPrice = () => rateLimits()?.planPrice ?? null;
   const spendControl = () => snapshot()?.individualLimit ?? null;
@@ -792,7 +853,7 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
     );
     if (response?.code === "reset" || response?.code === "already_redeemed") {
       setConfirmReset(null);
-      setResetSuccess("Limites de uso redefinidos.");
+      setResetSuccess(messages().resetSuccess);
     }
   }
 
@@ -830,24 +891,23 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
 
   return (
     <div class="settings-page">
-      <SettingsHeading
-        title="Uso e faturamento"
-        description="Consulte seu plano, créditos, limites de uso e redefinições disponíveis para a conta."
-      />
+      <SettingsHeading title={messages().usageBilling} description={messages().usageDescription} />
       <Show when={snapshot()}>
         {(current) => (
-          <SettingsSection title="Seu plano">
+          <SettingsSection title={messages().yourPlan}>
             <div class="usage-plan">
               <span>
-                <strong>{accountPlanLabel(current().planType)}</strong>
-                <small>{planPriceLabel(planPrice()) ?? "Seu plano atual do ChatGPT"}</small>
+                <strong>{accountPlanLabel(current().planType, i18n.messages().account)}</strong>
+                <small>
+                  {planPriceLabel(planPrice(), i18n.locale(), messages()) ?? messages().currentPlan}
+                </small>
               </span>
               <button
                 class="usage-credits-button"
                 onClick={() => void openExternalUrl("https://chatgpt.com/membership/plans")}
                 type="button"
               >
-                Ver planos
+                {messages().viewPlans}
               </button>
             </div>
           </SettingsSection>
@@ -855,22 +915,22 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
       </Show>
       <Show when={credits() !== null || autoTopUp() !== null || props.controller.autoTopUpError()}>
         <SettingsSection
-          description="Compre créditos ou ative a recarga automática para continuar usando o Codex ao atingir um limite."
-          title="Saldo de créditos"
+          description={messages().creditBalanceDescription}
+          title={messages().creditBalance}
         >
           <Show when={credits()}>
             {(snap) => (
               <div class="usage-credits usage-credit-balance">
                 <span>
-                  <strong>{creditsLabel(snap())}</strong>
-                  <small>Saldo atual</small>
+                  <strong>{creditsLabel(snap(), messages())}</strong>
+                  <small>{messages().balance}</small>
                 </span>
                 <button
                   class="usage-credits-button"
                   onClick={() => void openExternalUrl("https://chatgpt.com/settings/billing")}
                   type="button"
                 >
-                  Comprar créditos
+                  {messages().buyCredits}
                 </button>
               </div>
             )}
@@ -881,8 +941,8 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
               <div class="usage-auto-top-up-state">
                 <span>
                   {props.controller.autoTopUpLoading()
-                    ? "Consultando recarga automática..."
-                    : (props.controller.autoTopUpError() ?? "Recarga automática indisponível.")}
+                    ? messages().loadingAutoTopUp
+                    : (props.controller.autoTopUpError() ?? messages().autoTopUpUnavailable)}
                 </span>
                 <Show when={!props.controller.autoTopUpLoading()}>
                   <button
@@ -890,7 +950,7 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
                     onClick={() => void props.controller.refreshAutoTopUpSettings()}
                     type="button"
                   >
-                    Tentar novamente
+                    {i18n.messages().common.tryAgain}
                   </button>
                 </Show>
               </div>
@@ -900,13 +960,15 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
               <>
                 <div class="usage-auto-top-up-row">
                   <span class="usage-auto-top-up-copy">
-                    <strong>Recarga automática</strong>
-                    <small>{autoTopUpDescription(settings())}</small>
+                    <strong>{messages().autoTopUp}</strong>
+                    <small>{autoTopUpDescription(settings(), messages())}</small>
                   </span>
                   <span class="usage-auto-top-up-actions">
                     <Show when={settings().maximumDiscountPercent}>
                       {(discount) => (
-                        <span class="usage-discount-badge">Até {discount()}% de desconto</span>
+                        <span class="usage-discount-badge">
+                          {formatMessage(messages().discount, { percent: discount() })}
+                        </span>
                       )}
                     </Show>
                     <Show when={settings().isEnabled}>
@@ -915,12 +977,12 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
                         onClick={() => setAutoTopUpEditing((value) => !value)}
                         type="button"
                       >
-                        Gerenciar
+                        {messages().manage}
                       </button>
                     </Show>
                     <button
                       aria-checked={settings().isEnabled}
-                      aria-label="Alternar recarga automática"
+                      aria-label={messages().toggleAutoTopUp}
                       class="usage-switch"
                       classList={{ checked: settings().isEnabled }}
                       disabled={props.controller.autoTopUpLoading()}
@@ -935,7 +997,7 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
                 <Show when={autoTopUpEditing()}>
                   <form class="usage-auto-top-up-editor" onSubmit={saveAutoTopUpSettings}>
                     <label>
-                      <span>Recarregar quando o saldo chegar a</span>
+                      <span>{messages().rechargeThreshold}</span>
                       <input
                         min="125"
                         onInput={(event) => setRechargeThreshold(event.currentTarget.value)}
@@ -946,7 +1008,7 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
                       />
                     </label>
                     <label>
-                      <span>Recarregar o saldo até</span>
+                      <span>{messages().rechargeTarget}</span>
                       <input
                         max="250000"
                         min="250"
@@ -958,11 +1020,11 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
                       />
                     </label>
                     <label>
-                      <span>Limite mensal opcional</span>
+                      <span>{messages().optionalMonthlyLimit}</span>
                       <input
                         min="250"
                         onInput={(event) => setRechargeMonthlyLimit(event.currentTarget.value)}
-                        placeholder="Sem limite definido"
+                        placeholder={messages().noLimit}
                         step="1"
                         type="number"
                         value={rechargeMonthlyLimit()}
@@ -974,14 +1036,14 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
                         onClick={() => setAutoTopUpEditing(false)}
                         type="button"
                       >
-                        Cancelar
+                        {i18n.messages().common.cancel}
                       </button>
                       <button
                         class="usage-credits-button"
                         disabled={props.controller.autoTopUpLoading()}
                         type="submit"
                       >
-                        {props.controller.autoTopUpLoading() ? "Salvando..." : "Salvar"}
+                        {props.controller.autoTopUpLoading() ? messages().saving : messages().save}
                       </button>
                     </div>
                   </form>
@@ -999,7 +1061,7 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
         fallback={
           <SettingsSection
             busy={props.controller.rateLimitsLoading()}
-            title="Limites gerais de uso"
+            title={messages().generalLimits}
           >
             <div
               aria-live="polite"
@@ -1015,16 +1077,15 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
               <div>
                 <strong>
                   {props.controller.rateLimitsLoading()
-                    ? "Consultando detalhes de uso"
+                    ? messages().usageDetailsLoading
                     : props.controller.rateLimitsError() === null
-                      ? "Detalhes de uso indisponíveis"
-                      : "Não foi possível consultar o uso"}
+                      ? messages().usageDetailsUnavailable
+                      : messages().usageDetailsFailure}
                 </strong>
                 <p>
                   {props.controller.rateLimitsLoading()
-                    ? "Aguarde enquanto os limites da conta são atualizados."
-                    : (props.controller.rateLimitsError() ??
-                      "Atualize para consultar os limites da sua conta.")}
+                    ? messages().usageDetailsWait
+                    : (props.controller.rateLimitsError() ?? messages().usageDetailsRefresh)}
                 </p>
               </div>
             </div>
@@ -1036,11 +1097,22 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
             <SettingsSection
               busy={props.controller.rateLimitsLoading()}
               title={
-                group.label === null ? "Limites gerais de uso" : `Limites de uso do ${group.label}`
+                group.label === null
+                  ? messages().generalLimits
+                  : formatMessage(messages().namedLimits, { name: group.label })
               }
             >
               <section class="usage-limit-group">
-                <For each={group.limits}>{(limit) => <UsageMeter limit={limit} />}</For>
+                <For each={group.limits}>
+                  {(limit) => (
+                    <UsageMeter
+                      limit={limit}
+                      locale={i18n.locale()}
+                      messages={messages()}
+                      soonLabel={i18n.messages().common.soon}
+                    />
+                  )}
+                </For>
               </section>
             </SettingsSection>
           )}
@@ -1048,22 +1120,24 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
       </Show>
       <Show when={spendControl()}>
         {(limit) => (
-          <SettingsSection title="Limite de gastos">
-            <SpendControlMeter limit={limit()} />
+          <SettingsSection title={messages().spendLimit}>
+            <SpendControlMeter
+              limit={limit()}
+              locale={i18n.locale()}
+              messages={messages()}
+              soonLabel={i18n.messages().common.soon}
+            />
           </SettingsSection>
         )}
       </Show>
-      <SettingsSection
-        busy={props.controller.usageResetsLoading()}
-        title="Redefinições do limite de uso"
-      >
+      <SettingsSection busy={props.controller.usageResetsLoading()} title={messages().usageResets}>
         <Show
           when={
             !props.controller.usageResetsLoading() ||
             props.controller.usageResets() !== null ||
             props.controller.usageResetsError() !== null
           }
-          fallback={<div class="usage-reset-state">Consultando redefinições disponíveis...</div>}
+          fallback={<div class="usage-reset-state">{messages().loadingResets}</div>}
         >
           <Show
             when={props.controller.usageResetsError() === null || resetRows().length > 0}
@@ -1075,14 +1149,14 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
                   onClick={() => void props.controller.refreshUsageResets()}
                   type="button"
                 >
-                  Tentar novamente
+                  {i18n.messages().common.tryAgain}
                 </button>
               </div>
             }
           >
             <Show
               when={resetRows().length > 0}
-              fallback={<div class="usage-reset-state">Nenhuma redefinição disponível.</div>}
+              fallback={<div class="usage-reset-state">{messages().noResets}</div>}
             >
               <For each={resetRows()}>
                 {(credit) => {
@@ -1092,10 +1166,18 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
                   return (
                     <div class="usage-reset-row">
                       <span>
-                        <strong>{credit?.title?.trim() || "Redefinição completa"}</strong>
+                        <strong>{credit?.title?.trim() || messages().fullReset}</strong>
                         <Show when={credit?.expiresAt}>
                           {(expiration) => (
-                            <small>Expira em {formatShortDateWithTimeZone(expiration())}</small>
+                            <small>
+                              {formatMessage(messages().expires, {
+                                date: formatShortDateWithTimeZone(
+                                  expiration(),
+                                  i18n.locale(),
+                                  i18n.messages().common.soon,
+                                ),
+                              })}
+                            </small>
                           )}
                         </Show>
                       </span>
@@ -1106,10 +1188,10 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
                         type="button"
                       >
                         {resetting()
-                          ? "Redefinindo..."
+                          ? messages().resetting
                           : confirming()
-                            ? "Confirmar"
-                            : "Usar redefinição"}
+                            ? messages().confirm
+                            : messages().useReset}
                       </button>
                     </div>
                   );
@@ -1130,7 +1212,7 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
             onClick={() => void openExternalUrl("https://chatgpt.com/settings/usage")}
             type="button"
           >
-            Comprar redefinição instantânea
+            {messages().buyInstantReset}
           </button>
         </Show>
       </SettingsSection>
@@ -1145,33 +1227,48 @@ function normalizedOptionalCreditValue(value: string): string | null {
 
 function planPriceLabel(
   price: NonNullable<ReturnType<SettingsDialogController["rateLimits"]>>["planPrice"],
+  locale: string,
+  messages: SettingsMessages,
 ): string | null {
   if (price === null) {
     return null;
   }
   const amount = price.amount / 10 ** price.minorUnitExponent;
-  return `${new Intl.NumberFormat("pt-BR", {
+  const formattedPrice = new Intl.NumberFormat(locale, {
     style: "currency",
     currency: price.currency,
-  }).format(amount)}/mês`;
+  }).format(amount);
+  return formatMessage(messages.perMonth, { price: formattedPrice });
 }
 
-function autoTopUpDescription(settings: AutoTopUpSettingsSnapshot): string {
+function autoTopUpDescription(
+  settings: AutoTopUpSettingsSnapshot,
+  messages: SettingsMessages,
+): string {
   if (!settings.isEnabled) {
-    return "Continue trabalhando quando o saldo de créditos atingir o limite configurado.";
+    return messages.autoTopUpDisabledDescription;
   }
   const threshold = settings.rechargeThreshold ?? "—";
   const target = settings.rechargeTarget ?? "—";
   const monthly =
     settings.rechargeMonthlyLimit === null
       ? ""
-      : ` Limite mensal: ${settings.rechargeMonthlyLimit} créditos.`;
-  return `Recarrega para ${target} créditos quando o saldo chegar a ${threshold}.${monthly}`;
+      : formatMessage(messages.autoTopUpMonthlyLimit, {
+          limit: settings.rechargeMonthlyLimit,
+        });
+  return formatMessage(messages.autoTopUpEnabledDescription, { monthly, target, threshold });
 }
 
-function UsageMeter(props: { readonly limit: UsageLimitEntry }) {
+function UsageMeter(props: {
+  readonly limit: UsageLimitEntry;
+  readonly locale: string;
+  readonly messages: SettingsMessages;
+  readonly soonLabel: string;
+}) {
   const remaining = () => usagePercentLabel(props.limit.remainingPercent);
-  const resetLabel = () => usageResetLabel(props.limit);
+  const remainingLabel = () => formatMessage(props.messages.remaining, { value: remaining() });
+  const resetLabel = () =>
+    usageResetLabel(props.limit, props.locale, props.soonLabel, props.messages);
   return (
     <div class="usage-meter-row">
       <span class="usage-meter-copy">
@@ -1180,38 +1277,60 @@ function UsageMeter(props: { readonly limit: UsageLimitEntry }) {
       </span>
       <div class="usage-meter-status">
         <progress
-          aria-label={`${props.limit.label}: ${remaining()} restante`}
+          aria-label={`${props.limit.label}: ${remainingLabel()}`}
           class="usage-meter usage-limit-meter"
           max={100}
           value={props.limit.remainingPercent}
         >
           {remaining()}
         </progress>
-        <strong>{remaining()} restante</strong>
+        <strong>{remainingLabel()}</strong>
       </div>
     </div>
   );
 }
 
-function usageResetLabel(limit: UsageLimitEntry): string | null {
+function usageResetLabel(
+  limit: UsageLimitEntry,
+  locale: string,
+  soonLabel: string,
+  messages: SettingsMessages,
+): string | null {
   if (limit.resetAt === null) {
     return null;
   }
   if (limit.windowDurationMins !== null && limit.windowDurationMins < 24 * 60) {
-    return `Redefine em ${formatShortDate(limit.resetAt)}`;
+    return formatMessage(messages.resetsAt, {
+      date: formatShortDate(limit.resetAt, locale, soonLabel),
+    });
   }
-  return `Redefinição ${formatShortDate(limit.resetAt)}`;
+  return formatMessage(messages.resetAt, {
+    date: formatShortDate(limit.resetAt, locale, soonLabel),
+  });
 }
 
-function SpendControlMeter(props: { readonly limit: SpendControlLimitSnapshot }) {
+function SpendControlMeter(props: {
+  readonly limit: SpendControlLimitSnapshot;
+  readonly locale: string;
+  readonly messages: SettingsMessages;
+  readonly soonLabel: string;
+}) {
   const usedPercent = () => Math.max(0, Math.min(100, 100 - props.limit.remainingPercent));
   return (
     <div class="usage-meter-row">
       <span class="usage-meter-copy">
-        <strong>Limite de gastos</strong>
+        <strong>{props.messages.spendLimit}</strong>
         <small>
-          {props.limit.used} de {props.limit.limit}
-          <i> · Redefine em {formatShortDate(props.limit.resetsAt)}</i>
+          {formatMessage(props.messages.usedOf, {
+            used: props.limit.used,
+            limit: props.limit.limit,
+          })}
+          <i>
+            {" · "}
+            {formatMessage(props.messages.resetsAt, {
+              date: formatShortDate(props.limit.resetsAt, props.locale, props.soonLabel),
+            })}
+          </i>
         </small>
       </span>
       <progress class="usage-meter" max={100} value={usedPercent()}>
@@ -1221,46 +1340,50 @@ function SpendControlMeter(props: { readonly limit: SpendControlLimitSnapshot })
   );
 }
 
-function creditsLabel(credits: CreditsSnapshot): string {
+function creditsLabel(credits: CreditsSnapshot, messages: SettingsMessages): string {
   if (credits.unlimited) {
-    return "Ilimitado";
+    return messages.unlimited;
   }
   return credits.balance ?? "—";
 }
 
 function ProfileSettings(props: { readonly controller: SettingsDialogController }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().settings;
   return (
     <div class="settings-page profile-settings-page">
-      <SettingsHeading title="Perfil" description="Conta ChatGPT usada pelo Codex App." />
+      <SettingsHeading title={messages().profile} description={messages().profileDescription} />
       <ProfileView controller={props.controller} mode="settings" />
     </div>
   );
 }
 
 function DiagnosticsSettings(props: { readonly controller: SettingsDialogController }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().settings;
   return (
     <div class="settings-page diagnostics-page">
       <SettingsHeading
-        title="Diagnósticos"
-        description="Falhas operacionais ficam visíveis nesta sessão e persistidas em disco."
+        title={messages().diagnostics}
+        description={messages().diagnosticsDescription}
       />
       <Show when={props.controller.engine()?.diagnosticLogPath}>
         {(path) => (
           <section class="diagnostics-log-location">
-            <strong>Arquivo de log</strong>
+            <strong>{messages().logFile}</strong>
             <code>{path()}</code>
           </section>
         )}
       </Show>
       <Show
         when={props.controller.diagnostics().length > 0}
-        fallback={<p class="diagnostics-empty">Nenhum diagnóstico registrado.</p>}
+        fallback={<p class="diagnostics-empty">{messages().noDiagnostics}</p>}
       >
         <ol class="diagnostics-list">
           <For each={[...props.controller.diagnostics()].reverse()}>
             {(entry) => (
               <li>
-                <time>{entry.occurredAt.toLocaleTimeString("pt-BR")}</time>
+                <time>{entry.occurredAt.toLocaleTimeString(i18n.locale())}</time>
                 <code>{entry.stream}</code>
                 <p>{entry.message}</p>
               </li>
@@ -1273,6 +1396,8 @@ function DiagnosticsSettings(props: { readonly controller: SettingsDialogControl
 }
 
 function ArchivedChatsSettings(props: { readonly controller: SettingsDialogController }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().settings;
   onMount(() => {
     if (!props.controller.archivedThreadsLoaded()) {
       void props.controller.loadMoreArchivedThreads();
@@ -1282,18 +1407,18 @@ function ArchivedChatsSettings(props: { readonly controller: SettingsDialogContr
   return (
     <div class="settings-page">
       <SettingsHeading
-        title="Chats arquivados"
-        description="Conversas arquivadas da barra lateral. Restaure para voltar à lista ou exclua permanentemente."
+        title={messages().archivedChats}
+        description={messages().archivedDescription}
       />
-      <SettingsSection busy={props.controller.archivedThreadsLoading()} title="Arquivadas">
+      <SettingsSection busy={props.controller.archivedThreadsLoading()} title={messages().archived}>
         <Show
           when={props.controller.archivedThreadsLoaded()}
           fallback={
             <div class="archived-chats-status">
               <p class="archived-chats-empty">
                 {props.controller.archivedThreadsLoading()
-                  ? "Carregando chats arquivados..."
-                  : "Não foi possível carregar os chats arquivados."}
+                  ? messages().loadingArchived
+                  : messages().archivedLoadFailure}
               </p>
               <Show when={!props.controller.archivedThreadsLoading()}>
                 <button
@@ -1301,7 +1426,7 @@ function ArchivedChatsSettings(props: { readonly controller: SettingsDialogContr
                   onClick={() => void props.controller.loadMoreArchivedThreads()}
                   type="button"
                 >
-                  Tentar novamente
+                  {i18n.messages().common.tryAgain}
                 </button>
               </Show>
             </div>
@@ -1309,32 +1434,36 @@ function ArchivedChatsSettings(props: { readonly controller: SettingsDialogContr
         >
           <Show
             when={props.controller.archivedThreads().length > 0}
-            fallback={<p class="archived-chats-empty">Nenhum chat arquivado.</p>}
+            fallback={<p class="archived-chats-empty">{messages().noArchived}</p>}
           >
             <For each={props.controller.archivedThreads()}>
               {(thread) => (
                 <div class="settings-row archived-chat-row">
                   <span>
-                    <strong>{threadTitle(thread)}</strong>
-                    <small>{thread.projectPath ?? "Sem projeto"}</small>
+                    <strong>{threadTitle(thread, i18n.messages().sidebar.newTask)}</strong>
+                    <small>{thread.projectPath ?? messages().noProject}</small>
                   </span>
                   <div class="archived-chat-actions">
                     <button
-                      aria-label={`Restaurar ${threadTitle(thread)}`}
+                      aria-label={formatMessage(messages().restoreNamed, {
+                        name: threadTitle(thread, i18n.messages().sidebar.newTask),
+                      })}
                       onClick={() => void props.controller.unarchiveThread(thread.id)}
-                      title="Restaurar para a barra lateral"
+                      title={messages().restoreTitle}
                       type="button"
                     >
-                      <Icon name="reset" size={14} /> Restaurar
+                      <Icon name="reset" size={14} /> {messages().restore}
                     </button>
                     <button
-                      aria-label={`Excluir ${threadTitle(thread)}`}
+                      aria-label={formatMessage(messages().deleteNamed, {
+                        name: threadTitle(thread, i18n.messages().sidebar.newTask),
+                      })}
                       class="archived-chat-delete"
                       onClick={() => void props.controller.deleteThread(thread.id)}
-                      title="Excluir permanentemente"
+                      title={messages().deleteTitle}
                       type="button"
                     >
-                      <Icon name="close" size={14} /> Excluir
+                      <Icon name="close" size={14} /> {messages().delete}
                     </button>
                   </div>
                 </div>
@@ -1354,7 +1483,7 @@ function ArchivedChatsSettings(props: { readonly controller: SettingsDialogContr
             onClick={() => void props.controller.loadMoreArchivedThreads()}
             type="button"
           >
-            Carregar mais
+            {messages().loadMore}
           </button>
         </Show>
       </SettingsSection>
@@ -1367,6 +1496,9 @@ function OutputDetailSelect(props: {
   readonly onChange: (value: ModelVerbosity | null) => void;
   readonly value: ModelVerbosity | null;
 }) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().settings;
+  const options = () => outputDetailOptions(messages());
   const [open, setOpen] = createSignal(false);
   const [openAbove, setOpenAbove] = createSignal(false);
   let rootElement: HTMLDivElement | undefined;
@@ -1374,12 +1506,12 @@ function OutputDetailSelect(props: {
   const optionElements: Array<HTMLButtonElement | undefined> = [];
 
   const selectedIndex = () => {
-    const index = OUTPUT_DETAIL_OPTIONS.findIndex((option) => option.value === props.value);
+    const index = options().findIndex((option) => option.value === props.value);
     return index < 0 ? 0 : index;
   };
 
   function focusOption(index: number): void {
-    const optionCount = OUTPUT_DETAIL_OPTIONS.length;
+    const optionCount = options().length;
     const normalizedIndex = (index + optionCount) % optionCount;
     queueMicrotask(() => optionElements[normalizedIndex]?.focus());
   }
@@ -1455,7 +1587,7 @@ function OutputDetailSelect(props: {
         break;
       case "End":
         event.preventDefault();
-        focusOption(OUTPUT_DETAIL_OPTIONS.length - 1);
+        focusOption(options().length - 1);
         break;
       case "Escape":
         event.preventDefault();
@@ -1499,7 +1631,7 @@ function OutputDetailSelect(props: {
         aria-controls="output-detail-menu"
         aria-expanded={open()}
         aria-haspopup="menu"
-        aria-label="Detalhamento da saída"
+        aria-label={messages().outputDetail}
         class="output-detail-trigger"
         classList={{ open: open() }}
         disabled={props.disabled}
@@ -1508,17 +1640,17 @@ function OutputDetailSelect(props: {
         ref={triggerElement}
         type="button"
       >
-        <span>{outputDetailLabel(props.value)}</span>
+        <span>{outputDetailLabel(props.value, messages())}</span>
         <Icon name="chevronDown" size={14} />
       </button>
       <Show when={open()}>
         <div
-          aria-label="Detalhamento da saída"
+          aria-label={messages().outputDetail}
           class="output-detail-menu"
           id="output-detail-menu"
           role="menu"
         >
-          <For each={OUTPUT_DETAIL_OPTIONS}>
+          <For each={options()}>
             {(option, index) => (
               <button
                 aria-checked={option.value === props.value}

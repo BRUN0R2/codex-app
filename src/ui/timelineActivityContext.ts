@@ -32,7 +32,7 @@ export const TimelineActivityContext = createContext<TimelineActivityContextValu
 export function useTimelineActivityContext(): TimelineActivityContextValue {
   const context = useContext(TimelineActivityContext);
   if (context === undefined) {
-    throw new Error("A virtualização das atividades da timeline não foi inicializada.");
+    throw new Error("Timeline activity virtualization was not initialized.");
   }
   return context;
 }

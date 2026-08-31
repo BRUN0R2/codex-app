@@ -91,7 +91,7 @@ export function writeWorkspaceSplitRatio(
       String(normalizeWorkspaceSplitRatio(ratio)),
     );
   } catch {
-    // A preferência é opcional; o layout continua funcional se o armazenamento estiver indisponível.
+    // The preference is optional; layout remains functional when storage is unavailable.
   }
 }
 

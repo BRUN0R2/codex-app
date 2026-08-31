@@ -1,4 +1,5 @@
 import type { VisibleThreadItem } from "../contracts/types";
+import { formatMessage } from "../i18n/messages";
 import {
   isBrowserTool,
   isCommandTool,
@@ -7,7 +8,7 @@ import {
   isTerminalReadTool,
   isWebSearchTool,
 } from "./activityLabels";
-import { fileReadActivityTitle } from "./timelinePresentation";
+import { fileReadActivityTitle, type TimelineMessages } from "./timelinePresentation";
 
 export { isTerminalReadTool };
 
@@ -67,7 +68,7 @@ export class AgentActivityProjectionStore {
       const identity = agentActivityRenderUnitIdentity(unit);
       if (nextByIdentity.has(identity)) {
         throw new Error(
-          `A projeção de atividade produziu a chave duplicada ${JSON.stringify(identity)}.`,
+          `The activity projection produced duplicate key ${JSON.stringify(identity)}.`,
         );
       }
       const previous = this.#unitsByIdentity.get(identity);
@@ -102,7 +103,7 @@ export function splitAgentActivityUnits(
     }
     units.push({
       kind: "activityGroup",
-      // A cauda cresce durante o streaming; o primeiro item é a identidade estável do grupo.
+      // The tail grows during streaming; the first item is the group's stable identity.
       key: `activity:${activityItems[0]?.id ?? "start"}`,
       items: activityItems,
     });
@@ -122,7 +123,7 @@ export function splitAgentActivityUnits(
   };
 
   for (const item of items) {
-    if (item.type === "reasoning") {
+    if (item.type === "reasoning" || isCodeModeOrchestrationItem(item)) {
       continue;
     }
     if (isImageViewItem(item)) {
@@ -144,6 +145,23 @@ export function splitAgentActivityUnits(
   return units;
 }
 
+export function canAgentActivityOwnHeadline(items: readonly VisibleThreadItem[]): boolean {
+  return splitAgentActivityUnits(items).at(-1)?.kind === "activityGroup";
+}
+
+export function agentActivityHeadlineLabel(
+  items: readonly AgentActivityItem[],
+  isCurrent: boolean,
+  reasoningHeading: string | null,
+  messages: TimelineMessages,
+  locale: string,
+): string {
+  if (!isCurrent) {
+    return agentActivitySummaryLabel(items, messages, locale);
+  }
+  return activeAgentActivity(items, messages)?.label ?? reasoningHeading ?? messages.thinking;
+}
+
 export function shouldRenderAgentActivityGroup(
   items: readonly AgentActivityItem[],
   isCurrent: boolean,
@@ -157,6 +175,7 @@ export function shouldRenderAgentActivityGroup(
 
 export function summarizeAgentActivity(
   items: readonly AgentActivityItem[],
+  messages: TimelineMessages,
 ): readonly AgentActivitySummary[] {
   let calledTools = 0;
   let browser = 0;
@@ -224,63 +243,68 @@ export function summarizeAgentActivity(
   if (calledTools > 0) {
     summaries.push({
       kind: "calledTools",
-      label: calledTools === 1 ? "Chamou uma ferramenta" : "Chamou ferramentas",
+      label: calledTools === 1 ? messages.calledOneTool : messages.calledTools,
       running: calledToolsRunning,
     });
   }
   if (changedPathCardinality > 0) {
     summaries.push({
       kind: "fileChanges",
-      label: changedPathCardinality === 1 ? "Editou um arquivo" : "Editou arquivos",
+      label: changedPathCardinality === 1 ? messages.editedOneFile : messages.editedFiles,
       running: fileChangesRunning,
     });
   }
   if (fileReads > 0) {
     summaries.push({
       kind: "fileReads",
-      label: fileReadActivityTitle("completed", fileReads),
+      label: fileReadActivityTitle("completed", messages, fileReads),
       running: fileReadsRunning,
     });
   }
   if (exploration > 0) {
     summaries.push({
       kind: "exploration",
-      label: "Explorou arquivos",
+      label: messages.exploredFiles,
       running: explorationRunning,
     });
   }
   if (browser > 0) {
-    summaries.push({ kind: "browser", label: "Usou o navegador", running: browserRunning });
+    summaries.push({ kind: "browser", label: messages.usedBrowser, running: browserRunning });
   }
   if (commands > 0) {
     summaries.push({
       kind: "commands",
-      label: commands === 1 ? "Executou um comando" : "Executou comandos",
+      label: commands === 1 ? messages.executedOneCommand : messages.executedCommands,
       running: commandsRunning,
     });
   }
   if (terminalReads > 0) {
     summaries.push({
       kind: "terminalRead",
-      label: "Leu o terminal do chat",
+      label: messages.readChatTerminal,
       running: terminalReadsRunning,
     });
   }
   if (webSearch > 0) {
-    summaries.push({ kind: "webSearch", label: "Pesquisou na web", running: webSearchRunning });
+    summaries.push({ kind: "webSearch", label: messages.searchedWeb, running: webSearchRunning });
   }
   return summaries;
 }
 
-export function agentActivitySummaryLabel(items: readonly AgentActivityItem[]): string {
-  const labels = summarizeAgentActivity(items).map(({ label }, index) =>
-    index === 0 ? label : lowerInitial(label),
+export function agentActivitySummaryLabel(
+  items: readonly AgentActivityItem[],
+  messages: TimelineMessages,
+  locale: string,
+): string {
+  const labels = summarizeAgentActivity(items, messages).map(({ label }, index) =>
+    index === 0 ? label : lowerInitial(label, locale),
   );
-  return formatConjunction(labels);
+  return formatConjunction(labels, messages, locale);
 }
 
 export function activeAgentActivity(
   items: readonly AgentActivityItem[],
+  messages: TimelineMessages,
 ): ActiveAgentActivity | null {
   const runningFileReads = countRunningFileReads(items);
   for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -289,37 +313,40 @@ export function activeAgentActivity(
       continue;
     }
     if (item.type === "commandExecution") {
-      return { kind: "commands", label: "Executando comando" };
+      return { kind: "commands", label: messages.executingCommand };
     }
     if (item.type === "fileChange") {
-      return { kind: "fileChanges", label: activeFileChangeLabel(item.changes) };
+      return { kind: "fileChanges", label: activeFileChangeLabel(item.changes, messages) };
     }
 
     const name = item.name.toLowerCase();
     if (isBrowserTool(name)) {
-      return { kind: "browser", label: "Usando o navegador" };
+      return { kind: "browser", label: messages.usingBrowser };
     }
     if (isWebSearchTool(name)) {
-      return { kind: "webSearch", label: webSearchActivityTitle(item.description, item.status) };
+      return {
+        kind: "webSearch",
+        label: webSearchActivityTitle(item.description, item.status, messages),
+      };
     }
     if (isTerminalReadTool(name)) {
-      return { kind: "terminalRead", label: "Lendo terminal do chat" };
+      return { kind: "terminalRead", label: messages.readingTerminal };
     }
     if (isFileReadTool(name)) {
       return {
         kind: "fileReads",
-        label: fileReadActivityTitle("inProgress", runningFileReads),
+        label: fileReadActivityTitle("inProgress", messages, runningFileReads),
       };
     }
     if (isExplorationTool(name)) {
-      return { kind: "exploration", label: "Explorando arquivos" };
+      return { kind: "exploration", label: messages.exploringFiles };
     }
     if (isCommandTool(name)) {
-      return { kind: "commands", label: "Executando comando" };
+      return { kind: "commands", label: messages.executingCommand };
     }
     return {
       kind: "calledTools",
-      label: item.description.trim() || "Chamando uma ferramenta",
+      label: item.description.trim() || messages.callingTool,
     };
   }
   return null;
@@ -342,16 +369,17 @@ function countRunningFileReads(items: readonly AgentActivityItem[]): number {
 export function webSearchActivityTitle(
   description: string,
   status: AgentActivityItem["status"],
+  messages: TimelineMessages,
 ): string {
   const detail = description.trim();
-  const base = status === "inProgress" ? "Pesquisando na web" : "Pesquisou na web";
+  const base = status === "inProgress" ? messages.searchingWeb : messages.searchedWeb;
   if (isGenericWebSearchDescription(detail)) {
     return base;
   }
   if (/^pesquis(?:ando|ou) na web(?:\s+por\b)?/iu.test(detail)) {
     return detail;
   }
-  return `${base} por ${detail}`;
+  return formatMessage(messages.webSearchFor, { base, detail });
 }
 
 function sameAgentActivityRenderUnit(
@@ -388,17 +416,26 @@ function isImageViewItem(item: VisibleThreadItem): item is ImageViewItem {
   return item.type === "toolExecution" && item.name.toLowerCase() === "view_image";
 }
 
+function isCodeModeOrchestrationItem(item: VisibleThreadItem): boolean {
+  if (item.type !== "toolExecution") {
+    return false;
+  }
+  const name = item.name.toLowerCase();
+  return name === "exec" || name === "wait";
+}
+
 function activeFileChangeLabel(
   changes: Extract<AgentActivityItem, { type: "fileChange" }>["changes"],
+  messages: TimelineMessages,
 ): string {
   const plural = changes.length !== 1;
   if (changes.every(({ kind }) => kind.type === "add")) {
-    return plural ? "Criando arquivos" : "Criando um arquivo";
+    return plural ? messages.creatingFiles : messages.creatingOneFile;
   }
   if (changes.every(({ kind }) => kind.type === "delete")) {
-    return plural ? "Excluindo arquivos" : "Excluindo um arquivo";
+    return plural ? messages.deletingFiles : messages.deletingOneFile;
   }
-  return plural ? "Editando arquivos" : "Editando um arquivo";
+  return plural ? messages.editingFiles : messages.editingOneFile;
 }
 
 function isGenericWebSearchDescription(value: string): boolean {
@@ -408,16 +445,17 @@ function isGenericWebSearchDescription(value: string): boolean {
   );
 }
 
-function lowerInitial(value: string): string {
-  return value.length === 0 ? value : `${value[0]?.toLocaleLowerCase("pt-BR")}${value.slice(1)}`;
+function lowerInitial(value: string, locale: string): string {
+  return value.length === 0 ? value : `${value[0]?.toLocaleLowerCase(locale)}${value.slice(1)}`;
 }
 
-function formatConjunction(values: readonly string[]): string {
+function formatConjunction(
+  values: readonly string[],
+  messages: TimelineMessages,
+  locale: string,
+): string {
   if (values.length < 2) {
-    return values[0] ?? "Atividade do agente";
+    return values[0] ?? messages.agentActivity;
   }
-  if (values.length === 2) {
-    return `${values[0]} e ${values[1]}`;
-  }
-  return `${values.slice(0, -1).join(", ")} e ${values.at(-1)}`;
+  return new Intl.ListFormat(locale, { style: "long", type: "conjunction" }).format(values);
 }

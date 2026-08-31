@@ -18,28 +18,28 @@ Enable-ProjectTools -ProjectRoot $projectRoot | Out-Null
 if ($env:CODEX_DESKTOP_DEV_PORT) {
   $portFromEnv = 0
   if (-not [int]::TryParse($env:CODEX_DESKTOP_DEV_PORT, [ref]$portFromEnv)) {
-    throw "A variável CODEX_DESKTOP_DEV_PORT precisa ser um número inteiro entre 1 e 65535."
+    throw "CODEX_DESKTOP_DEV_PORT must be an integer between 1 and 65535."
   }
   $requestedPort = $portFromEnv
 } elseif ($env:VITE_PORT) {
   $portFromViteEnv = 0
   if (-not [int]::TryParse($env:VITE_PORT, [ref]$portFromViteEnv)) {
-    throw "A variável VITE_PORT precisa ser um número inteiro entre 1 e 65535."
+    throw "VITE_PORT must be an integer between 1 and 65535."
   }
   $requestedPort = $portFromViteEnv
 }
 
 if ($requestedPort -lt 1 -or $requestedPort -gt 65535) {
-  throw "Porta inválida para desenvolvimento: $requestedPort. Use um valor entre 1 e 65535."
+  throw "Invalid development port: $requestedPort. Use a value between 1 and 65535."
 }
 
 $existingDevProcesses = @(Get-ProcessesByExecutablePath -ExecutablePath $debugExecutablePath)
 if ($existingDevProcesses.Count -gt 0) {
   $details = $existingDevProcesses | ForEach-Object {
-    "pid=$($_.Pid) caminho=$($_.Path) comando=$($_.Command)"
+    "pid=$($_.Pid) path=$($_.Path) command=$($_.Command)"
   }
   throw @(
-    "Já existe uma instância dev deste perfil em execução.",
+    "A development instance for this profile is already running.",
     ($details -join "`n")
   ) -join "`n"
 }
@@ -49,7 +49,7 @@ if ($listeners.Count -gt 0) {
   $conflictProcessIds = $listeners | Select-Object -ExpandProperty OwningProcess -Unique
   $details = foreach ($processId in $conflictProcessIds) {
     $process = Get-ProcessDetails -ProcessId $processId
-    "pid=$($process.Pid) caminho=$($process.Path) comando=$($process.Command)"
+    "pid=$($process.Pid) path=$($process.Path) command=$($process.Command)"
   }
 
   $killCommands = foreach ($processId in $conflictProcessIds) {
@@ -57,8 +57,8 @@ if ($listeners.Count -gt 0) {
   }
 
   $message = @(
-    "A porta 127.0.0.1:$requestedPort já está em uso.",
-    "Processos em conflito:",
+    "Port 127.0.0.1:$requestedPort is already in use.",
+    "Conflicting processes:",
     ($details -join "`n"),
     "Para liberar: $($killCommands -join ' ; ')"
   ) -join "`n"
@@ -68,12 +68,12 @@ if ($listeners.Count -gt 0) {
 $env:CODEX_DESKTOP_DEV_PORT = "$requestedPort"
 
 if ($CheckOnly) {
-  Write-Host "Sanidade concluída. Porta 127.0.0.1:$requestedPort disponível."
+  Write-Host "Preflight complete. Port 127.0.0.1:$requestedPort is available."
   exit 0
 }
 
-Write-Host "Iniciando Vite em 127.0.0.1:$requestedPort"
+Write-Host "Starting Vite at 127.0.0.1:$requestedPort"
 & pnpm dev:server
 if ($LASTEXITCODE -ne 0) {
-  throw "pnpm dev:server falhou com código $LASTEXITCODE."
+  throw "pnpm dev:server failed with exit code $LASTEXITCODE."
 }

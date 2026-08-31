@@ -23,7 +23,7 @@ export function readSourceVirtualRows(
   for (let rowIndex = range.start; rowIndex < range.end; rowIndex += 1) {
     const line = projection.lines[rowIndex];
     if (line === undefined) {
-      throw new Error(`A linha de código ${rowIndex} não existe.`);
+      throw new Error(`Source line ${rowIndex} does not exist.`);
     }
     const tokens = projection.tokensAt(rowIndex);
     const content = tokens === null ? escapeHtml(line.content) : syntaxLineToHtml(tokens);
@@ -44,7 +44,7 @@ export function readSourceVirtualRows(
   while (cache.size > MAXIMUM_WINDOWS_PER_PROJECTION) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) {
-      throw new Error("O cache de janelas de leitura perdeu sua entrada mais antiga.");
+      throw new Error("The source window cache lost its oldest entry.");
     }
     cache.delete(oldest);
   }

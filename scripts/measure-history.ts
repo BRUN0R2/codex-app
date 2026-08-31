@@ -145,8 +145,8 @@ function createConversation() {
     thread: {
       id: "benchmark-thread",
       mode: "codex",
-      preview: "Conversa sintética extrema",
-      name: "Benchmark de histórico",
+      preview: "Extreme synthetic conversation",
+      name: "History benchmark",
       cwd: "D:\\benchmark",
       projectPath: "D:\\benchmark",
       createdAt: 1,
