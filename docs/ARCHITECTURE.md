@@ -44,16 +44,21 @@ directly, and approximate payload formats are never accepted as fallbacks.
 5. The controller publishes either ready state or an explicit, repeatable error.
 
 Failures do not expose partially initialized state. A retry executes the owning
-boundary again.
+boundary again. Shell discovery, Code Mode initialization, and the first
+credential load are warmed in tracked background tasks; they do not delay the
+ready transition.
 
 ## Codex task flow
 
 1. The UI sends a validated turn to the controller.
-2. The engine persists intent and assembles context, model, instructions, and a
-   capability-compatible tool catalog.
+2. The engine persists intent and concurrently assembles one transactional
+   history/usage snapshot, model context, instructions, Code Mode state,
+   transport, and a capability-compatible tool catalog.
 3. For models that support reasoning summaries, the Desktop product preference
    explicitly requests `auto`; the provider then streams typed Responses items
-   over SSE.
+   over a persistent WebSocket. A verified response chain sends only new input;
+   any mismatch returns to the complete canonical request. HTTP/SSE is used only
+   after an explicit 426 capability response.
 4. The loop projects deltas, persists complete items, and executes authorized
    tools.
 5. Outputs are bounded and compacted before re-entering model context.
@@ -61,6 +66,12 @@ boundary again.
 
 Independent tasks can progress concurrently. Shared resources have explicit
 owners, limits, cancellation, and shutdown behavior.
+
+Task creation, resume, restore, and fork schedule a non-blocking
+`generate:false` transport warmup. Session leases are generation-tagged: an
+active turn can supersede warmup atomically, and stale work cannot reinsert a
+socket after logout, archive, deletion, eviction, or shutdown. Raw WebSocket
+frames have both count and byte budgets, while decoded events remain bounded.
 
 ## Internationalization
 
@@ -128,6 +139,8 @@ images, never arbitrary access to the application DOM.
 - incomplete call/output pairs are repaired by explicit rules;
 - credentials use an application-private encrypted envelope;
 - the envelope key lives in Windows Credential Manager;
+- the decrypted record is loaded once per process-local credential state and
+  updated only after successful vault mutations;
 - tokens never cross IPC or enter SQLite.
 
 Schemas are versioned and migrations are tested. A database or vault with an

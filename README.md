@@ -8,7 +8,8 @@ a protocol and behavior reference.
 ## Features
 
 - ChatGPT OAuth with PKCE, refresh, revocation, and cancellation;
-- separate Chat and Codex catalogs, HTTPS/SSE streaming, and isolated history;
+- separate Chat and Codex catalogs, incremental WebSocket/SSE streaming, and
+  isolated history;
 - concurrent tasks, steering, interruption, compaction, forks, and archiving;
 - a native agent with sandboxed V8 Code Mode, files, commands, plans, images,
   and browser tools;

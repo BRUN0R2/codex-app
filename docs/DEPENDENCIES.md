@@ -25,9 +25,9 @@ dependencies only. Translation discovery uses Vite's native
 | --- | --- | --- |
 | shell | `tauri`, plugins, `tauri-build` | Window, Windows integration, and bundle |
 | Windows | `webview2-com`, `windows` | Child WebView2, COM, and Job Objects |
-| async | `tokio`, `futures-util` | Tasks, concurrency, and SSE |
+| async | `tokio`, `futures-util` | Tasks, concurrency, and streaming |
 | sandbox | `v8` | Isolated Code Mode JavaScript runtime |
-| HTTP | `reqwest`, `url` | rustls HTTPS, cookies, and validated URLs |
+| transport | `reqwest`, `tokio-tungstenite`, `url` | rustls HTTPS, cookies, system proxy, WebSocket framing, and validated URLs |
 | storage | `rusqlite`, `r2d2`, `r2d2_sqlite` | SQLite WAL and pooling |
 | secrets | `age`, `keyring-core`, `windows-native-keyring-store`, `zeroize`, `rand`, `sha2` | Vault, PKCE, and hashes |
 | contracts | `serde`, `serde_json`, `base64`, `image` | IPC, envelopes, and images |

@@ -7,15 +7,16 @@ local implementation remains independent.
 
 | Source | Version |
 | --- | --- |
-| [`openai/codex`](https://github.com/openai/codex) | commit `d9511fb7888d98f89526d4ae019dd9be2f14199e`, 2026-08-28 |
-| stable release | `rust-v0.150.1`, commit `90854393966b21e9ebfd21b122334eb09a20c93d` |
+| [`openai/codex`](https://github.com/openai/codex) | commit `f88ff940c0f5b20628e94abc27d04196a14c5b94`, 2026-08-31 |
+| stable release | `rust-v0.151.0`, commit `78c290807ce710180111df227df3b7a4fe845452` |
+| latest prerelease reviewed | `rust-v0.152.0-alpha.7`, commit `a43ad35f9a273e3890593c54a157d286c7de9c4b` |
 | Codex Desktop for Windows | build `26.825.5331.0`, validated 2026-08-29 |
 
 The ignored study clone lives in `.references/openai-codex`. No referenced
 crate, package, executable, database, configuration, or credential enters the
 local build or runtime.
 
-The local catalog's `client_version` remains `0.150.1`, the latest stable
+The local catalog's `client_version` is `0.151.0`, the latest stable
 release whose protocol was audited.
 
 ## Upstream topology
@@ -47,11 +48,11 @@ Official references:
 | --- | --- | --- |
 | OAuth | PKCE, local callback, exchange, refresh, and revocation | Independent Rust implementation and isolated vault |
 | models | Authoritative capability catalog | Closed parser; UI never infers capability from model name |
-| Responses | Standard, Lite, SSE, and typed items | Separate native parsers and requests |
+| Responses | Standard, Lite, WebSocket/SSE, typed items, prewarm, and incremental continuation | Persistent native transport with strict full-request recovery |
 | history | Every tool call has exactly one output | Transactional normalization and repair |
 | instructions | Catalog template plus factual runtime context | Bounded layers without a duplicate universal prompt |
 | cache | Short in-memory catalog cache with ETag invalidation | Five-minute TTL and no persistence |
-| context | Confirmed use plus local delta and Remote Compaction V2 | Dynamic budget and atomic checkpoint |
+| context | Confirmed use plus local delta and stable Remote Compaction V2 | Dynamic budget, incremental trigger, and atomic checkpoint |
 | commands | Yield, registered sessions, polling, and incremental output | Independent manager with Windows Job Objects |
 | parallelism | Independent tools may overlap | Eight-call local batch with deterministic order |
 | patch | Freeform tool with a dedicated parser | Local Lark grammar and transactional commit |
@@ -88,12 +89,51 @@ The audited Desktop resolves an absent `model_reasoning_summary` preference to
 default. The local native client applies that same explicit product preference
 only when the catalog advertises parameter support.
 
+The current official client opens Responses WebSocket with the
+`responses_websockets=2026-02-06` beta contract, optionally sends a
+`response.create` with `generate:false`, and continues with
+`previous_response_id` plus only new input. The local transport implements the
+same sequence over the existing authenticated `reqwest` client so TLS, proxy,
+cookies, headers, and revocation remain one boundary. A valid HTTP 426 is the
+only capability fallback to SSE; connection and protocol defects stay visible
+and retry through their typed recovery paths.
+
+Startup prewarm runs when a task is created, resumed, restored, or forked. It
+never lies on the active turn's serial path. A generation-tagged lease lets the
+real turn supersede an unfinished warmup, while a completed warmup contributes
+its response ID and control metadata. Connections are reused only when the
+Standard/Lite handshake mode matches. Logout, archive, deletion, bounded cache
+eviction, shutdown, and a provider-session-wide 426 decision invalidate the
+corresponding state explicitly.
+
+Incremental reuse is deliberately stricter than a prefix-length check. Model,
+instructions, tools, tool policy, reasoning, service tier, prompt-cache key,
+verbosity, every prior input, and every provider output must match. Only local
+internal message metadata is ignored. Any mutation sends a complete request;
+`previous_response_not_found` and connection-limit errors close the chain and
+retry from that complete source of truth.
+
 Upstream calculates active context from the latest confirmed usage and local
 items after the latest model output. A local audit found that taking the maximum
 of that total and a fresh full estimate with margin inflated 200,340 tokens to
 252,518 and 186,851 to 250,917, causing two early compactions. The runtime now
 uses the same authoritative boundary. Full estimation is restricted to the
 phase before compatible telemetry.
+
+With compatible confirmed usage, preflight no longer serializes and scans the
+complete request. Compaction history stays borrowed unless a bounded tool output
+actually needs rewriting. The WebSocket compaction request extends the verified
+chain with only `compaction_trigger`, then discards that baseline so the next
+sample starts from the new canonical checkpoint. History and its latest usage
+marker are loaded in one SQLite read transaction, eliminating both a second
+pool round trip and an inconsistent cross-query snapshot.
+
+The latest upstream commit adds a bounded reverse-rollout cutoff after empty
+wake turns when a surviving full world-state snapshot exists. That patch is not
+applicable locally: this engine does not reconstruct provider context by
+reverse-scanning paginated rollouts. Its SQLite active-context prefix is already
+canonical, including empty `AgentMailbox` turns, and the combined transactional
+snapshot has direct regression coverage.
 
 SSE text deltas do not contain exact usage. `response.completed` supplies
 `output_tokens`, so the timeline accumulates only confirmed values per turn.
@@ -198,7 +238,13 @@ width and arrows.
 - Codex CLI storage, configuration, or process dependencies;
 - broad Computer Use;
 - arbitrary CDP and external browser profiles;
-- Responses WebSocket without proven SSE parity;
+- public `stream_id` multiplexing until the ChatGPT Codex consumer endpoint and
+  official client adopt the same contract;
+- automatic `context_management.compact_threshold` on the public API until the
+  consumer provider exposes it with Remote Compaction V2 parity;
+- experimental `token_budget`, which replaces summarization with a fresh-window
+  policy and is disabled upstream; reducing output at an unproven quality cost
+  violates this product's requirements;
 - generic compatibility for old protocol versions.
 
 ## Regression coverage
@@ -206,7 +252,8 @@ width and arrows.
 Local fixtures and tests lock:
 
 - Rust/TypeScript schemas and event methods;
-- Standard/Lite transport and capability-driven instructions;
+- Standard/Lite WebSocket and SSE transport, upgrade validation, ping/pong,
+  bounded buffering, incremental equality, prewarm, fallback, and cancellation;
 - capability-gated `auto` reasoning summaries and semantic headline transitions;
 - TTL/ETag behavior and absence of persistent catalog cache;
 - call/output pairing, ordering, and resume;

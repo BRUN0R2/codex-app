@@ -9,6 +9,9 @@ method and latest reproducible gate snapshot; it does not accumulate history.
 pnpm verify:benchmarks         # UI, stream, and command regressions
 pnpm measure:code-mode-warmup # cold V8 runtime cost
 pnpm measure:tokens           # catalog, context, and compaction
+pnpm measure:credentials      # cold vault versus process-local session cache
+pnpm measure:context-window   # confirmed-use preflight and compaction preparation
+pnpm measure:response-transport # full versus incremental Responses payload
 pnpm measure:release          # release startup and memory
 pnpm measure:browser          # Browser Use metrics
 ```
@@ -25,6 +28,13 @@ produce a sample.
 
 Time to first delta requires a controlled authenticated task. An error, rate
 limit, or total request duration is not a substitute.
+
+Wire payload bytes and local serialization time are not billable-token or
+end-to-end latency measurements. `previous_response_id` avoids retransmitting
+known input and lets the provider reuse response state, but only provider usage
+telemetry can establish token billing. The runtime therefore keeps the
+catalog-selected output verbosity and never truncates an answer merely to make
+a benchmark smaller.
 
 ## Solid transform analysis
 
@@ -69,38 +79,60 @@ actual compiler invocations, and keep the warning enabled.
 
 ## Current baseline
 
-Local sample from 2026-08-30 on Windows with 28 logical processors. These values
+Local sample from 2026-08-31 on Windows with 28 logical processors. These values
 describe that run; they are not universal guarantees.
+
+### Agent startup, continuation, and compaction
+
+Each range is two consecutive optimized runs after warm-up. The response case
+uses a 3 MiB history and five samples per run; context cases use the same history
+and 40 samples per run.
+
+| Scenario | Previous work | Current work | Result |
+| --- | ---: | ---: | ---: |
+| credential load after the first vault read | 1,461.460-1,485.377 ms | 3.555-4.030 us | 368,580x-411,100x faster |
+| confirmed context preflight | 2.205-2.207 ms | 0.170-0.173 us | 12,781x-12,983x faster |
+| compaction preparation with no rewrite | 3.986-4.035 ms | 0.120-0.130 us | 31,037x-33,213x faster |
+| compaction request encoding | 3.618-3.707 ms | 0.621-0.631 ms | 5.74x-5.97x faster |
+| compaction wire payload | 3,146,213 B | 425 B | 99.98649% smaller |
+
+The credential comparison intentionally includes the real Windows Credential
+Manager cold read and compares it with 100 process-local loads. The context
+results measure the now-constant fast paths; they do not include SQLite or
+provider time. There is no authenticated time-to-first-delta claim in this
+snapshot. First-turn work is nevertheless removed from the serial path by
+background `generate:false` prewarm, parallel prompt/session preparation, and
+connection reuse, with loopback protocol tests guarding the behavior.
 
 ### Context and tools
 
 | Scenario | Result |
 | --- | ---: |
-| base catalog, 20 tools | 13,977 B; ~3,495 tokens |
-| read-only catalog, 16 tools | 9,598 B; ~2,400 tokens |
-| read-only catalog reduction | 31.33% |
-| catalog build and encode | 0.0227 ms median |
+| base catalog, 20 tools | 14,264 B; ~3,566 tokens |
+| read-only catalog, 16 tools | 9,885 B; ~2,472 tokens |
+| read-only catalog reduction | 30.70% |
+| catalog build and encode | 0.023 ms median |
 | provider output, 2,439,995 B -> 6,372 B | 99.7389% smaller |
 | moderate command, 3,216 B -> 414 B | 87.1269% smaller |
 | large command, 6,018 B -> 633 B | 89.4816% smaller |
 | history, 232.169 MiB -> 0.957 MiB | 99.588% smaller |
-| initial history parse and decode | 311.694x faster |
+| initial history parse and decode | 319.355x faster |
 | initial history heap | 99.576% smaller |
-| search in 64 MiB output, 65,536 B -> 110 B | 99.8322% smaller; 57.28 ms |
-| eight identical reads | one execution; 87.5% fewer calls |
+| search in 64 MiB output, 65,536 B -> 110 B | 99.8322% smaller; 56.259 ms |
+| eight identical reads | one execution; 87.5% fewer calls; 1.506x faster |
 
 ### Interface and execution
 
 | Scenario | Result |
 | --- | ---: |
-| batched text streaming | 168.746x the sequential path |
-| framed command streaming | 72.594x the sequential path |
-| cold Code Mode runtime warm-up | 6.362 ms; one initialization |
-| 150,001-line diff | 45 mounted rows; 0.324 ms window |
-| incremental 64 MiB terminal | 1,573.479 ms; 40.7 MiB/s |
-| command after yield | response in 258 ms; independent work in 486 ms |
-| incremental polling | 146 B versus a 16,513 B snapshot |
-| four independent commands | 735.12 ms parallel versus 2,880.681 ms sequential |
+| batched text streaming | 199x the sequential path |
+| framed command streaming | 71.129x the sequential path |
+| cold Code Mode runtime warm-up | 5.546 ms; one initialization |
+| 150,001-line diff | 45 mounted rows; 0.263 ms visible window |
+| incremental 64 MiB terminal | 1,360.816 ms; 47.0 MiB/s |
+| command after yield | response in 258 ms; independent work in 445 ms |
+| incremental polling | 146 B versus a 165,133 B snapshot |
+| four independent commands | 698.987 ms parallel versus 2,715.103 ms sequential |
 
 Visual QA passed at 920x640, 1280x820, and 1920x1080 without horizontal
 overflow. Ultra rendered as `rgb(167, 139, 250)` (`#a78bfa`); appearance does
@@ -110,11 +142,11 @@ not alter the engine capability gate.
 
 | Check | Result |
 | --- | ---: |
-| encoding | 411 valid UTF-8 files |
+| encoding | 412 valid UTF-8 files |
 | frontend | 92 files; 491 passing tests |
 | main JavaScript bundle | 449.16 kB; 133.81 kB gzip |
 | CSS | 144.93 kB; 25.99 kB gzip |
-| Rust | 434 passing; 10 ignored benchmarks; no failures |
+| Rust | 454 passing; 13 ignored benchmarks; no failures |
 | Cargo, formatting, and Clippy | passed without warnings |
 
 ## Regression protection
@@ -127,6 +159,11 @@ not alter the engine capability gate.
 | diff mounts the whole document | virtual window and a 150,000-line corpus |
 | long commands block the agent | yield, incremental polling, and independent work |
 | first `exec` pays cold V8 cost | tracked prewarm, `OnceLock`, and release benchmark |
+| first response pays vault, catalog, and socket setup serially | credential cache, startup prewarm, and parallel preparation |
+| every tool round resends the complete transcript | strict `previous_response_id` continuation with full-request reset on mismatch |
+| compaction clones and re-encodes a confirmed history | borrowed fast path and compaction-trigger-only WebSocket extension |
+| WebSocket buffering grows without a limit | 1,024-message and 16 MiB raw-frame budgets plus bounded decoded events |
+| a stale startup warmup replaces an active turn | generation-tagged session leases and invalidation tests |
 | concurrency changes order | barriers and parallel-command benchmark |
 | tools consume unbounded context | catalog budget and `measure:tokens` |
 | local estimates compact early | provider-confirmed use plus post-model delta only |
