@@ -13,9 +13,15 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use uuid::Uuid;
 
+use super::AccountPlanTypeWire;
+use super::CreditsWire;
+use super::to_js_timestamp_ms;
+use super::validate_snapshot;
 use crate::engine::ImageDetail;
 use crate::engine::ModelVerbosity;
 use crate::engine::ModelVerification;
+use crate::engine::RateLimitSnapshot;
+use crate::engine::RateLimitWindow;
 use crate::engine::ReasoningEffort;
 use crate::engine::TokenUsage;
 use crate::error::AppError;
@@ -1378,6 +1384,7 @@ pub enum ResponseEvent {
     TurnState(String),
     ModelVerifications(Vec<ModelVerification>),
     SafetyBuffering(SafetyBuffering),
+    RateLimits(RateLimitSnapshot),
     TransportFallback(String),
     OutputItemDone(ResponseItem),
     Completed(ResponseCompleted),
@@ -1388,6 +1395,45 @@ pub enum ResponseEvent {
 pub struct ResponseCompleted {
     pub response_id: Option<String>,
     pub usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct ResponseMetadataState {
+    safety_faster_model: Option<String>,
+}
+
+impl ResponseMetadataState {
+    pub(super) fn new(safety_faster_model: Option<String>) -> Self {
+        Self {
+            safety_faster_model,
+        }
+    }
+
+    fn update_safety_treatment(&mut self, headers: Option<&Value>) -> Result<(), AppError> {
+        let Some(headers) = headers else {
+            return Ok(());
+        };
+        let has_enabled = has_json_header(headers, "x-codex-safety-buffering-enabled");
+        let has_faster_model = has_json_header(headers, "x-codex-safety-buffering-faster-model");
+        if !has_enabled && !has_faster_model {
+            return Ok(());
+        }
+
+        self.safety_faster_model = if has_faster_model {
+            let model = json_header(headers, &["x-codex-safety-buffering-faster-model"])
+                .ok_or_else(|| {
+                    AppError::Provider("safety fallback model header is invalid".into())
+                })?;
+            Some(validated_metadata_text(
+                model,
+                "safety fallback model",
+                MAX_SERVER_MODEL_NAME_BYTES,
+            )?)
+        } else {
+            None
+        };
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1512,10 +1558,10 @@ impl ResponseStream {
 
 pub(super) fn decode_websocket_event(
     data: &str,
-    safety_faster_model: Option<&str>,
+    metadata_state: &mut ResponseMetadataState,
 ) -> Result<VecDeque<ResponseEvent>, AppError> {
     let mut events = VecDeque::new();
-    decode_event(data, safety_faster_model, &mut events)?;
+    decode_event(data, metadata_state, &mut events)?;
     Ok(events)
 }
 
@@ -1547,13 +1593,13 @@ struct SseParser {
     line: Vec<u8>,
     data: Vec<String>,
     event_bytes: usize,
-    safety_faster_model: Option<String>,
+    metadata_state: ResponseMetadataState,
 }
 
 impl SseParser {
     fn new(safety_faster_model: Option<String>) -> Self {
         Self {
-            safety_faster_model,
+            metadata_state: ResponseMetadataState::new(safety_faster_model),
             ..Self::default()
         }
     }
@@ -1625,7 +1671,7 @@ impl SseParser {
         if data == "[DONE]" {
             return Ok(());
         }
-        decode_event(&data, self.safety_faster_model.as_deref(), output)
+        decode_event(&data, &mut self.metadata_state, output)
     }
 }
 
@@ -1655,6 +1701,16 @@ struct StreamEventWire {
     response: Option<ResponseStateWire>,
     #[serde(default)]
     error: Option<ResponseErrorWire>,
+    #[serde(default)]
+    plan_type: Option<AccountPlanTypeWire>,
+    #[serde(default)]
+    rate_limits: Option<RateLimitEventDetailsWire>,
+    #[serde(default)]
+    credits: Option<CreditsWire>,
+    #[serde(default)]
+    metered_limit_name: Option<String>,
+    #[serde(default)]
+    limit_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1720,14 +1776,41 @@ struct IncompleteDetailsWire {
     reason: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RateLimitEventDetailsWire {
+    #[serde(default)]
+    primary: Option<RateLimitEventWindowWire>,
+    #[serde(default)]
+    secondary: Option<RateLimitEventWindowWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RateLimitEventWindowWire {
+    used_percent: f64,
+    #[serde(default)]
+    window_minutes: Option<i64>,
+    #[serde(default)]
+    reset_at: Option<i64>,
+}
+
+impl RateLimitEventWindowWire {
+    fn into_domain(self) -> RateLimitWindow {
+        RateLimitWindow {
+            used_percent: self.used_percent,
+            window_duration_mins: self.window_minutes,
+            resets_at: self.reset_at.map(to_js_timestamp_ms),
+        }
+    }
+}
+
 fn decode_event(
     data: &str,
-    safety_faster_model: Option<&str>,
+    metadata_state: &mut ResponseMetadataState,
     output: &mut VecDeque<ResponseEvent>,
 ) -> Result<(), AppError> {
     let event: StreamEventWire = serde_json::from_str(data)
         .map_err(|error| AppError::Provider(format!("invalid SSE event: {error}")))?;
-    emit_metadata_events(&event, safety_faster_model, output)?;
+    emit_metadata_events(&event, metadata_state, output)?;
     let decoded = match event.kind.as_str() {
         "response.output_item.added" => {
             let item = event.item.ok_or_else(|| {
@@ -1768,6 +1851,13 @@ fn decode_event(
         "response.completed" => Some(ResponseEvent::Completed(decode_completed_response(
             event.response,
         )?)),
+        "codex.rate_limits" => Some(ResponseEvent::RateLimits(decode_rate_limit_event(
+            event.plan_type,
+            event.rate_limits,
+            event.credits,
+            event.metered_limit_name,
+            event.limit_name,
+        )?)),
         "response.failed" | "error" => return Err(stream_failure(event)),
         "response.incomplete" => {
             let reason = event
@@ -1792,10 +1882,50 @@ fn decode_event(
     Ok(())
 }
 
+fn decode_rate_limit_event(
+    plan_type: Option<AccountPlanTypeWire>,
+    rate_limits: Option<RateLimitEventDetailsWire>,
+    credits: Option<CreditsWire>,
+    metered_limit_name: Option<String>,
+    legacy_limit_name: Option<String>,
+) -> Result<RateLimitSnapshot, AppError> {
+    let (primary, secondary) = rate_limits.map_or((None, None), |details| {
+        (
+            details.primary.map(RateLimitEventWindowWire::into_domain),
+            details.secondary.map(RateLimitEventWindowWire::into_domain),
+        )
+    });
+    let limit_id = metered_limit_name
+        .or(legacy_limit_name)
+        .unwrap_or_else(|| "codex".into())
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    if limit_id.is_empty() || limit_id.len() > super::MAX_RATE_LIMIT_BUCKET_ID_BYTES {
+        return Err(AppError::Provider(
+            "codex.rate_limits contains an invalid bucket id".into(),
+        ));
+    }
+    let snapshot = RateLimitSnapshot {
+        limit_id: Some(limit_id),
+        limit_name: None,
+        primary,
+        secondary,
+        credits: credits.map(CreditsWire::into_domain),
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: plan_type.map(AccountPlanTypeWire::into_domain),
+        rate_limit_reached_type: None,
+    };
+    validate_snapshot(&snapshot)?;
+    Ok(snapshot)
+}
+
 fn is_non_output_event(kind: &str) -> bool {
     matches!(
         kind,
-        "keepalive"
+        "codex.response.metadata"
+            | "keepalive"
             | "response.content_part.added"
             | "response.content_part.done"
             | "response.created"
@@ -1815,14 +1945,16 @@ fn is_non_output_event(kind: &str) -> bool {
             | "response.web_search_call.completed"
             | "response.web_search_call.in_progress"
             | "response.web_search_call.searching"
+            | "responsesapi.websocket_timing"
     )
 }
 
 fn emit_metadata_events(
     event: &StreamEventWire,
-    safety_faster_model: Option<&str>,
+    metadata_state: &mut ResponseMetadataState,
     output: &mut VecDeque<ResponseEvent>,
 ) -> Result<(), AppError> {
+    metadata_state.update_safety_treatment(event.headers.as_ref())?;
     let response_model = event
         .response
         .as_ref()
@@ -1842,18 +1974,22 @@ fn emit_metadata_events(
         )?));
     }
 
+    if matches!(
+        event.kind.as_str(),
+        "codex.response.metadata" | "response.metadata"
+    ) && let Some(etag) = event
+        .headers
+        .as_ref()
+        .and_then(|headers| json_header(headers, &["x-models-etag"]))
+    {
+        output.push_back(ResponseEvent::ModelsEtag(validated_metadata_text(
+            etag,
+            "models ETag",
+            MAX_HEADER_VALUE_BYTES,
+        )?));
+    }
+
     if event.kind == "response.metadata" {
-        if let Some(etag) = event
-            .headers
-            .as_ref()
-            .and_then(|headers| json_header(headers, &["x-models-etag"]))
-        {
-            output.push_back(ResponseEvent::ModelsEtag(validated_metadata_text(
-                etag,
-                "models ETag",
-                MAX_HEADER_VALUE_BYTES,
-            )?));
-        }
         if let Some(turn_state) = event
             .headers
             .as_ref()
@@ -1877,9 +2013,10 @@ fn emit_metadata_events(
         }
     }
 
-    if let Some(buffering) =
-        decode_safety_buffering(event.safety_buffering.as_ref(), safety_faster_model)?
-    {
+    if let Some(buffering) = decode_safety_buffering(
+        event.safety_buffering.as_ref(),
+        metadata_state.safety_faster_model.as_deref(),
+    )? {
         output.push_back(ResponseEvent::SafetyBuffering(buffering));
     }
     Ok(())
@@ -1984,6 +2121,14 @@ fn json_header<'a>(headers: &'a Value, names: &[&str]) -> Option<&'a str> {
                 _ => None,
             })
             .flatten()
+    })
+}
+
+fn has_json_header(headers: &Value, expected: &str) -> bool {
+    headers.as_object().is_some_and(|headers| {
+        headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case(expected))
     })
 }
 
@@ -2130,10 +2275,13 @@ mod tests {
     use super::ResponseEvent;
     use super::ResponseItem;
     use super::ResponseMessagePhase;
+    use super::ResponseMetadataState;
     use super::ResponseProtocol;
     use super::ResponseRequest;
     use super::ResponseRequestSettings;
+    use super::SafetyBuffering;
     use super::SseParser;
+    use super::decode_websocket_event;
 
     #[test]
     fn custom_tool_output_uses_the_responses_api_shape() {
@@ -2405,6 +2553,136 @@ mod tests {
         ));
         // Unknown metadata fields such as moderation metadata are ignored by the contract.
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn decodes_codex_response_metadata_and_updates_safety_treatment() {
+        let mut metadata_state = ResponseMetadataState::default();
+        let mut events = decode_websocket_event(
+            r#"{
+                "type": "codex.response.metadata",
+                "headers": {
+                    "OpenAI-Model": "gpt-rerouted",
+                    "x-models-etag": "catalog-v3",
+                    "x-codex-safety-buffering-enabled": "true",
+                    "x-codex-safety-buffering-faster-model": "gpt-fast"
+                }
+            }"#,
+            &mut metadata_state,
+        )
+        .expect("Codex websocket metadata should decode");
+
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::ServerModel(model)) if model == "gpt-rerouted"
+        ));
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::ModelsEtag(etag)) if etag == "catalog-v3"
+        ));
+        assert!(events.is_empty());
+
+        let mut events = decode_websocket_event(
+            r#"{
+                "type": "response.output_text.delta",
+                "item_id": "message-1",
+                "delta": "ready",
+                "safety_buffering": {
+                    "use_cases": ["cyber"],
+                    "reasons": ["user_risk"]
+                }
+            }"#,
+            &mut metadata_state,
+        )
+        .expect("subsequent events should use the websocket treatment");
+
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::SafetyBuffering(SafetyBuffering {
+                faster_model: Some(model),
+                ..
+            })) if model == "gpt-fast"
+        ));
+        assert!(matches!(
+            events.pop_front(),
+            Some(ResponseEvent::OutputTextDelta { item_id, delta })
+                if item_id == "message-1" && delta == "ready"
+        ));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn decodes_codex_rate_limits_as_a_typed_sparse_control_event() {
+        let mut metadata_state = ResponseMetadataState::default();
+        let mut events = decode_websocket_event(
+            r#"{
+                "type": "codex.rate_limits",
+                "plan_type": "pro",
+                "metered_limit_name": "Codex-Bengalfox",
+                "rate_limits": {
+                    "primary": {
+                        "used_percent": 25.5,
+                        "window_minutes": 300,
+                        "reset_at": 1755000000
+                    },
+                    "secondary": {
+                        "used_percent": 80,
+                        "window_minutes": 10080,
+                        "reset_at": 1756000000000
+                    }
+                },
+                "credits": {
+                    "has_credits": true,
+                    "unlimited": false,
+                    "balance": "12.50"
+                }
+            }"#,
+            &mut metadata_state,
+        )
+        .expect("rate-limit telemetry should decode");
+        let Some(ResponseEvent::RateLimits(snapshot)) = events.pop_front() else {
+            panic!("a typed rate-limit event should be emitted");
+        };
+
+        assert_eq!(snapshot.limit_id.as_deref(), Some("codex_bengalfox"));
+        assert!(matches!(
+            snapshot.plan_type,
+            Some(crate::engine::AccountPlanType::Pro)
+        ));
+        let primary = snapshot
+            .primary
+            .expect("the primary window should be present");
+        assert_eq!(primary.used_percent, 25.5);
+        assert_eq!(primary.window_duration_mins, Some(300));
+        assert_eq!(primary.resets_at, Some(1_755_000_000_000));
+        let secondary = snapshot
+            .secondary
+            .expect("the secondary window should be present");
+        assert_eq!(secondary.resets_at, Some(1_756_000_000_000));
+        let credits = snapshot.credits.expect("credits should be present");
+        assert_eq!(credits.balance.as_deref(), Some("12.50"));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_codex_rate_limit_windows() {
+        let mut metadata_state = ResponseMetadataState::default();
+        let error = decode_websocket_event(
+            r#"{
+                "type": "codex.rate_limits",
+                "rate_limits": {
+                    "primary": {
+                        "used_percent": 101,
+                        "window_minutes": 300,
+                        "reset_at": 1755000000
+                    }
+                }
+            }"#,
+            &mut metadata_state,
+        )
+        .expect_err("invalid rate-limit telemetry must fail explicitly");
+
+        assert!(error.to_string().contains("invalid usage window"));
     }
 
     #[test]
@@ -3340,6 +3618,32 @@ mod tests {
 
         assert!(events.is_empty());
         assert!(error.to_string().contains("response.future"));
+    }
+
+    #[test]
+    fn accepts_the_complete_official_non_output_event_set() {
+        let mut metadata_state = ResponseMetadataState::default();
+        for kind in [
+            "codex.response.metadata",
+            "response.content_part.added",
+            "response.content_part.done",
+            "response.custom_tool_call_input.done",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.in_progress",
+            "response.metadata",
+            "response.output_text.done",
+            "response.reasoning_summary_part.done",
+            "responsesapi.websocket_timing",
+        ] {
+            let event = format!(r#"{{"type":"{kind}"}}"#);
+            let decoded = decode_websocket_event(&event, &mut metadata_state)
+                .unwrap_or_else(|error| panic!("{kind} should be accepted: {error}"));
+            assert!(
+                decoded.is_empty(),
+                "{kind} must not project assistant output"
+            );
+        }
     }
 
     #[test]

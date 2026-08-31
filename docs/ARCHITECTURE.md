@@ -59,10 +59,14 @@ ready transition.
    over a persistent WebSocket. A verified response chain sends only new input;
    any mismatch returns to the complete canonical request. HTTP/SSE is used only
    after an explicit 426 capability response.
-4. The loop projects deltas, persists complete items, and executes authorized
+4. Provider control events are decoded before output projection;
+   `codex.response.metadata` updates the response-local model catalog and safety
+   treatment, while `codex.rate_limits` becomes a validated sparse account
+   update during normal turns, prewarm, and compaction.
+5. The loop projects deltas, persists complete items, and executes authorized
    tools.
-5. Outputs are bounded and compacted before re-entering model context.
-6. Completion, failure, interruption, and recovery close the turn explicitly.
+6. Outputs are bounded and compacted before re-entering model context.
+7. Completion, failure, interruption, and recovery close the turn explicitly.
 
 Independent tasks can progress concurrently. Shared resources have explicit
 owners, limits, cancellation, and shutdown behavior.

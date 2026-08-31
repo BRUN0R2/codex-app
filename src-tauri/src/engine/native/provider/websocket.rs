@@ -14,8 +14,8 @@ use tokio_tungstenite::tungstenite::handshake::{client::generate_key, derive_acc
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 
 use super::responses::{
-    CompletedWebSocketResponse, MAX_RESPONSE_EVENT_BYTES, ResponseEvent, ResponseStream,
-    decode_websocket_event, initial_response_events,
+    CompletedWebSocketResponse, MAX_RESPONSE_EVENT_BYTES, ResponseEvent, ResponseMetadataState,
+    ResponseStream, decode_websocket_event, initial_response_events,
 };
 use crate::error::AppError;
 
@@ -378,6 +378,7 @@ async fn run_response_stream(
     send_message(stream, Message::Text(payload.into())).await?;
     let mut output_items = Vec::new();
     let mut completed_response = Some(completed_response);
+    let mut metadata_state = ResponseMetadataState::new(safety_faster_model.map(str::to_owned));
     loop {
         let message = tokio::select! {
             biased;
@@ -409,7 +410,7 @@ async fn run_response_stream(
         };
         match message {
             Message::Text(text) => {
-                let decoded = decode_websocket_event(text.as_str(), safety_faster_model)?;
+                let decoded = decode_websocket_event(text.as_str(), &mut metadata_state)?;
                 for event in decoded {
                     if let ResponseEvent::OutputItemDone(item) = &event {
                         output_items.push(item.clone());

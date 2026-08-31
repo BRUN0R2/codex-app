@@ -44,7 +44,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 20;
+  readonly schemaVersion: 21;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -680,6 +680,8 @@ export interface RateLimitSnapshot {
   readonly rateLimitReachedType: RateLimitReachedType | null;
 }
 
+export type RateLimitUpdateSnapshot = RateLimitSnapshot & { readonly limitId: string };
+
 export interface PlanPriceSnapshot {
   readonly amount: number;
   readonly currency: string;
@@ -748,6 +750,11 @@ export interface AuthLoginCompletedNotification {
 export interface AuthSessionChangedNotification {
   readonly method: "auth.sessionChanged";
   readonly params: { readonly signedIn: boolean };
+}
+
+export interface AccountRateLimitsUpdatedNotification {
+  readonly method: "account.rateLimitsUpdated";
+  readonly params: { readonly rateLimits: RateLimitUpdateSnapshot };
 }
 
 export interface ThreadNotification {
@@ -875,6 +882,7 @@ export interface AutomationRunUpdatedNotification {
 }
 
 export type EngineNotification =
+  | AccountRateLimitsUpdatedNotification
   | AutomationChangedNotification
   | AutomationDeletedNotification
   | AutomationRunUpdatedNotification

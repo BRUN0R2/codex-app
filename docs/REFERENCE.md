@@ -7,7 +7,7 @@ local implementation remains independent.
 
 | Source | Version |
 | --- | --- |
-| [`openai/codex`](https://github.com/openai/codex) | commit `f88ff940c0f5b20628e94abc27d04196a14c5b94`, 2026-08-31 |
+| [`openai/codex`](https://github.com/openai/codex) | commit `9a4b78579a7f672d5c71aa442bb95072915cc5cd`, 2026-08-31 |
 | stable release | `rust-v0.151.0`, commit `78c290807ce710180111df227df3b7a4fe845452` |
 | latest prerelease reviewed | `rust-v0.152.0-alpha.7`, commit `a43ad35f9a273e3890593c54a157d286c7de9c4b` |
 | Codex Desktop for Windows | build `26.825.5331.0`, validated 2026-08-29 |
@@ -49,6 +49,8 @@ Official references:
 | OAuth | PKCE, local callback, exchange, refresh, and revocation | Independent Rust implementation and isolated vault |
 | models | Authoritative capability catalog | Closed parser; UI never infers capability from model name |
 | Responses | Standard, Lite, WebSocket/SSE, typed items, prewarm, and incremental continuation | Persistent native transport with strict full-request recovery |
+| response metadata | `codex.response.metadata` is a WebSocket control frame | Response-local typed state for model, catalog ETag, and safety treatment |
+| rate limits | `codex.rate_limits` is a typed sparse stream update | Validated account notification with non-destructive merge |
 | history | Every tool call has exactly one output | Transactional normalization and repair |
 | instructions | Catalog template plus factual runtime context | Bounded layers without a duplicate universal prompt |
 | cache | Short in-memory catalog cache with ETag invalidation | Five-minute TTL and no persistence |
@@ -106,6 +108,24 @@ Standard/Lite handshake mode matches. Logout, archive, deletion, bounded cache
 eviction, shutdown, and a provider-session-wide 426 decision invalidate the
 corresponding state explicitly.
 
+On WebSocket responses, the provider may emit `codex.response.metadata` before
+content. The official transport consumes the frame as control state: its
+headers can identify the effective model, invalidate the model catalog through
+`x-models-etag`, and configure the safety-buffering fallback used by later
+events in that response. The local decoder preserves the same response-local
+ordering and does not project this frame as assistant output. Transport-only
+`responsesapi.websocket_timing` frames are also explicitly enumerated as
+non-output; the decoder does not use a wildcard that could hide a new protocol
+event.
+
+The provider may emit `codex.rate_limits` on the same Responses stream during
+prewarm, normal turns, or compaction. The official client decodes it into a
+typed snapshot and the app-server publishes a sparse account update. The local
+engine follows that contract: it validates identity, plan, percentages,
+durations, and timestamps, then merges present values without clearing account
+metadata omitted from the rolling event. Unknown stream discriminators remain
+terminal protocol errors.
+
 Incremental reuse is deliberately stricter than a prefix-length check. Model,
 instructions, tools, tool policy, reasoning, service tier, prompt-cache key,
 verbosity, every prior input, and every provider output must match. Only local
@@ -128,12 +148,12 @@ sample starts from the new canonical checkpoint. History and its latest usage
 marker are loaded in one SQLite read transaction, eliminating both a second
 pool round trip and an inconsistent cross-query snapshot.
 
-The latest upstream commit adds a bounded reverse-rollout cutoff after empty
-wake turns when a surviving full world-state snapshot exists. That patch is not
-applicable locally: this engine does not reconstruct provider context by
-reverse-scanning paginated rollouts. Its SQLite active-context prefix is already
-canonical, including empty `AgentMailbox` turns, and the combined transactional
-snapshot has direct regression coverage.
+The previously audited `f88ff940` change adds a bounded reverse-rollout cutoff
+after empty wake turns when a surviving full world-state snapshot exists. That
+patch is not applicable locally: this engine does not reconstruct provider
+context by reverse-scanning paginated rollouts. Its SQLite active-context
+prefix is already canonical, including empty `AgentMailbox` turns, and the
+combined transactional snapshot has direct regression coverage.
 
 SSE text deltas do not contain exact usage. `response.completed` supplies
 `output_tokens`, so the timeline accumulates only confirmed values per turn.
