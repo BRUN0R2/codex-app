@@ -258,6 +258,11 @@ pub(super) struct ProviderHistorySnapshot {
     last_sequence: i64,
 }
 
+pub(super) struct ProviderPromptSnapshot {
+    pub history: ProviderHistorySnapshot,
+    pub context_usage: Option<ContextUsageSnapshot>,
+}
+
 pub(super) struct TurnSettlement {
     pub turn: CompletedTurn,
     pub automation_run: Option<AutomationRun>,
@@ -1991,6 +1996,30 @@ impl NativeStorage {
         .await
     }
 
+    pub(super) async fn provider_prompt_snapshot(
+        &self,
+        thread_id: String,
+    ) -> Result<ProviderPromptSnapshot, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let mut connection = pool.get().map_err(pool_error)?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            require_readable_thread(&transaction, &thread_id)?;
+            let page = read_provider_history_page(&transaction, &thread_id, 0)?;
+            let snapshot = ProviderPromptSnapshot {
+                history: ProviderHistorySnapshot {
+                    items: page.items,
+                    encoded_bytes: page.encoded_bytes,
+                    last_sequence: page.last_sequence,
+                },
+                context_usage: read_latest_context_usage(&transaction, &thread_id)?,
+            };
+            transaction.commit().map_err(storage_error)?;
+            Ok(snapshot)
+        })
+        .await
+    }
+
     pub(super) async fn refresh_provider_history(
         &self,
         thread_id: String,
@@ -2099,58 +2128,6 @@ impl NativeStorage {
                 )
                 .map_err(storage_error)?;
             transaction.commit().map_err(storage_error)
-        })
-        .await
-    }
-
-    pub async fn latest_context_usage(
-        &self,
-        thread_id: String,
-    ) -> Result<Option<ContextUsageSnapshot>, AppError> {
-        let pool = self.pool().await?;
-        run_blocking(move || {
-            let connection = pool.get().map_err(pool_error)?;
-            let exists: bool = connection
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1 AND archived = 0)",
-                    [&thread_id],
-                    |row| row.get(0),
-                )
-                .map_err(storage_error)?;
-            if !exists {
-                return Err(AppError::State(
-                    "thread does not exist or is archived".into(),
-                ));
-            }
-            let payload = connection
-                .query_row(
-                    "SELECT thread_items.payload
-                     FROM thread_items
-                     JOIN turns ON turns.id = thread_items.turn_id
-                     WHERE turns.thread_id = ?1
-                       AND json_extract(thread_items.payload, '$.type') IN (
-                           'contextUsage',
-                           'contextCompaction'
-                       )
-                     ORDER BY thread_items.sequence DESC
-                     LIMIT 1",
-                    [thread_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(storage_error)?;
-            let Some(payload) = payload else {
-                return Ok(None);
-            };
-            match decode_bounded::<ThreadItem>(&payload, MAX_ITEM_BYTES, "context usage")? {
-                ThreadItem::ContextUsage { model, usage, .. } => {
-                    Ok(Some(ContextUsageSnapshot { model, usage }))
-                }
-                ThreadItem::ContextCompaction { .. } => Ok(None),
-                _ => Err(AppError::Storage(
-                    "context-state query returned a different item type".into(),
-                )),
-            }
         })
         .await
     }
@@ -3564,6 +3541,41 @@ fn require_readable_thread(connection: &Connection, thread_id: &str) -> Result<(
         Err(AppError::State(
             "thread does not exist or is archived".into(),
         ))
+    }
+}
+
+fn read_latest_context_usage(
+    connection: &Connection,
+    thread_id: &str,
+) -> Result<Option<ContextUsageSnapshot>, AppError> {
+    let payload = connection
+        .query_row(
+            "SELECT thread_items.payload
+             FROM thread_items
+             JOIN turns ON turns.id = thread_items.turn_id
+             WHERE turns.thread_id = ?1
+               AND json_extract(thread_items.payload, '$.type') IN (
+                   'contextUsage',
+                   'contextCompaction'
+               )
+             ORDER BY thread_items.sequence DESC
+             LIMIT 1",
+            [thread_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(storage_error)?;
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    match decode_bounded::<ThreadItem>(&payload, MAX_ITEM_BYTES, "context usage")? {
+        ThreadItem::ContextUsage { model, usage, .. } => {
+            Ok(Some(ContextUsageSnapshot { model, usage }))
+        }
+        ThreadItem::ContextCompaction { .. } => Ok(None),
+        _ => Err(AppError::Storage(
+            "context-state query returned a different item type".into(),
+        )),
     }
 }
 
@@ -6041,17 +6053,20 @@ mod tests {
             .provider_history(thread.id.clone())
             .await
             .expect("replacement history should load");
-        let usage = storage
-            .latest_context_usage(thread.id.clone())
+        let prompt = storage
+            .provider_prompt_snapshot(thread.id.clone())
             .await
-            .expect("usage lookup should succeed")
-            .expect("usage should exist");
+            .expect("combined prompt snapshot should load");
         assert_eq!(history.len(), 1);
         assert!(
             serde_json::to_string(&history[0])
                 .expect("history should encode")
                 .contains("replacement")
         );
+        assert_eq!(prompt.history.items, history);
+        let usage = prompt
+            .context_usage
+            .expect("combined snapshot should contain usage");
         assert_eq!(usage.model, "gpt-test");
         assert_eq!(usage.usage.total_tokens, 100);
 
@@ -6067,9 +6082,10 @@ mod tests {
             .expect("compaction marker should persist");
         assert!(
             storage
-                .latest_context_usage(thread.id.clone())
+                .provider_prompt_snapshot(thread.id.clone())
                 .await
-                .expect("context state should load")
+                .expect("combined context state should load")
+                .context_usage
                 .is_none()
         );
     }
@@ -6142,9 +6158,10 @@ mod tests {
         ));
         assert!(
             storage
-                .latest_context_usage(thread.id.clone())
+                .provider_prompt_snapshot(thread.id.clone())
                 .await
-                .expect("context state should load")
+                .expect("combined context state should load")
+                .context_usage
                 .is_none()
         );
     }

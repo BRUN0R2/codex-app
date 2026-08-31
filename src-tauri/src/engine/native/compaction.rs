@@ -7,7 +7,9 @@ use super::agent::{
     validate_response_item,
 };
 use super::context_window::{build_compacted_history, prepare_compaction_history};
-use super::provider::{ResponseEvent, ResponseItem, ResponseRequest, ResponseRequestSettings};
+use super::provider::{
+    ProviderResponseSession, ResponseEvent, ResponseItem, ResponseRequest, ResponseRequestSettings,
+};
 use super::storage::ProviderHistorySnapshot;
 use super::turn_recovery;
 use crate::engine::ThreadItem;
@@ -17,6 +19,7 @@ pub(super) struct CompactionContext<'a> {
     pub base_instructions: &'a str,
     pub prompt_context: &'a [ResponseItem],
     pub tools: &'a [serde_json::Value],
+    pub active_tokens: Option<u64>,
 }
 
 pub(super) async fn compact_context(
@@ -24,6 +27,7 @@ pub(super) async fn compact_context(
     app: &AppHandle,
     run: &mut TurnRun,
     provider_state: &mut TurnProviderState,
+    response_session: &mut ProviderResponseSession,
     history: &ProviderHistorySnapshot,
     context: CompactionContext<'_>,
 ) -> Result<bool, AppError> {
@@ -38,14 +42,15 @@ pub(super) async fn compact_context(
     .into_iter()
     .flatten()
     .min();
-    let mut compaction_input = prepare_compaction_history(
+    let compaction_input = prepare_compaction_history(
         context.base_instructions,
         context.prompt_context,
         &history.items,
         context.tools,
         compaction_limit,
+        context.active_tokens,
     );
-    compaction_input.push(ResponseItem::compaction_trigger());
+    let compaction_trigger = [ResponseItem::compaction_trigger()];
 
     let compaction_id = Uuid::now_v7().to_string();
     let compaction_item = ThreadItem::ContextCompaction {
@@ -62,11 +67,12 @@ pub(super) async fn compact_context(
 
     let mut transient_failure_count = 0u32;
     let checkpoint = 'request: loop {
-        let request = ResponseRequest::new(
+        let request = ResponseRequest::new_with_tail(
             run.model.id(),
             context.base_instructions,
             context.prompt_context,
-            &compaction_input,
+            compaction_input.as_ref(),
+            &compaction_trigger,
             context.tools,
             ResponseRequestSettings {
                 protocol: run.model.response_protocol(),
@@ -80,11 +86,11 @@ pub(super) async fn compact_context(
         )?;
         let mut stream = match inner
             .provider
-            .start_response(
+            .start_compaction_response(
                 app,
                 &inner.auth,
+                response_session,
                 request,
-                &run.thread_id,
                 provider_state.turn_state(),
                 &mut run.cancellation,
             )
@@ -155,7 +161,8 @@ pub(super) async fn compact_context(
                 | ResponseEvent::ModelsEtag(_)
                 | ResponseEvent::TurnState(_)
                 | ResponseEvent::ModelVerifications(_)
-                | ResponseEvent::SafetyBuffering(_) => {
+                | ResponseEvent::SafetyBuffering(_)
+                | ResponseEvent::TransportFallback(_) => {
                     return Err(AppError::State(
                         "provider control event escaped its handler".into(),
                     ));

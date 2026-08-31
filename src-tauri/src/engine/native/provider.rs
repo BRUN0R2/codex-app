@@ -2,6 +2,7 @@ mod client;
 mod history;
 mod models;
 mod responses;
+mod websocket;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tokio::sync::{Mutex, RwLock};
 
-use self::client::ProviderClient;
+pub(crate) use self::client::ProviderResponseSession;
+use self::client::{ContinuationPolicy, ProviderClient};
 pub(crate) use self::models::ModelCatalog;
 pub(crate) use self::models::ModelToolMode;
 use super::auth::{AuthSession, ChatGptAuth};
@@ -153,18 +155,93 @@ impl ChatGptCodexProvider {
         }
     }
 
+    pub fn response_session(&self, thread_id: &str) -> ProviderResponseSession {
+        self.client.response_session(thread_id)
+    }
+
+    pub fn startup_response_session(&self, thread_id: &str) -> Option<ProviderResponseSession> {
+        self.client.startup_response_session(thread_id)
+    }
+
+    pub fn close_response_session(&self, thread_id: &str) {
+        self.client.close_response_session(thread_id);
+    }
+
+    pub fn shutdown_response_sessions(&self) {
+        self.client.shutdown_response_sessions();
+    }
+
     pub async fn start_response(
         &self,
         app: &AppHandle,
         auth: &ChatGptAuth,
+        response_session: &mut ProviderResponseSession,
         request: ResponseRequest<'_>,
-        thread_id: &str,
         turn_state: Option<&str>,
         cancellation: &mut tokio::sync::watch::Receiver<bool>,
     ) -> Result<ResponseStream, AppError> {
         let session = auth.session(app).await?;
         self.client
-            .start_response(&session, request, thread_id, turn_state, cancellation)
+            .start_response(
+                &session,
+                response_session,
+                request,
+                ContinuationPolicy::Preserve,
+                turn_state,
+                cancellation,
+            )
+            .await
+    }
+
+    pub async fn start_compaction_response(
+        &self,
+        app: &AppHandle,
+        auth: &ChatGptAuth,
+        response_session: &mut ProviderResponseSession,
+        request: ResponseRequest<'_>,
+        turn_state: Option<&str>,
+        cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> Result<ResponseStream, AppError> {
+        let session = auth.session(app).await?;
+        self.client
+            .start_response(
+                &session,
+                response_session,
+                request,
+                ContinuationPolicy::ResetAfterResponse,
+                turn_state,
+                cancellation,
+            )
+            .await
+    }
+
+    pub async fn preconnect_response(
+        &self,
+        app: &AppHandle,
+        auth: &ChatGptAuth,
+        response_session: &mut ProviderResponseSession,
+        uses_responses_lite: bool,
+        cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Option<String>, AppError> {
+        let session = auth.session(app).await?;
+        self.client
+            .preconnect_response(
+                &session,
+                response_session,
+                uses_responses_lite,
+                cancellation,
+            )
+            .await
+    }
+
+    pub async fn prewarm_response(
+        &self,
+        response_session: &mut ProviderResponseSession,
+        request: ResponseRequest<'_>,
+        turn_state: Option<&str>,
+    ) -> Result<Option<ResponseStream>, AppError> {
+        self.client
+            .prewarm_response(response_session, request, turn_state)
             .await
     }
 
@@ -349,6 +426,7 @@ impl ChatGptCodexProvider {
     pub async fn clear_session_state(&self) {
         let _refresh_guard = self.refresh_gate.lock().await;
         *self.catalog.write().await = None;
+        self.client.clear_response_sessions();
     }
 
     async fn write_auto_top_up(

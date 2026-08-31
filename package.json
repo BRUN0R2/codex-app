@@ -39,6 +39,7 @@
     "verify:transitive": "node scripts/verify-transitive-dependencies.mjs",
     "verify:version": "node scripts/verify-version.mjs",
     "measure:release": "pwsh -File scripts/measure-release.ps1",
+    "measure:response-transport": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::provider::responses::tests::benchmark_incremental_compaction_payload -- --ignored --nocapture --test-threads=1",
     "measure:command-output": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::output_compaction::tests::benchmark_semantic_command_output_reduction -- --ignored --nocapture --test-threads=1",
     "measure:context-window": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::context_window::tests::benchmark_confirmed_context_preflight -- --ignored --nocapture --test-threads=1",
     "measure:credentials": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml engine::native::auth::storage::vault::tests::benchmark_cached_credential_load -- --ignored --nocapture --test-threads=1",

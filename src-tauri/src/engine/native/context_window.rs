@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{self, Cursor, Write};
 use std::sync::LazyLock;
@@ -110,20 +111,27 @@ pub(super) fn full_context_usage(window: &ModelContextWindow) -> TokenUsage {
     }
 }
 
-pub(super) fn prepare_compaction_history(
+pub(super) fn prepare_compaction_history<'a>(
     base_instructions: &str,
     prompt_context: &[ResponseItem],
-    history: &[ResponseItem],
+    history: &'a [ResponseItem],
     tools: &[Value],
     hard_limit: Option<u64>,
-) -> Vec<ResponseItem> {
-    let mut prepared = history.to_vec();
+    confirmed_active_tokens: Option<u64>,
+) -> Cow<'a, [ResponseItem]> {
+    let mut prepared = Cow::Borrowed(history);
     let Some(hard_limit) = hard_limit else {
         return prepared;
     };
+    let trigger_tokens = estimate_item_tokens(&ResponseItem::compaction_trigger());
+    if confirmed_active_tokens.is_some_and(|tokens| {
+        tokens.saturating_add(add_request_estimate_headroom(trigger_tokens)) <= hard_limit
+    }) {
+        return prepared;
+    }
     let mut estimated_tokens =
         estimate_request_tokens(base_instructions, prompt_context, &prepared, tools)
-            .saturating_add(estimate_item_tokens(&ResponseItem::compaction_trigger()));
+            .saturating_add(trigger_tokens);
 
     for index in (0..prepared.len()).rev() {
         if add_request_estimate_headroom(estimated_tokens) <= hard_limit {
@@ -141,7 +149,7 @@ pub(super) fn prepare_compaction_history(
         estimated_tokens = estimated_tokens
             .saturating_sub(estimate_item_tokens(&prepared[index]))
             .saturating_add(estimate_item_tokens(&replacement));
-        prepared[index] = replacement;
+        prepared.to_mut()[index] = replacement;
     }
 
     prepared
@@ -737,8 +745,9 @@ mod tests {
             text("user", "keep"),
             ResponseItem::function_output("call-1".into(), "x".repeat(4_000)),
         ];
-        let prepared = prepare_compaction_history("", &[], &history, &[], Some(200));
+        let prepared = prepare_compaction_history("", &[], &history, &[], Some(200), None);
 
+        assert!(matches!(&prepared, std::borrow::Cow::Owned(_)));
         assert!(matches!(
             prepared.last(),
             Some(ResponseItem::FunctionCallOutput { output, .. })
@@ -755,12 +764,35 @@ mod tests {
     }
 
     #[test]
+    fn compaction_history_stays_borrowed_when_no_output_needs_rewriting() {
+        let history = vec![text("user", "keep this context")];
+        let prepared = prepare_compaction_history("", &[], &history, &[], Some(10_000), Some(20));
+
+        assert!(matches!(prepared, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn confirmed_usage_recomputes_conservatively_before_rewriting_outputs() {
+        let history = vec![
+            text("user", "keep"),
+            ResponseItem::function_output("call-1".into(), "x".repeat(4_000)),
+        ];
+        let from_confirmed_usage =
+            prepare_compaction_history("", &[], &history, &[], Some(200), Some(10_000));
+        let from_full_estimate =
+            prepare_compaction_history("", &[], &history, &[], Some(200), None);
+
+        assert!(matches!(&from_confirmed_usage, std::borrow::Cow::Owned(_)));
+        assert_eq!(from_confirmed_usage, from_full_estimate);
+    }
+
+    #[test]
     fn rewrites_older_tool_outputs_past_non_output_items() {
         let history = vec![
             ResponseItem::function_output("call-1".into(), "x".repeat(4_000)),
             text("user", "newest"),
         ];
-        let prepared = prepare_compaction_history("", &[], &history, &[], Some(200));
+        let prepared = prepare_compaction_history("", &[], &history, &[], Some(200), None);
 
         assert!(matches!(
             prepared.first(),
@@ -1033,6 +1065,57 @@ mod tests {
             (HISTORY_ITEMS * ITEM_BYTES) as f64 / (1_024.0 * 1_024.0),
             optimized_elapsed.as_secs_f64() * 1_000.0,
             full_estimate_elapsed.as_secs_f64() * 1_000.0,
+        );
+
+        let compaction_started_at = Instant::now();
+        let mut prepared_item_count = 0usize;
+        for _ in 0..SAMPLES {
+            let prepared = black_box(prepare_compaction_history(
+                black_box("system instructions"),
+                &[],
+                black_box(&history),
+                &[],
+                Some(u64::MAX),
+                Some(expected_active_tokens),
+            ));
+            assert!(matches!(&prepared, std::borrow::Cow::Borrowed(_)));
+            prepared_item_count = prepared_item_count.saturating_add(prepared.len());
+        }
+        let compaction_elapsed = compaction_started_at.elapsed();
+
+        let eager_started_at = Instant::now();
+        let mut eager_item_count = 0usize;
+        for _ in 0..SAMPLES {
+            let cloned = black_box(history.clone());
+            black_box(add_request_estimate_headroom(
+                estimate_request_tokens(
+                    black_box("system instructions"),
+                    &[],
+                    black_box(&cloned),
+                    &[],
+                )
+                .saturating_add(estimate_item_tokens(&ResponseItem::compaction_trigger())),
+            ));
+            eager_item_count = eager_item_count.saturating_add(cloned.len());
+        }
+        let eager_elapsed = eager_started_at.elapsed();
+        let compaction_per_request_micros =
+            compaction_elapsed.as_secs_f64() * 1_000_000.0 / f64::from(SAMPLES);
+        let eager_per_request_micros =
+            eager_elapsed.as_secs_f64() * 1_000_000.0 / f64::from(SAMPLES);
+        let compaction_speedup =
+            eager_per_request_micros / compaction_per_request_micros.max(f64::EPSILON);
+
+        assert_eq!(prepared_item_count, eager_item_count);
+        assert!(
+            compaction_speedup > 10.0,
+            "compaction preparation speedup was only {compaction_speedup:.2}x"
+        );
+        println!(
+            "confirmed_compaction_preparation history_mib={:.3} samples={SAMPLES} optimized_total_ms={:.3} optimized_per_request_us={compaction_per_request_micros:.3} eager_total_ms={:.3} eager_per_request_us={eager_per_request_micros:.3} speedup={compaction_speedup:.2}x",
+            (HISTORY_ITEMS * ITEM_BYTES) as f64 / (1_024.0 * 1_024.0),
+            compaction_elapsed.as_secs_f64() * 1_000.0,
+            eager_elapsed.as_secs_f64() * 1_000.0,
         );
     }
 }

@@ -23,8 +23,8 @@ mod text;
 mod tools;
 mod turn_recovery;
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,11 +45,11 @@ use self::chat::ChatGptConsumerProvider;
 use self::code_mode::CodeModeSessionRegistry;
 use self::diagnostics::RuntimeDiagnostics;
 use self::multi_agent::{AgentStatus, MultiAgentManager};
-use self::provider::ChatGptCodexProvider;
+use self::provider::{ChatGptCodexProvider, SelectedModel};
 use self::storage::NativeStorage;
 use self::tools::{CommandSessionManager, Ripgrep, ToolRegistry};
 use crate::engine::{
-    AccountRateLimitsResponse, AutoTopUpSettingsSnapshot, Automation,
+    AccountRateLimitsResponse, AppConfig, AutoTopUpSettingsSnapshot, Automation,
     AutomationDeletedNotification, AutomationListResponse, AutomationNotification, AutomationRun,
     AutomationRunNotification, ChatModelListResponse, ConfigUpdate, ConfigUpdateResponse,
     ConversationMode, DiagnosticStream, EngineCapability, EngineDescriptor, EngineNotification,
@@ -125,6 +125,14 @@ struct ActiveTurn {
     latest_steer_sequence: Option<i64>,
     deletion_waiters: Vec<oneshot::Sender<Result<OperationAck, AppError>>>,
     deletion_in_progress: bool,
+}
+
+pub(super) struct ResolvedAgentSettings {
+    config: AppConfig,
+    model: SelectedModel,
+    reasoning_effort: Option<ReasoningEffort>,
+    provider_reasoning_effort: Option<ReasoningEffort>,
+    service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +212,7 @@ pub(super) struct NativeEngineInner {
     active_turns: Mutex<HashMap<String, ActiveTurn>>,
     thread_lifecycle_gate: Mutex<()>,
     tasks: Mutex<JoinSet<()>>,
+    response_prewarm_threads: Mutex<HashSet<String>>,
     automation_scheduler: Mutex<Option<AutomationSchedulerTask>>,
     automation_wake: Notify,
     start_gate: Mutex<()>,
@@ -241,6 +250,7 @@ impl NativeEngine {
                 active_turns: Mutex::new(HashMap::new()),
                 thread_lifecycle_gate: Mutex::new(()),
                 tasks: Mutex::new(JoinSet::new()),
+                response_prewarm_threads: Mutex::new(HashSet::new()),
                 automation_scheduler: Mutex::new(None),
                 automation_wake: Notify::new(),
                 start_gate: Mutex::new(()),
@@ -316,6 +326,111 @@ impl NativeEngine {
                     &app_handle,
                     DiagnosticStream::Runtime,
                     format!("could not prewarm ChatGPT credentials: {error}"),
+                );
+            }
+        });
+    }
+
+    async fn resolve_agent_settings(
+        &self,
+        app: &AppHandle,
+        requested_model: Option<&str>,
+        requested_effort: Option<ReasoningEffort>,
+        requested_service_tier: Option<&str>,
+    ) -> Result<ResolvedAgentSettings, AppError> {
+        let config = self.inner.storage.read_config().await?.config;
+        let requested_model = requested_model.or(config.model.as_deref());
+        let model = self
+            .inner
+            .provider
+            .select_model(app, &self.inner.auth, requested_model)
+            .await?;
+        let context_preference = config
+            .model_context_window_preferences
+            .get(model.id())
+            .copied()
+            .unwrap_or(ModelContextWindowPreference::Default);
+        let model = model.with_context_window_preference(context_preference)?;
+        let reasoning_effort = requested_effort
+            .or(config.model_reasoning_effort)
+            .or_else(|| model.default_reasoning_effort());
+        if let Some(reasoning_effort) = reasoning_effort
+            && !model.supports_reasoning_effort(reasoning_effort)
+        {
+            return Err(AppError::Protocol(format!(
+                "reasoning effort `{}` is not supported by model `{}`",
+                reasoning_effort.as_str(),
+                model.id()
+            )));
+        }
+        let provider_reasoning_effort = model.provider_reasoning_effort(reasoning_effort);
+        let service_tier = model.select_service_tier(requested_service_tier)?;
+        Ok(ResolvedAgentSettings {
+            config,
+            model,
+            reasoning_effort,
+            provider_reasoning_effort,
+            service_tier,
+        })
+    }
+
+    async fn spawn_response_session_prewarm(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+        mode: ConversationMode,
+    ) {
+        if mode == ConversationMode::Chat
+            || !self
+                .inner
+                .response_prewarm_threads
+                .lock()
+                .await
+                .insert(thread_id.clone())
+        {
+            return;
+        }
+        let Some(mut response_session) = self.inner.provider.startup_response_session(&thread_id)
+        else {
+            self.inner
+                .response_prewarm_threads
+                .lock()
+                .await
+                .remove(&thread_id);
+            return;
+        };
+
+        let engine = self.clone();
+        let app_handle = app.clone();
+        self.inner.tasks.lock().await.spawn(async move {
+            let result = async {
+                let settings = engine
+                    .resolve_agent_settings(&app_handle, None, None, None)
+                    .await?;
+                agent::prewarm_response_session(
+                    &engine.inner,
+                    &app_handle,
+                    &thread_id,
+                    mode,
+                    &settings,
+                    &mut response_session,
+                )
+                .await
+            }
+            .await;
+            engine
+                .inner
+                .response_prewarm_threads
+                .lock()
+                .await
+                .remove(&thread_id);
+            if let Err(error) = result {
+                engine.inner.emit_diagnostic(
+                    &app_handle,
+                    DiagnosticStream::Runtime,
+                    format!(
+                        "could not prewarm Responses transport for thread `{thread_id}`: {error}"
+                    ),
                 );
             }
         });
@@ -774,6 +889,8 @@ impl NativeEngine {
                 thread: page.thread.summary.clone(),
             }),
         )?;
+        self.spawn_response_session_prewarm(app, page.thread.id.clone(), page.thread.mode)
+            .await;
         Ok(ThreadStartResponse {
             thread: page.thread,
             next_cursor: page.next_cursor,
@@ -789,9 +906,15 @@ impl NativeEngine {
         self.inner.storage.list_threads(cursor, archived).await
     }
 
-    pub async fn thread_resume(&self, thread_id: String) -> Result<ThreadResumeResponse, AppError> {
+    pub async fn thread_resume(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+    ) -> Result<ThreadResumeResponse, AppError> {
         self.ensure_started()?;
         let page = self.inner.storage.read_thread_page(thread_id, None).await?;
+        self.spawn_response_session_prewarm(app, page.thread.id.clone(), page.thread.mode)
+            .await;
         Ok(ThreadResumeResponse {
             cwd: page.thread.cwd.clone(),
             thread: page.thread,
@@ -859,6 +982,7 @@ impl NativeEngine {
         }
         let response = self.inner.storage.archive_thread(thread_id.clone()).await?;
         self.inner.code_mode_sessions.close(&thread_id).await;
+        self.inner.provider.close_response_session(&thread_id);
         self.inner.emit_notification(
             app,
             EngineNotification::ThreadArchived(ThreadArchivedNotification { thread_id }),
@@ -887,6 +1011,8 @@ impl NativeEngine {
                 thread: page.thread.summary.clone(),
             }),
         )?;
+        self.spawn_response_session_prewarm(app, page.thread.id.clone(), page.thread.mode)
+            .await;
         Ok(ThreadUnarchiveResponse {
             thread: page.thread,
             next_cursor: page.next_cursor,
@@ -924,6 +1050,7 @@ impl NativeEngine {
                 }
                 let response = self.inner.storage.delete_thread(thread_id.clone()).await?;
                 self.inner.code_mode_sessions.close(&thread_id).await;
+                self.inner.provider.close_response_session(&thread_id);
                 self.inner.multi_agents.forget_tree(&thread_id).await;
                 drop(lifecycle_guard);
                 self.inner.emit_notification(
@@ -977,6 +1104,8 @@ impl NativeEngine {
                 thread: page.thread.summary.clone(),
             }),
         )?;
+        self.spawn_response_session_prewarm(app, page.thread.id.clone(), page.thread.mode)
+            .await;
         Ok(ThreadForkResponse {
             thread: page.thread,
             next_cursor: page.next_cursor,
@@ -1017,34 +1146,20 @@ impl NativeEngine {
                 .await
                 .map(|response| (response, None));
         }
-        let config = self.inner.storage.read_config().await?.config;
-        let requested_model = request.model.as_deref().or(config.model.as_deref());
-        let model = self
-            .inner
-            .provider
-            .select_model(app, &self.inner.auth, requested_model)
+        let ResolvedAgentSettings {
+            config,
+            model,
+            reasoning_effort,
+            provider_reasoning_effort,
+            service_tier,
+        } = self
+            .resolve_agent_settings(
+                app,
+                request.model.as_deref(),
+                request.effort,
+                request.service_tier.as_deref(),
+            )
             .await?;
-        let context_preference = config
-            .model_context_window_preferences
-            .get(model.id())
-            .copied()
-            .unwrap_or(ModelContextWindowPreference::Default);
-        let model = model.with_context_window_preference(context_preference)?;
-        let reasoning_effort = request
-            .effort
-            .or(config.model_reasoning_effort)
-            .or_else(|| model.default_reasoning_effort());
-        if let Some(reasoning_effort) = reasoning_effort
-            && !model.supports_reasoning_effort(reasoning_effort)
-        {
-            return Err(AppError::Protocol(format!(
-                "reasoning effort `{}` is not supported by model `{}`",
-                reasoning_effort.as_str(),
-                model.id()
-            )));
-        }
-        let provider_reasoning_effort = model.provider_reasoning_effort(reasoning_effort);
-        let service_tier = model.select_service_tier(request.service_tier.as_deref())?;
         let lifecycle_guard = self.inner.thread_lifecycle_gate.lock().await;
         let (turn, user_item) = match request.content {
             StartTurnContent::User {
@@ -1527,6 +1642,7 @@ impl NativeEngine {
             cancellation.send_replace(true);
         }
         self.inner.code_mode_sessions.shutdown().await;
+        self.inner.provider.shutdown_response_sessions();
         match self.inner.command_sessions.shutdown().await {
             Ok(settlement) if settlement.forced_abort_count() > 0 => self.inner.emit_diagnostic(
                 app,
@@ -1798,6 +1914,7 @@ impl NativeEngineInner {
             match deletion {
                 Ok(response) => {
                     self.code_mode_sessions.close(&thread_id).await;
+                    self.provider.close_response_session(&thread_id);
                     self.multi_agents.forget_tree(&thread_id).await;
                     if let Ok(settlement) = &completion
                         && let Some(run) = settlement.automation_run.clone()

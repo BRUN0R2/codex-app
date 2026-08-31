@@ -1,11 +1,14 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde::Serialize;
 use serde::ser::SerializeSeq as _;
+use serde::ser::SerializeStruct as _;
 use serde_json::Value;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -18,7 +21,7 @@ use crate::engine::TokenUsage;
 use crate::error::AppError;
 
 const MAX_SSE_LINE_BYTES: usize = 1_048_576;
-const MAX_SSE_EVENT_BYTES: usize = 2_097_152;
+pub(super) const MAX_RESPONSE_EVENT_BYTES: usize = 2_097_152;
 const MAX_DELTA_BYTES: usize = 262_144;
 const MAX_HEADER_VALUE_BYTES: usize = 4_096;
 const MAX_ITEM_ID_BYTES: usize = 256;
@@ -89,6 +92,26 @@ impl<'a> ResponseRequest<'a> {
         tools: &'a [Value],
         settings: ResponseRequestSettings<'a>,
     ) -> Result<Self, AppError> {
+        Self::new_with_tail(
+            model,
+            base_instructions,
+            context,
+            input,
+            &[],
+            tools,
+            settings,
+        )
+    }
+
+    pub(in crate::engine::native) fn new_with_tail(
+        model: &'a str,
+        base_instructions: &'a str,
+        context: &'a [ResponseItem],
+        input: &'a [ResponseItem],
+        tail: &'a [ResponseItem],
+        tools: &'a [Value],
+        settings: ResponseRequestSettings<'a>,
+    ) -> Result<Self, AppError> {
         let lite_prefix = match settings.protocol {
             ResponseProtocol::Standard => None,
             ResponseProtocol::Lite => Some(LitePrefix::new(
@@ -115,6 +138,7 @@ impl<'a> ResponseRequest<'a> {
                 lite_prefix,
                 context,
                 history: input,
+                tail,
                 strip_image_detail: settings.protocol == ResponseProtocol::Lite,
             },
             tools: (settings.protocol == ResponseProtocol::Standard).then_some(tools),
@@ -136,9 +160,298 @@ impl<'a> ResponseRequest<'a> {
     pub const fn uses_responses_lite(&self) -> bool {
         self.input.lite_prefix.is_some()
     }
+
+    pub(super) fn prepare_websocket_request(
+        &self,
+        previous_request: Option<ResponseRequestBaseline>,
+        previous_response: Option<CompletedWebSocketResponse>,
+        thread_id: &str,
+        turn_state: Option<&str>,
+    ) -> Result<PreparedWebSocketRequest, AppError> {
+        self.prepare_websocket_request_with_baseline(
+            previous_request,
+            previous_response,
+            thread_id,
+            turn_state,
+            true,
+            None,
+        )
+    }
+
+    pub(super) fn prepare_websocket_compaction_request(
+        &self,
+        previous_request: Option<ResponseRequestBaseline>,
+        previous_response: Option<CompletedWebSocketResponse>,
+        thread_id: &str,
+        turn_state: Option<&str>,
+    ) -> Result<PreparedWebSocketRequest, AppError> {
+        self.prepare_websocket_request_with_baseline(
+            previous_request,
+            previous_response,
+            thread_id,
+            turn_state,
+            false,
+            None,
+        )
+    }
+
+    pub(super) fn prepare_websocket_prewarm_request(
+        &self,
+        thread_id: &str,
+        turn_state: Option<&str>,
+    ) -> Result<PreparedWebSocketRequest, AppError> {
+        self.prepare_websocket_request_with_baseline(
+            None,
+            None,
+            thread_id,
+            turn_state,
+            true,
+            Some(false),
+        )
+    }
+
+    fn prepare_websocket_request_with_baseline(
+        &self,
+        previous_request: Option<ResponseRequestBaseline>,
+        previous_response: Option<CompletedWebSocketResponse>,
+        thread_id: &str,
+        turn_state: Option<&str>,
+        retain_baseline: bool,
+        generate: Option<bool>,
+    ) -> Result<PreparedWebSocketRequest, AppError> {
+        let continuation =
+            previous_request
+                .zip(previous_response)
+                .and_then(|(request, response)| {
+                    self.continuation_input_start(&request, &response)
+                        .map(|input_start| (request, response, input_start))
+                });
+        let (previous_response_id, input_start, baseline) = match continuation {
+            Some((mut request, response, input_start)) => {
+                let previous_response_id = response.response_id;
+                let baseline = if retain_baseline {
+                    request.input.extend(
+                        response
+                            .output_items
+                            .into_iter()
+                            .map(OwnedResponseRequestInput::Response),
+                    );
+                    request
+                        .input
+                        .extend(self.input.clone_owned_range(input_start)?);
+                    Some(request)
+                } else {
+                    None
+                };
+                (Some(previous_response_id), input_start, baseline)
+            }
+            None => (
+                None,
+                0,
+                retain_baseline
+                    .then(|| self.to_owned_baseline())
+                    .transpose()?,
+            ),
+        };
+        let envelope = WebSocketResponseRequest {
+            request: self,
+            previous_response_id,
+            input_start,
+            generate,
+            client_metadata: websocket_client_metadata(thread_id, turn_state),
+        };
+        let payload = serde_json::to_string(&envelope).map_err(|error| {
+            AppError::Protocol(format!(
+                "websocket response request could not be encoded: {error}"
+            ))
+        })?;
+        Ok(PreparedWebSocketRequest { payload, baseline })
+    }
+
+    fn continuation_input_start(
+        &self,
+        previous_request: &ResponseRequestBaseline,
+        previous_response: &CompletedWebSocketResponse,
+    ) -> Option<usize> {
+        if previous_response.response_id.is_empty()
+            || !self.properties_match(&previous_request.properties)
+        {
+            return None;
+        }
+        let input_start = previous_request
+            .input
+            .len()
+            .checked_add(previous_response.output_items.len())?;
+        if input_start > self.input.len() {
+            return None;
+        }
+        let request_matches = previous_request
+            .input
+            .iter()
+            .enumerate()
+            .all(|(index, item)| self.input.matches_owned(index, item));
+        let response_matches =
+            previous_response
+                .output_items
+                .iter()
+                .enumerate()
+                .all(|(index, item)| {
+                    self.input
+                        .matches_response(previous_request.input.len() + index, item)
+                });
+        (request_matches && response_matches).then_some(input_start)
+    }
+
+    fn properties_match(&self, previous: &OwnedResponseRequestProperties) -> bool {
+        self.model == previous.model
+            && self.instructions == previous.instructions
+            && self.tools == previous.tools.as_deref()
+            && self.tool_choice == previous.tool_choice
+            && self.parallel_tool_calls == previous.parallel_tool_calls
+            && self.reasoning == previous.reasoning
+            && self.store == previous.store
+            && self.stream == previous.stream
+            && self.include == previous.include
+            && self.service_tier == previous.service_tier.as_deref()
+            && self.prompt_cache_key == previous.prompt_cache_key.as_deref()
+            && self.text == previous.text
+    }
+
+    fn to_owned_baseline(&self) -> Result<ResponseRequestBaseline, AppError> {
+        Ok(ResponseRequestBaseline {
+            properties: OwnedResponseRequestProperties {
+                model: self.model.to_string(),
+                instructions: self.instructions.to_string(),
+                tools: self.tools.map(<[Value]>::to_vec),
+                tool_choice: self.tool_choice,
+                parallel_tool_calls: self.parallel_tool_calls,
+                reasoning: self.reasoning.clone(),
+                store: self.store,
+                stream: self.stream,
+                include: self.include,
+                service_tier: self.service_tier.map(str::to_string),
+                prompt_cache_key: self.prompt_cache_key.map(str::to_string),
+                text: self.text.clone(),
+            },
+            input: self.input.clone_owned_range(0)?,
+        })
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
+pub(super) struct ResponseRequestBaseline {
+    properties: OwnedResponseRequestProperties,
+    input: Vec<OwnedResponseRequestInput>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CompletedWebSocketResponse {
+    pub response_id: String,
+    pub output_items: Vec<ResponseItem>,
+}
+
+#[derive(Debug)]
+pub(super) struct PreparedWebSocketRequest {
+    pub payload: String,
+    pub baseline: Option<ResponseRequestBaseline>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedResponseRequestProperties {
+    model: String,
+    instructions: String,
+    tools: Option<Vec<Value>>,
+    tool_choice: &'static str,
+    parallel_tool_calls: bool,
+    reasoning: Option<ReasoningOptions>,
+    store: bool,
+    stream: bool,
+    include: [&'static str; 1],
+    service_tier: Option<String>,
+    prompt_cache_key: Option<String>,
+    text: Option<TextOptions>,
+}
+
+#[derive(Debug, Clone)]
+enum OwnedResponseRequestInput {
+    AdditionalTools(AdditionalTools),
+    BaseInstructions { id: String, text: String },
+    Response(ResponseItem),
+}
+
+struct WebSocketResponseRequest<'input, 'request> {
+    request: &'input ResponseRequest<'request>,
+    previous_response_id: Option<String>,
+    input_start: usize,
+    generate: Option<bool>,
+    client_metadata: BTreeMap<String, String>,
+}
+
+impl Serialize for WebSocketResponseRequest<'_, '_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let request = self.request;
+        let mut state = serializer.serialize_struct("WebSocketResponseRequest", 18)?;
+        state.serialize_field("type", "response.create")?;
+        state.serialize_field("model", request.model)?;
+        if !request.instructions.is_empty() {
+            state.serialize_field("instructions", request.instructions)?;
+        }
+        if let Some(previous_response_id) = &self.previous_response_id {
+            state.serialize_field("previous_response_id", previous_response_id)?;
+        }
+        state.serialize_field(
+            "input",
+            &ResponseRequestInputRange {
+                input: &request.input,
+                start: self.input_start,
+            },
+        )?;
+        if let Some(generate) = self.generate {
+            state.serialize_field("generate", &generate)?;
+        }
+        if let Some(tools) = request.tools {
+            state.serialize_field("tools", tools)?;
+        }
+        state.serialize_field("tool_choice", request.tool_choice)?;
+        state.serialize_field("parallel_tool_calls", &request.parallel_tool_calls)?;
+        if let Some(reasoning) = &request.reasoning {
+            state.serialize_field("reasoning", reasoning)?;
+        }
+        state.serialize_field("store", &request.store)?;
+        state.serialize_field("stream", &request.stream)?;
+        state.serialize_field("include", &request.include)?;
+        if let Some(service_tier) = request.service_tier {
+            state.serialize_field("service_tier", service_tier)?;
+        }
+        if let Some(prompt_cache_key) = request.prompt_cache_key {
+            state.serialize_field("prompt_cache_key", prompt_cache_key)?;
+        }
+        if let Some(text) = &request.text {
+            state.serialize_field("text", text)?;
+        }
+        state.serialize_field("client_metadata", &self.client_metadata)?;
+        state.end()
+    }
+}
+
+fn websocket_client_metadata(
+    thread_id: &str,
+    turn_state: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut metadata = BTreeMap::from([
+        ("session_id".into(), thread_id.into()),
+        ("thread_id".into(), thread_id.into()),
+    ]);
+    if let Some(turn_state) = turn_state {
+        metadata.insert("x-codex-turn-state".into(), turn_state.into());
+    }
+    metadata
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReasoningOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     effort: Option<ReasoningEffort>,
@@ -154,13 +467,13 @@ impl ReasoningOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ReasoningContext {
     AllTurns,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TextOptions {
     verbosity: ModelVerbosity,
 }
@@ -170,6 +483,7 @@ pub struct ResponseRequestInput<'a> {
     lite_prefix: Option<LitePrefix<'a>>,
     context: &'a [ResponseItem],
     history: &'a [ResponseItem],
+    tail: &'a [ResponseItem],
     strip_image_detail: bool,
 }
 
@@ -178,26 +492,147 @@ impl Serialize for ResponseRequestInput<'_> {
     where
         S: serde::Serializer,
     {
+        ResponseRequestInputRange {
+            input: self,
+            start: 0,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl ResponseRequestInput<'_> {
+    fn len(&self) -> usize {
+        self.lite_prefix
+            .as_ref()
+            .map_or(0, LitePrefix::serialized_item_count)
+            .saturating_add(self.context.len())
+            .saturating_add(self.history.len())
+            .saturating_add(self.tail.len())
+    }
+
+    fn response_item(&self, index: usize) -> Option<&ResponseItem> {
         let prefix_len = self
             .lite_prefix
             .as_ref()
             .map_or(0, LitePrefix::serialized_item_count);
-        let mut sequence = serializer.serialize_seq(Some(
-            prefix_len
-                .saturating_add(self.context.len())
-                .saturating_add(self.history.len()),
-        ))?;
+        let response_index = index.checked_sub(prefix_len)?;
+        if let Some(item) = self.context.get(response_index) {
+            return Some(item);
+        }
+        let history_index = response_index.checked_sub(self.context.len())?;
+        if let Some(item) = self.history.get(history_index) {
+            return Some(item);
+        }
+        self.tail
+            .get(history_index.checked_sub(self.history.len())?)
+    }
+
+    fn matches_owned(&self, index: usize, owned: &OwnedResponseRequestInput) -> bool {
         if let Some(prefix) = &self.lite_prefix {
-            sequence.serialize_element(&prefix.additional_tools)?;
-            if let Some(base_instructions) = &prefix.base_instructions {
-                sequence.serialize_element(base_instructions)?;
+            if index == 0 {
+                return matches!(
+                    owned,
+                    OwnedResponseRequestInput::AdditionalTools(candidate)
+                        if candidate == &prefix.additional_tools
+                );
+            }
+            if let Some(base_instructions) = &prefix.base_instructions
+                && index == 1
+            {
+                return matches!(
+                    owned,
+                    OwnedResponseRequestInput::BaseInstructions { id, text }
+                        if id == &base_instructions.id
+                            && text == base_instructions.content[0].text()
+                );
             }
         }
-        for item in self.context.iter().chain(self.history) {
-            sequence.serialize_element(&RequestResponseItem {
-                item,
-                strip_image_detail: self.strip_image_detail,
-            })?;
+        let OwnedResponseRequestInput::Response(previous) = owned else {
+            return false;
+        };
+        self.matches_response(index, previous)
+    }
+
+    fn matches_response(&self, index: usize, previous: &ResponseItem) -> bool {
+        let Some(current) = self.response_item(index) else {
+            return false;
+        };
+        current
+            .for_request(self.strip_image_detail)
+            .equivalent_for_continuation(previous)
+    }
+
+    fn clone_owned(&self, index: usize) -> Option<OwnedResponseRequestInput> {
+        if let Some(prefix) = &self.lite_prefix {
+            if index == 0 {
+                return Some(OwnedResponseRequestInput::AdditionalTools(
+                    prefix.additional_tools.clone(),
+                ));
+            }
+            if let Some(base_instructions) = &prefix.base_instructions
+                && index == 1
+            {
+                return Some(OwnedResponseRequestInput::BaseInstructions {
+                    id: base_instructions.id.clone(),
+                    text: base_instructions.content[0].text().to_string(),
+                });
+            }
+        }
+        self.response_item(index).map(|item| {
+            OwnedResponseRequestInput::Response(
+                item.for_request(self.strip_image_detail).into_owned(),
+            )
+        })
+    }
+
+    fn clone_owned_range(&self, start: usize) -> Result<Vec<OwnedResponseRequestInput>, AppError> {
+        (start..self.len())
+            .map(|index| {
+                self.clone_owned(index).ok_or_else(|| {
+                    AppError::State("response input range exceeded the request".into())
+                })
+            })
+            .collect()
+    }
+
+    fn serialize_item<S>(&self, sequence: &mut S, index: usize) -> Result<(), S::Error>
+    where
+        S: serde::ser::SerializeSeq,
+    {
+        if let Some(prefix) = &self.lite_prefix {
+            if index == 0 {
+                return sequence.serialize_element(&prefix.additional_tools);
+            }
+            if let Some(base_instructions) = &prefix.base_instructions
+                && index == 1
+            {
+                return sequence.serialize_element(base_instructions);
+            }
+        }
+        let item = self.response_item(index).ok_or_else(|| {
+            serde::ser::Error::custom("response input index is outside the request")
+        })?;
+        sequence.serialize_element(&RequestResponseItem {
+            item,
+            strip_image_detail: self.strip_image_detail,
+        })
+    }
+}
+
+struct ResponseRequestInputRange<'input, 'request> {
+    input: &'input ResponseRequestInput<'request>,
+    start: usize,
+}
+
+impl Serialize for ResponseRequestInputRange<'_, '_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let count = self.input.len().saturating_sub(self.start);
+        let mut sequence = serializer.serialize_seq(Some(count))?;
+        for index in self.start..self.input.len() {
+            self.input.serialize_item(&mut sequence, index)?;
         }
         sequence.end()
     }
@@ -338,7 +773,7 @@ fn tools_for_responses_lite(tools: &[Value]) -> Result<Vec<Value>, AppError> {
     Ok(converted)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct AdditionalTools {
     #[serde(rename = "type")]
     kind: &'static str,
@@ -374,6 +809,14 @@ enum ResponseContentRef<'a> {
     InputText { text: &'a str },
 }
 
+impl ResponseContentRef<'_> {
+    const fn text(&self) -> &str {
+        match self {
+            Self::InputText { text } => text,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ContentItemKinds<'a> {
     content_item_kinds: [&'a str; 1],
@@ -403,7 +846,7 @@ impl Serialize for RequestResponseItem<'_> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseItem {
     Message {
@@ -476,7 +919,7 @@ pub enum ResponseItem {
     CompactionTrigger {},
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FunctionCallOutputPayload {
     Text(String),
@@ -492,7 +935,7 @@ impl FunctionCallOutputPayload {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[expect(
     clippy::enum_variant_names,
@@ -512,7 +955,7 @@ pub enum FunctionCallOutputContent {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct InternalChatMessageMetadataPassthrough {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     turn_id: Option<String>,
@@ -756,6 +1199,45 @@ impl ResponseItem {
         Cow::Owned(item)
     }
 
+    fn equivalent_for_continuation(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Message {
+                    id: left_id,
+                    role: left_role,
+                    content: left_content,
+                    phase: left_phase,
+                    ..
+                },
+                Self::Message {
+                    id: right_id,
+                    role: right_role,
+                    content: right_content,
+                    phase: right_phase,
+                    ..
+                },
+            ) => {
+                left_id == right_id
+                    && left_role == right_role
+                    && left_content == right_content
+                    && left_phase == right_phase
+            }
+            (
+                Self::Compaction {
+                    id: left_id,
+                    encrypted_content: left_content,
+                    ..
+                },
+                Self::Compaction {
+                    id: right_id,
+                    encrypted_content: right_content,
+                    ..
+                },
+            ) => left_id == right_id && left_content == right_content,
+            _ => self == other,
+        }
+    }
+
     fn has_image_detail(&self) -> bool {
         match self {
             Self::Message { content, .. } => content.iter().any(|part| {
@@ -792,7 +1274,7 @@ fn stable_item_id<'a>(prefix: &str, segments: impl IntoIterator<Item = &'a str>)
     format!("{prefix}_{namespace}")
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseCallStatus {
     InProgress,
@@ -801,7 +1283,7 @@ pub enum ResponseCallStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WebSearchAction {
     Search {
@@ -822,7 +1304,7 @@ pub enum WebSearchAction {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseContent {
     InputText {
@@ -841,34 +1323,34 @@ pub enum ResponseContent {
     },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseMessagePhase {
     Commentary,
     FinalAnswer,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReasoningSummary {
     #[serde(rename = "type")]
     kind: ReasoningSummaryType,
     text: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ReasoningSummaryType {
     SummaryText,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReasoningContent {
     #[serde(rename = "type")]
     kind: ReasoningContentType,
     text: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ReasoningContentType {
     ReasoningText,
@@ -896,9 +1378,16 @@ pub enum ResponseEvent {
     TurnState(String),
     ModelVerifications(Vec<ModelVerification>),
     SafetyBuffering(SafetyBuffering),
+    TransportFallback(String),
     OutputItemDone(ResponseItem),
-    Completed(Option<TokenUsage>),
+    Completed(ResponseCompleted),
     Interrupted,
+}
+
+#[derive(Debug)]
+pub struct ResponseCompleted {
+    pub response_id: Option<String>,
+    pub usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -909,39 +1398,45 @@ pub struct SafetyBuffering {
 }
 
 pub struct ResponseStream {
-    response: reqwest::Response,
-    parser: SseParser,
+    source: ResponseStreamSource,
     pending: VecDeque<ResponseEvent>,
     ended: bool,
 }
 
+enum ResponseStreamSource {
+    Sse {
+        response: Box<reqwest::Response>,
+        parser: SseParser,
+    },
+    Events(mpsc::Receiver<Result<ResponseEvent, AppError>>),
+}
+
 impl ResponseStream {
     pub(super) fn new(response: reqwest::Response) -> Result<Self, AppError> {
-        let mut pending = VecDeque::new();
-        if let Some(model) =
-            response_header(&response, "openai-model", MAX_SERVER_MODEL_NAME_BYTES)?
-        {
-            pending.push_back(ResponseEvent::ServerModel(model));
-        }
-        if let Some(etag) = response_header(&response, "x-models-etag", MAX_HEADER_VALUE_BYTES)? {
-            pending.push_back(ResponseEvent::ModelsEtag(etag));
-        }
-        if let Some(turn_state) =
-            response_header(&response, "x-codex-turn-state", MAX_HEADER_VALUE_BYTES)?
-        {
-            pending.push_back(ResponseEvent::TurnState(turn_state));
-        }
-        let safety_faster_model = response_header(
-            &response,
-            "x-codex-safety-buffering-faster-model",
-            MAX_SERVER_MODEL_NAME_BYTES,
-        )?;
+        let (pending, safety_faster_model) = initial_response_events(response.headers())?;
         Ok(Self {
-            response,
-            parser: SseParser::new(safety_faster_model),
+            source: ResponseStreamSource::Sse {
+                response: Box::new(response),
+                parser: SseParser::new(safety_faster_model),
+            },
             pending,
             ended: false,
         })
+    }
+
+    pub(super) fn from_events(
+        receiver: mpsc::Receiver<Result<ResponseEvent, AppError>>,
+        pending: VecDeque<ResponseEvent>,
+    ) -> Self {
+        Self {
+            source: ResponseStreamSource::Events(receiver),
+            pending,
+            ended: false,
+        }
+    }
+
+    pub(super) fn push_pending(&mut self, event: ResponseEvent) {
+        self.pending.push_back(event);
     }
 
     pub async fn next_event(
@@ -963,29 +1458,88 @@ impl ResponseStream {
                 return Ok(Some(ResponseEvent::Interrupted));
             }
 
-            let next_chunk = tokio::time::timeout_at(event_deadline, self.response.chunk());
-            let chunk = tokio::select! {
-                changed = cancellation.changed() => {
-                    if changed.is_err() || *cancellation.borrow() {
-                        self.ended = true;
-                        return Ok(Some(ResponseEvent::Interrupted));
+            match &mut self.source {
+                ResponseStreamSource::Sse { response, parser } => {
+                    let next_chunk = tokio::time::timeout_at(event_deadline, response.chunk());
+                    let chunk = tokio::select! {
+                        changed = cancellation.changed() => {
+                            if changed.is_err() || *cancellation.borrow() {
+                                self.ended = true;
+                                return Ok(Some(ResponseEvent::Interrupted));
+                            }
+                            continue;
+                        }
+                        result = next_chunk => {
+                            result.map_err(|_| AppError::Timeout { operation: "response stream" })?
+                                .map_err(|error| AppError::Transport(error.to_string()))?
+                        }
+                    };
+                    match chunk {
+                        Some(chunk) => parser.push(&chunk, &mut self.pending)?,
+                        None => {
+                            parser.finish(&mut self.pending)?;
+                            self.ended = true;
+                        }
                     }
-                    continue;
                 }
-                result = next_chunk => {
-                    result.map_err(|_| AppError::Timeout { operation: "response stream" })?
-                        .map_err(|error| AppError::Transport(error.to_string()))?
-                }
-            };
-            match chunk {
-                Some(chunk) => self.parser.push(&chunk, &mut self.pending)?,
-                None => {
-                    self.parser.finish(&mut self.pending)?;
-                    self.ended = true;
+                ResponseStreamSource::Events(receiver) => {
+                    let next_event = tokio::time::timeout_at(event_deadline, receiver.recv());
+                    let event = tokio::select! {
+                        changed = cancellation.changed() => {
+                            if changed.is_err() || *cancellation.borrow() {
+                                self.ended = true;
+                                return Ok(Some(ResponseEvent::Interrupted));
+                            }
+                            continue;
+                        }
+                        result = next_event => {
+                            result.map_err(|_| AppError::Timeout { operation: "response stream" })?
+                        }
+                    };
+                    match event {
+                        Some(Ok(event)) => return Ok(Some(event)),
+                        Some(Err(error)) => {
+                            self.ended = true;
+                            return Err(error);
+                        }
+                        None => self.ended = true,
+                    }
                 }
             }
         }
     }
+}
+
+pub(super) fn decode_websocket_event(
+    data: &str,
+    safety_faster_model: Option<&str>,
+) -> Result<VecDeque<ResponseEvent>, AppError> {
+    let mut events = VecDeque::new();
+    decode_event(data, safety_faster_model, &mut events)?;
+    Ok(events)
+}
+
+pub(super) fn initial_response_events(
+    headers: &reqwest::header::HeaderMap,
+) -> Result<(VecDeque<ResponseEvent>, Option<String>), AppError> {
+    let mut pending = VecDeque::new();
+    if let Some(model) = response_header(headers, "openai-model", MAX_SERVER_MODEL_NAME_BYTES)? {
+        pending.push_back(ResponseEvent::ServerModel(model));
+    }
+    if let Some(etag) = response_header(headers, "x-models-etag", MAX_HEADER_VALUE_BYTES)? {
+        pending.push_back(ResponseEvent::ModelsEtag(etag));
+    }
+    if let Some(turn_state) =
+        response_header(headers, "x-codex-turn-state", MAX_HEADER_VALUE_BYTES)?
+    {
+        pending.push_back(ResponseEvent::TurnState(turn_state));
+    }
+    let safety_faster_model = response_header(
+        headers,
+        "x-codex-safety-buffering-faster-model",
+        MAX_SERVER_MODEL_NAME_BYTES,
+    )?;
+    Ok((pending, safety_faster_model))
 }
 
 #[derive(Default)]
@@ -1048,9 +1602,9 @@ impl SseParser {
         if let Some(value) = line.strip_prefix("data:") {
             let value = value.strip_prefix(' ').unwrap_or(value);
             self.event_bytes = self.event_bytes.saturating_add(value.len());
-            if self.event_bytes > MAX_SSE_EVENT_BYTES {
+            if self.event_bytes > MAX_RESPONSE_EVENT_BYTES {
                 return Err(AppError::Provider(format!(
-                    "SSE event exceeds {MAX_SSE_EVENT_BYTES} bytes"
+                    "SSE event exceeds {MAX_RESPONSE_EVENT_BYTES} bytes"
                 )));
             }
             self.data.push(value.into());
@@ -1079,6 +1633,8 @@ impl SseParser {
 struct StreamEventWire {
     #[serde(rename = "type")]
     kind: String,
+    #[serde(default, alias = "status_code")]
+    status: Option<u16>,
     #[serde(default)]
     headers: Option<Value>,
     #[serde(default)]
@@ -1103,6 +1659,8 @@ struct StreamEventWire {
 
 #[derive(Debug, Deserialize)]
 struct ResponseStateWire {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     headers: Option<Value>,
     #[serde(default)]
@@ -1207,7 +1765,7 @@ fn decode_event(
             })?;
             Some(ResponseEvent::OutputItemDone(item))
         }
-        "response.completed" => Some(ResponseEvent::Completed(decode_completed_usage(
+        "response.completed" => Some(ResponseEvent::Completed(decode_completed_response(
             event.response,
         )?)),
         "response.failed" | "error" => return Err(stream_failure(event)),
@@ -1430,12 +1988,11 @@ fn json_header<'a>(headers: &'a Value, names: &[&str]) -> Option<&'a str> {
 }
 
 fn response_header(
-    response: &reqwest::Response,
+    headers: &reqwest::header::HeaderMap,
     name: &str,
     maximum: usize,
 ) -> Result<Option<String>, AppError> {
-    response
-        .headers()
+    headers
         .get(name)
         .map(|value| {
             value
@@ -1446,11 +2003,19 @@ fn response_header(
         .transpose()
 }
 
-fn decode_completed_usage(
+fn decode_completed_response(
     response: Option<ResponseStateWire>,
-) -> Result<Option<TokenUsage>, AppError> {
+) -> Result<ResponseCompleted, AppError> {
+    let response_id = response
+        .as_ref()
+        .and_then(|response| response.id.as_deref())
+        .map(|response_id| validated_metadata_text(response_id, "response id", MAX_ITEM_ID_BYTES))
+        .transpose()?;
     let Some(usage) = response.and_then(|response| response.usage) else {
-        return Ok(None);
+        return Ok(ResponseCompleted {
+            response_id,
+            usage: None,
+        });
     };
     let values = [
         usage.input_tokens,
@@ -1483,13 +2048,16 @@ fn decode_completed_usage(
             "response total tokens do not equal input plus output tokens".into(),
         ));
     }
-    Ok(Some(TokenUsage {
-        input_tokens: usage.input_tokens,
-        cached_input_tokens: usage.input_tokens_details.cached_tokens,
-        output_tokens: usage.output_tokens,
-        reasoning_output_tokens: usage.output_tokens_details.reasoning_tokens,
-        total_tokens: usage.total_tokens,
-    }))
+    Ok(ResponseCompleted {
+        response_id,
+        usage: Some(TokenUsage {
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.input_tokens_details.cached_tokens,
+            output_tokens: usage.output_tokens,
+            reasoning_output_tokens: usage.output_tokens_details.reasoning_tokens,
+            total_tokens: usage.total_tokens,
+        }),
+    })
 }
 
 fn required_id(value: Option<String>, event: &str) -> Result<String, AppError> {
@@ -1513,6 +2081,7 @@ fn required_delta(value: Option<String>, event: &str) -> Result<String, AppError
 }
 
 fn stream_failure(event: StreamEventWire) -> AppError {
+    let status = event.status;
     let error = event
         .error
         .or_else(|| event.response.and_then(|response| response.error));
@@ -1541,7 +2110,7 @@ fn stream_failure(event: StreamEventWire) -> AppError {
         Some(code) => format!("{code}: {message}"),
         None => message,
     };
-    AppError::from_provider_rejection(None, code.as_deref(), message, retry_after_seconds)
+    AppError::from_provider_rejection(status, code.as_deref(), message, retry_after_seconds)
 }
 
 #[cfg(test)]
@@ -1773,9 +2342,12 @@ mod tests {
                 &mut events,
             )
             .expect("completed usage should decode");
-        let Some(ResponseEvent::Completed(Some(usage))) = events.pop_front() else {
+        let Some(ResponseEvent::Completed(completed)) = events.pop_front() else {
             panic!("completed usage event should be emitted");
         };
+        let usage = completed
+            .usage
+            .expect("completed response should contain usage");
 
         assert_eq!(usage.cached_input_tokens, 120_000);
         assert_eq!(usage.total_tokens, 174_000);
@@ -1794,10 +2366,11 @@ mod tests {
             )
             .expect("usage is optional on a completed response");
 
-        assert!(matches!(
-            events.pop_front(),
-            Some(ResponseEvent::Completed(None))
-        ));
+        let Some(ResponseEvent::Completed(completed)) = events.pop_front() else {
+            panic!("completed response should be emitted");
+        };
+        assert_eq!(completed.response_id.as_deref(), Some("response-1"));
+        assert!(completed.usage.is_none());
     }
 
     #[test]
@@ -2039,6 +2612,426 @@ mod tests {
         assert_eq!(encoded["input"][0]["type"], "compaction_trigger");
         assert_eq!(encoded["stream"], true);
         assert_eq!(encoded["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn websocket_prewarm_disables_generation_and_retains_a_continuation_baseline() {
+        let request = ResponseRequest::new(
+            "gpt-test",
+            "Be useful.",
+            &[],
+            &[],
+            &[],
+            ResponseRequestSettings {
+                prompt_cache_key: Some("thread-1"),
+                ..ResponseRequestSettings::default()
+            },
+        )
+        .expect("prewarm request should build")
+        .prepare_websocket_prewarm_request("thread-1", None)
+        .expect("prewarm request should encode");
+        let payload: serde_json::Value =
+            serde_json::from_str(&request.payload).expect("prewarm payload should be JSON");
+
+        assert_eq!(payload["type"], "response.create");
+        assert_eq!(payload["generate"], false);
+        assert_eq!(payload["input"].as_array().map(Vec::len), Some(0));
+        assert!(payload.get("previous_response_id").is_none());
+        assert!(request.baseline.is_some());
+    }
+
+    #[test]
+    fn first_turn_continues_from_a_completed_startup_prewarm() {
+        let settings = ResponseRequestSettings {
+            prompt_cache_key: Some("thread-1"),
+            ..ResponseRequestSettings::default()
+        };
+        let prewarm =
+            ResponseRequest::new("gpt-test", "Be useful.", &[], &[], &[], settings.clone())
+                .expect("prewarm request should build")
+                .prepare_websocket_prewarm_request("thread-1", None)
+                .expect("prewarm request should encode");
+        let input = [ResponseItem::user_content(vec![
+            ResponseContent::InputText {
+                text: "Inspect the repository.".into(),
+            },
+        ])];
+        let first_turn = ResponseRequest::new("gpt-test", "Be useful.", &[], &input, &[], settings)
+            .expect("first-turn request should build")
+            .prepare_websocket_request(
+                prewarm.baseline,
+                Some(super::CompletedWebSocketResponse {
+                    response_id: "response-prewarm".into(),
+                    output_items: Vec::new(),
+                }),
+                "thread-1",
+                None,
+            )
+            .expect("first-turn request should continue from prewarm");
+        let payload: serde_json::Value =
+            serde_json::from_str(&first_turn.payload).expect("first-turn payload should be JSON");
+
+        assert_eq!(payload["previous_response_id"], "response-prewarm");
+        assert_eq!(payload["input"].as_array().map(Vec::len), Some(1));
+        assert_eq!(payload["input"][0]["role"], "user");
+    }
+
+    #[test]
+    fn websocket_compaction_sends_only_the_strict_input_extension() {
+        let initial_history = [ResponseItem::user_content(vec![
+            ResponseContent::InputText {
+                text: "inspect the repository".into(),
+            },
+        ])];
+        let initial = ResponseRequest::new(
+            "gpt-test",
+            "Be useful.",
+            &[],
+            &initial_history,
+            &[],
+            ResponseRequestSettings {
+                prompt_cache_key: Some("thread-1"),
+                ..ResponseRequestSettings::default()
+            },
+        )
+        .expect("initial request should build")
+        .prepare_websocket_request(None, None, "thread-1", None)
+        .expect("initial websocket request should encode");
+        let assistant_output = ResponseItem::Message {
+            id: Some("message-1".into()),
+            role: "assistant".into(),
+            content: vec![ResponseContent::OutputText {
+                text: "I will inspect it.".into(),
+            }],
+            phase: Some(ResponseMessagePhase::Commentary),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let compaction_history = [initial_history[0].clone(), assistant_output.clone()];
+        let compaction_trigger = [ResponseItem::compaction_trigger()];
+        let compact = ResponseRequest::new_with_tail(
+            "gpt-test",
+            "Be useful.",
+            &[],
+            &compaction_history,
+            &compaction_trigger,
+            &[],
+            ResponseRequestSettings {
+                prompt_cache_key: Some("thread-1"),
+                ..ResponseRequestSettings::default()
+            },
+        )
+        .expect("compaction request should build")
+        .prepare_websocket_compaction_request(
+            Some(
+                initial
+                    .baseline
+                    .expect("initial request should retain its baseline"),
+            ),
+            Some(super::CompletedWebSocketResponse {
+                response_id: "response-1".into(),
+                output_items: vec![assistant_output],
+            }),
+            "thread-1",
+            Some("route-1"),
+        )
+        .expect("incremental websocket request should encode");
+        let payload: serde_json::Value =
+            serde_json::from_str(&compact.payload).expect("websocket payload should be JSON");
+
+        assert_eq!(payload["type"], "response.create");
+        assert_eq!(payload["previous_response_id"], "response-1");
+        assert_eq!(payload["input"].as_array().map(Vec::len), Some(1));
+        assert_eq!(payload["input"][0]["type"], "compaction_trigger");
+        assert_eq!(payload["client_metadata"]["session_id"], "thread-1");
+        assert_eq!(payload["client_metadata"]["x-codex-turn-state"], "route-1");
+        assert!(compact.baseline.is_none());
+    }
+
+    #[test]
+    fn websocket_continuation_resets_when_request_properties_change() {
+        let history = [ResponseItem::user_content(vec![
+            ResponseContent::InputText {
+                text: "hello".into(),
+            },
+        ])];
+        let initial = ResponseRequest::new(
+            "gpt-a",
+            "Be useful.",
+            &[],
+            &history,
+            &[],
+            ResponseRequestSettings::default(),
+        )
+        .expect("initial request should build")
+        .prepare_websocket_request(None, None, "thread-1", None)
+        .expect("initial websocket request should encode");
+        let changed = ResponseRequest::new(
+            "gpt-b",
+            "Be useful.",
+            &[],
+            &history,
+            &[],
+            ResponseRequestSettings::default(),
+        )
+        .expect("changed request should build")
+        .prepare_websocket_request(
+            Some(
+                initial
+                    .baseline
+                    .expect("initial request should retain its baseline"),
+            ),
+            Some(super::CompletedWebSocketResponse {
+                response_id: "response-1".into(),
+                output_items: Vec::new(),
+            }),
+            "thread-1",
+            None,
+        )
+        .expect("changed websocket request should encode");
+        let payload: serde_json::Value =
+            serde_json::from_str(&changed.payload).expect("websocket payload should be JSON");
+
+        assert!(payload.get("previous_response_id").is_none());
+        assert_eq!(payload["input"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn websocket_continuation_ignores_only_internal_message_metadata() {
+        let user = ResponseItem::user_content(vec![ResponseContent::InputText {
+            text: "hello".into(),
+        }]);
+        let initial = ResponseRequest::new(
+            "gpt-test",
+            "Be useful.",
+            &[],
+            std::slice::from_ref(&user),
+            &[],
+            ResponseRequestSettings::default(),
+        )
+        .expect("initial request should build")
+        .prepare_websocket_request(None, None, "thread-1", None)
+        .expect("initial websocket request should encode");
+        let provider_output = ResponseItem::Message {
+            id: Some("message-1".into()),
+            role: "assistant".into(),
+            content: vec![ResponseContent::OutputText {
+                text: "done".into(),
+            }],
+            phase: Some(ResponseMessagePhase::FinalAnswer),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let persisted_output = ResponseItem::Message {
+            id: Some("message-1".into()),
+            role: "assistant".into(),
+            content: vec![ResponseContent::OutputText {
+                text: "done".into(),
+            }],
+            phase: Some(ResponseMessagePhase::FinalAnswer),
+            internal_chat_message_metadata_passthrough: Some(
+                super::InternalChatMessageMetadataPassthrough {
+                    turn_id: Some("turn-1".into()),
+                    content_item_kinds: None,
+                },
+            ),
+        };
+        let continued_history = [
+            user,
+            persisted_output,
+            ResponseItem::function_output("call-1".into(), "result".into()),
+        ];
+        let continued = ResponseRequest::new(
+            "gpt-test",
+            "Be useful.",
+            &[],
+            &continued_history,
+            &[],
+            ResponseRequestSettings::default(),
+        )
+        .expect("continued request should build")
+        .prepare_websocket_request(
+            Some(
+                initial
+                    .baseline
+                    .expect("initial request should retain its baseline"),
+            ),
+            Some(super::CompletedWebSocketResponse {
+                response_id: "response-1".into(),
+                output_items: vec![provider_output],
+            }),
+            "thread-1",
+            None,
+        )
+        .expect("continued websocket request should encode");
+        let payload: serde_json::Value =
+            serde_json::from_str(&continued.payload).expect("payload should be JSON");
+
+        assert_eq!(payload["previous_response_id"], "response-1");
+        assert_eq!(payload["input"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn websocket_continuation_resets_when_any_prior_content_changes() {
+        let original = ResponseItem::user_content(vec![ResponseContent::InputText {
+            text: "original".into(),
+        }]);
+        let initial = ResponseRequest::new(
+            "gpt-test",
+            "Be useful.",
+            &[],
+            std::slice::from_ref(&original),
+            &[],
+            ResponseRequestSettings::default(),
+        )
+        .expect("initial request should build")
+        .prepare_websocket_request(None, None, "thread-1", None)
+        .expect("initial websocket request should encode");
+        let changed = [ResponseItem::user_content(vec![
+            ResponseContent::InputText {
+                text: "changed".into(),
+            },
+        ])];
+        let continued = ResponseRequest::new(
+            "gpt-test",
+            "Be useful.",
+            &[],
+            &changed,
+            &[],
+            ResponseRequestSettings::default(),
+        )
+        .expect("changed request should build")
+        .prepare_websocket_request(
+            Some(
+                initial
+                    .baseline
+                    .expect("initial request should retain its baseline"),
+            ),
+            Some(super::CompletedWebSocketResponse {
+                response_id: "response-1".into(),
+                output_items: Vec::new(),
+            }),
+            "thread-1",
+            None,
+        )
+        .expect("changed websocket request should encode");
+        let payload: serde_json::Value =
+            serde_json::from_str(&continued.payload).expect("payload should be JSON");
+
+        assert!(payload.get("previous_response_id").is_none());
+        assert_eq!(payload["input"][0]["content"][0]["text"], "changed");
+    }
+
+    #[test]
+    #[ignore = "performance benchmark; run through `pnpm measure:response-transport`"]
+    fn benchmark_incremental_compaction_payload() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const HISTORY_BYTES: usize = 3 * 1_024 * 1_024;
+        const SAMPLES: usize = 5;
+
+        let initial_history = [ResponseItem::user_content(vec![
+            ResponseContent::InputText {
+                text: "x".repeat(HISTORY_BYTES),
+            },
+        ])];
+        let initial_request = ResponseRequest::new(
+            "gpt-benchmark",
+            "Benchmark instructions",
+            &[],
+            &initial_history,
+            &[],
+            ResponseRequestSettings {
+                prompt_cache_key: Some("benchmark-thread"),
+                ..ResponseRequestSettings::default()
+            },
+        )
+        .expect("initial benchmark request should build");
+        let assistant_output = ResponseItem::Message {
+            id: Some("benchmark-message".into()),
+            role: "assistant".into(),
+            content: vec![ResponseContent::OutputText {
+                text: "done".into(),
+            }],
+            phase: Some(ResponseMessagePhase::FinalAnswer),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let compaction_history = [initial_history[0].clone(), assistant_output.clone()];
+        let compaction_trigger = [ResponseItem::compaction_trigger()];
+        let compaction_request = ResponseRequest::new_with_tail(
+            "gpt-benchmark",
+            "Benchmark instructions",
+            &[],
+            &compaction_history,
+            &compaction_trigger,
+            &[],
+            ResponseRequestSettings {
+                prompt_cache_key: Some("benchmark-thread"),
+                ..ResponseRequestSettings::default()
+            },
+        )
+        .expect("compaction benchmark request should build");
+        let full_started_at = Instant::now();
+        let full = (0..SAMPLES)
+            .map(|_| {
+                black_box(
+                    serde_json::to_string(&compaction_request)
+                        .expect("full compaction payload should encode"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let full_elapsed = full_started_at.elapsed();
+        let full_payload_bytes = full[0].len();
+        let baselines = (0..SAMPLES)
+            .map(|_| {
+                initial_request
+                    .prepare_websocket_request(None, None, "benchmark-thread", None)
+                    .expect("benchmark baseline should encode")
+                    .baseline
+                    .expect("initial request should retain its baseline")
+            })
+            .collect::<Vec<_>>();
+
+        let incremental_started_at = Instant::now();
+        let incremental = baselines
+            .into_iter()
+            .map(|baseline| {
+                black_box(
+                    compaction_request
+                        .prepare_websocket_compaction_request(
+                            Some(baseline),
+                            Some(super::CompletedWebSocketResponse {
+                                response_id: "benchmark-response".into(),
+                                output_items: vec![assistant_output.clone()],
+                            }),
+                            "benchmark-thread",
+                            None,
+                        )
+                        .expect("incremental benchmark payload should encode"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let incremental_elapsed = incremental_started_at.elapsed();
+        let incremental_payload_bytes = incremental[0].payload.len();
+        let reduction = 1.0 - incremental_payload_bytes as f64 / full_payload_bytes as f64;
+
+        assert!(
+            incremental
+                .iter()
+                .all(|sample| sample.payload.contains("\"previous_response_id\""))
+        );
+        assert!(incremental.iter().all(|sample| sample.baseline.is_none()));
+        assert!(reduction > 0.999);
+        let encoding_speedup =
+            full_elapsed.as_secs_f64() / incremental_elapsed.as_secs_f64().max(f64::EPSILON);
+        println!(
+            "incremental_compaction history_mib={:.3} full_payload_bytes={full_payload_bytes} incremental_payload_bytes={incremental_payload_bytes} payload_reduction_percent={:.5} samples={SAMPLES} full_total_ms={:.3} full_per_request_ms={:.3} incremental_total_ms={:.3} incremental_per_request_ms={:.3} encoding_speedup={encoding_speedup:.3}x",
+            HISTORY_BYTES as f64 / (1_024.0 * 1_024.0),
+            reduction * 100.0,
+            full_elapsed.as_secs_f64() * 1_000.0,
+            full_elapsed.as_secs_f64() * 1_000.0 / SAMPLES as f64,
+            incremental_elapsed.as_secs_f64() * 1_000.0,
+            incremental_elapsed.as_secs_f64() * 1_000.0 / SAMPLES as f64,
+        );
     }
 
     #[test]

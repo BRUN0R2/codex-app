@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use futures_util::future::join_all;
@@ -21,9 +22,10 @@ use super::multi_agent::{
 use super::output::OutputSource;
 use super::prompt_context::compose_prompt_context;
 use super::provider::{
-    DEFAULT_FUNCTION_NAMESPACE, FunctionCallOutputPayload, ModelToolMode, ResponseContent,
-    ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseRequest, ResponseRequestSettings,
-    SelectedModel, WebSearchAction, normalize_provider_history,
+    DEFAULT_FUNCTION_NAMESPACE, FunctionCallOutputPayload, ModelToolMode, ProviderResponseSession,
+    ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseProtocol,
+    ResponseRequest, ResponseRequestSettings, ResponseStream, SelectedModel, WebSearchAction,
+    normalize_provider_history,
 };
 use super::storage::ProviderHistorySnapshot;
 use super::stream_notifications::StreamNotificationBatcher;
@@ -33,7 +35,7 @@ use super::tools::{
     ReadToolCache, ReadToolCacheKey, ToolExecutionContext, ToolExecutionResult, ToolRegistry,
 };
 use super::turn_recovery;
-use super::{NativeEngineInner, TurnContinuation};
+use super::{NativeEngineInner, ResolvedAgentSettings, TurnContinuation};
 use crate::attachments::{AttachmentKind, ImageContentError, inspect_path, validate_image_content};
 use crate::engine::{
     ActivityStatus, AppConfig, CodexModel, ConversationMode, DiagnosticStream, ImageDetail,
@@ -61,6 +63,8 @@ const MAX_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_ERROR_BYTES: usize = 4_096;
 const MAX_PARALLEL_TOOLS: usize = 8;
+const MAX_PREWARM_CONTROL_EVENTS: usize = 32;
+const RESPONSE_PREWARM_COMPLETION_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONTEXT_RECOVERY_ATTEMPTS_WITHOUT_PROGRESS: u8 = 1;
 pub(super) struct PreparedTurn {
     pub user_item: ThreadItem,
@@ -234,36 +238,211 @@ pub(super) async fn prepare_user_input(
     })
 }
 
+pub(super) async fn prewarm_response_session(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    thread_id: &str,
+    mode: ConversationMode,
+    settings: &ResolvedAgentSettings,
+    response_session: &mut ProviderResponseSession,
+) -> Result<(), AppError> {
+    if !response_session.owns_current_lease() || !response_session.needs_prewarm() {
+        return Ok(());
+    }
+
+    let supports_multi_agent = settings.model.multi_agent_version().is_supported();
+    let (_cancellation_sender, mut cancellation) = watch::channel(false);
+    let preconnect = inner.provider.preconnect_response(
+        app,
+        &inner.auth,
+        response_session,
+        settings.model.response_protocol() == ResponseProtocol::Lite,
+        &mut cancellation,
+    );
+    let multi_agent_models = async {
+        if supports_multi_agent {
+            inner
+                .provider
+                .multi_agent_models(app, &inner.auth)
+                .await
+                .map(Some)
+        } else {
+            Ok(None)
+        }
+    };
+    let (preconnect_result, multi_agent_models) = tokio::join!(preconnect, multi_agent_models);
+    if let Some(message) = preconnect_result? {
+        inner.emit_diagnostic(app, DiagnosticStream::Runtime, message);
+    }
+    if !response_session.owns_current_lease() || !response_session.needs_prewarm() {
+        return Ok(());
+    }
+
+    let tools = provider_tools(
+        inner,
+        &settings.config,
+        mode,
+        &settings.model,
+        multi_agent_models?.as_deref(),
+    );
+    let base_instructions = settings.model.instructions(settings.config.personality);
+    let request = ResponseRequest::new(
+        settings.model.id(),
+        &base_instructions,
+        &[],
+        &[],
+        &tools,
+        ResponseRequestSettings {
+            protocol: settings.model.response_protocol(),
+            parallel_tool_calls: settings.model.request_parallel_tool_calls(),
+            reasoning_effort: settings.provider_reasoning_effort,
+            reasoning_summary: settings.model.requested_reasoning_summary(),
+            service_tier: settings.service_tier.as_deref(),
+            prompt_cache_key: Some(thread_id),
+            verbosity: settings
+                .model
+                .select_verbosity(settings.config.model_verbosity)?,
+        },
+    )?;
+    let Some(stream) = inner
+        .provider
+        .prewarm_response(response_session, request, None)
+        .await?
+    else {
+        return Ok(());
+    };
+    match tokio::time::timeout(
+        RESPONSE_PREWARM_COMPLETION_TIMEOUT,
+        collect_response_prewarm(stream, &mut cancellation),
+    )
+    .await
+    {
+        Ok(Ok(events)) => {
+            response_session.retain_prewarm_control_events(events);
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            response_session.abandon_pending_response();
+            Err(error)
+        }
+        Err(_) => {
+            response_session.abandon_pending_response();
+            Err(AppError::Timeout {
+                operation: "Responses WebSocket prewarm",
+            })
+        }
+    }
+}
+
 pub(super) async fn run_turn(
     inner: Arc<NativeEngineInner>,
     app: AppHandle,
     mut run: TurnRun,
 ) -> Result<RunCompletion, AppError> {
     let base_instructions = run.model.instructions(run.config.personality);
-    let multi_agent_context = if run.model.multi_agent_version().is_supported() {
-        let identity = inner
-            .multi_agents
-            .identity(&inner.storage, &run.thread_id)
-            .await?;
-        Some(compose_multi_agent_prompt_context(
-            &identity,
-            &run.model,
-            run.selected_reasoning_effort,
-        ))
-    } else {
-        None
-    };
-    let prompt_context = compose_prompt_context(
-        &run.workspace,
-        &run.config,
-        run.mode,
-        &run.model,
-        multi_agent_context.as_ref(),
-        &run.timezone,
-        run.timezone_offset_min,
-    )
-    .await?;
+    let supports_multi_agent = run.model.multi_agent_version().is_supported();
     let verbosity = run.model.select_verbosity(run.config.model_verbosity)?;
+    let code_mode_enabled =
+        local_tools_enabled(run.mode) && run.model.tool_mode() != ModelToolMode::Direct;
+    let code_mode_tools = if code_mode_enabled {
+        inner.tools.code_mode_nested_definitions(
+            run.config.permission_profile,
+            run.model.supports_image_input(),
+            run.model.supports_image_detail_original(),
+        )
+    } else {
+        Vec::new()
+    };
+    let mut response_session = inner.provider.response_session(&run.thread_id);
+    let mut preconnect_cancellation = run.cancellation.clone();
+    let prompt_context_future = async {
+        let multi_agent_context = if supports_multi_agent {
+            let identity = inner
+                .multi_agents
+                .identity(&inner.storage, &run.thread_id)
+                .await?;
+            Some(compose_multi_agent_prompt_context(
+                &identity,
+                &run.model,
+                run.selected_reasoning_effort,
+            ))
+        } else {
+            None
+        };
+        compose_prompt_context(
+            &run.workspace,
+            &run.config,
+            run.mode,
+            &run.model,
+            multi_agent_context.as_ref(),
+            &run.timezone,
+            run.timezone_offset_min,
+        )
+        .await
+    };
+    let prompt_state_future = load_initial_prompt_state(&inner, &app, &run.thread_id);
+    let code_mode_session_future = async {
+        if code_mode_enabled {
+            Some(inner.code_mode_sessions.session(&run.thread_id).await)
+        } else {
+            None
+        }
+    };
+    let response_transport_future = async {
+        let preconnect_future = inner.provider.preconnect_response(
+            &app,
+            &inner.auth,
+            &mut response_session,
+            run.model.response_protocol() == ResponseProtocol::Lite,
+            &mut preconnect_cancellation,
+        );
+        let multi_agent_models_future = async {
+            if supports_multi_agent {
+                inner
+                    .provider
+                    .multi_agent_models(&app, &inner.auth)
+                    .await
+                    .map(Some)
+            } else {
+                Ok(None)
+            }
+        };
+        let (preconnect_result, multi_agent_models) =
+            tokio::join!(preconnect_future, multi_agent_models_future);
+        let multi_agent_models = multi_agent_models?;
+        let tools = provider_tools(
+            &inner,
+            &run.config,
+            run.mode,
+            &run.model,
+            multi_agent_models.as_deref(),
+        );
+        Ok::<_, AppError>((preconnect_result, tools))
+    };
+    let (transport, prompt_context, prompt_state, code_mode_session) = tokio::join!(
+        response_transport_future,
+        prompt_context_future,
+        prompt_state_future,
+        code_mode_session_future,
+    );
+    let (preconnect_result, tools) = transport?;
+    match preconnect_result {
+        Ok(Some(message)) => inner.emit_diagnostic(&app, DiagnosticStream::Runtime, message),
+        Ok(None) => {}
+        Err(AppError::Cancelled(_)) if *run.cancellation.borrow() => {
+            return Ok(RunCompletion::Interrupted);
+        }
+        Err(error) if error.is_transient() => inner.emit_diagnostic(
+            &app,
+            DiagnosticStream::Runtime,
+            format!(
+                "Responses WebSocket preconnect was unavailable; the request will connect normally: {error}"
+            ),
+        ),
+        Err(error) => return Err(error),
+    }
+    let prompt_context = prompt_context?;
+    let (mut history, mut context_snapshot) = prompt_state?;
     let agent_invocation = AgentInvocationContext {
         thread_id: run.thread_id.clone(),
         model: run.model.id().to_string(),
@@ -273,23 +452,16 @@ pub(super) async fn run_turn(
         timezone_offset_min: run.timezone_offset_min,
     };
     let mut provider_state = TurnProviderState::default();
-    let multi_agent_models = if run.model.multi_agent_version().is_supported() {
-        Some(inner.provider.multi_agent_models(&app, &inner.auth).await?)
-    } else {
-        None
-    };
-    let tools = provider_tools(
-        &inner,
-        &run.config,
-        run.mode,
-        &run.model,
-        multi_agent_models.as_deref(),
-    );
-    let mut history = load_prompt_history(&inner, &app, &run.thread_id).await?;
-    let mut context_snapshot = inner
-        .storage
-        .latest_context_usage(run.thread_id.clone())
-        .await?;
+    for event in response_session.take_prewarm_control_events() {
+        if handle_provider_control_event(&inner, &app, &run, &mut provider_state, event)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::State(
+                "websocket prewarm retained a non-control event".into(),
+            ));
+        }
+    }
     let mut history_requires_refresh = false;
     let mut promoted_through_steer_sequence = 0i64;
     let mut required_pending_steer_sequence = None;
@@ -301,23 +473,6 @@ pub(super) async fn run_turn(
         run.thread_id.clone(),
         run.turn_id.clone(),
     );
-    let code_mode_tools =
-        if local_tools_enabled(run.mode) && run.model.tool_mode() != ModelToolMode::Direct {
-            inner.tools.code_mode_nested_definitions(
-                run.config.permission_profile,
-                run.model.supports_image_input(),
-                run.model.supports_image_detail_original(),
-            )
-        } else {
-            Vec::new()
-        };
-    let code_mode_enabled =
-        local_tools_enabled(run.mode) && run.model.tool_mode() != ModelToolMode::Direct;
-    let code_mode_session = if code_mode_enabled {
-        Some(inner.code_mode_sessions.session(&run.thread_id).await)
-    } else {
-        None
-    };
     let code_mode_delegate: Option<Arc<dyn ToolDelegate>> = code_mode_enabled.then(|| {
         Arc::new(CodeModeToolDelegate::new(
             Arc::clone(&inner),
@@ -376,6 +531,7 @@ pub(super) async fn run_turn(
                 },
                 &mut run,
                 &mut provider_state,
+                &mut response_session,
                 &mut history,
             )
             .await?
@@ -404,8 +560,8 @@ pub(super) async fn run_turn(
                 .start_response(
                     &app,
                     &inner.auth,
+                    &mut response_session,
                     request,
-                    &run.thread_id,
                     provider_state.turn_state(),
                     &mut run.cancellation,
                 )
@@ -437,6 +593,7 @@ pub(super) async fn run_turn(
                             },
                             &mut run,
                             &mut provider_state,
+                            &mut response_session,
                             &mut history,
                             &mut context_recovery_attempts,
                         )
@@ -492,6 +649,7 @@ pub(super) async fn run_turn(
                                 },
                                 &mut run,
                                 &mut provider_state,
+                                &mut response_session,
                                 &mut history,
                                 &mut context_recovery_attempts,
                             )
@@ -645,9 +803,9 @@ pub(super) async fn run_turn(
                             _ => {}
                         }
                     }
-                    ResponseEvent::Completed(usage) => {
+                    ResponseEvent::Completed(completed) => {
                         context_recovery_attempts = 0;
-                        if let Some(usage) = usage {
+                        if let Some(usage) = completed.usage {
                             context_snapshot = Some(ContextUsageSnapshot {
                                 model: run.model.id().into(),
                                 usage: usage.clone(),
@@ -676,7 +834,8 @@ pub(super) async fn run_turn(
                     | ResponseEvent::ModelsEtag(_)
                     | ResponseEvent::TurnState(_)
                     | ResponseEvent::ModelVerifications(_)
-                    | ResponseEvent::SafetyBuffering(_) => {
+                    | ResponseEvent::SafetyBuffering(_)
+                    | ResponseEvent::TransportFallback(_) => {
                         return Err(AppError::State(
                             "provider control event escaped its handler".into(),
                         ));
@@ -904,6 +1063,7 @@ async fn recover_from_context_window(
     context: SamplingContext<'_>,
     run: &mut TurnRun,
     provider_state: &mut TurnProviderState,
+    response_session: &mut ProviderResponseSession,
     history: &mut ProviderHistorySnapshot,
     attempts: &mut u8,
 ) -> Result<ContextWindowRecovery, AppError> {
@@ -923,11 +1083,13 @@ async fn recover_from_context_window(
         context.app,
         run,
         provider_state,
+        response_session,
         history,
         CompactionContext {
             base_instructions: context.base_instructions,
             prompt_context: context.prompt_context,
             tools: context.tools,
+            active_tokens: None,
         },
     )
     .await
@@ -1050,10 +1212,76 @@ pub(super) async fn load_prompt_history(
     app: &AppHandle,
     thread_id: &str,
 ) -> Result<ProviderHistorySnapshot, AppError> {
-    let mut history = inner
+    let history = inner
         .storage
         .provider_history_snapshot(thread_id.into())
         .await?;
+    normalize_prompt_history(inner, app, thread_id, history).await
+}
+
+async fn collect_response_prewarm(
+    mut stream: ResponseStream,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<Vec<ResponseEvent>, AppError> {
+    let mut events = Vec::new();
+    loop {
+        let Some(event) = stream.next_event(cancellation).await? else {
+            return Err(AppError::Protocol(
+                "websocket prewarm ended before response.completed".into(),
+            ));
+        };
+        match event {
+            ResponseEvent::ServerModel(_)
+            | ResponseEvent::ModelsEtag(_)
+            | ResponseEvent::TurnState(_)
+            | ResponseEvent::ModelVerifications(_)
+            | ResponseEvent::SafetyBuffering(_)
+            | ResponseEvent::TransportFallback(_) => {
+                if events.len() >= MAX_PREWARM_CONTROL_EVENTS {
+                    return Err(AppError::Protocol(format!(
+                        "websocket prewarm exceeded {MAX_PREWARM_CONTROL_EVENTS} control events"
+                    )));
+                }
+                events.push(event);
+            }
+            ResponseEvent::Completed(_) => return Ok(events),
+            ResponseEvent::Interrupted => {
+                return Err(AppError::Cancelled(
+                    "websocket prewarm was interrupted".into(),
+                ));
+            }
+            ResponseEvent::OutputItemAdded(_)
+            | ResponseEvent::OutputTextDelta { .. }
+            | ResponseEvent::ReasoningSummaryDelta { .. }
+            | ResponseEvent::ReasoningContentDelta { .. }
+            | ResponseEvent::OutputItemDone(_) => {
+                return Err(AppError::Protocol(
+                    "websocket prewarm generated an unexpected output event".into(),
+                ));
+            }
+        }
+    }
+}
+
+async fn load_initial_prompt_state(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    thread_id: &str,
+) -> Result<(ProviderHistorySnapshot, Option<ContextUsageSnapshot>), AppError> {
+    let snapshot = inner
+        .storage
+        .provider_prompt_snapshot(thread_id.into())
+        .await?;
+    let history = normalize_prompt_history(inner, app, thread_id, snapshot.history).await?;
+    Ok((history, snapshot.context_usage))
+}
+
+async fn normalize_prompt_history(
+    inner: &NativeEngineInner,
+    app: &AppHandle,
+    thread_id: &str,
+    mut history: ProviderHistorySnapshot,
+) -> Result<ProviderHistorySnapshot, AppError> {
     let normalized_through_sequence = history.last_sequence();
     let normalized = normalize_provider_history(std::mem::take(&mut history.items))?;
     if !normalized.changed() {
@@ -1087,6 +1315,7 @@ async fn prepare_sampling_input(
     context: SamplingContext<'_>,
     run: &mut TurnRun,
     provider_state: &mut TurnProviderState,
+    response_session: &mut ProviderResponseSession,
     history: &mut ProviderHistorySnapshot,
 ) -> Result<bool, AppError> {
     let context_window = run.model.context_window();
@@ -1117,11 +1346,13 @@ async fn prepare_sampling_input(
         context.app,
         run,
         provider_state,
+        response_session,
         history,
         CompactionContext {
             base_instructions: context.base_instructions,
             prompt_context: context.prompt_context,
             tools: context.tools,
+            active_tokens: Some(status.active_tokens),
         },
     )
     .await?
@@ -1240,6 +1471,10 @@ pub(super) async fn handle_provider_control_event(
                     },
                 ),
             )?;
+            Ok(None)
+        }
+        ResponseEvent::TransportFallback(message) => {
+            inner.emit_diagnostic(app, DiagnosticStream::Runtime, message);
             Ok(None)
         }
         event => Ok(Some(event)),

@@ -168,8 +168,12 @@ impl EngineManager {
         self.engine.thread_list(cursor, archived).await
     }
 
-    pub async fn thread_resume(&self, thread_id: String) -> Result<ThreadResumeResponse, AppError> {
-        self.engine.thread_resume(thread_id).await
+    pub async fn thread_resume(
+        &self,
+        app: &AppHandle,
+        thread_id: String,
+    ) -> Result<ThreadResumeResponse, AppError> {
+        self.engine.thread_resume(app, thread_id).await
     }
 
     pub async fn thread_read(
