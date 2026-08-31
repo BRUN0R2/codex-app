@@ -161,6 +161,7 @@ import {
   createBrowserRateLimitRefreshHost,
   createRateLimitRefreshCoordinator,
 } from "./rateLimitRefresh";
+import { mergeRateLimitUpdate } from "./rateLimits";
 import { SingleFlightOperations } from "./singleFlightOperations";
 import {
   createBrowserStreamDeltaScheduler,
@@ -971,6 +972,19 @@ export function createAppController(localization: AppControllerLocalization): Ap
       case "auth.sessionChanged":
         void synchronizeAuthentication(notification.params.signedIn);
         return;
+      case "account.rateLimitsUpdated": {
+        if (!signedIn()) {
+          return;
+        }
+        const current = rateLimits();
+        if (current === null) {
+          void rateLimitRefresh.refresh();
+          return;
+        }
+        setRateLimits(mergeRateLimitUpdate(current, notification.params.rateLimits));
+        setRateLimitsError(null);
+        return;
+      }
       case "automation.changed":
         if (signedIn()) {
           setAutomations((current) => upsertAutomation(current, notification.params.automation));

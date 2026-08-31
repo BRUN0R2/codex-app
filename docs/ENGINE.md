@@ -6,7 +6,7 @@ data.
 
 | Contract | Current value |
 | --- | --- |
-| IPC schema | `20` |
+| IPC schema | `21` |
 | SQLite schema | `5` |
 | Codex provider | ChatGPT Codex Responses |
 | Transport | persistent Responses WebSocket; HTTPS/SSE on explicit 426 |
@@ -51,13 +51,18 @@ synchronization fails.
 | `browser://agent-activity` | Conversation, action, and panel-open state |
 | `browser://metric` | Bounded QA and latency sample |
 
-Accepted notifications are `auth.loginCompleted`, `auth.sessionChanged`,
-`thread.created`, `thread.updated`, `thread.archived`,
+Accepted notifications are `account.rateLimitsUpdated`, `auth.loginCompleted`,
+`auth.sessionChanged`, `thread.created`, `thread.updated`, `thread.archived`,
 `thread.unarchived`, `thread.deleted`, `turn.started`, `turn.completed`,
 `item.started`, `item.completed`, `item.streamDeltas`, `model.rerouted`,
 `model.verification`, `model.safetyBufferingUpdated`, `automation.changed`,
 `automation.deleted`, and `automation.runUpdated`. Decoders reject unknown
 methods.
+
+`account.rateLimitsUpdated` carries a validated sparse snapshot from the active
+Responses stream. The frontend merges only present values into the latest full
+account snapshot, so absent rolling metadata never clears plan, credit, spend,
+or secondary-window state.
 
 Golden fixtures in `src/contracts/fixtures` lock Rust and TypeScript together.
 Regenerate them only intentionally:
@@ -126,10 +131,14 @@ derived from persisted items, so the total survives completion and reload.
 3. Consume Standard or Lite Responses over a persistent WebSocket. Continue
    only after strict equality of the complete prior request and output, sending
    `previous_response_id` plus new items; otherwise send the complete request.
-4. Persist complete items; deltas and `item.started` remain transient
+4. Decode provider control events before they reach the output loop.
+   `codex.response.metadata` updates the effective model, model-catalog ETag,
+   and response-local safety treatment; `codex.rate_limits` publishes validated
+   sparse account telemetry.
+5. Persist complete items; deltas and `item.started` remain transient
    projections.
-5. Execute tools, persist outputs in original call order, and continue.
-6. Complete, interrupt, or fail the turn transactionally.
+6. Execute tools, persist outputs in original call order, and continue.
+7. Complete, interrupt, or fail the turn transactionally.
 
 The WebSocket upgrade validates status, `Connection`, `Upgrade`, and
 `Sec-WebSocket-Accept`. It retains the authenticated HTTP client's TLS, system

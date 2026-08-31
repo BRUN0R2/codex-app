@@ -371,7 +371,7 @@ describe("decodificação dos contratos nativos", () => {
           "scheduledAutomations",
         ],
       },
-      schemaVersion: 20,
+      schemaVersion: 21,
       config: configFixture(),
       diagnosticLogPath: "C:\\Users\\Developer\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
@@ -398,7 +398,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 20,
+        schemaVersion: 21,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",
@@ -897,6 +897,33 @@ describe("decodificação dos contratos nativos", () => {
         },
       }),
     ).toThrow(ContractError);
+  });
+
+  it("decodifica atualizações incrementais de limite com identidade obrigatória", () => {
+    const rateLimits = {
+      limitId: "codex",
+      limitName: null,
+      primary: { usedPercent: 25.5, windowDurationMins: 300, resetsAt: 1_755_000_000_000 },
+      secondary: null,
+      credits: { hasCredits: true, unlimited: false, balance: "12.50" },
+      individualLimit: null,
+      spendControlReached: null,
+      planType: "pro",
+      rateLimitReachedType: null,
+    };
+
+    expect(
+      decodeEngineNotification({
+        method: "account.rateLimitsUpdated",
+        params: { rateLimits },
+      }),
+    ).toEqual({ method: "account.rateLimitsUpdated", params: { rateLimits } });
+    expect(() =>
+      decodeEngineNotification({
+        method: "account.rateLimitsUpdated",
+        params: { rateLimits: { ...rateLimits, limitId: null } },
+      }),
+    ).toThrow("rolling updates require a bucket id");
   });
 
   it("decodifica somente projeções terminais completas", () => {

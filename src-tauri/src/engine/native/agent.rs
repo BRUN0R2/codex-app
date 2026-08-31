@@ -38,10 +38,11 @@ use super::turn_recovery;
 use super::{NativeEngineInner, ResolvedAgentSettings, TurnContinuation};
 use crate::attachments::{AttachmentKind, ImageContentError, inspect_path, validate_image_content};
 use crate::engine::{
-    ActivityStatus, AppConfig, CodexModel, ConversationMode, DiagnosticStream, ImageDetail,
-    ItemNotification, MessagePhase, ModelRerouteReason, ModelReroutedNotification,
-    ModelSafetyBufferingUpdatedNotification, ModelVerificationNotification, PermissionProfile,
-    StreamDelta, ThreadItem, TurnInput, WebSearchMode,
+    AccountRateLimitsUpdatedNotification, ActivityStatus, AppConfig, CodexModel, ConversationMode,
+    DiagnosticStream, ImageDetail, ItemNotification, MessagePhase, ModelRerouteReason,
+    ModelReroutedNotification, ModelSafetyBufferingUpdatedNotification,
+    ModelVerificationNotification, PermissionProfile, StreamDelta, ThreadItem, TurnInput,
+    WebSearchMode,
 };
 use crate::error::AppError;
 
@@ -835,6 +836,7 @@ pub(super) async fn run_turn(
                     | ResponseEvent::TurnState(_)
                     | ResponseEvent::ModelVerifications(_)
                     | ResponseEvent::SafetyBuffering(_)
+                    | ResponseEvent::RateLimits(_)
                     | ResponseEvent::TransportFallback(_) => {
                         return Err(AppError::State(
                             "provider control event escaped its handler".into(),
@@ -1236,6 +1238,7 @@ async fn collect_response_prewarm(
             | ResponseEvent::TurnState(_)
             | ResponseEvent::ModelVerifications(_)
             | ResponseEvent::SafetyBuffering(_)
+            | ResponseEvent::RateLimits(_)
             | ResponseEvent::TransportFallback(_) => {
                 if events.len() >= MAX_PREWARM_CONTROL_EVENTS {
                     return Err(AppError::Protocol(format!(
@@ -1469,6 +1472,15 @@ pub(super) async fn handle_provider_control_event(
                         show_buffering_ui: true,
                         faster_model: buffering.faster_model,
                     },
+                ),
+            )?;
+            Ok(None)
+        }
+        ResponseEvent::RateLimits(rate_limits) => {
+            inner.emit_notification(
+                app,
+                crate::engine::EngineNotification::AccountRateLimitsUpdated(
+                    AccountRateLimitsUpdatedNotification { rate_limits },
                 ),
             )?;
             Ok(None)

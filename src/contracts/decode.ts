@@ -61,6 +61,7 @@ import type {
   PlanStepStatus,
   RateLimitReachedType,
   RateLimitSnapshot,
+  RateLimitUpdateSnapshot,
   RateLimitWindow,
   ReasoningEffort,
   ReasoningEffortOption,
@@ -207,7 +208,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [20] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [21] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -1035,6 +1036,16 @@ export function decodeEngineNotification(value: unknown): EngineNotification {
       return {
         method,
         params: { signedIn: booleanValue(params.signedIn, "$.params.signedIn") },
+      };
+    }
+    case "account.rateLimitsUpdated": {
+      exactKeys(root, "$", ["method", "params"]);
+      const params = exactRecord(root.params, "$.params", ["rateLimits"]);
+      return {
+        method,
+        params: {
+          rateLimits: decodeRateLimitUpdate(params.rateLimits, "$.params.rateLimits"),
+        },
       };
     }
     case "automation.changed": {
@@ -2183,6 +2194,14 @@ function decodeRateLimitSnapshot(value: unknown, path: string): RateLimitSnapsho
             RATE_LIMIT_REACHED_TYPES,
           ),
   };
+}
+
+function decodeRateLimitUpdate(value: unknown, path: string): RateLimitUpdateSnapshot {
+  const snapshot = decodeRateLimitSnapshot(value, path);
+  if (snapshot.limitId === null) {
+    throw new ContractError(`${path}.limitId`, "rolling updates require a bucket id");
+  }
+  return { ...snapshot, limitId: snapshot.limitId };
 }
 
 function decodeRateLimitWindow(value: unknown, path: string): RateLimitWindow {

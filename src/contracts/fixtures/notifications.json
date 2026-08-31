@@ -14,6 +14,30 @@
     }
   },
   {
+    "method": "account.rateLimitsUpdated",
+    "params": {
+      "rateLimits": {
+        "limitId": "codex",
+        "limitName": null,
+        "primary": {
+          "usedPercent": 25.5,
+          "windowDurationMins": 300,
+          "resetsAt": 1755000000000
+        },
+        "secondary": null,
+        "credits": {
+          "hasCredits": true,
+          "unlimited": false,
+          "balance": "12.50"
+        },
+        "individualLimit": null,
+        "spendControlReached": null,
+        "planType": "pro",
+        "rateLimitReachedType": null
+      }
+    }
+  },
+  {
     "method": "thread.created",
     "params": {
       "thread": {

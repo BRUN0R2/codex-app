@@ -114,6 +114,27 @@ fn notification_fixtures() -> Vec<EngineNotification> {
             error: None,
         }),
         EngineNotification::AuthSessionChanged(AuthSessionChanged { signed_in: true }),
+        EngineNotification::AccountRateLimitsUpdated(AccountRateLimitsUpdatedNotification {
+            rate_limits: RateLimitSnapshot {
+                limit_id: Some("codex".into()),
+                limit_name: None,
+                primary: Some(RateLimitWindow {
+                    used_percent: 25.5,
+                    window_duration_mins: Some(300),
+                    resets_at: Some(1_755_000_000_000),
+                }),
+                secondary: None,
+                credits: Some(CreditsSnapshot {
+                    has_credits: true,
+                    unlimited: false,
+                    balance: Some("12.50".into()),
+                }),
+                individual_limit: None,
+                spend_control_reached: None,
+                plan_type: Some(AccountPlanType::Pro),
+                rate_limit_reached_type: None,
+            },
+        }),
         EngineNotification::ThreadCreated(ThreadNotification {
             thread: thread_summary_fixture(),
         }),

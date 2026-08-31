@@ -52,6 +52,8 @@ pub struct EngineStartResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "method", content = "params")]
 pub enum EngineNotification {
+    #[serde(rename = "account.rateLimitsUpdated")]
+    AccountRateLimitsUpdated(AccountRateLimitsUpdatedNotification),
     #[serde(rename = "auth.loginCompleted")]
     AuthLoginCompleted(AuthLoginCompleted),
     #[serde(rename = "auth.sessionChanged")]
@@ -88,6 +90,15 @@ pub enum EngineNotification {
     AutomationDeleted(AutomationDeletedNotification),
     #[serde(rename = "automation.runUpdated")]
     AutomationRunUpdated(AutomationRunNotification),
+}
+
+/// Sparse rolling usage update emitted by the provider stream.
+///
+/// Nullable fields do not clear values from the latest complete account snapshot.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRateLimitsUpdatedNotification {
+    pub rate_limits: RateLimitSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize)]
