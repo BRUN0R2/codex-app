@@ -1,14 +1,15 @@
 # Engine contract
 
-`NativeEngine` is the product's only backend. It uses ChatGPT OAuth, HTTPS/SSE,
-and SQLite without running the Codex CLI or importing its data.
+`NativeEngine` is the product's only backend. It uses ChatGPT OAuth,
+HTTPS/WebSocket/SSE, and SQLite without running the Codex CLI or importing its
+data.
 
 | Contract | Current value |
 | --- | --- |
 | IPC schema | `20` |
 | SQLite schema | `5` |
 | Codex provider | ChatGPT Codex Responses |
-| Transport | HTTPS/SSE |
+| Transport | persistent Responses WebSocket; HTTPS/SSE on explicit 426 |
 | Sidecar | hash-validated `rg.exe` 15.2.0 |
 
 ## Tauri commands
@@ -75,6 +76,14 @@ the native boundary, which returns a valid cached value or coalesces one network
 refresh. Starting a new turn requires the active catalog; steering an active turn
 does not.
 
+The first successful credential-vault load is retained in the process-local
+credential store and replaced or cleared only after a successful save/delete.
+Engine startup warms credentials and shell discovery in a tracked background
+task. Creating, resuming, restoring, or forking a Codex task also starts a
+best-effort `generate:false` Responses warmup with the selected default
+configuration. A real turn always supersedes an unfinished warmup and never
+waits for it.
+
 Base instructions come from `model_messages.instructions_template`, with
 `base_instructions` reserved for legacy catalogs. The runtime adds separate,
 bounded repository, permission, collaboration, and environment items. It does
@@ -91,9 +100,17 @@ Before compatible provider telemetry exists, the engine estimates the real
 request and applies a 12% margin. After `response.completed`, provider totals
 are authoritative and receive only the local cost of items added after the last
 model output. A full estimate never inflates that confirmed value again. At the
-catalog limit, Remote Compaction V2 installs one valid checkpoint transactionally.
-`context_length_exceeded` permits one compaction recovery before becoming
-terminal.
+catalog limit, Remote Compaction V2 sends only the verified incremental
+`compaction_trigger` when a response chain exists and installs one valid
+checkpoint transactionally. History remains borrowed unless a tool output must
+be rewritten to fit. `context_length_exceeded` permits one compaction recovery
+before becoming terminal.
+
+Initial history and latest compatible usage come from one SQLite read
+transaction. Prompt composition, that snapshot, Code Mode session acquisition,
+model/tool resolution, and transport preconnection run concurrently. This keeps
+the first request and the first request after compaction off avoidable local
+serial work while preserving one canonical snapshot.
 
 Each confirmed usage sample is persisted as `contextUsage`. During a turn, the
 UI sums provider-confirmed `output_tokens` and shows the total next to elapsed
@@ -102,18 +119,31 @@ derived from persisted items, so the total survives completion and reload.
 
 ## Agent loop
 
-1. Normalize history and guarantee one output for every tool call.
-2. Build instructions, input items, capabilities, and the permitted catalog.
-3. Consume Standard or Lite Responses over SSE.
+1. Load one consistent prompt snapshot, normalize history, and guarantee one
+   output for every tool call.
+2. Build instructions, input items, capabilities, and the permitted catalog in
+   parallel with transport and session preparation.
+3. Consume Standard or Lite Responses over a persistent WebSocket. Continue
+   only after strict equality of the complete prior request and output, sending
+   `previous_response_id` plus new items; otherwise send the complete request.
 4. Persist complete items; deltas and `item.started` remain transient
    projections.
 5. Execute tools, persist outputs in original call order, and continue.
 6. Complete, interrupt, or fail the turn transactionally.
 
+The WebSocket upgrade validates status, `Connection`, `Upgrade`, and
+`Sec-WebSocket-Accept`. It retains the authenticated HTTP client's TLS, system
+proxy, cookies, and headers; answers ping/pong between requests; limits frames
+to 2 MiB and its raw queue to 1,024 messages/16 MiB; and serializes responses on
+one connection. HTTP 426 disables WebSocket for that provider session and uses
+the existing bounded SSE parser. No other error silently changes protocols.
+
 Heartbeats do not extend the semantic-event deadline. Transient transport,
-timeout, HTTP 5xx, and SSE failures may resume with backoff and immediate
-cancellation. Invalid protocol is terminal. Rate limiting follows the provider
-deadline without an arbitrary local retry counter.
+timeout, HTTP 5xx, WebSocket, and SSE failures may resume with backoff and
+immediate cancellation. A lost incremental response resets the chain and
+retries from complete canonical input. Invalid protocol is terminal. Rate
+limiting follows the provider deadline without an arbitrary local retry
+counter.
 
 Consecutive read-only calls may overlap. A mutation, approval, or exclusive
 command creates a barrier. A local batch contains at most eight calls, and
