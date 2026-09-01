@@ -48,7 +48,6 @@ type SettingsDialogController = Pick<
   | "engine"
   | "loadMoreArchivedThreads"
   | "logout"
-  | "models"
   | "rateLimits"
   | "rateLimitsError"
   | "rateLimitsLoading"
@@ -69,7 +68,6 @@ type SettingsDialogController = Pick<
   | "updateAutoTopUp"
   | "disableAutoTopUp"
   | "reportError"
-  | "turnBusy"
   | "unarchiveThread"
   | "updateSetting"
 >;
@@ -81,11 +79,6 @@ import {
 } from "./applicationPreferences";
 import { formatShortDate, formatShortDateWithTimeZone } from "./dateFormat";
 import { Icon, type IconName } from "./Icon";
-import {
-  formatModelContextTokens,
-  modelContextWindowPreference,
-  modelSupportsMaximumContext,
-} from "./modelContextWindow";
 import { outputDetailLabel, outputDetailOptions } from "./outputDetail";
 import { ProfileView } from "./ProfileView";
 import { threadTitle } from "./Sidebar";
@@ -543,11 +536,6 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
   const i18n = useI18n();
   const messages = () => i18n.messages().settings;
   const configuration = () => props.controller.config()?.config;
-  const expandedContextModels = createMemo(() =>
-    props.controller
-      .models()
-      .filter((model) => !model.hidden && modelSupportsMaximumContext(model)),
-  );
 
   return (
     <div class="settings-page">
@@ -568,66 +556,6 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
           />
         </SettingsRow>
       </SettingsSection>
-      <Show when={expandedContextModels().length > 0}>
-        <SettingsSection
-          title={messages().contextWindow}
-          description={messages().contextWindowDescription}
-        >
-          <For each={expandedContextModels()}>
-            {(model) => {
-              const contextWindow = model.contextWindow;
-              const maximumTokens = contextWindow?.maximumTokens ?? null;
-              const preference = () =>
-                modelContextWindowPreference(
-                  configuration()?.modelContextWindowPreferences ?? {},
-                  model.id,
-                );
-              return (
-                <SettingsRow
-                  label={model.displayName}
-                  description={
-                    contextWindow === null || maximumTokens === null
-                      ? messages().contextUnavailable
-                      : formatMessage(messages().contextRange, {
-                          defaultTokens: formatModelContextTokens(contextWindow.tokens),
-                          maximumTokens: formatModelContextTokens(maximumTokens),
-                        })
-                  }
-                >
-                  <select
-                    disabled={configuration() === undefined || props.controller.turnBusy()}
-                    onChange={(event) => {
-                      const value = event.currentTarget.value;
-                      if (value === "default" || value === "maximum") {
-                        void props.controller.updateSetting({
-                          type: "modelContextWindow",
-                          model: model.id,
-                          value,
-                        });
-                      }
-                    }}
-                    value={preference()}
-                  >
-                    <option value="default">
-                      {messages().contextDefault}
-                      {contextWindow === null
-                        ? ""
-                        : ` — ${formatModelContextTokens(contextWindow.tokens)}`}
-                    </option>
-                    <option value="maximum">
-                      {messages().contextMaximum}
-                      {maximumTokens === null
-                        ? ""
-                        : ` — ${formatModelContextTokens(maximumTokens)}`}
-                    </option>
-                  </select>
-                </SettingsRow>
-              );
-            }}
-          </For>
-          <div class="settings-note">{messages().contextNote}</div>
-        </SettingsSection>
-      </Show>
       <SettingsSection title={messages().tools}>
         <SettingsRow label={messages().webSearch} description={messages().webSearchDescription}>
           <select

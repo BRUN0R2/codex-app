@@ -13,6 +13,7 @@ import type {
   Attachment,
   ChatModelOption,
   CodexModel,
+  ModelContextWindowPreference,
   ModelDefaults,
   PermissionProfile,
   ReasoningEffort,
@@ -72,7 +73,12 @@ import { ContextWindowIndicator } from "./ContextWindowIndicator";
 import { canSubmitComposerMessage, shouldWarmComposerModelCatalog } from "./composerSubmission";
 import { Icon } from "./Icon";
 import { ImagePreview } from "./ImagePreview";
-import { modelContextWindowPreference, resolveModelContextWindow } from "./modelContextWindow";
+import {
+  formatModelContextTokens,
+  modelContextWindowOptions,
+  modelContextWindowPreference,
+  resolveModelContextWindow,
+} from "./modelContextWindow";
 import {
   persistModelDefaults,
   resolveRuntimeCompatibleModelSelection,
@@ -80,6 +86,7 @@ import {
   selectRuntimeCompatibleReasoningEffort,
   selectRuntimeCompatibleServiceTier,
 } from "./modelSelection";
+import { presentServiceTier, selectedServiceTierLabel } from "./serviceTierPresentation";
 
 const COMPOSER_MESSAGE_MAXIMUM_CHARACTERS: number = 1_048_576;
 const COMPOSER_ATTACHMENT_MAXIMUM_COUNT: number = 12;
@@ -97,7 +104,7 @@ export interface ComposerDraftRequest {
   readonly text: string;
 }
 
-type ModelMenuSection = "effort" | "model" | "serviceTier";
+type ModelMenuSection = "contextWindow" | "effort" | "model" | "serviceTier";
 type ComposerMessages = TranslationMessages["composer"];
 
 export function Composer(props: ComposerProps) {
@@ -163,6 +170,13 @@ export function Composer(props: ComposerProps) {
   const selectedModelWindow = createMemo(() =>
     resolveModelContextWindow(selectedModel(), selectedContextWindowPreference()),
   );
+  const selectedContextWindowOptions = createMemo(() => modelContextWindowOptions(selectedModel()));
+  const selectedContextWindowLabel = createMemo(() => {
+    const window = selectedModelWindow();
+    return window === null
+      ? messages().default
+      : formatModelContextTokens(window.tokens, i18n.locale());
+  });
   const selectedChatOption = createMemo(() => chatIntelligence().option);
   const selectedChatLabel = createMemo(() => {
     const option = selectedChatOption();
@@ -379,6 +393,18 @@ export function Composer(props: ComposerProps) {
       model: selectedModel()?.id ?? null,
       reasoningEffort: effort(),
       serviceTier: value,
+    });
+  }
+
+  function selectNextContextWindow(value: ModelContextWindowPreference): void {
+    const selected = selectedModel();
+    if (selected === undefined || selectedContextWindowOptions().length === 0) {
+      return;
+    }
+    void props.controller.updateSetting({
+      type: "modelContextWindow",
+      model: selected.id,
+      value,
     });
   }
 
@@ -882,7 +908,7 @@ export function Composer(props: ComposerProps) {
                     setModelMenuSection(null);
                     setPermissionMenuOpen(false);
                   }}
-                  title={messages().modelReasoningSpeed}
+                  title={messages().codexModelControls}
                   type="button"
                 >
                   <Show when={serviceTier() !== null}>
@@ -910,7 +936,7 @@ export function Composer(props: ComposerProps) {
                 </button>
                 <Show when={modelMenuOpen()}>
                   <div
-                    aria-label={messages().modelAndReasoningMenu}
+                    aria-label={messages().codexModelControlsMenu}
                     class="composer-popover model-menu"
                     role="menu"
                   >
@@ -932,11 +958,23 @@ export function Composer(props: ComposerProps) {
                       value={selectedEffortLabel(effort(), messages())}
                       valueTone={effort() === "ultra" ? "ultra" : undefined}
                     />
+                    <Show when={selectedContextWindowOptions().length > 0}>
+                      <ModelMenuRow
+                        active={modelMenuSection() === "contextWindow"}
+                        label={messages().contextWindow}
+                        onActivate={() => setModelMenuSection("contextWindow")}
+                        value={selectedContextWindowLabel()}
+                      />
+                    </Show>
                     <ModelMenuRow
                       active={modelMenuSection() === "serviceTier"}
                       label={messages().speed}
                       onActivate={() => setModelMenuSection("serviceTier")}
-                      value={serviceTierLabel(selectedModel(), serviceTier(), messages())}
+                      value={selectedServiceTierLabel(
+                        selectedModel()?.serviceTiers ?? [],
+                        serviceTier(),
+                        messages(),
+                      )}
                     />
                     <button
                       class="model-reset-button"
@@ -953,9 +991,15 @@ export function Composer(props: ComposerProps) {
                     <Show when={modelMenuSection()}>
                       {(section) => (
                         <ModelMenuOptions
+                          contextWindowPreference={selectedContextWindowPreference()}
                           effort={effort()}
+                          locale={i18n.locale()}
                           model={selectedModel()}
                           models={props.controller.models()}
+                          onSelectContextWindow={(value) => {
+                            selectNextContextWindow(value);
+                            closeComposerMenus();
+                          }}
                           onSelectEffort={(value) => {
                             selectNextEffort(value);
                             closeComposerMenus();
@@ -1140,9 +1184,12 @@ function ChatModelMenuOptions(props: {
 }
 
 function ModelMenuOptions(props: {
+  readonly contextWindowPreference: ModelContextWindowPreference;
   readonly effort: ReasoningEffort | null;
+  readonly locale: string;
   readonly model: CodexModel | undefined;
   readonly models: readonly CodexModel[];
+  readonly onSelectContextWindow: (value: ModelContextWindowPreference) => void;
   readonly onSelectEffort: (value: ReasoningEffort) => void;
   readonly onSelectModel: (value: string) => void;
   readonly onSelectServiceTier: (value: string | null) => void;
@@ -1218,6 +1265,39 @@ function ModelMenuOptions(props: {
             }}
           </For>
         </Show>
+        <Show when={props.section === "contextWindow"}>
+          <For each={modelContextWindowOptions(props.model)}>
+            {(option) => (
+              <button
+                aria-checked={option.preference === props.contextWindowPreference}
+                class="model-menu-option described"
+                classList={{ selected: option.preference === props.contextWindowPreference }}
+                onClick={() => props.onSelectContextWindow(option.preference)}
+                role="menuitemradio"
+                type="button"
+              >
+                <span class="model-menu-option-copy">
+                  <strong>
+                    {option.preference === "default"
+                      ? messages().contextDefault
+                      : messages().contextMaximum}
+                  </strong>
+                  <small>
+                    {formatMessage(
+                      option.preference === "default"
+                        ? messages().contextDefaultDescription
+                        : messages().contextMaximumDescription,
+                      { tokens: formatModelContextTokens(option.tokens, props.locale) },
+                    )}
+                  </small>
+                </span>
+                <Show when={option.preference === props.contextWindowPreference}>
+                  <Icon name="check" size={15} />
+                </Show>
+              </button>
+            )}
+          </For>
+        </Show>
         <Show when={props.section === "serviceTier"}>
           <button
             aria-checked={props.serviceTier === null}
@@ -1229,31 +1309,34 @@ function ModelMenuOptions(props: {
           >
             <span class="model-menu-option-copy">
               <strong>{messages().default}</strong>
-              <small>{messages().defaultSpeed}</small>
+              <small>{messages().speedDefaultDescription}</small>
             </span>
             <Show when={props.serviceTier === null}>
               <Icon name="check" size={15} />
             </Show>
           </button>
           <For each={props.model?.serviceTiers ?? []}>
-            {(tier) => (
-              <button
-                aria-checked={tier.id === props.serviceTier}
-                class="model-menu-option described"
-                classList={{ selected: tier.id === props.serviceTier }}
-                onClick={() => props.onSelectServiceTier(tier.id)}
-                role="menuitemradio"
-                type="button"
-              >
-                <span class="model-menu-option-copy">
-                  <strong>{tier.name}</strong>
-                  <small>{tier.description}</small>
-                </span>
-                <Show when={tier.id === props.serviceTier}>
-                  <Icon name="check" size={15} />
-                </Show>
-              </button>
-            )}
+            {(tier) => {
+              const presentation = () => presentServiceTier(tier, messages());
+              return (
+                <button
+                  aria-checked={tier.id === props.serviceTier}
+                  class="model-menu-option described"
+                  classList={{ selected: tier.id === props.serviceTier }}
+                  onClick={() => props.onSelectServiceTier(tier.id)}
+                  role="menuitemradio"
+                  type="button"
+                >
+                  <span class="model-menu-option-copy">
+                    <strong>{presentation().name}</strong>
+                    <small>{presentation().description}</small>
+                  </span>
+                  <Show when={tier.id === props.serviceTier}>
+                    <Icon name="check" size={15} />
+                  </Show>
+                </button>
+              );
+            }}
           </For>
         </Show>
       </div>
@@ -1267,6 +1350,8 @@ function modelMenuSectionLabel(section: ModelMenuSection, messages: ComposerMess
       return messages.model;
     case "effort":
       return messages.effort;
+    case "contextWindow":
+      return messages.contextWindow;
     case "serviceTier":
       return messages.speed;
   }
@@ -1371,17 +1456,6 @@ function samePermission(left: PermissionProfile, right: PermissionProfile | unde
 
 function compactModelName(displayName: string): string {
   return displayName.replace(/^gpt[- ]?/iu, "").replaceAll("-", " ");
-}
-
-function serviceTierLabel(
-  model: CodexModel | undefined,
-  serviceTier: string | null,
-  messages: ComposerMessages,
-): string {
-  if (serviceTier === null) {
-    return messages.default;
-  }
-  return model?.serviceTiers.find((tier) => tier.id === serviceTier)?.name ?? serviceTier;
 }
 
 function formatBytes(bytes: number): string {

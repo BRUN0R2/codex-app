@@ -182,7 +182,7 @@ const PREVIEW_CONFIG = {
   config: {
     model: PREVIEW_MODEL_ID,
     modelReasoningEffort: PREVIEW_REASONING_EFFORT,
-    serviceTier: "fast",
+    serviceTier: "priority",
     modelContextWindowPreferences: { [PREVIEW_MODEL_ID]: "maximum" },
     permissionProfile: PREVIEW_PERMISSION_PROFILE,
     webSearch: "live",
@@ -2384,9 +2384,14 @@ function createPreviewModel(id: string, displayName: string, isDefault: boolean)
     defaultReasoningEffort: "medium",
     serviceTiers: [
       {
-        id: "fast",
+        id: "priority",
         name: "Fast",
-        description: "Prioritizes lower response latency.",
+        description: "1.5x speed, increased usage",
+      },
+      {
+        id: "ultrafast",
+        name: "Ultrafast",
+        description: "The fastest available responses for latency-sensitive work.",
       },
     ],
     defaultServiceTier: null,
