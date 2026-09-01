@@ -43,6 +43,7 @@ interface ActivityVirtualizerRecord {
   virtualizer: VariableSizeVirtualizer;
 }
 
+const ACTIVITY_BODY_MATERIALIZATION_GUARD_ITEMS = 1;
 const EAGER_ACTIVITY_ESTIMATE_ITEM_LIMIT = 4_096;
 
 export class ActivityVirtualizerStore {
@@ -292,11 +293,11 @@ export function shouldMinimizeActivityOverscan(scrollDelta: number, viewportSize
 
 export function shouldMaterializeActivityBody(
   itemIndex: number,
-  visibleStart: number,
-  visibleEnd: number,
+  materializationStart: number,
+  materializationEnd: number,
   contentDeferred: boolean,
 ): boolean {
-  return !contentDeferred || (itemIndex >= visibleStart && itemIndex < visibleEnd);
+  return !contentDeferred || (itemIndex >= materializationStart && itemIndex < materializationEnd);
 }
 
 export function overscanActivityVirtualRange(
@@ -319,6 +320,17 @@ export function overscanActivityVirtualRange(
     start: Math.max(0, range.start - overscanItems),
     end: Math.min(itemCount, range.end + overscanItems),
   };
+}
+
+export function resolveActivityBodyMaterializationRange(
+  visibleRange: VirtualRange,
+  itemCount: number,
+): VirtualRange {
+  return overscanActivityVirtualRange(
+    visibleRange,
+    itemCount,
+    ACTIVITY_BODY_MATERIALIZATION_GUARD_ITEMS,
+  );
 }
 
 export function retainContainingActivityVirtualRange(

@@ -16,6 +16,7 @@ import {
   isActivityListNearViewport,
   isCurrentActivityMeasurement,
   overscanActivityVirtualRange,
+  resolveActivityBodyMaterializationRange,
   resolveActivityViewport,
   retainContainingActivityVirtualRange,
   shouldMaterializeActivityBody,
@@ -39,9 +40,9 @@ const ACTIVITY_SETTLED_OVERSCAN_ITEMS = 2;
 
 interface ActivityVirtualRange {
   readonly end: number;
+  readonly materializationEnd: number;
+  readonly materializationStart: number;
   readonly start: number;
-  readonly visibleEnd: number;
-  readonly visibleStart: number;
 }
 
 interface PendingActivityMeasurement {
@@ -118,19 +119,23 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
       return preserveActivityVirtualRange(previousRange, {
         start: 0,
         end: props.itemSource.count,
-        visibleStart: 0,
-        visibleEnd: props.itemSource.count,
+        materializationStart: 0,
+        materializationEnd: props.itemSource.count,
       });
     }
     if (!nearViewport() || timelineViewport === null || listElement === undefined) {
       return preserveActivityVirtualRange(previousRange, {
         start: 0,
         end: 0,
-        visibleStart: 0,
-        visibleEnd: 0,
+        materializationStart: 0,
+        materializationEnd: 0,
       });
     }
     const virtualRange = virtualizer().range(viewport.logicalOffset, viewport.viewportSize, 0);
+    const materializationRange = resolveActivityBodyMaterializationRange(
+      virtualRange,
+      props.itemSource.count,
+    );
     const stableRange = overscanActivityVirtualRange(
       virtualRange,
       props.itemSource.count,
@@ -145,9 +150,9 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
     const retainedRange = retainContainingActivityVirtualRange(previousRange, anchoredRange);
     return preserveActivityVirtualRange(previousRange, {
       end: retainedRange.end,
+      materializationEnd: materializationRange.end,
+      materializationStart: materializationRange.start,
       start: retainedRange.start,
-      visibleEnd: virtualRange.end,
-      visibleStart: virtualRange.start,
     });
   });
   const mountedRange = createMemo<{ readonly end: number; readonly start: number }>(
@@ -592,8 +597,8 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
                       const currentRange = range();
                       return shouldMaterializeActivityBody(
                         itemIndex(),
-                        currentRange.visibleStart,
-                        currentRange.visibleEnd,
+                        currentRange.materializationStart,
+                        currentRange.materializationEnd,
                         context.contentDeferred(),
                       );
                     }}
@@ -730,8 +735,8 @@ function preserveActivityVirtualRange(
   return previous !== undefined &&
     previous.start === next.start &&
     previous.end === next.end &&
-    previous.visibleStart === next.visibleStart &&
-    previous.visibleEnd === next.visibleEnd
+    previous.materializationStart === next.materializationStart &&
+    previous.materializationEnd === next.materializationEnd
     ? previous
     : next;
 }

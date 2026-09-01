@@ -6,6 +6,7 @@ import {
   isActivityListNearViewport,
   isCurrentActivityMeasurement,
   overscanActivityVirtualRange,
+  resolveActivityBodyMaterializationRange,
   resolveActivityViewport,
   retainContainingActivityVirtualRange,
   shouldDeferActivityContent,
@@ -284,11 +285,32 @@ describe("activity viewport geometry", () => {
     expect(shouldMinimizeActivityOverscan(Number.NaN, 720)).toBe(false);
   });
 
-  it("always materializes visible bodies while deferring only offscreen overscan", () => {
-    expect(shouldMaterializeActivityBody(12, 12, 18, true)).toBe(true);
-    expect(shouldMaterializeActivityBody(17, 12, 18, true)).toBe(true);
-    expect(shouldMaterializeActivityBody(11, 12, 18, true)).toBe(false);
-    expect(shouldMaterializeActivityBody(18, 12, 18, true)).toBe(false);
-    expect(shouldMaterializeActivityBody(11, 12, 18, false)).toBe(true);
+  it("guards both visible boundaries before deferring heavy activity bodies", () => {
+    const materializationRange = resolveActivityBodyMaterializationRange(
+      { start: 12, end: 18 },
+      30,
+    );
+    const shouldMaterialize = (itemIndex: number, contentDeferred = true) =>
+      shouldMaterializeActivityBody(
+        itemIndex,
+        materializationRange.start,
+        materializationRange.end,
+        contentDeferred,
+      );
+
+    expect(materializationRange).toEqual({ start: 11, end: 19 });
+    expect(shouldMaterialize(11)).toBe(true);
+    expect(shouldMaterialize(18)).toBe(true);
+    expect(shouldMaterialize(10)).toBe(false);
+    expect(shouldMaterialize(19)).toBe(false);
+    expect(shouldMaterialize(10, false)).toBe(true);
+    expect(resolveActivityBodyMaterializationRange({ start: 0, end: 4 }, 30)).toEqual({
+      start: 0,
+      end: 5,
+    });
+    expect(resolveActivityBodyMaterializationRange({ start: 26, end: 30 }, 30)).toEqual({
+      start: 25,
+      end: 30,
+    });
   });
 });
