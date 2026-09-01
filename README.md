@@ -120,3 +120,11 @@ Official releases follow [docs/RELEASE.md](docs/RELEASE.md).
 
 Read [docs/RULES.md](docs/RULES.md) before changing the project. The active
 backlog is [docs/TODO.md](docs/TODO.md).
+
+## License
+
+Codex Desktop Next is licensed under the [MIT License](LICENSE). Forks, copies,
+and derived projects may use, modify, and redistribute the software, provided
+that they preserve the copyright and MIT permission notices. See
+[LICENSING.md](LICENSING.md) to request separate terms before distributing the
+software without those notices.

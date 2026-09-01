@@ -3,6 +3,7 @@ name = "codex-desktop-next"
 version = "0.1.0"
 description = "An independent native desktop coding agent for Windows"
 authors = ["Codex App contributors"]
+license = "MIT"
 edition = "2024"
 rust-version = "1.98"
 
