@@ -27,7 +27,7 @@ tauri-build = { version = "2.6.3", features = [] }
 age = { version = "0.12.1", default-features = false }
 base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
-deno_core_icudata = "=0.77.0"
+deno_core_icudata = "=0.78.0"
 futures-util = "0.3.34"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 keyring-core = "1.0.0"
