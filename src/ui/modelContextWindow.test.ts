@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import type { CodexModel } from "../contracts/types";
+import type { CodexModel, ModelContextWindow } from "../contracts/types";
 import {
   formatModelContextTokens,
+  modelContextWindowOptions,
   modelContextWindowPreference,
-  modelSupportsMaximumContext,
   resolveModelContextWindow,
 } from "./modelContextWindow";
+
+const MODEL_CONTEXT_WINDOW = {
+  tokens: 272_000,
+  usableTokens: 258_400,
+  usablePercent: 95,
+  maximumTokens: 872_000,
+} as const satisfies ModelContextWindow;
 
 const MODEL: CodexModel = {
   id: "gpt-5.6-sol",
@@ -18,12 +25,7 @@ const MODEL: CodexModel = {
   defaultReasoningEffort: null,
   serviceTiers: [],
   defaultServiceTier: null,
-  contextWindow: {
-    tokens: 272_000,
-    usableTokens: 258_400,
-    usablePercent: 95,
-    maximumTokens: 872_000,
-  },
+  contextWindow: MODEL_CONTEXT_WINDOW,
   unsupportedRuntimeCapabilities: [],
   unsupportedReasoningEfforts: [],
   isDefault: true,
@@ -31,7 +33,10 @@ const MODEL: CodexModel = {
 
 describe("model context-window preferences", () => {
   it("uses the live catalog maximum without hard-coding a model name", () => {
-    expect(modelSupportsMaximumContext(MODEL)).toBe(true);
+    expect(modelContextWindowOptions(MODEL)).toEqual([
+      { preference: "default", tokens: 272_000 },
+      { preference: "maximum", tokens: 872_000 },
+    ]);
     expect(resolveModelContextWindow(MODEL, "maximum")).toEqual({
       ...MODEL.contextWindow,
       tokens: 872_000,
@@ -41,7 +46,21 @@ describe("model context-window preferences", () => {
 
   it("falls back to the default preference and formats large windows", () => {
     expect(modelContextWindowPreference({}, MODEL.id)).toBe("default");
-    expect(formatModelContextTokens(272_000)).toBe("272 mil");
-    expect(formatModelContextTokens(1_050_000)).toBe("1,05 mi");
+    expect(formatModelContextTokens(272_000, "pt-BR")).toBe("272\u00a0mil");
+    expect(formatModelContextTokens(1_050_000, "pt-BR")).toBe("1,05\u00a0mi");
+    expect(formatModelContextTokens(272_000, "en")).toBe("272K");
+    expect(formatModelContextTokens(1_050_000, "en")).toBe("1.05M");
+  });
+
+  it("omits context controls when the catalog has no larger window", () => {
+    expect(
+      modelContextWindowOptions({
+        ...MODEL,
+        contextWindow: {
+          ...MODEL_CONTEXT_WINDOW,
+          maximumTokens: MODEL_CONTEXT_WINDOW.tokens,
+        },
+      }),
+    ).toEqual([]);
   });
 });

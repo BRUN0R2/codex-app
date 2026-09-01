@@ -6423,7 +6423,7 @@ pre {
   display: grid;
   width: 100%;
   min-height: 38px;
-  grid-template-columns: 78px minmax(0, 1fr) 16px;
+  grid-template-columns: minmax(0, 1fr) auto 16px;
   align-items: center;
   gap: 8px;
   padding: 0 6px;
@@ -6742,8 +6742,8 @@ pre {
 @container main-panel (max-width: 1278px) {
   .model-submenu {
     top: auto;
-    right: 0;
-    bottom: calc(100% + 7px);
+    right: calc(100% + var(--model-submenu-gap));
+    bottom: -1px;
     left: auto;
   }
 }
@@ -8232,8 +8232,8 @@ pre {
 
   .model-submenu {
     top: auto;
-    right: 0;
-    bottom: calc(100% + 7px);
+    right: calc(100% + var(--model-submenu-gap));
+    bottom: -1px;
     left: auto;
     width: min(252px, calc(100vw - 32px));
   }

@@ -8,9 +8,9 @@ const MILLION_TOKEN_THRESHOLD = 1_000_000;
 const MILLION_TOKEN_DIVISOR = 1_000_000;
 const KILO_TOKEN_DIVISOR = 1_000;
 
-export function modelSupportsMaximumContext(model: CodexModel): boolean {
-  const window = model.contextWindow;
-  return window !== null && window.maximumTokens !== null && window.maximumTokens > window.tokens;
+export interface ModelContextWindowOption {
+  readonly preference: ModelContextWindowPreference;
+  readonly tokens: number;
 }
 
 export function modelContextWindowPreference(
@@ -18,6 +18,20 @@ export function modelContextWindowPreference(
   modelId: string,
 ): ModelContextWindowPreference {
   return preferences[modelId] ?? "default";
+}
+
+export function modelContextWindowOptions(
+  model: CodexModel | undefined,
+): readonly ModelContextWindowOption[] {
+  const window = model?.contextWindow ?? null;
+  const maximum = window?.maximumTokens ?? null;
+  if (window === null || maximum === null || maximum <= window.tokens) {
+    return [];
+  }
+  return [
+    { preference: "default", tokens: window.tokens },
+    { preference: "maximum", tokens: maximum },
+  ];
 }
 
 export function resolveModelContextWindow(
@@ -36,15 +50,12 @@ export function resolveModelContextWindow(
   };
 }
 
-export function formatModelContextTokens(tokens: number): string {
-  if (tokens >= MILLION_TOKEN_THRESHOLD) {
-    const value = new Intl.NumberFormat("pt-BR", {
-      maximumFractionDigits: tokens % MILLION_TOKEN_DIVISOR === 0 ? 0 : 2,
-    }).format(tokens / MILLION_TOKEN_DIVISOR);
-    return `${value} mi`;
-  }
-  const value = new Intl.NumberFormat("pt-BR", {
-    maximumFractionDigits: tokens % KILO_TOKEN_DIVISOR === 0 ? 0 : 1,
-  }).format(tokens / KILO_TOKEN_DIVISOR);
-  return `${value} mil`;
+export function formatModelContextTokens(tokens: number, locale: string): string {
+  const usesMillions = tokens >= MILLION_TOKEN_THRESHOLD;
+  const divisor = usesMillions ? MILLION_TOKEN_DIVISOR : KILO_TOKEN_DIVISOR;
+  const maximumFractionDigits = tokens % divisor === 0 ? 0 : usesMillions ? 2 : 1;
+  return new Intl.NumberFormat(locale, {
+    maximumFractionDigits,
+    notation: "compact",
+  }).format(tokens);
 }

@@ -66,6 +66,94 @@ const SCENARIOS = [
     validate: validateComposerFastModeMetrics,
   },
   {
+    id: "composer-context-window",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `document.querySelector(".model-button") instanceof HTMLButtonElement`,
+    prepareExpression: `(() => {
+      const modelButton = document.querySelector(".model-button");
+      if (!(modelButton instanceof HTMLButtonElement)) {
+        throw new Error("The model selector is missing.");
+      }
+      modelButton.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const contextRow = [...document.querySelectorAll(".model-menu-row")].find(
+          (button) => button.querySelector("span")?.textContent?.trim() === "Janela de contexto",
+        );
+        if (!(contextRow instanceof HTMLButtonElement)) {
+          throw new Error("The context-window section is missing.");
+        }
+        contextRow.click();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const defaultOption = [...document.querySelectorAll(
+            ".model-submenu-contextWindow .model-menu-option",
+          )].find(
+            (button) => button.querySelector("strong")?.textContent?.trim() === "Padrão",
+          );
+          if (!(defaultOption instanceof HTMLButtonElement)) {
+            throw new Error("The default context-window option is missing.");
+          }
+          defaultOption.click();
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            modelButton.click();
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              const updatedContextRow = [...document.querySelectorAll(".model-menu-row")].find(
+                (button) =>
+                  button.querySelector("span")?.textContent?.trim() === "Janela de contexto",
+              );
+              if (!(updatedContextRow instanceof HTMLButtonElement)) {
+                throw new Error("The persisted context-window section is missing.");
+              }
+              updatedContextRow.click();
+            }));
+          }));
+        }));
+      }));
+    })()`,
+    readyExpression: `(() => {
+      const contextRow = [...document.querySelectorAll(".model-menu-row")].find(
+        (button) => button.querySelector("span")?.textContent?.trim() === "Janela de contexto",
+      );
+      const defaultOption = [...document.querySelectorAll(
+        ".model-submenu-contextWindow .model-menu-option",
+      )].find(
+        (button) => button.querySelector("strong")?.textContent?.trim() === "Padrão",
+      );
+      return contextRow?.querySelector("small")?.textContent?.includes("272") === true &&
+        defaultOption?.getAttribute("aria-checked") === "true";
+    })()`,
+    auditExpression: composerContextWindowVisualAuditExpression,
+    validate: validateComposerContextWindowMetrics,
+  },
+  {
+    id: "composer-speed-options",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `document.querySelector(".model-button") instanceof HTMLButtonElement`,
+    prepareExpression: `(() => {
+      const modelButton = document.querySelector(".model-button");
+      if (!(modelButton instanceof HTMLButtonElement)) {
+        throw new Error("The model selector is missing.");
+      }
+      modelButton.click();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const speedRow = [...document.querySelectorAll(".model-menu-row")].find(
+          (button) => button.querySelector("span")?.textContent?.trim() === "Velocidade",
+        );
+        if (!(speedRow instanceof HTMLButtonElement)) {
+          throw new Error("The speed section is missing.");
+        }
+        speedRow.click();
+      }));
+    })()`,
+    readyExpression: `(() => {
+      const labels = [...document.querySelectorAll(
+        ".model-submenu-serviceTier .model-menu-option strong",
+      )].map((element) => element.textContent?.trim());
+      return JSON.stringify(labels) === JSON.stringify(["Padrão", "Rápido", "Ultrarrápido"]);
+    })()`,
+    auditExpression: composerServiceTierVisualAuditExpression,
+    validate: validateComposerServiceTierMetrics,
+  },
+  {
     id: "composer-ultra-effort",
     url: HOME_PREVIEW_URL,
     initialReadyExpression: `document.querySelector(".model-button") instanceof HTMLButtonElement`,
@@ -647,7 +735,7 @@ const SCENARIOS = [
     url: SETTINGS_PREVIEW_URL,
     initialReadyExpression: `document.querySelector(".settings-dialog") !== null &&
       document.querySelector(".window-chrome-controls") !== null &&
-      document.querySelector(".settings-scrollbar:not(.is-hidden)") !== null &&
+      document.querySelector(".settings-scrollbar") !== null &&
       document.querySelectorAll(".application-preference").length === 3`,
     prepareExpression: `(() => {
       const languageSelect = document.querySelector(".language-preference-select");
@@ -4375,6 +4463,58 @@ function composerFastModeVisualAuditExpression() {
   })()`;
 }
 
+function composerModelSubmenuVisualAuditExpression(submenuSelector) {
+  return `(() => {
+    const normalize = (value) => value?.replace(/\\s+/gu, " ").trim() ?? null;
+    const rectangle = (element, label) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Missing element: " + label);
+      }
+      const bounds = element.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    const mainPanel = document.querySelector(".main-panel");
+    const menu = document.querySelector(".model-menu");
+    const submenu = document.querySelector(${JSON.stringify(submenuSelector)});
+    const rows = [...(menu?.querySelectorAll(":scope > .model-menu-row") ?? [])];
+    const options = [...(submenu?.querySelectorAll(".model-menu-option") ?? [])];
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      mainPanelWidth: mainPanel instanceof HTMLElement ? mainPanel.clientWidth : null,
+      menu: rectangle(menu, ".model-menu"),
+      submenu: rectangle(submenu, ${JSON.stringify(submenuSelector)}),
+      rowLabels: rows.map((row) => normalize(row.querySelector("span")?.textContent)),
+      rowValues: rows.map((row) => normalize(row.querySelector("small")?.textContent)),
+      options: options.map((option) => ({
+        checked: option.getAttribute("aria-checked"),
+        description: normalize(option.querySelector("small")?.textContent),
+        label: normalize(option.querySelector("strong")?.textContent),
+      })),
+      rowHorizontalOverflows: rows.map((row) =>
+        row instanceof HTMLElement ? row.scrollWidth - row.clientWidth : null,
+      ),
+      submenuHorizontalOverflow:
+        submenu instanceof HTMLElement ? submenu.scrollWidth - submenu.clientWidth : null,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function composerContextWindowVisualAuditExpression() {
+  return composerModelSubmenuVisualAuditExpression(".model-submenu-contextWindow");
+}
+
+function composerServiceTierVisualAuditExpression() {
+  return composerModelSubmenuVisualAuditExpression(".model-submenu-serviceTier");
+}
+
 function activeActivityReflectionVisualAuditExpression() {
   return `(() => {
     const title = document.querySelector(
@@ -5800,6 +5940,8 @@ function settingsVisualAuditExpression() {
     const selectedNavigation = document.querySelector(".settings-nav nav button.active");
     const selectedNavigationStyle =
       selectedNavigation instanceof HTMLElement ? getComputedStyle(selectedNavigation) : null;
+    const settingsMain = document.querySelector(".settings-main");
+    const settingsScrollbar = document.querySelector(".settings-scrollbar");
     const rootStyle = getComputedStyle(document.documentElement);
     return {
       viewport: { width: innerWidth, height: innerHeight },
@@ -5826,6 +5968,11 @@ function settingsVisualAuditExpression() {
       nativeScrollbarWidth: getComputedStyle(
         document.querySelector(".settings-main"),
       ).scrollbarWidth,
+      settingsVerticalOverflow:
+        settingsMain instanceof HTMLElement
+          ? settingsMain.scrollHeight - settingsMain.clientHeight
+          : null,
+      scrollbarHidden: settingsScrollbar?.classList.contains("is-hidden") ?? null,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
       verticalOverflow: document.documentElement.scrollHeight - innerHeight,
       checkboxCount: document.querySelectorAll(
@@ -5833,6 +5980,9 @@ function settingsVisualAuditExpression() {
       ).length,
       navigationLabels: [...document.querySelectorAll(".settings-nav nav button")].map(
         (button) => button.textContent?.trim() ?? "",
+      ),
+      sectionHeadings: [...document.querySelectorAll(".settings-section > h3")].map(
+        (heading) => heading.textContent?.trim() ?? "",
       ),
       navigationItemGaps,
       hoverSurface: rootStyle.getPropertyValue("--interactive-hover-surface").trim(),
@@ -6314,6 +6464,110 @@ function validateComposerFastModeMetrics(metrics, viewport) {
   assert(metrics.projectIconColor === "rgb(74, 222, 128)", "the project icon color was not applied");
   assert(metrics.diffAddedColor === "#4ade80", "additions do not use semantic lime green");
   assert(metrics.diffDeletedColor === "#ff6764", "deletions do not use semantic red");
+}
+
+function validateComposerContextWindowMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "the context selector created page overflow");
+  assert(
+    metrics.rowHorizontalOverflows.length === 4 &&
+      metrics.rowHorizontalOverflows.every(
+        (overflow) => overflow !== null && overflow <= tolerance,
+      ),
+    `a model-control row clips its content: ${JSON.stringify(metrics.rowHorizontalOverflows)}`,
+  );
+  assert(
+    metrics.submenuHorizontalOverflow !== null && metrics.submenuHorizontalOverflow <= tolerance,
+    "the context-window submenu clips its options",
+  );
+  assert(
+    JSON.stringify(metrics.rowLabels) ===
+      JSON.stringify(["Modelo", "Esforço", "Janela de contexto", "Velocidade"]),
+    `the model-control order changed: ${JSON.stringify(metrics.rowLabels)}`,
+  );
+  assert(metrics.rowValues[2] === "272 mil", "the persisted catalog window is not visible");
+  assert(metrics.rowValues[3] === "Rápido", "the active speed tier is not localized");
+  assert(
+    JSON.stringify(metrics.options) ===
+      JSON.stringify([
+        { checked: "true", description: "272 mil tokens", label: "Padrão" },
+        {
+          checked: "false",
+          description: "400 mil tokens; pode aumentar a latência e o uso de tokens.",
+          label: "Máxima",
+        },
+      ]),
+    `the context-window options are incomplete: ${JSON.stringify(metrics.options)}`,
+  );
+  validateComposerModelSubmenuPlacement(metrics, viewport, "context-window");
+}
+
+function validateComposerServiceTierMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "the speed selector created page overflow");
+  assert(
+    metrics.rowHorizontalOverflows.length === 4 &&
+      metrics.rowHorizontalOverflows.every(
+        (overflow) => overflow !== null && overflow <= tolerance,
+      ),
+    `a model-control row clips its content: ${JSON.stringify(metrics.rowHorizontalOverflows)}`,
+  );
+  assert(
+    metrics.submenuHorizontalOverflow !== null && metrics.submenuHorizontalOverflow <= tolerance,
+    "the speed submenu clips its options",
+  );
+  assert(
+    JSON.stringify(metrics.rowLabels) ===
+      JSON.stringify(["Modelo", "Esforço", "Janela de contexto", "Velocidade"]),
+    `the model-control order changed: ${JSON.stringify(metrics.rowLabels)}`,
+  );
+  assert(metrics.rowValues[3] === "Rápido", "the active speed tier is not localized");
+  assert(
+    JSON.stringify(metrics.options) ===
+      JSON.stringify([
+        { checked: "false", description: "Velocidade padrão", label: "Padrão" },
+        {
+          checked: "true",
+          description: "Velocidade 1,5x, mais uso",
+          label: "Rápido",
+        },
+        {
+          checked: "false",
+          description:
+            "As respostas mais rápidas disponíveis para trabalhos sensíveis à latência.",
+          label: "Ultrarrápido",
+        },
+      ]),
+    `the speed options are not fully localized: ${JSON.stringify(metrics.options)}`,
+  );
+  validateComposerModelSubmenuPlacement(metrics, viewport, "speed");
+}
+
+function validateComposerModelSubmenuPlacement(metrics, viewport, label) {
+  const gap = 7;
+  const tolerance = 1;
+  assert(metrics.mainPanelWidth !== null, `the ${label} submenu has no main-panel measurement`);
+  assert(metrics.menu.left >= -tolerance, "the model menu exceeds the left edge");
+  assert(metrics.submenu.left >= -tolerance, `the ${label} submenu exceeds the left edge`);
+  assert(
+    metrics.submenu.right <= viewport.width + tolerance,
+    `the ${label} submenu exceeds the right edge`,
+  );
+  assert(
+    Math.abs(metrics.menu.bottom - metrics.submenu.bottom) <= tolerance,
+    `the ${label} submenu is not bottom-aligned with the model menu`,
+  );
+  if (metrics.mainPanelWidth <= 1_278) {
+    assert(
+      Math.abs(metrics.menu.left - metrics.submenu.right - gap) <= tolerance,
+      `the ${label} submenu did not open to the left in constrained space`,
+    );
+    return;
+  }
+  assert(
+    Math.abs(metrics.submenu.left - metrics.menu.right - gap) <= tolerance,
+    `the ${label} submenu did not open to the right when space was available`,
+  );
 }
 
 function validateComposerUltraEffortMetrics(metrics) {
@@ -7446,6 +7700,14 @@ function validateSettingsMetrics(metrics, viewport) {
     "the settings scrollbar does not follow the main-screen geometry",
   );
   assert(metrics.scrollbarThumb.width >= 12, "the settings scrollbar thumb became too narrow");
+  assert(
+    metrics.settingsVerticalOverflow !== null &&
+      metrics.scrollbarHidden === (metrics.settingsVerticalOverflow <= tolerance),
+    `the settings scrollbar visibility does not match overflow: ${JSON.stringify({
+      hidden: metrics.scrollbarHidden,
+      overflow: metrics.settingsVerticalOverflow,
+    })}`,
+  );
   assert(metrics.nativeScrollbarWidth === "none", "the native scrollbar remains visible");
   assert(metrics.horizontalOverflow <= tolerance, "the page has horizontal overflow");
   assert(metrics.navigation.width >= 248, "settings navigation became too narrow");
@@ -7470,6 +7732,10 @@ function validateSettingsMetrics(metrics, viewport) {
   );
   assert(metrics.checkboxCount === 3, "the three boolean controls were not rendered");
   assert(metrics.visibleCards >= 2, "fewer than two settings cards are visible");
+  assert(
+    !metrics.sectionHeadings.includes("Janela de contexto"),
+    "the context-window controls remain duplicated in Settings",
+  );
   assert(
     !metrics.navigationLabels.includes("Aparência") &&
       !metrics.navigationLabels.includes("Segurança e permissões"),
