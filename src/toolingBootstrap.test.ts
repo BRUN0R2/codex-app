@@ -60,13 +60,20 @@ describe("tooling bootstrap contract", () => {
     );
   });
 
-  it("lets Chromium own its ephemeral DevTools port without hiding early exits", () => {
+  it("uses one background Chromium target for the visual run and closes it explicitly", () => {
     expect(packageManifest.scripts?.["verify:visual"]).toContain(
       "node --experimental-strip-types scripts/verify-visual-preview.mjs",
     );
     expect(visualAuditRuntime).toContain('"--remote-debugging-port=0"');
     expect(visualAuditRuntime).toContain('"--edge-skip-compat-layer-relaunch"');
+    expect(visualAuditRuntime).toContain('"--no-startup-window"');
     expect(visualAuditScript).toContain("chromiumAuditArguments(browserProfile)");
+    expect(visualAuditScript.match(/createAuditTarget\(browserController\)/gu)).toHaveLength(1);
+    expect(
+      visualAuditScript.match(/closeAuditTarget\(browserController, auditTargetId\)/gu),
+    ).toHaveLength(1);
+    expect(visualAuditScript).not.toContain("/json/new");
+    expect(visualAuditScript).not.toContain("/json/close");
     expect(visualAuditScript).toContain("waitForDevToolsEndpoint");
     expect(visualAuditScript).not.toContain("/json/version");
     expect(visualAuditScript).not.toContain("reservePort");

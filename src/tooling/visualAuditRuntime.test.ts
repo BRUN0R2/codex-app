@@ -8,7 +8,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   chromiumAuditArguments,
+  closeAuditTarget,
   compareRetainedIdentities,
+  createAuditTarget,
+  type DevToolsCommandClient,
   loopbackHttpOrigin,
   type ObservedProcess,
   observeProcess,
@@ -32,9 +35,41 @@ describe("visual audit runtime", () => {
     const arguments_ = chromiumAuditArguments(profile);
 
     expect(arguments_).toContain("--edge-skip-compat-layer-relaunch");
+    expect(arguments_).toContain("--no-startup-window");
     expect(arguments_).toContain("--remote-debugging-port=0");
     expect(arguments_.filter((argument) => argument.startsWith("--user-data-dir="))).toEqual([
       `--user-data-dir=${profile}`,
+    ]);
+    expect(arguments_).not.toContain("about:blank");
+  });
+
+  it("creates one background audit target for the entire visual run", async () => {
+    const client = commandClient([{ targetId: "audit-target" }]);
+
+    await expect(createAuditTarget(client)).resolves.toBe("audit-target");
+    expect(client.calls).toEqual([
+      {
+        method: "Target.createTarget",
+        params: { background: true, url: "about:blank" },
+      },
+    ]);
+  });
+
+  it("fails rather than leaking an audit target when creation or closure is unconfirmed", async () => {
+    await expect(createAuditTarget(commandClient([{}]))).rejects.toThrow(
+      /did not return an audit target id/u,
+    );
+    await expect(
+      closeAuditTarget(commandClient([{ success: false }]), "audit-target"),
+    ).rejects.toThrow(/did not confirm/u);
+  });
+
+  it("closes every audit target through the browser protocol", async () => {
+    const client = commandClient([{ success: true }]);
+
+    await expect(closeAuditTarget(client, "audit-target")).resolves.toBeUndefined();
+    expect(client.calls).toEqual([
+      { method: "Target.closeTarget", params: { targetId: "audit-target" } },
     ]);
   });
 
@@ -159,5 +194,21 @@ function healthyProcessObservation(): ObservedProcess {
   return {
     diagnostics: () => "Saída capturada: (vazia)",
     failure: () => undefined,
+  };
+}
+
+function commandClient(results: readonly unknown[]): DevToolsCommandClient & {
+  readonly calls: Array<{ method: string; params: Record<string, unknown> | undefined }>;
+} {
+  const calls: Array<{ method: string; params: Record<string, unknown> | undefined }> = [];
+  let resultIndex = 0;
+  return {
+    calls,
+    send: async (method, params) => {
+      calls.push({ method, params });
+      const result = results[resultIndex];
+      resultIndex += 1;
+      return result;
+    },
   };
 }

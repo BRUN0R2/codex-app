@@ -13,6 +13,15 @@ export interface DevToolsEndpoint {
   readonly port: number;
 }
 
+export interface DevToolsCommandClient {
+  send(method: string, params?: Record<string, unknown>): Promise<unknown>;
+}
+
+interface DevToolsCommandResponse {
+  readonly success?: unknown;
+  readonly targetId?: unknown;
+}
+
 export interface ObservedProcess {
   readonly diagnostics: () => string;
   readonly failure: () => string | undefined;
@@ -49,10 +58,28 @@ export function chromiumAuditArguments(userDataDirectory: string): readonly stri
     "--hide-scrollbars",
     "--metrics-recording-only",
     "--no-first-run",
+    "--no-startup-window",
     "--remote-debugging-port=0",
     `--user-data-dir=${userDataDirectory}`,
-    "about:blank",
   ];
+}
+
+export async function createAuditTarget(client: DevToolsCommandClient): Promise<string> {
+  const result = await client.send("Target.createTarget", {
+    background: true,
+    url: "about:blank",
+  });
+  return requiredTargetId(result, "Target.createTarget");
+}
+
+export async function closeAuditTarget(
+  client: DevToolsCommandClient,
+  targetId: string,
+): Promise<void> {
+  const result = await client.send("Target.closeTarget", { targetId });
+  if (commandResponse(result)?.success !== true) {
+    throw new Error("Target.closeTarget did not confirm that the audit target was closed.");
+  }
 }
 
 export function loopbackHttpOrigin(address: AddressInfo | string | null): string {
@@ -235,6 +262,21 @@ function assertPositiveFiniteInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new TypeError(`${name} must be a positive integer.`);
   }
+}
+
+function requiredTargetId(result: unknown, command: string): string {
+  const targetId = commandResponse(result)?.targetId;
+  if (typeof targetId === "string" && targetId.length > 0) {
+    return targetId;
+  }
+  throw new Error(`${command} did not return an audit target id.`);
+}
+
+function commandResponse(value: unknown): DevToolsCommandResponse | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as DevToolsCommandResponse;
 }
 
 function describeError(error: unknown): string {

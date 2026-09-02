@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 
 import {
+  closeAuditTarget,
+  createAuditTarget,
   chromiumAuditArguments,
   compareRetainedIdentities,
   loopbackHttpOrigin,
@@ -1060,29 +1062,41 @@ async function main() {
     browserController = await CdpClient.connect(devToolsEndpoint.browserWebSocketUrl);
     await mkdir(ARTIFACT_DIRECTORY, { recursive: true });
 
-    const reports = [];
-    const selectedScenarios =
-      REQUESTED_SCENARIOS.size === 0
-        ? SCENARIOS
-        : SCENARIOS.filter((scenario) => REQUESTED_SCENARIOS.has(scenario.id));
-    if (selectedScenarios.length !== (REQUESTED_SCENARIOS.size || SCENARIOS.length)) {
-      const knownScenarios = new Set(SCENARIOS.map((scenario) => scenario.id));
-      const unknownScenarios = [...REQUESTED_SCENARIOS].filter(
-        (scenarioId) => !knownScenarios.has(scenarioId),
-      );
-      throw new Error(`Unknown visual scenarios: ${unknownScenarios.join(", ")}`);
-    }
-    const scenarios = selectedScenarios.map((scenario) => ({
-      ...scenario,
-      url: rebasePreviewUrl(scenario.url, previewOrigin),
-    }));
-    for (const scenario of scenarios) {
-      for (const viewport of scenario.viewports ?? VIEWPORTS) {
-        reports.push(await auditViewport(devToolsEndpoint.port, viewport, scenario));
-      }
-    }
+    const auditTargetId = await createAuditTarget(browserController);
+    try {
+      const auditClient = await browserController.attachToTarget(auditTargetId);
+      await auditClient.send("Page.enable");
+      await auditClient.send("Runtime.enable");
+      await auditClient.send("Page.addScriptToEvaluateOnNewDocument", {
+        source: `localStorage.setItem(${JSON.stringify(PROFILE_STORAGE_KEYS.locale)}, ${JSON.stringify(VISUAL_AUDIT_LOCALE)});`,
+      });
 
-    process.stdout.write(`${JSON.stringify({ browserPath, reports }, null, 2)}\n`);
+      const reports = [];
+      const selectedScenarios =
+        REQUESTED_SCENARIOS.size === 0
+          ? SCENARIOS
+          : SCENARIOS.filter((scenario) => REQUESTED_SCENARIOS.has(scenario.id));
+      if (selectedScenarios.length !== (REQUESTED_SCENARIOS.size || SCENARIOS.length)) {
+        const knownScenarios = new Set(SCENARIOS.map((scenario) => scenario.id));
+        const unknownScenarios = [...REQUESTED_SCENARIOS].filter(
+          (scenarioId) => !knownScenarios.has(scenarioId),
+        );
+        throw new Error(`Unknown visual scenarios: ${unknownScenarios.join(", ")}`);
+      }
+      const scenarios = selectedScenarios.map((scenario) => ({
+        ...scenario,
+        url: rebasePreviewUrl(scenario.url, previewOrigin),
+      }));
+      for (const scenario of scenarios) {
+        for (const viewport of scenario.viewports ?? VIEWPORTS) {
+          reports.push(await auditViewport(auditClient, viewport, scenario));
+        }
+      }
+
+      process.stdout.write(`${JSON.stringify({ browserPath, reports }, null, 2)}\n`);
+    } finally {
+      await closeAuditTarget(browserController, auditTargetId);
+    }
   } finally {
     if (browserController !== undefined) {
       await Promise.race([
@@ -1110,86 +1124,69 @@ function rebasePreviewUrl(url, previewOrigin) {
   return `${previewOrigin}${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
-async function auditViewport(debugPort, viewport, scenario) {
-  const target = await fetchJson(
-    `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent("about:blank")}`,
-    { method: "PUT" },
+async function auditViewport(client, viewport, scenario) {
+  await client.send("Storage.clearDataForOrigin", {
+    origin: new URL(scenario.url).origin,
+    storageTypes: "all",
+  });
+  await client.send("Emulation.setDeviceMetricsOverride", {
+    width: viewport.width,
+    height: viewport.height,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await client.send("Emulation.setEmulatedMedia", {
+    features: [{ name: "prefers-reduced-motion", value: "no-preference" }],
+  });
+  const loaded = client.waitForEvent("Page.loadEventFired");
+  await client.send("Page.navigate", { url: scenario.url });
+  await loaded;
+  await waitForPreview(
+    client,
+    scenario.initialReadyExpression ?? scenario.readyExpression,
+    scenario.id,
   );
-  const client = await CdpClient.connect(target.webSocketDebuggerUrl);
-  try {
-    await client.send("Page.enable");
-    await client.send("Runtime.enable");
-    await client.send("Page.addScriptToEvaluateOnNewDocument", {
-      source: `localStorage.setItem(${JSON.stringify(PROFILE_STORAGE_KEYS.locale)}, ${JSON.stringify(VISUAL_AUDIT_LOCALE)});`,
-    });
-    await client.send("Storage.clearDataForOrigin", {
-      origin: new URL(scenario.url).origin,
-      storageTypes: "all",
-    });
-    await client.send("Emulation.setDeviceMetricsOverride", {
-      width: viewport.width,
-      height: viewport.height,
-      deviceScaleFactor: 1,
-      mobile: false,
-    });
-    await client.send("Emulation.setEmulatedMedia", {
-      features: [{ name: "prefers-reduced-motion", value: "no-preference" }],
-    });
-    const loaded = client.waitForEvent("Page.loadEventFired");
-    await client.send("Page.navigate", { url: scenario.url });
-    await loaded;
+  if (scenario.prepareExpression !== undefined) {
+    await client.evaluate(scenario.prepareExpression, false);
     await waitForPreview(
       client,
-      scenario.initialReadyExpression ?? scenario.readyExpression,
+      scenario.readyExpression,
       scenario.id,
+      scenario.readyTimeoutMs,
     );
-    if (scenario.prepareExpression !== undefined) {
-      await client.evaluate(scenario.prepareExpression, false);
-      await waitForPreview(
-        client,
-        scenario.readyExpression,
-        scenario.id,
-        scenario.readyTimeoutMs,
-      );
-    }
-    if (scenario.interact !== undefined) {
-      await scenario.interact(client);
-    }
-    await client.evaluate(
-      `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(async () => {
-        await document.fonts.ready;
-        resolve(true);
-      })))`,
-      true,
-    );
-
-    const metrics = await client.evaluate(scenario.auditExpression(), false);
-    try {
-      scenario.validate(metrics, viewport);
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `Scenario ${scenario.id} is invalid at ${viewport.width}x${viewport.height}: ${reason}. Metrics: ${JSON.stringify(metrics)}`,
-        { cause: error },
-      );
-    }
-    const screenshot = await client.send("Page.captureScreenshot", {
-      format: "png",
-      fromSurface: true,
-      captureBeyondViewport: false,
-    });
-    const screenshotPath = path.join(
-      ARTIFACT_DIRECTORY,
-      `${scenario.id}-${viewport.width}x${viewport.height}.png`,
-    );
-    await writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
-    return { scenario: scenario.id, viewport, screenshotPath, metrics };
-  } finally {
-    client.close();
-    await fetch(
-      `http://127.0.0.1:${debugPort}/json/close/${encodeURIComponent(target.id)}`,
-    ).catch(() => undefined);
   }
+  if (scenario.interact !== undefined) {
+    await scenario.interact(client);
+  }
+  await client.evaluate(
+    `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(async () => {
+      await document.fonts.ready;
+      resolve(true);
+    })))`,
+    true,
+  );
+
+  const metrics = await client.evaluate(scenario.auditExpression(), false);
+  try {
+    scenario.validate(metrics, viewport);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Scenario ${scenario.id} is invalid at ${viewport.width}x${viewport.height}: ${reason}. Metrics: ${JSON.stringify(metrics)}`,
+      { cause: error },
+    );
+  }
+  const screenshot = await client.send("Page.captureScreenshot", {
+    format: "png",
+    fromSurface: true,
+    captureBeyondViewport: false,
+  });
+  const screenshotPath = path.join(
+    ARTIFACT_DIRECTORY,
+    `${scenario.id}-${viewport.width}x${viewport.height}.png`,
+  );
+  await writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
+  return { scenario: scenario.id, viewport, screenshotPath, metrics };
 }
 
 async function waitForPreview(client, readyExpression, scenarioId, timeoutMs = 15_000) {
@@ -8516,14 +8513,6 @@ function resolveBrowserPath() {
   return resolved;
 }
 
-async function fetchJson(url, init) {
-  const response = await fetch(url, init);
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} while accessing ${url}`);
-  }
-  return response.json();
-}
-
 async function terminate(child, options = {}) {
   if (child === undefined || child.exitCode !== null) {
     return;
@@ -8571,33 +8560,47 @@ class CdpClient {
     socket.addEventListener("message", (event) => this.handleMessage(event));
   }
 
-  send(method, params = {}) {
+  async attachToTarget(targetId) {
+    const result = await this.send("Target.attachToTarget", { targetId, flatten: true });
+    const sessionId = result?.sessionId;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      throw new Error("Target.attachToTarget did not return a session id.");
+    }
+    return new CdpSession(this, sessionId);
+  }
+
+  send(method, params = {}, sessionId = undefined) {
     this.nextId += 1;
     const id = this.nextId;
     const response = new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
     });
-    this.socket.send(JSON.stringify({ id, method, params }));
+    const request = { id, method, params };
+    if (sessionId !== undefined) {
+      request.sessionId = sessionId;
+    }
+    this.socket.send(JSON.stringify(request));
     return response;
   }
 
-  waitForEvent(method) {
+  waitForEvent(method, sessionId = undefined) {
+    const eventKey = this.eventKey(method, sessionId);
     return new Promise((resolve, reject) => {
-      const listeners = this.events.get(method) ?? [];
+      const listeners = this.events.get(eventKey) ?? [];
       const settle = (value) => {
         clearTimeout(deadline);
         resolve(value);
       };
       listeners.push(settle);
-      this.events.set(method, listeners);
+      this.events.set(eventKey, listeners);
       const deadline = setTimeout(() => {
-        const pending = this.events.get(method) ?? [];
+        const pending = this.events.get(eventKey) ?? [];
         const listenerIndex = pending.indexOf(settle);
         if (listenerIndex >= 0) {
           pending.splice(listenerIndex, 1);
         }
-        if ((this.events.get(method) ?? []).length === 0) {
-          this.events.delete(method);
+        if ((this.events.get(eventKey) ?? []).length === 0) {
+          this.events.delete(eventKey);
         }
         reject(
           new Error(
@@ -8608,25 +8611,12 @@ class CdpClient {
     });
   }
 
-  async evaluate(expression, awaitPromise) {
-    const response = await this.send("Runtime.evaluate", {
-      expression,
-      awaitPromise,
-      returnByValue: true,
-    });
-    if (response.exceptionDetails !== undefined) {
-      const description =
-        response.exceptionDetails.exception?.description ??
-        response.exceptionDetails.exception?.value ??
-        response.exceptionDetails.text ??
-        "Preview evaluation failed.";
-      throw new Error(String(description));
-    }
-    return response.result.value;
-  }
-
   close() {
     this.socket.close();
+  }
+
+  eventKey(method, sessionId) {
+    return `${sessionId ?? ""}\u0000${method}`;
   }
 
   handleMessage(event) {
@@ -8644,13 +8634,46 @@ class CdpClient {
       }
       return;
     }
-    const listeners = this.events.get(message.method);
+    const eventKey = this.eventKey(message.method, message.sessionId);
+    const listeners = this.events.get(eventKey);
     if (listeners !== undefined) {
-      this.events.delete(message.method);
+      this.events.delete(eventKey);
       for (const listener of listeners) {
         listener(message.params);
       }
     }
+  }
+}
+
+class CdpSession {
+  constructor(client, sessionId) {
+    this.client = client;
+    this.sessionId = sessionId;
+  }
+
+  send(method, params = {}) {
+    return this.client.send(method, params, this.sessionId);
+  }
+
+  waitForEvent(method) {
+    return this.client.waitForEvent(method, this.sessionId);
+  }
+
+  async evaluate(expression, awaitPromise) {
+    const response = await this.send("Runtime.evaluate", {
+      expression,
+      awaitPromise,
+      returnByValue: true,
+    });
+    if (response.exceptionDetails !== undefined) {
+      const description =
+        response.exceptionDetails.exception?.description ??
+        response.exceptionDetails.exception?.value ??
+        response.exceptionDetails.text ??
+        "Preview evaluation failed.";
+      throw new Error(String(description));
+    }
+    return response.result.value;
   }
 }
 
