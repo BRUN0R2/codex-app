@@ -1275,6 +1275,45 @@ mod tests {
     }
 
     #[test]
+    fn preserves_luna_reserve_as_an_additional_usage_bucket() {
+        let payload = serde_json::from_str::<UsagePayload>(
+            r#"{
+                "plan_type": "pro",
+                "additional_rate_limits": [{
+                    "limit_name": "gpt-reserve",
+                    "metered_feature": "base_model_inference",
+                    "rate_limit": {
+                        "secondary_window": {
+                            "used_percent": 14,
+                            "limit_window_seconds": 604800,
+                            "reset_at": 1788735840
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .expect("the usage payload should decode");
+
+        let response = payload
+            .into_domain()
+            .expect("the decoded usage payload should be valid");
+        let reserve = response
+            .rate_limits_by_limit_id
+            .get("base_model_inference")
+            .expect("the Luna Reserve bucket must be preserved");
+
+        assert_eq!(reserve.limit_name.as_deref(), Some("gpt-reserve"));
+        assert_eq!(
+            reserve
+                .secondary
+                .as_ref()
+                .expect("a weekly window must be present")
+                .used_percent,
+            14.0
+        );
+    }
+
+    #[test]
     fn normalizes_reset_timestamps_to_unix_milliseconds() {
         let payload = serde_json::from_str::<UsagePayload>(
             r#"{

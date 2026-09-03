@@ -13,6 +13,7 @@ import { Portal } from "solid-js/web";
 import type { ProjectRecord, ThreadSummary } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
+import { openExternalUrl } from "../infrastructure/codexClient";
 import type { AppController } from "../state/appController";
 import {
   hexToHsv,
@@ -65,7 +66,9 @@ import { pathsEqual } from "../state/projects";
 import { threadsWithoutConfiguredProject } from "../state/sidebarThreads";
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { CodexGlyph } from "./CodexGlyph";
+import { formatShortDate } from "./dateFormat";
 import { Icon, type IconName } from "./Icon";
+import { presentLunaReserveUsage } from "./lunaReserve";
 import type { SettingsPage } from "./SettingsDialog";
 
 const MAX_VISIBLE_PROJECT_GROUPS = 5;
@@ -612,6 +615,7 @@ export function Sidebar(props: SidebarProps) {
       <footer class="sidebar-footer">
         <Show when={!props.collapsed && accountMenuOpen()}>
           <div aria-label={messages().account} class="account-menu" id="account-menu" role="menu">
+            <LunaReserveCard response={() => props.controller.rateLimits()} />
             <div class="account-menu-identity" role="presentation">
               <AccountAvatar account={props.controller.account()?.account} />
               <strong>{accountLabel(props.controller)}</strong>
@@ -1053,6 +1057,67 @@ function ThreadButton(props: ThreadButtonProps) {
         </div>
       </Show>
     </div>
+  );
+}
+
+function LunaReserveCard(props: {
+  readonly response: () => ReturnType<SidebarController["rateLimits"]>;
+}) {
+  const i18n = useI18n();
+  const messages = () => i18n.messages().sidebar;
+  const usage = () => presentLunaReserveUsage(props.response());
+
+  return (
+    <Show when={usage()}>
+      {(current) => {
+        const reserve = current();
+        const resetDate =
+          reserve.resetAt === null
+            ? i18n.messages().common.soon
+            : formatShortDate(reserve.resetAt, i18n.locale(), i18n.messages().common.soon);
+        return (
+          <section aria-label={messages().lunaReserve} class="luna-reserve-card">
+            <div class="luna-reserve-heading">
+              <span aria-hidden="true" class="luna-reserve-icon">
+                🌙
+              </span>
+              <strong>
+                {formatMessage(messages().lunaReserveRemaining, {
+                  percent: reserve.remainingPercent,
+                })}
+              </strong>
+            </div>
+            <progress
+              aria-label={formatMessage(messages().lunaReserveRemaining, {
+                percent: reserve.remainingPercent,
+              })}
+              class="luna-reserve-progress"
+              max={100}
+              value={reserve.remainingPercent}
+            >
+              {reserve.remainingPercent}%
+            </progress>
+            <small class="luna-reserve-reset">
+              {formatMessage(messages().lunaReserveReset, { date: resetDate })}
+            </small>
+            <div class="luna-reserve-actions">
+              <button
+                onClick={() => void openExternalUrl("https://chatgpt.com/membership/plans")}
+                type="button"
+              >
+                {messages().upgrade}
+              </button>
+              <button
+                onClick={() => void openExternalUrl("https://chatgpt.com/settings/billing")}
+                type="button"
+              >
+                {messages().addCredits}
+              </button>
+            </div>
+          </section>
+        );
+      }}
+    </Show>
   );
 }
 

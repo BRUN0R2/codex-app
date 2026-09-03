@@ -1331,6 +1331,21 @@ const PREVIEW_RATE_LIMITS = {
       planType: "pro",
       rateLimitReachedType: null,
     },
+    base_model_inference: {
+      limitId: "base_model_inference",
+      limitName: "gpt-reserve",
+      primary: null,
+      secondary: {
+        usedPercent: 14,
+        windowDurationMins: 10_080,
+        resetsAt: Date.parse("2026-09-07T00:04:00-03:00"),
+      },
+      credits: null,
+      individualLimit: null,
+      spendControlReached: null,
+      planType: "pro",
+      rateLimitReachedType: null,
+    },
   },
   planPrice: { amount: 52_500, currency: "BRL", minorUnitExponent: 2 },
 } as const satisfies AccountRateLimitsResponse;

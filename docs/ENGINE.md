@@ -71,6 +71,12 @@ Regenerate them only intentionally:
 cargo test --locked --manifest-path src-tauri/Cargo.toml engine::contracts_fixtures::tests::regenerate_golden_contract_fixtures -- --ignored
 ```
 
+Account usage preserves the provider's additional limit buckets. When the
+server supplies the `gpt-reserve` bucket, the account menu presents its Luna
+Reserve balance using the longest available quota window and links to the
+official plan and credit pages. The card is a presentation of server-provided
+usage; it does not infer or silently switch the active model from percentages.
+
 ## Models, instructions, and context
 
 Consumer Chat and Codex use separate protocols and catalogs. The Codex catalog
