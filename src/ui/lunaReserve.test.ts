@@ -18,7 +18,10 @@ function snapshot(overrides: Partial<RateLimitSnapshot> = {}): RateLimitSnapshot
   };
 }
 
-function response(reserve: RateLimitSnapshot): AccountRateLimitsResponse {
+function response(
+  reserve: RateLimitSnapshot,
+  lunaReserveAvailable = true,
+): AccountRateLimitsResponse {
   return {
     rateLimits: {
       ...snapshot(),
@@ -34,7 +37,7 @@ function response(reserve: RateLimitSnapshot): AccountRateLimitsResponse {
       base_model_inference: reserve,
     },
     planPrice: null,
-    lunaReserveAvailable: false,
+    lunaReserveAvailable,
   };
 }
 
@@ -59,6 +62,19 @@ describe("Luna Reserve usage", () => {
   it("does not invent a reserve card when the bucket has no usable window", () => {
     expect(presentLunaReserveUsage(response(snapshot()))).toBeNull();
     expect(presentLunaReserveUsage(null)).toBeNull();
+  });
+
+  it("keeps a historical reserve bucket hidden while reserve is not active", () => {
+    expect(
+      presentLunaReserveUsage(
+        response(
+          snapshot({
+            secondary: { usedPercent: 14, windowDurationMins: 10_080, resetsAt: 2_000 },
+          }),
+          false,
+        ),
+      ),
+    ).toBeNull();
   });
 
   it("does not confuse another additional bucket with Luna Reserve", () => {

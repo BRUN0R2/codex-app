@@ -1558,12 +1558,18 @@ pre {
   justify-content: center;
 }
 
-.account-menu {
+.account-popover {
   position: absolute;
   z-index: 35;
   right: 7px;
   bottom: calc(100% + 2px);
   left: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.account-menu {
   padding: 7px;
   border: 1px solid #414141;
   border-radius: 14px;
@@ -1571,11 +1577,10 @@ pre {
 }
 
 .luna-reserve-card {
-  margin: 0 0 7px;
-  padding: 9px 10px 10px;
-  border: 1px solid #3b3b3b;
-  border-radius: 12px;
-  background: #242424;
+  padding: 10px 11px 11px;
+  border: 1px solid #414141;
+  border-radius: 14px;
+  background: #2a2a2a;
 }
 
 .luna-reserve-heading {

@@ -194,7 +194,7 @@ export function Sidebar(props: SidebarProps) {
       setBrandMenuOpen(false);
       return;
     }
-    if (event.target.closest(".sidebar-account-trigger, #account-menu") === null) {
+    if (event.target.closest(".sidebar-account-trigger, #account-popover") === null) {
       setAccountMenuOpen(false);
     }
     if (event.target.closest(".sidebar-brand, .brand-menu") === null) {
@@ -622,49 +622,56 @@ export function Sidebar(props: SidebarProps) {
       <footer class="sidebar-footer">
         <div class="sidebar-footer-account">
           <Show when={!props.collapsed && accountMenuOpen()}>
-            <div aria-label={messages().account} class="account-menu" id="account-menu" role="menu">
+            <div class="account-popover" id="account-popover">
               <LunaReserveCard response={() => props.controller.rateLimits()} />
-              <div class="account-menu-identity" role="presentation">
-                <AccountAvatar account={props.controller.account()?.account} />
-                <strong>{accountLabel(props.controller)}</strong>
+              <div
+                aria-label={messages().account}
+                class="account-menu"
+                id="account-menu"
+                role="menu"
+              >
+                <div class="account-menu-identity" role="presentation">
+                  <AccountAvatar account={props.controller.account()?.account} />
+                  <strong>{accountLabel(props.controller)}</strong>
+                </div>
+                <hr class="account-menu-separator" />
+                <button
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    props.onOpenSettings("usage");
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="creditCard" size={15} />
+                  <span>{messages().remainingUsage}</span>
+                  <small class="usage-badge">{remainingUsageLabel(props.controller)}</small>
+                  <Icon name="chevronRight" size={13} />
+                </button>
+                <button
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    props.onOpenSettings();
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="settings" size={15} />
+                  <span>{messages().settings}</span>
+                  <kbd>Ctrl+,</kbd>
+                </button>
+                <button
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    void props.controller.logout();
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="logout" size={15} />
+                  <span>{messages().signOut}</span>
+                </button>
               </div>
-              <hr class="account-menu-separator" />
-              <button
-                onClick={() => {
-                  setAccountMenuOpen(false);
-                  props.onOpenSettings("usage");
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <Icon name="creditCard" size={15} />
-                <span>{messages().remainingUsage}</span>
-                <small class="usage-badge">{remainingUsageLabel(props.controller)}</small>
-                <Icon name="chevronRight" size={13} />
-              </button>
-              <button
-                onClick={() => {
-                  setAccountMenuOpen(false);
-                  props.onOpenSettings();
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <Icon name="settings" size={15} />
-                <span>{messages().settings}</span>
-                <kbd>Ctrl+,</kbd>
-              </button>
-              <button
-                onClick={() => {
-                  setAccountMenuOpen(false);
-                  void props.controller.logout();
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <Icon name="logout" size={15} />
-                <span>{messages().signOut}</span>
-              </button>
             </div>
           </Show>
           <div class="sidebar-footer-row">

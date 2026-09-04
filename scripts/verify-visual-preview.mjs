@@ -1298,16 +1298,17 @@ function sidebarLayoutVisualAuditExpression({ requireReserveCard = true } = {}) 
     const sidebar = document.querySelector(".sidebar");
     const splitter = document.querySelector(".sidebar-splitter");
     const main = document.querySelector(".main-panel");
-    const card = document.querySelector("#account-menu .luna-reserve-card");
-    const accountIdentity = document.querySelector("#account-menu .account-menu-identity");
+    const card = document.querySelector("#account-popover > .luna-reserve-card");
+    const accountMenu = document.querySelector("#account-popover > #account-menu");
     if (
       !(root instanceof HTMLElement) ||
       !(sidebar instanceof HTMLElement) ||
       !(splitter instanceof HTMLElement) ||
       !(main instanceof HTMLElement) ||
-      (${requireReserveCard} && !(card instanceof HTMLElement))
+      (${requireReserveCard} &&
+        (!(card instanceof HTMLElement) || !(accountMenu instanceof HTMLElement)))
     ) {
-      throw new Error("The sidebar layout or Luna Reserve account menu is incomplete.");
+      throw new Error("The sidebar layout or Luna Reserve account popover is incomplete.");
     }
     return {
       viewport: { width: innerWidth, height: innerHeight },
@@ -1316,6 +1317,8 @@ function sidebarLayoutVisualAuditExpression({ requireReserveCard = true } = {}) 
       splitter: rectangle(splitter, ".sidebar-splitter"),
       main: rectangle(main, ".main-panel"),
       card: card instanceof HTMLElement ? rectangle(card, ".luna-reserve-card") : null,
+      accountMenu:
+        accountMenu instanceof HTMLElement ? rectangle(accountMenu, "#account-menu") : null,
       cardDisplay: card instanceof HTMLElement ? getComputedStyle(card).display : null,
       cardVisible: (() => {
         if (!(card instanceof HTMLElement)) {
@@ -1335,16 +1338,16 @@ function sidebarLayoutVisualAuditExpression({ requireReserveCard = true } = {}) 
       ariaOrientation: splitter.getAttribute("aria-orientation"),
       ariaText: splitter.getAttribute("aria-valuetext"),
       role: splitter.getAttribute("role") ?? (splitter.tagName === "HR" ? "separator" : null),
-      sidebarFooterReserveCardCount: document.querySelectorAll(
-        ".sidebar-footer-reserve > .luna-reserve-card",
+      accountPopoverReserveCardCount: document.querySelectorAll(
+        "#account-popover > .luna-reserve-card",
       ).length,
       accountMenuReserveCardCount: document.querySelectorAll("#account-menu .luna-reserve-card")
         .length,
       accountMenuVisible: document.querySelector("#account-menu") instanceof HTMLElement,
-      reserveBeforeProfile:
+      reserveAboveMenu:
         card instanceof HTMLElement &&
-        accountIdentity instanceof HTMLElement &&
-        Boolean(card.compareDocumentPosition(accountIdentity) & Node.DOCUMENT_POSITION_FOLLOWING),
+        accountMenu instanceof HTMLElement &&
+        card.getBoundingClientRect().bottom < accountMenu.getBoundingClientRect().top,
       persistedWidth: localStorage.getItem("codex-desktop.profile-v2.sidebar-width"),
       interaction: window.__previewSidebarWidthInteraction ?? null,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
@@ -4744,8 +4747,8 @@ function activeActivityReflectionVisualAuditExpression() {
         : item.getBoundingClientRect().top - previous.getBoundingClientRect().bottom;
     });
     const sidebar = document.querySelector(".sidebar");
-    const sidebarFooterReserveCard = document.querySelector(
-      ".sidebar-footer-reserve > .luna-reserve-card",
+    const accountPopoverReserveCard = document.querySelector(
+      "#account-popover > .luna-reserve-card",
     );
     const selectedThread = document.querySelector(".thread-row.active");
     const selectedThreadStyle =
@@ -4842,7 +4845,7 @@ function activeActivityReflectionVisualAuditExpression() {
       alignmentError,
       sidebarItemGaps,
       sidebarWidth: sidebar instanceof HTMLElement ? sidebar.getBoundingClientRect().width : null,
-      sidebarFooterReserveCard: sidebarFooterReserveCard instanceof HTMLElement,
+      accountPopoverReserveCard: accountPopoverReserveCard instanceof HTMLElement,
       accountMenuReserveCardCount: document.querySelectorAll("#account-menu .luna-reserve-card")
         .length,
       selectedThreadBackground: selectedThreadStyle?.backgroundColor ?? null,
@@ -6829,22 +6832,26 @@ function validateSidebarLayoutMetrics(metrics, viewport) {
     `unexpected sidebar-layout viewport at ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.horizontalOverflow <= tolerance, "the sidebar layout created horizontal overflow");
-  assert(metrics.cardDisplay !== "none", "the Luna Reserve card is hidden inside the account popover");
-  assert(metrics.cardVisible === true, "the Luna Reserve card is covered inside the account popover");
+  assert(metrics.cardDisplay !== "none", "the Luna Reserve panel is hidden");
+  assert(metrics.cardVisible === true, "the Luna Reserve panel is covered");
   assert(
-    metrics.sidebarFooterReserveCardCount === 0,
-    "the Luna Reserve card is rendered outside the account popover",
+    metrics.accountPopoverReserveCardCount === 1,
+    "the Luna Reserve panel is duplicated or missing from the account popover stack",
   );
   assert(
-    metrics.accountMenuReserveCardCount === 1,
-    "the Luna Reserve card is duplicated or missing inside the account popover",
+    metrics.accountMenuReserveCardCount === 0,
+    "the Luna Reserve panel is nested inside the profile menu",
   );
-  assert(metrics.reserveBeforeProfile === true, "the profile menu is rendered above the Luna Reserve card");
+  assert(metrics.reserveAboveMenu === true, "the profile menu is rendered above the Luna Reserve panel");
   assert(metrics.accountMenuVisible === true, "the account popover did not open for its action check");
   assert(metrics.splitterDisplay !== "none", "the sidebar splitter is hidden");
   assert(Math.abs(metrics.splitter.width - 8) <= tolerance, "the sidebar splitter lost its 8px target");
   assert(metrics.sidebar.width >= 360 - tolerance, "the default sidebar is too narrow");
   assert(metrics.card.width >= 320 - tolerance, "the Luna Reserve card remains too narrow");
+  assert(
+    metrics.accountMenu !== null && metrics.accountMenu.top - metrics.card.bottom >= 6,
+    "the Luna Reserve panel is not visually separated from the profile menu",
+  );
   assert(
     Math.abs(metrics.sidebar.right - metrics.splitter.left) <= tolerance &&
       Math.abs(metrics.splitter.right - metrics.main.left) <= tolerance &&
@@ -6972,7 +6979,7 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
     `sidebar items remain visually crowded: ${JSON.stringify(metrics.sidebarItemGaps)}`,
   );
   assert(
-    metrics.sidebarFooterReserveCard === false && metrics.accountMenuReserveCardCount === 0,
+    metrics.accountPopoverReserveCard === false && metrics.accountMenuReserveCardCount === 0,
     "the Luna Reserve card is rendered outside the closed account popover",
   );
   assert(

@@ -15,7 +15,7 @@ export interface LunaReserveUsage {
 export function presentLunaReserveUsage(
   response: AccountRateLimitsResponse | null | undefined,
 ): LunaReserveUsage | null {
-  if (response === null || response === undefined) {
+  if (response === null || response === undefined || !response.lunaReserveAvailable) {
     return null;
   }
 
