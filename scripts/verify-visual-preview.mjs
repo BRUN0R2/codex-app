@@ -270,6 +270,15 @@ const SCENARIOS = [
     validate: validateActiveActivityReflectionMetrics,
   },
   {
+    id: "sidebar-layout",
+    url: HOME_PREVIEW_URL,
+    readyExpression: `document.querySelector(".sidebar-splitter") !== null &&
+      document.querySelector(".sidebar-footer-reserve > .luna-reserve-card") !== null`,
+    interact: exerciseSidebarWidthInteraction,
+    auditExpression: sidebarLayoutVisualAuditExpression,
+    validate: validateSidebarLayoutMetrics,
+  },
+  {
     id: "reasoning-activity-reflection",
     url: REASONING_REFLECTION_PREVIEW_URL,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
@@ -1265,6 +1274,72 @@ function browserPanelVisualAuditExpression() {
       navigationButtons: panel.querySelectorAll(".browser-toolbar > .browser-toolbar-button").length,
       addressInputs: panel.querySelectorAll('.browser-address input[aria-label="Pesquisar ou digitar endereço"]').length,
       previewPages: panel.querySelectorAll(".browser-preview-page").length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function sidebarLayoutVisualAuditExpression() {
+  return `(() => {
+    const rectangle = (element, label) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Missing element: " + label);
+      }
+      const bounds = element.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    const root = document.querySelector(".app-shell");
+    const sidebar = document.querySelector(".sidebar");
+    const splitter = document.querySelector(".sidebar-splitter");
+    const main = document.querySelector(".main-panel");
+    const card = document.querySelector(".sidebar-footer-reserve > .luna-reserve-card");
+    if (
+      !(root instanceof HTMLElement) ||
+      !(sidebar instanceof HTMLElement) ||
+      !(splitter instanceof HTMLElement) ||
+      !(main instanceof HTMLElement) ||
+      !(card instanceof HTMLElement)
+    ) {
+      throw new Error("The persistent sidebar layout is incomplete.");
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      root: rectangle(root, ".app-shell"),
+      sidebar: rectangle(sidebar, ".sidebar"),
+      splitter: rectangle(splitter, ".sidebar-splitter"),
+      main: rectangle(main, ".main-panel"),
+      card: rectangle(card, ".luna-reserve-card"),
+      cardDisplay: getComputedStyle(card).display,
+      cardVisible: (() => {
+        const bounds = card.getBoundingClientRect();
+        const hit = document.elementFromPoint(
+          bounds.left + bounds.width / 2,
+          bounds.top + bounds.height / 2,
+        );
+        return hit !== null && card.contains(hit);
+      })(),
+      splitterDisplay: getComputedStyle(splitter).display,
+      ariaMaximum: Number(splitter.getAttribute("aria-valuemax")),
+      ariaMinimum: Number(splitter.getAttribute("aria-valuemin")),
+      ariaNow: Number(splitter.getAttribute("aria-valuenow")),
+      ariaOrientation: splitter.getAttribute("aria-orientation"),
+      ariaText: splitter.getAttribute("aria-valuetext"),
+      role: splitter.getAttribute("role") ?? (splitter.tagName === "HR" ? "separator" : null),
+      persistentReserveCard: document.querySelectorAll(
+        ".sidebar-footer-reserve > .luna-reserve-card",
+      ).length,
+      accountMenuReserveCardCount: document.querySelectorAll("#account-menu .luna-reserve-card")
+        .length,
+      accountMenuVisible: document.querySelector("#account-menu") instanceof HTMLElement,
+      persistedWidth: localStorage.getItem("codex-desktop.profile-v2.sidebar-width"),
+      interaction: window.__previewSidebarWidthInteraction ?? null,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
@@ -3191,6 +3266,117 @@ async function exerciseHighlightedReadInteraction(client) {
   });
 }
 
+async function exerciseSidebarWidthInteraction(client) {
+  const initial = await client.evaluate(sidebarLayoutVisualAuditExpression(), false);
+  const pointer = {
+    startX: initial.splitter.left + initial.splitter.width / 2,
+    targetX: initial.sidebar.left + 420 + initial.splitter.width / 2,
+    y: initial.splitter.top + Math.min(120, initial.splitter.height / 2),
+  };
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: pointer.startX,
+    y: pointer.y,
+  });
+  await client.send("Input.dispatchMouseEvent", {
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+    type: "mousePressed",
+    x: pointer.startX,
+    y: pointer.y,
+  });
+  for (let step = 1; step <= 5; step += 1) {
+    await client.send("Input.dispatchMouseEvent", {
+      button: "left",
+      buttons: 1,
+      type: "mouseMoved",
+      x: pointer.startX + ((pointer.targetX - pointer.startX) * step) / 5,
+      y: pointer.y,
+    });
+  }
+  await client.send("Input.dispatchMouseEvent", {
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+    type: "mouseReleased",
+    x: pointer.targetX,
+    y: pointer.y,
+  });
+  await client.evaluate(
+    `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+    true,
+  );
+  const dragged = await client.evaluate(sidebarLayoutVisualAuditExpression(), false);
+
+  await client.evaluate(`document.querySelector(".sidebar-splitter")?.focus()`, false);
+  await client.send("Input.dispatchKeyEvent", {
+    code: "ArrowRight",
+    key: "ArrowRight",
+    nativeVirtualKeyCode: 39,
+    type: "keyDown",
+    windowsVirtualKeyCode: 39,
+  });
+  await client.send("Input.dispatchKeyEvent", {
+    code: "ArrowRight",
+    key: "ArrowRight",
+    nativeVirtualKeyCode: 39,
+    type: "keyUp",
+    windowsVirtualKeyCode: 39,
+  });
+  await client.evaluate(
+    `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+    true,
+  );
+  const keyboard = await client.evaluate(sidebarLayoutVisualAuditExpression(), false);
+
+  const reset = {
+    x: keyboard.splitter.left + keyboard.splitter.width / 2,
+    y: keyboard.splitter.top + Math.min(120, keyboard.splitter.height / 2),
+  };
+  await client.send("Input.dispatchMouseEvent", {
+    button: "left",
+    buttons: 1,
+    clickCount: 2,
+    type: "mousePressed",
+    x: reset.x,
+    y: reset.y,
+  });
+  await client.send("Input.dispatchMouseEvent", {
+    button: "left",
+    buttons: 0,
+    clickCount: 2,
+    type: "mouseReleased",
+    x: reset.x,
+    y: reset.y,
+  });
+  await client.evaluate(
+    `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+    true,
+  );
+  const restored = await client.evaluate(sidebarLayoutVisualAuditExpression(), false);
+  await client.evaluate(
+    `document.querySelector(".sidebar-account-trigger")?.click()`,
+    false,
+  );
+  await client.evaluate(
+    `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+    true,
+  );
+  const accountMenuOpen = await client.evaluate(sidebarLayoutVisualAuditExpression(), false);
+  await client.evaluate(
+    `window.__previewSidebarWidthInteraction = ${JSON.stringify({
+      accountMenuOpen,
+      dragged,
+      initial,
+      keyboard,
+      restored,
+      supported: true,
+    })}`,
+    false,
+  );
+}
+
 async function exerciseWorkspaceSplitInteraction(client) {
   const initial = await client.evaluate(workspaceSplitVisualStateExpression(), false);
   if (initial.splitterDisplay === "none") {
@@ -4538,6 +4724,10 @@ function activeActivityReflectionVisualAuditExpression() {
         ? null
         : item.getBoundingClientRect().top - previous.getBoundingClientRect().bottom;
     });
+    const sidebar = document.querySelector(".sidebar");
+    const persistentReserveCard = document.querySelector(
+      ".sidebar-footer-reserve > .luna-reserve-card",
+    );
     const selectedThread = document.querySelector(".thread-row.active");
     const selectedThreadStyle =
       selectedThread instanceof HTMLElement ? getComputedStyle(selectedThread) : null;
@@ -4632,6 +4822,10 @@ function activeActivityReflectionVisualAuditExpression() {
       pausePositions,
       alignmentError,
       sidebarItemGaps,
+      sidebarWidth: sidebar instanceof HTMLElement ? sidebar.getBoundingClientRect().width : null,
+      persistentReserveCard: persistentReserveCard instanceof HTMLElement,
+      accountMenuReserveCardCount: document.querySelectorAll("#account-menu .luna-reserve-card")
+        .length,
       selectedThreadBackground: selectedThreadStyle?.backgroundColor ?? null,
       selectedThreadBoxShadow: selectedThreadStyle?.boxShadow ?? null,
       planExplanationCount: document.querySelectorAll(".plan-progress-explanation").length,
@@ -6606,6 +6800,64 @@ function validateModelCatalogWarmupMetrics(metrics, viewport) {
   assert(metrics.draft === "Preparar catálogo antes do envio", "catalog warmup changed the draft");
 }
 
+function validateSidebarLayoutMetrics(metrics, viewport) {
+  const tolerance = 1;
+  const interaction = metrics.interaction;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `unexpected sidebar-layout viewport at ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "the sidebar layout created horizontal overflow");
+  assert(metrics.cardDisplay !== "none", "the persistent Luna Reserve card is hidden");
+  assert(metrics.cardVisible === true, "the account popover covers the Luna Reserve card");
+  assert(metrics.persistentReserveCard === 1, "the persistent Luna Reserve card is duplicated or missing");
+  assert(
+    metrics.accountMenuReserveCardCount === 0,
+    "the Luna Reserve card is still rendered inside the account popover",
+  );
+  assert(metrics.accountMenuVisible === true, "the account popover did not open for its action check");
+  assert(metrics.splitterDisplay !== "none", "the sidebar splitter is hidden");
+  assert(Math.abs(metrics.splitter.width - 8) <= tolerance, "the sidebar splitter lost its 8px target");
+  assert(metrics.sidebar.width >= 360 - tolerance, "the default sidebar is too narrow");
+  assert(metrics.card.width >= 320 - tolerance, "the Luna Reserve card remains too narrow");
+  assert(
+    Math.abs(metrics.sidebar.right - metrics.splitter.left) <= tolerance &&
+      Math.abs(metrics.splitter.right - metrics.main.left) <= tolerance &&
+      Math.abs(metrics.main.right - metrics.root.right) <= tolerance,
+    "the sidebar, splitter, and main panel do not fill the application grid",
+  );
+  assert(metrics.main.width >= 430 - tolerance, "resizing the sidebar squeezed the main panel");
+  assert(metrics.role === "separator", "the sidebar splitter lacks an accessible separator role");
+  assert(
+    metrics.ariaOrientation === "vertical" &&
+      metrics.ariaMinimum <= metrics.ariaNow &&
+      metrics.ariaNow <= metrics.ariaMaximum,
+    "the sidebar splitter exposes invalid accessible bounds",
+  );
+  assert(
+    typeof metrics.ariaText === "string" && metrics.ariaText.includes("Largura da barra lateral"),
+    "the sidebar splitter does not describe its current width",
+  );
+  assert(
+    interaction?.supported === true,
+    "the sidebar splitter interaction did not run",
+  );
+  assert(
+    interaction.dragged.sidebar.width > interaction.initial.sidebar.width + 40,
+    "pointer dragging did not expand the sidebar",
+  );
+  assert(
+    interaction.keyboard.sidebar.width > interaction.dragged.sidebar.width,
+    "the keyboard did not adjust the sidebar width",
+  );
+  assert(
+    Math.abs(interaction.restored.sidebar.width - 360) <= tolerance &&
+      Number(interaction.restored.persistedWidth) === 360 &&
+      metrics.sidebar.width === 360,
+    "double-click did not restore and persist the default sidebar width",
+  );
+}
+
 function validateActiveActivityReflectionMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
@@ -6693,6 +6945,14 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
     metrics.sidebarItemGaps.length > 0 &&
       metrics.sidebarItemGaps.every((gap) => gap !== null && gap >= 3.5),
     `sidebar items remain visually crowded: ${JSON.stringify(metrics.sidebarItemGaps)}`,
+  );
+  assert(
+    metrics.persistentReserveCard === true && metrics.accountMenuReserveCardCount === 0,
+    "the Luna Reserve card is still coupled to the account popover",
+  );
+  assert(
+    metrics.sidebarWidth !== null && metrics.sidebarWidth >= 360 - tolerance,
+    `the default sidebar is too narrow for the Luna Reserve summary: ${metrics.sidebarWidth}`,
   );
   assert(
     metrics.selectedThreadBackground === "rgba(255, 255, 255, 0.12)",

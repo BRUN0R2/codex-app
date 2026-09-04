@@ -26,6 +26,13 @@ import { Icon } from "./Icon";
 import { LatestTurnFileChangeStore } from "./reviewChanges";
 import type { SettingsPage } from "./SettingsDialog";
 import { Sidebar } from "./Sidebar";
+import {
+  readSidebarWidth,
+  resolveSidebarWidthMetrics,
+  SIDEBAR_WIDTH_DEFAULT_PX,
+  sidebarWidthFromPointer,
+  writeSidebarWidth,
+} from "./sidebarWidth";
 import { Timeline } from "./Timeline";
 import { TurnProgress } from "./TurnProgress";
 import { shouldShowTurnProgress } from "./turnProgressVisibility";
@@ -72,6 +79,11 @@ export function AppShell(props: { readonly controller: AppController }) {
   const reviewChangeStore = new LatestTurnFileChangeStore();
   const browserController = createBrowserController(props.controller.reportError);
   const [workspaceTabs, setWorkspaceTabs] = createSignal(emptyWorkspaceTabsState());
+  const [sidebarWidth, setSidebarWidth] = createSignal(readSidebarWidth());
+  const [sidebarWidthMetrics, setSidebarWidthMetrics] = createSignal(
+    resolveSidebarWidthMetrics(sidebarWidth(), 0),
+  );
+  const [sidebarResizing, setSidebarResizing] = createSignal(false);
   const [workspaceSplitRatio, setWorkspaceSplitRatio] = createSignal(readWorkspaceSplitRatio());
   const [workspaceSplitMetrics, setWorkspaceSplitMetrics] = createSignal(
     resolveWorkspaceSplitMetrics(workspaceSplitRatio(), 0),
@@ -97,12 +109,16 @@ export function AppShell(props: { readonly controller: AppController }) {
   let nextDraftRequestId = 0;
   let chatPageElement: HTMLElement | undefined;
   let chatDockElement: HTMLDivElement | undefined;
+  let appShellElement: HTMLDivElement | undefined;
   let mainPanelContentElement: HTMLDivElement | undefined;
+  let sidebarSplitterElement: HTMLHRElement | undefined;
   let workspaceSplitterElement: HTMLHRElement | undefined;
   let chatDockResizeObserver: ResizeObserver | undefined;
+  let sidebarWidthResizeObserver: ResizeObserver | undefined;
   let workspaceSplitResizeObserver: ResizeObserver | undefined;
   let chatDockResizeFrame: number | undefined;
   let workspaceSplitPointerId: number | undefined;
+  let sidebarWidthPointerId: number | undefined;
   let disposed = false;
   const eventUnlisteners: Array<() => void> = [];
 
@@ -331,6 +347,105 @@ export function AppShell(props: { readonly controller: AppController }) {
     });
   }
 
+  function synchronizeSidebarWidthGeometry(requestedWidth = sidebarWidth()): void {
+    if (appShellElement === undefined) {
+      return;
+    }
+    if (sidebarCollapsed()) {
+      appShellElement.style.removeProperty("--sidebar-width");
+      return;
+    }
+    const metrics = resolveSidebarWidthMetrics(
+      requestedWidth,
+      appShellElement.getBoundingClientRect().width,
+    );
+    setSidebarWidthMetrics(metrics);
+    appShellElement.style.setProperty("--sidebar-width", `${metrics.width}px`);
+  }
+
+  function commitSidebarWidth(requestedWidth: number, persist: boolean): void {
+    if (appShellElement === undefined) {
+      return;
+    }
+    const metrics = resolveSidebarWidthMetrics(
+      requestedWidth,
+      appShellElement.getBoundingClientRect().width,
+    );
+    setSidebarWidth(metrics.width);
+    setSidebarWidthMetrics(metrics);
+    appShellElement.style.setProperty("--sidebar-width", `${metrics.width}px`);
+    if (persist) {
+      writeSidebarWidth(metrics.width);
+    }
+  }
+
+  function updateSidebarWidthFromPointer(event: PointerEvent): void {
+    if (sidebarWidthPointerId !== event.pointerId || appShellElement === undefined) {
+      return;
+    }
+    const bounds = appShellElement.getBoundingClientRect();
+    commitSidebarWidth(sidebarWidthFromPointer(event.clientX, bounds.left, bounds.width), false);
+  }
+
+  function handleSidebarWidthPointerDown(event: PointerEvent): void {
+    if (event.button !== 0 || sidebarWidthPointerId !== undefined || settingsOpen()) {
+      return;
+    }
+    event.preventDefault();
+    sidebarWidthPointerId = event.pointerId;
+    setSidebarResizing(true);
+    sidebarSplitterElement?.setPointerCapture(event.pointerId);
+    updateSidebarWidthFromPointer(event);
+  }
+
+  function endSidebarWidthPointerDrag(event: PointerEvent, releaseCapture: boolean): void {
+    if (sidebarWidthPointerId !== event.pointerId) {
+      return;
+    }
+    sidebarWidthPointerId = undefined;
+    setSidebarResizing(false);
+    writeSidebarWidth(sidebarWidth());
+    if (releaseCapture && sidebarSplitterElement?.hasPointerCapture(event.pointerId) === true) {
+      sidebarSplitterElement.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function cancelSidebarWidthPointerDrag(): void {
+    const pointerId = sidebarWidthPointerId;
+    sidebarWidthPointerId = undefined;
+    setSidebarResizing(false);
+    if (pointerId !== undefined && sidebarSplitterElement?.hasPointerCapture(pointerId) === true) {
+      sidebarSplitterElement.releasePointerCapture(pointerId);
+    }
+  }
+
+  function handleSidebarWidthKeyDown(event: KeyboardEvent): void {
+    if (settingsOpen()) {
+      return;
+    }
+    const metrics = sidebarWidthMetrics();
+    const step = event.shiftKey ? 64 : 16;
+    let requestedWidth: number;
+    switch (event.key) {
+      case "ArrowLeft":
+        requestedWidth = metrics.width - step;
+        break;
+      case "ArrowRight":
+        requestedWidth = metrics.width + step;
+        break;
+      case "Home":
+        requestedWidth = metrics.minimumWidth;
+        break;
+      case "End":
+        requestedWidth = metrics.maximumWidth;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    commitSidebarWidth(requestedWidth, true);
+  }
+
   function synchronizeWorkspaceSplitGeometry(requestedRatio = workspaceSplitRatio()): void {
     if (mainPanelContentElement === undefined) {
       return;
@@ -424,6 +539,16 @@ export function AppShell(props: { readonly controller: AppController }) {
   }
 
   createEffect(() => {
+    const collapsed = sidebarCollapsed();
+    if (collapsed) {
+      cancelSidebarWidthPointerDrag();
+      appShellElement?.style.removeProperty("--sidebar-width");
+      return;
+    }
+    queueMicrotask(() => synchronizeSidebarWidthGeometry());
+  });
+
+  createEffect(() => {
     if (activeSurface() !== "chat" || !workspaceTabs().visible) {
       const pointerId = workspaceSplitPointerId;
       workspaceSplitPointerId = undefined;
@@ -446,6 +571,11 @@ export function AppShell(props: { readonly controller: AppController }) {
       chatDockResizeObserver = new ResizeObserver(scheduleChatDockInset);
       chatDockResizeObserver.observe(chatDockElement);
       scheduleChatDockInset();
+    }
+    if (appShellElement !== undefined) {
+      sidebarWidthResizeObserver = new ResizeObserver(() => synchronizeSidebarWidthGeometry());
+      sidebarWidthResizeObserver.observe(appShellElement);
+      synchronizeSidebarWidthGeometry();
     }
     if (mainPanelContentElement !== undefined) {
       workspaceSplitResizeObserver = new ResizeObserver(() => synchronizeWorkspaceSplitGeometry());
@@ -475,7 +605,9 @@ export function AppShell(props: { readonly controller: AppController }) {
     }
     window.removeEventListener("keydown", handleKeyboardShortcut);
     chatDockResizeObserver?.disconnect();
+    sidebarWidthResizeObserver?.disconnect();
     workspaceSplitResizeObserver?.disconnect();
+    cancelSidebarWidthPointerDrag();
     if (chatDockResizeFrame !== undefined) {
       cancelAnimationFrame(chatDockResizeFrame);
     }
@@ -485,7 +617,9 @@ export function AppShell(props: { readonly controller: AppController }) {
       class="app-shell"
       classList={{
         "sidebar-collapsed": sidebarCollapsed(),
+        "sidebar-resizing": sidebarResizing(),
       }}
+      ref={appShellElement}
     >
       <Sidebar
         automationsActive={activeSurface() === "automations"}
@@ -503,6 +637,30 @@ export function AppShell(props: { readonly controller: AppController }) {
           setActiveSurface("chat");
         }}
       />
+      <Show when={!sidebarCollapsed()}>
+        <hr
+          aria-disabled={settingsOpen()}
+          aria-label={messages().resizeSidebar}
+          aria-orientation="vertical"
+          aria-valuemax={Math.round(sidebarWidthMetrics().maximumWidth)}
+          aria-valuemin={Math.round(sidebarWidthMetrics().minimumWidth)}
+          aria-valuenow={Math.round(sidebarWidthMetrics().width)}
+          aria-valuetext={formatMessage(messages().sidebarWidth, {
+            width: Math.round(sidebarWidthMetrics().width),
+          })}
+          class="sidebar-splitter"
+          onDblClick={() => commitSidebarWidth(SIDEBAR_WIDTH_DEFAULT_PX, true)}
+          onKeyDown={handleSidebarWidthKeyDown}
+          onLostPointerCapture={(event) => endSidebarWidthPointerDrag(event, false)}
+          onPointerCancel={(event) => endSidebarWidthPointerDrag(event, true)}
+          onPointerDown={handleSidebarWidthPointerDown}
+          onPointerMove={updateSidebarWidthFromPointer}
+          onPointerUp={(event) => endSidebarWidthPointerDrag(event, true)}
+          ref={sidebarSplitterElement}
+          tabIndex={settingsOpen() ? -1 : 0}
+          title={messages().resizeSidebarTitle}
+        />
+      </Show>
       <main class="main-panel" inert={settingsOpen()}>
         <Show when={activeSurface() === "chat" && props.controller.product() === "chatgpt"}>
           <HomeComposerModeToggle

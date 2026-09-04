@@ -125,7 +125,7 @@
   --timeline-work-gap: calc(var(--spacing) * 3);
   --composer-inline-overhang: calc(var(--spacing) * 6);
   --home-composer-inline-inset: calc(var(--spacing) * 3.25);
-  --sidebar-width: clamp(240px, 275px, min(520px, calc(100vw - 320px)));
+  --sidebar-width: clamp(240px, 360px, min(520px, calc(100vw - 438px)));
   --settings-nav-width: clamp(240px, 275px, min(520px, calc(100vw - 320px)));
   --spacing-token-sidebar: clamp(240px, 275px, min(520px, calc(100vw - 320px)));
   --layer-window-chrome: 20000;
@@ -692,7 +692,7 @@ pre {
   display: grid;
   width: 100%;
   height: 100%;
-  grid-template-columns: var(--sidebar-width) minmax(430px, 1fr);
+  grid-template-columns: var(--sidebar-width) 8px minmax(430px, 1fr);
   grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   background: var(--color-background-surface-under);
@@ -700,6 +700,7 @@ pre {
 
 .app-shell.sidebar-collapsed {
   --sidebar-width: 52px;
+  grid-template-columns: var(--sidebar-width) minmax(430px, 1fr);
 }
 
 .sidebar {
@@ -723,6 +724,56 @@ pre {
   width: 16px;
   background: inherit;
   content: "";
+  pointer-events: none;
+}
+
+.sidebar-splitter {
+  position: relative;
+  z-index: 18;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  grid-column: 2;
+  grid-row: 1;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-splitter::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: var(--color-token-border);
+  content: "";
+  transform: translateX(-50%);
+  transition: width 120ms ease, background-color 120ms ease;
+}
+
+.sidebar-splitter:hover::before,
+.sidebar-splitter:focus-visible::before,
+.app-shell.sidebar-resizing > .sidebar-splitter::before {
+  width: 3px;
+  background: var(--color-token-border-heavy);
+}
+
+.sidebar-splitter:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+
+.app-shell.sidebar-resizing,
+.app-shell.sidebar-resizing * {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.app-shell.sidebar-resizing > .main-panel {
   pointer-events: none;
 }
 
@@ -1412,6 +1463,15 @@ pre {
   padding: 7px 8px 8px;
   border-top: 1px solid var(--border-soft);
   background: var(--sidebar-bg);
+}
+
+.sidebar-footer-reserve {
+  min-width: 0;
+  margin-bottom: 7px;
+}
+
+.sidebar-footer-account {
+  min-width: 0;
 }
 
 .sidebar-footer-row {

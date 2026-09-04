@@ -180,6 +180,13 @@ export function Sidebar(props: SidebarProps) {
       setBrandMenuOpen(false);
     }
   });
+  createEffect(() => {
+    const account = props.controller.account();
+    if (account?.account === null || account?.account === undefined) {
+      return;
+    }
+    void props.controller.refreshRateLimitsIfStale();
+  });
 
   function dismissSidebarMenusFromPointer(event: PointerEvent): void {
     if (!(event.target instanceof Element)) {
@@ -613,81 +620,87 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       <footer class="sidebar-footer">
-        <Show when={!props.collapsed && accountMenuOpen()}>
-          <div aria-label={messages().account} class="account-menu" id="account-menu" role="menu">
+        <Show when={!props.collapsed}>
+          <div class="sidebar-footer-reserve">
             <LunaReserveCard response={() => props.controller.rateLimits()} />
-            <div class="account-menu-identity" role="presentation">
-              <AccountAvatar account={props.controller.account()?.account} />
-              <strong>{accountLabel(props.controller)}</strong>
-            </div>
-            <hr class="account-menu-separator" />
-            <button
-              onClick={() => {
-                setAccountMenuOpen(false);
-                props.onOpenSettings("usage");
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <Icon name="creditCard" size={15} />
-              <span>{messages().remainingUsage}</span>
-              <small class="usage-badge">{remainingUsageLabel(props.controller)}</small>
-              <Icon name="chevronRight" size={13} />
-            </button>
-            <button
-              onClick={() => {
-                setAccountMenuOpen(false);
-                props.onOpenSettings();
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <Icon name="settings" size={15} />
-              <span>{messages().settings}</span>
-              <kbd>Ctrl+,</kbd>
-            </button>
-            <button
-              onClick={() => {
-                setAccountMenuOpen(false);
-                void props.controller.logout();
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <Icon name="logout" size={15} />
-              <span>{messages().signOut}</span>
-            </button>
           </div>
         </Show>
-        <div class="sidebar-footer-row">
-          <button
-            aria-controls="account-menu"
-            aria-expanded={accountMenuOpen()}
-            aria-haspopup="menu"
-            class="sidebar-account-trigger"
-            onClick={() => {
-              setBrandMenuOpen(false);
-              if (props.collapsed) {
-                props.onOpenSettings("profile");
-                return;
-              }
-              const opening = !accountMenuOpen();
-              setAccountMenuOpen(opening);
-              if (opening) {
-                void props.controller.refreshAccountProfile();
-                void props.controller.refreshRateLimitsIfStale();
-              }
-            }}
-            title={messages().account}
-            type="button"
-          >
-            <AccountAvatar account={props.controller.account()?.account} />
-            <Show when={!props.collapsed}>
-              <span class="account-label">
+        <div class="sidebar-footer-account">
+          <Show when={!props.collapsed && accountMenuOpen()}>
+            <div aria-label={messages().account} class="account-menu" id="account-menu" role="menu">
+              <div class="account-menu-identity" role="presentation">
+                <AccountAvatar account={props.controller.account()?.account} />
                 <strong>{accountLabel(props.controller)}</strong>
-              </span>
-            </Show>
-          </button>
+              </div>
+              <hr class="account-menu-separator" />
+              <button
+                onClick={() => {
+                  setAccountMenuOpen(false);
+                  props.onOpenSettings("usage");
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <Icon name="creditCard" size={15} />
+                <span>{messages().remainingUsage}</span>
+                <small class="usage-badge">{remainingUsageLabel(props.controller)}</small>
+                <Icon name="chevronRight" size={13} />
+              </button>
+              <button
+                onClick={() => {
+                  setAccountMenuOpen(false);
+                  props.onOpenSettings();
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <Icon name="settings" size={15} />
+                <span>{messages().settings}</span>
+                <kbd>Ctrl+,</kbd>
+              </button>
+              <button
+                onClick={() => {
+                  setAccountMenuOpen(false);
+                  void props.controller.logout();
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <Icon name="logout" size={15} />
+                <span>{messages().signOut}</span>
+              </button>
+            </div>
+          </Show>
+          <div class="sidebar-footer-row">
+            <button
+              aria-controls="account-menu"
+              aria-expanded={accountMenuOpen()}
+              aria-haspopup="menu"
+              class="sidebar-account-trigger"
+              onClick={() => {
+                setBrandMenuOpen(false);
+                if (props.collapsed) {
+                  props.onOpenSettings("profile");
+                  return;
+                }
+                const opening = !accountMenuOpen();
+                setAccountMenuOpen(opening);
+                if (opening) {
+                  void props.controller.refreshAccountProfile();
+                  void props.controller.refreshRateLimitsIfStale();
+                }
+              }}
+              title={messages().account}
+              type="button"
+            >
+              <AccountAvatar account={props.controller.account()?.account} />
+              <Show when={!props.collapsed}>
+                <span class="account-label">
+                  <strong>{accountLabel(props.controller)}</strong>
+                </span>
+              </Show>
+            </button>
+          </div>
         </div>
       </footer>
     </aside>

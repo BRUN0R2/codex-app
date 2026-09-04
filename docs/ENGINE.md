@@ -72,10 +72,14 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml engine::contracts_fixtu
 ```
 
 Account usage preserves the provider's additional limit buckets. When the
-server supplies the `gpt-reserve` bucket, the account menu presents its Luna
-Reserve balance using the longest available quota window and links to the
-official plan and credit pages. The card is a presentation of server-provided
-usage; it does not infer or silently switch the active model from percentages.
+server supplies the `gpt-reserve` bucket, the persistent sidebar account summary
+presents its Luna Reserve balance using the longest available quota window and
+links to the official plan and credit pages. The account popover contains only
+profile actions, while the card remains visible whenever the sidebar is
+expanded. The card is a presentation of server-provided usage; it does not
+infer or silently switch the active model from percentages. The sidebar width
+is a local layout preference, bounded so the main panel retains its minimum
+width and adjustable with the keyboard or pointer divider.
 
 ## Models, instructions, and context
 
