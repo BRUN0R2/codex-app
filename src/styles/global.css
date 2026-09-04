@@ -4854,7 +4854,7 @@ pre {
   font-size: 0.7rem;
 }
 
-.approval-card > p {
+.approval-card > .approval-request-reason {
   margin: 11px 0 8px;
   color: var(--text-soft);
   font-size: 0.78rem;
@@ -4873,7 +4873,7 @@ pre {
   white-space: pre-wrap;
 }
 
-.approval-card > small {
+.approval-card > .approval-request-context {
   display: block;
   margin-top: 6px;
   color: var(--muted);

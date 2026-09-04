@@ -1,10 +1,17 @@
 import { createEffect, onCleanup, Show } from "solid-js";
 
-import type { NotificationEventKind } from "./contracts/notificationOverlay";
+import {
+  type AppNotification,
+  decodeNotificationChannel,
+  type NotificationEventKind,
+} from "./contracts/notificationOverlay";
 import { createI18nController, I18nProvider, useI18n } from "./i18n/context";
 import { formatMessage, type TranslationMessages } from "./i18n/messages";
+import { createNotificationOverlayPreviewController } from "./preview/notificationOverlayPreviewController";
 import { createNotificationOverlayController } from "./state/notificationOverlayController";
-import { CodexGlyph } from "./ui/CodexGlyph";
+import { ApprovalDecisionButtons } from "./ui/ApprovalDecisionButtons";
+import { ApprovalRequestDetails } from "./ui/ApprovalRequestDetails";
+import { observeElementResize, readResizeObserverBorderBoxHeight } from "./ui/elementResize";
 import { Icon, type IconName } from "./ui/Icon";
 import "./styles/notification-overlay.css";
 
@@ -19,18 +26,34 @@ export default function NotificationOverlayApp() {
 
 function NotificationOverlay() {
   const i18n = useI18n();
-  const controller = createNotificationOverlayController();
-  let card: HTMLElement | undefined;
+  const parameters = new URLSearchParams(window.location.search);
+  const channel = decodeNotificationChannel(parameters.get("channel"), "$url.channel");
+  const controller =
+    parameters.get("preview") === "1"
+      ? createNotificationOverlayPreviewController(channel)
+      : createNotificationOverlayController(channel);
+  let surface: HTMLElement | undefined;
   let progress: HTMLElement | undefined;
   let progressAnimation: Animation | null = null;
   let animatedNotificationId: string | null = null;
+  let releaseSurfaceObservation: (() => void) | null = null;
+
+  function bindSurface(element: HTMLElement): void {
+    releaseSurfaceObservation?.();
+    surface = element;
+    releaseSurfaceObservation = observeElementResize(element, (entry) => {
+      const height =
+        readResizeObserverBorderBoxHeight(entry) ?? element.getBoundingClientRect().height;
+      controller.synchronizePresentation(height);
+    });
+  }
 
   createEffect(() => {
     const notificationId = controller.notification()?.id;
     if (notificationId === undefined) return;
     queueMicrotask(() => {
-      if (controller.notification()?.id === notificationId && card !== undefined) {
-        controller.synchronizePresentation(card);
+      if (controller.notification()?.id === notificationId && surface !== undefined) {
+        controller.synchronizePresentation(surface.getBoundingClientRect().height);
       }
     });
   });
@@ -64,7 +87,10 @@ function NotificationOverlay() {
     });
   });
 
-  onCleanup(() => progressAnimation?.cancel());
+  onCleanup(() => {
+    releaseSurfaceObservation?.();
+    progressAnimation?.cancel();
+  });
 
   return (
     <Show when={controller.notification()}>
@@ -74,11 +100,15 @@ function NotificationOverlay() {
           notification().target?.type === "thread"
             ? i18n.messages().notifications.openTask
             : i18n.messages().notifications.openUsage;
+        const hasStandardFooter = () =>
+          notification().approval === null &&
+          (notification().target !== null || controller.pendingCount() > 1);
         return (
           <main
             aria-label={notification().title}
             aria-live={priority() ? "assertive" : "polite"}
             class="notification-overlay-surface"
+            ref={bindSurface}
           >
             <section
               aria-describedby="notification-message"
@@ -93,20 +123,19 @@ function NotificationOverlay() {
                 if (
                   priority() &&
                   event.button === 0 &&
-                  !(event.target instanceof Element && event.target.closest("button") !== null)
+                  !(
+                    event.target instanceof Element &&
+                    event.target.closest("button, [data-notification-interactive]") !== null
+                  )
                 ) {
                   controller.startDrag();
                 }
               }}
-              ref={card}
               role={priority() ? "alertdialog" : "status"}
             >
               <div class="notification-card-header">
-                <span aria-hidden="true" class="notification-mark">
-                  <CodexGlyph size={19} />
-                </span>
-                <span aria-hidden="true" class="notification-tone-icon">
-                  <Icon name={toneIcon(notification().tone)} size={16} />
+                <span aria-hidden="true" class="notification-icon">
+                  <Icon name={notificationIcon(notification())} size={16} />
                 </span>
                 <div>
                   <p>{eventLabel(notification().event, i18n.messages().notifications)}</p>
@@ -124,24 +153,58 @@ function NotificationOverlay() {
               <p class="notification-message" id="notification-message">
                 {notification().message}
               </p>
-              <div class="notification-card-footer">
-                <Show when={notification().target !== null}>
-                  <button
-                    class="notification-action"
-                    onClick={() => controller.activate(notification().id)}
-                    type="button"
-                  >
-                    {targetLabel()}
-                  </button>
-                </Show>
-                <Show when={controller.pendingCount() > 1}>
-                  <span>
-                    {formatMessage(i18n.messages().notifications.pendingCount, {
-                      count: controller.pendingCount() - 1,
-                    })}
-                  </span>
-                </Show>
-              </div>
+              <Show when={notification().approval}>
+                {(request) => (
+                  <div class="notification-approval" data-notification-interactive>
+                    <ApprovalRequestDetails request={request()} />
+                    <Show when={controller.approvalResponseFailed()}>
+                      <p class="notification-approval-error" role="alert">
+                        {i18n.messages().notifications.approvalResponseFailed}
+                      </p>
+                    </Show>
+                    <div
+                      aria-busy={controller.approvalResponding()}
+                      class="notification-approval-actions"
+                    >
+                      <Show when={controller.pendingCount() > 1}>
+                        <span class="notification-pending-count">
+                          {formatMessage(i18n.messages().notifications.pendingCount, {
+                            count: controller.pendingCount() - 1,
+                          })}
+                        </span>
+                      </Show>
+                      <ApprovalDecisionButtons
+                        buttonClass="notification-decision"
+                        disabled={controller.approvalResponding()}
+                        onDecision={(decision) =>
+                          controller.respondToApproval(notification().id, request().id, decision)
+                        }
+                        request={request()}
+                      />
+                    </div>
+                  </div>
+                )}
+              </Show>
+              <Show when={hasStandardFooter()}>
+                <div class="notification-card-footer">
+                  <Show when={notification().target !== null}>
+                    <button
+                      class="notification-action"
+                      onClick={() => controller.activate(notification().id)}
+                      type="button"
+                    >
+                      {targetLabel()}
+                    </button>
+                  </Show>
+                  <Show when={controller.pendingCount() > 1}>
+                    <span>
+                      {formatMessage(i18n.messages().notifications.pendingCount, {
+                        count: controller.pendingCount() - 1,
+                      })}
+                    </span>
+                  </Show>
+                </div>
+              </Show>
               <Show when={!priority()}>
                 <i aria-hidden="true" class="notification-progress" ref={progress} />
               </Show>
@@ -153,9 +216,11 @@ function NotificationOverlay() {
   );
 }
 
-function toneIcon(tone: "attention" | "error" | "success"): IconName {
-  if (tone === "success") return "check";
-  if (tone === "error") return "close";
+function notificationIcon(notification: AppNotification): IconName {
+  if (notification.approval?.method === "approval.command") return "shield";
+  if (notification.approval?.method === "approval.browserOrigin") return "globe";
+  if (notification.tone === "success") return "check";
+  if (notification.tone === "error") return "close";
   return "helpCircle";
 }
 

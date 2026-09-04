@@ -164,13 +164,25 @@ avoid blocking the main thread.
 
 Desktop notifications use the same ownership boundary. The main controller
 detects account and task transitions, resolves the per-event rule once, and
-places a bounded, deduplicated notification in a priority-first FIFO queue. A
-strict Tauri event bridge projects only the active item into an isolated,
-transparent `notification-overlay` webview. Priority items are centered,
-persistent, and draggable; transient items are placed in the configured corner
-and dismissed by an identity-bound timer whose progress animation does not
-restart when the pending count changes. Overlay actions carry the notification
-identity back to state before anything is dismissed or activated.
+places each bounded, deduplicated notification in its presentation lane. A
+strict Tauri event bridge projects the active priority and transient items into
+separate isolated webviews, so a centered priority request never blocks a corner
+notification. Each lane has its own FIFO capacity, readiness handshake,
+publication queue, and lifecycle. Priority items are persistent and draggable;
+transient items are dismissed by an identity-bound timer whose progress
+animation does not restart when that lane's pending count changes. Both windows
+derive their height from intrinsic content, and their opaque cards prevent the
+application beneath them from becoming competing text. Overlay actions carry
+the channel and notification identity back to state before anything is
+dismissed or activated.
+
+Approval notifications carry the already-decoded pending request and reuse the
+chat card's canonical decision set. The isolated surface sends only the channel,
+notification identity, request identity, and typed decision to the main
+controller. That controller verifies all identities and valid decisions before
+using the existing server-request response path. A failed response is
+acknowledged back to the originating lane and leaves the request actionable;
+success removes the notification only after the backend accepts the decision.
 
 Application preference schema 2 persists the global switch, transient position
 and duration, plus the enabled/priority rule for every notification event. Rust

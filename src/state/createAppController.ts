@@ -427,6 +427,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     const reset = previous === null ? null : findUsageLimitReset(previous, value);
     if (reset !== null) {
       enqueueNotification({
+        approval: null,
         id: `usage-limit-reset:${reset.limitId}:${reset.resetsAt}`,
         event: "usageLimitReset",
         tone: "success",
@@ -439,6 +440,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     }
     if (previous?.lunaReserveAvailable !== true && value.lunaReserveAvailable) {
       enqueueNotification({
+        approval: null,
         id: `luna-reserve-available:${value.rateLimits.primary?.resetsAt ?? "current"}`,
         event: "lunaReserveAvailable",
         tone: "attention",
@@ -1415,6 +1417,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       localization.notifications().untitledTask,
     );
     enqueueNotification({
+      approval: request,
       id: `approval-required:${request.id}`,
       event: "approvalRequired",
       tone: "attention",
@@ -1439,6 +1442,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   function notifySettingsSaved(): void {
     notificationSequence += 1;
     enqueueNotification({
+      approval: null,
       id: `settings-saved:${notificationSequence}`,
       event: "settingsSaved",
       tone: "success",
@@ -1460,6 +1464,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     const failed =
       notification.params.turn.status === "failed" || notification.params.error !== null;
     enqueueNotification({
+      approval: null,
       id: `task-${failed ? "failed" : "completed"}:${notification.params.turn.id}`,
       event: failed ? "taskFailed" : "taskCompleted",
       tone: failed ? "error" : "success",
@@ -2428,6 +2433,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     try {
       await respondToServerRequest(requestId, decision);
       setPendingApprovals((current) => current.filter((request) => request.id !== requestId));
+      notificationCenter.remove(`approval-required:${requestId}`);
       return true;
     } catch (reason) {
       reportError(reason);
@@ -2543,6 +2549,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     if (value.availableCount === 0 || identity === null) return;
 
     enqueueNotification({
+      approval: null,
       id: `usage-reset-available:${identity}`,
       event: "usageResetAvailable",
       tone: "attention",
@@ -2917,8 +2924,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
   });
 
   createNotificationOverlayBridge({
-    active: notificationCenter.active,
-    pendingCount: notificationCenter.pendingCount,
+    approvalFor: notificationCenter.approvalFor,
+    priority: notificationCenter.priority,
+    transient: notificationCenter.transient,
     dismiss: notificationCenter.dismiss,
     targetFor: notificationCenter.targetFor,
     onActivate: (target) => {
@@ -2929,6 +2937,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       }
     },
     reportError,
+    respondToApproval,
   });
 
   return {

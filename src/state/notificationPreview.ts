@@ -13,6 +13,7 @@ export function createNotificationPreview(
   switch (event) {
     case "approvalRequired":
       return {
+        approval: null,
         id: identity,
         event,
         tone: "attention",
@@ -22,6 +23,7 @@ export function createNotificationPreview(
       };
     case "taskCompleted":
       return {
+        approval: null,
         id: identity,
         event,
         tone: "success",
@@ -31,6 +33,7 @@ export function createNotificationPreview(
       };
     case "taskFailed":
       return {
+        approval: null,
         id: identity,
         event,
         tone: "error",
@@ -40,6 +43,7 @@ export function createNotificationPreview(
       };
     case "usageLimitReset":
       return {
+        approval: null,
         id: identity,
         event,
         tone: "success",
@@ -49,6 +53,7 @@ export function createNotificationPreview(
       };
     case "usageResetAvailable":
       return {
+        approval: null,
         id: identity,
         event,
         tone: "attention",
@@ -58,6 +63,7 @@ export function createNotificationPreview(
       };
     case "lunaReserveAvailable":
       return {
+        approval: null,
         id: identity,
         event,
         tone: "attention",

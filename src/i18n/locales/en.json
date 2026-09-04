@@ -86,6 +86,7 @@
       },
       "approvalTitle": "A task needs your approval",
       "approvalMessage": "Review the pending action in {task} before work can continue.",
+      "approvalResponseFailed": "The approval response could not be sent. Try again.",
       "taskCompletedTitle": "Task completed",
       "taskCompletedMessage": "{task} finished successfully.",
       "taskFailedTitle": "Task failed",

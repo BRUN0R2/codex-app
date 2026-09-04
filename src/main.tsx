@@ -12,6 +12,9 @@ if (root === null) {
 const previewRequested = new URLSearchParams(window.location.search).get("preview") === "1";
 const notificationOverlayRequested =
   new URLSearchParams(window.location.search).get("surface") === "notification-overlay";
+if (notificationOverlayRequested) {
+  document.documentElement.setAttribute("data-app-surface", "notification-overlay");
+}
 
 async function bootstrap(mountElement: HTMLElement): Promise<void> {
   if (previewRequested) {

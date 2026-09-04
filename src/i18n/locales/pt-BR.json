@@ -86,6 +86,7 @@
       },
       "approvalTitle": "Uma tarefa precisa da sua aprovação",
       "approvalMessage": "Revise a ação pendente em {task} para que o trabalho possa continuar.",
+      "approvalResponseFailed": "Não foi possível enviar a resposta da aprovação. Tente novamente.",
       "taskCompletedTitle": "Tarefa concluída",
       "taskCompletedMessage": "{task} foi concluída com sucesso.",
       "taskFailedTitle": "Falha na tarefa",

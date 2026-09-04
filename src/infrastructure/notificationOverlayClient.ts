@@ -10,32 +10,39 @@ import {
 
 import {
   type AppNotification,
+  decodeNotificationChannel,
   decodeNotificationOverlayAction,
+  decodeNotificationOverlayApprovalResult,
   decodeNotificationOverlayPayload,
+  type NotificationChannel,
   type NotificationOverlayAction,
+  type NotificationOverlayApprovalResult,
   type NotificationOverlayPayload,
 } from "../contracts/notificationOverlay";
 import {
-  NOTIFICATION_SCREEN_MARGIN_PX,
   resolveNotificationOverlayPosition,
+  resolveNotificationOverlaySize,
 } from "./notificationOverlayGeometry";
 import { listenRuntime } from "./runtimeBridge";
 
 const MAIN_WINDOW_LABEL = "main";
-const NOTIFICATION_OVERLAY_LABEL = "notification-overlay";
+const NOTIFICATION_OVERLAY_LABELS = {
+  priority: "notification-priority-overlay",
+  transient: "notification-transient-overlay",
+} as const satisfies Readonly<Record<NotificationChannel, string>>;
 const PRESENTATION_EVENT = "notification-overlay:presentation";
 const ACTION_EVENT = "notification-overlay:action";
+const APPROVAL_RESULT_EVENT = "notification-overlay:approval-result";
 const READY_EVENT = "notification-overlay:ready";
-const PRIORITY_WIDTH_PX = 460;
-const TRANSIENT_WIDTH_PX = 390;
 
 interface OverlayReadyPayload {
   readonly schemaVersion: 1;
+  readonly channel: NotificationChannel;
 }
 
 export function subscribeToNotificationOverlay(
   onAction: (action: NotificationOverlayAction) => void,
-  onReady: () => void,
+  onReady: (channel: NotificationChannel) => void,
   onBoundaryError: (reason: unknown) => void,
 ): Promise<() => void> {
   return subscribeAtomically([
@@ -50,8 +57,7 @@ export function subscribeToNotificationOverlay(
     () =>
       listenRuntime<unknown>(READY_EVENT, ({ payload }) => {
         try {
-          decodeReadyPayload(payload);
-          onReady();
+          onReady(decodeReadyPayload(payload).channel);
         } catch (reason) {
           onBoundaryError(reason);
         }
@@ -59,31 +65,52 @@ export function subscribeToNotificationOverlay(
   ]);
 }
 
-export function subscribeToNotificationPresentations(
+export function subscribeToNotificationOverlaySurface(
   onPresentation: (payload: NotificationOverlayPayload) => void,
+  onApprovalResult: (result: NotificationOverlayApprovalResult) => void,
   onBoundaryError: (reason: unknown) => void,
 ): Promise<() => void> {
-  return listenRuntime<unknown>(PRESENTATION_EVENT, ({ payload }) => {
-    try {
-      onPresentation(decodeNotificationOverlayPayload(payload));
-    } catch (reason) {
-      onBoundaryError(reason);
-    }
-  });
+  return subscribeAtomically([
+    () =>
+      listenRuntime<unknown>(PRESENTATION_EVENT, ({ payload }) => {
+        try {
+          onPresentation(decodeNotificationOverlayPayload(payload));
+        } catch (reason) {
+          onBoundaryError(reason);
+        }
+      }),
+    () =>
+      listenRuntime<unknown>(APPROVAL_RESULT_EVENT, ({ payload }) => {
+        try {
+          onApprovalResult(decodeNotificationOverlayApprovalResult(payload));
+        } catch (reason) {
+          onBoundaryError(reason);
+        }
+      }),
+  ]);
 }
 
 export function publishNotificationPresentation(
   payload: NotificationOverlayPayload,
 ): Promise<void> {
-  return emitTo(NOTIFICATION_OVERLAY_LABEL, PRESENTATION_EVENT, payload);
+  return emitTo(NOTIFICATION_OVERLAY_LABELS[payload.channel], PRESENTATION_EVENT, payload);
 }
 
-export function signalNotificationOverlayReady(): Promise<void> {
-  return emitTo(MAIN_WINDOW_LABEL, READY_EVENT, { schemaVersion: 1 } satisfies OverlayReadyPayload);
+export function signalNotificationOverlayReady(channel: NotificationChannel): Promise<void> {
+  return emitTo(MAIN_WINDOW_LABEL, READY_EVENT, {
+    schemaVersion: 1,
+    channel,
+  } satisfies OverlayReadyPayload);
 }
 
 export function sendNotificationOverlayAction(action: NotificationOverlayAction): Promise<void> {
   return emitTo(MAIN_WINDOW_LABEL, ACTION_EVENT, action);
+}
+
+export function publishNotificationApprovalResult(
+  result: NotificationOverlayApprovalResult,
+): Promise<void> {
+  return emitTo(NOTIFICATION_OVERLAY_LABELS[result.channel], APPROVAL_RESULT_EVENT, result);
 }
 
 export async function presentNotificationOverlay(
@@ -96,20 +123,19 @@ export async function presentNotificationOverlay(
   const area = monitor.workArea;
   const areaPosition = area.position.toLogical(monitor.scaleFactor);
   const areaSize = area.size.toLogical(monitor.scaleFactor);
-  const width =
-    notification.presentation.type === "priority" ? PRIORITY_WIDTH_PX : TRANSIENT_WIDTH_PX;
-  const height = Math.min(
-    Math.max(Math.ceil(contentHeight), 120),
-    Math.max(120, areaSize.height - NOTIFICATION_SCREEN_MARGIN_PX * 2),
+  const overlaySize = resolveNotificationOverlaySize(
+    notification.presentation,
+    contentHeight,
+    areaSize.height,
   );
-  await overlay.setSize(new LogicalSize(width, height));
+  await overlay.setSize(new LogicalSize(overlaySize.width, overlaySize.height));
 
   if (notification.presentation.type === "transient" || recenterPriority) {
     const position = resolveNotificationOverlayPosition(
       notification.presentation,
       areaPosition,
       areaSize,
-      { width, height },
+      overlaySize,
     );
     await overlay.setPosition(new LogicalPosition(position.x, position.y));
   }
@@ -158,12 +184,16 @@ function decodeReadyPayload(value: unknown): OverlayReadyPayload {
     typeof value !== "object" ||
     value === null ||
     Array.isArray(value) ||
-    Object.keys(value).length !== 1 ||
+    Object.keys(value).length !== 2 ||
     (value as { readonly schemaVersion?: unknown }).schemaVersion !== 1
   ) {
     throw new Error("The notification overlay ready payload is invalid.");
   }
-  return { schemaVersion: 1 };
+  const channel = decodeNotificationChannel(
+    (value as { readonly channel?: unknown }).channel,
+    "$.channel",
+  );
+  return { schemaVersion: 1, channel };
 }
 
 async function subscribeAtomically(

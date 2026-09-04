@@ -34,6 +34,8 @@ const OFFICIAL_READ_ICON_PATH =
   "M16.3965 5.01128C16.3963 4.93399 16.3489 4.87691 16.293 4.85406L16.2354 4.84332C13.9306 4.91764 12.5622 5.32101 10.665 6.34722V16.3716C11.3851 15.9994 12.0688 15.7115 12.7861 15.5015C13.8286 15.1965 14.9113 15.0633 16.2402 15.0435L16.2979 15.0308C16.353 15.0063 16.3965 14.9483 16.3965 14.8755V5.01128ZM3.54492 14.8765C3.54492 14.9725 3.62159 15.0422 3.70117 15.0435L4.19629 15.0562C5.94062 15.1247 7.26036 15.4201 8.65918 16.0484C8.05544 15.1706 7.14706 14.436 6.17871 14.1109V14.1099C5.56757 13.9045 5.16816 13.3314 5.16797 12.6988V4.98882C4.86679 4.93786 4.60268 4.8999 4.28223 4.87457L3.72754 4.84429C3.62093 4.84079 3.54505 4.92417 3.54492 5.01226V14.8765ZM17.7266 14.8755C17.7266 15.6314 17.1607 16.2751 16.4121 16.3628L16.2598 16.3736C15.0122 16.3922 14.0555 16.5159 13.1602 16.7779C12.2629 17.0404 11.3966 17.4508 10.3369 18.0738C10.129 18.1959 9.87099 18.1958 9.66309 18.0738C7.71455 16.9283 6.31974 16.4689 4.12988 16.3853L3.68164 16.3736C2.85966 16.3614 2.21484 15.6838 2.21484 14.8765V5.01226C2.21497 4.15391 2.93263 3.4871 3.77246 3.51519L4.39844 3.54937C4.67996 3.57191 4.92258 3.60421 5.16797 3.64214V2.51031C5.16797 1.44939 6.29018 0.645615 7.31055 1.15679L7.31152 1.15582C8.78675 1.89511 10.0656 3.33006 10.5352 4.91461C12.3595 3.98907 13.8688 3.58817 16.1924 3.51324L16.3506 3.51714C17.1285 3.5741 17.7264 4.23496 17.7266 5.01128V14.8755ZM6.49805 12.6988C6.49824 12.7723 6.5442 12.8296 6.60254 12.8492L6.96289 12.9859C7.85245 13.3586 8.68125 13.9846 9.33496 14.7496V5.5816C9.08794 4.37762 8.13648 3.1566 6.95801 2.47613L6.71582 2.34527C6.67779 2.32617 6.6337 2.32502 6.58301 2.35796C6.52946 2.39279 6.49805 2.44863 6.49805 2.51031V12.6988Z";
 const SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=general`;
 const NOTIFICATION_SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=notifications`;
+const PRIORITY_NOTIFICATION_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&surface=notification-overlay&channel=priority`;
+const TRANSIENT_NOTIFICATION_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&surface=notification-overlay&channel=transient`;
 const PERSONALIZATION_SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=personalization`;
 const USAGE_SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=usage`;
 const EMPTY_USAGE_SETTINGS_PREVIEW_URL = `${USAGE_SETTINGS_PREVIEW_URL}&usageResets=empty`;
@@ -47,6 +49,8 @@ const VIEWPORTS = [
   { width: 1280, height: 820 },
   { width: 1920, height: 1080 },
 ];
+const PRIORITY_NOTIFICATION_VIEWPORTS = [{ width: 460, height: 420 }];
+const TRANSIENT_NOTIFICATION_VIEWPORTS = [{ width: 390, height: 260 }];
 const FILE_VIEWER_VIEWPORTS = [
   { width: 789, height: 422 },
   { width: 881, height: 1030 },
@@ -823,6 +827,24 @@ const SCENARIOS = [
     readyExpression: `window.__notificationDurationDuringInput === "17s"`,
     auditExpression: notificationSettingsVisualAuditExpression,
     validate: validateNotificationSettingsMetrics,
+  },
+  {
+    id: "notification-priority-overlay",
+    url: PRIORITY_NOTIFICATION_PREVIEW_URL,
+    viewports: PRIORITY_NOTIFICATION_VIEWPORTS,
+    readyExpression: `document.querySelectorAll(".notification-decision").length === 4 &&
+      document.querySelector(".notification-approval .approval-command")?.textContent?.trim() === "pnpm verify"`,
+    auditExpression: notificationOverlayVisualAuditExpression,
+    validate: validatePriorityNotificationOverlayMetrics,
+  },
+  {
+    id: "notification-transient-overlay",
+    url: TRANSIENT_NOTIFICATION_PREVIEW_URL,
+    viewports: TRANSIENT_NOTIFICATION_VIEWPORTS,
+    readyExpression: `document.querySelector(".notification-card.transient") !== null &&
+      document.querySelector(".notification-progress") !== null`,
+    auditExpression: notificationOverlayVisualAuditExpression,
+    validate: validateTransientNotificationOverlayMetrics,
   },
   {
     id: "personalization-save-feedback",
@@ -6399,6 +6421,44 @@ function notificationSettingsVisualAuditExpression() {
   })()`;
 }
 
+function notificationOverlayVisualAuditExpression() {
+  return `(() => {
+    const surface = document.querySelector(".notification-overlay-surface");
+    const card = document.querySelector(".notification-card");
+    if (!(surface instanceof HTMLElement) || !(card instanceof HTMLElement)) {
+      throw new Error("The notification overlay is incomplete.");
+    }
+    const rectangle = (element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        bottom: bounds.bottom,
+        height: bounds.height,
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+        width: bounds.width,
+      };
+    };
+    const cardStyle = getComputedStyle(card);
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      surface: rectangle(surface),
+      card: rectangle(card),
+      bodyBackground: getComputedStyle(document.body).backgroundColor,
+      cardBackground: cardStyle.backgroundColor,
+      cardBackdropFilter: cardStyle.backdropFilter,
+      cardType: card.classList.contains("priority") ? "priority" : "transient",
+      standardFooterCount: card.querySelectorAll(".notification-card-footer").length,
+      approvalCount: card.querySelectorAll(".notification-approval").length,
+      decisionLabels: [...card.querySelectorAll(".notification-decision")].map(
+        (button) => button.textContent?.trim() ?? "",
+      ),
+      progressCount: card.querySelectorAll(".notification-progress").length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
 function personalizationSaveFeedbackVisualAuditExpression() {
   return `(() => {
     const page = document.querySelector(".settings-page");
@@ -8327,6 +8387,60 @@ function validateNotificationSettingsMetrics(metrics) {
   );
   assert(metrics.minimumTestButtonHeight >= 27, "notification test actions became too small");
   assert(metrics.rowsInsidePage === true, "a notification event row exceeds its page");
+}
+
+function validatePriorityNotificationOverlayMetrics(metrics, viewport) {
+  validateNotificationOverlaySurface(metrics, viewport);
+  assert(metrics.cardType === "priority", "the priority notification lost its presentation type");
+  assert(metrics.approvalCount === 1, "the priority approval details are missing");
+  assert(metrics.standardFooterCount === 0, "approval controls retained a redundant footer");
+  assert(metrics.progressCount === 0, "a priority notification received a transient timer");
+  assert(
+    JSON.stringify(metrics.decisionLabels) ===
+      JSON.stringify(["Cancelar turno", "Recusar", "Permitir nesta tarefa", "Executar uma vez"]),
+    `the overlay approval commands diverged from the chat: ${JSON.stringify(metrics.decisionLabels)}`,
+  );
+}
+
+function validateTransientNotificationOverlayMetrics(metrics, viewport) {
+  validateNotificationOverlaySurface(metrics, viewport);
+  assert(metrics.cardType === "transient", "the transient notification lost its presentation type");
+  assert(metrics.approvalCount === 0, "a basic transient notification exposed approval content");
+  assert(metrics.standardFooterCount === 0, "an empty transient footer still consumes space");
+  assert(metrics.progressCount === 1, "the transient lifetime indicator is missing");
+  assert(
+    metrics.surface.height < viewport.height / 2,
+    `the transient notification still reserves excess height: ${metrics.surface.height}px`,
+  );
+}
+
+function validateNotificationOverlaySurface(metrics, viewport) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "the notification overlay overflows horizontally");
+  assert(
+    Math.abs(metrics.surface.width - viewport.width) <= tolerance,
+    "the notification surface does not match its dedicated window",
+  );
+  assert(
+    Math.abs(metrics.surface.height - (metrics.card.height + 12)) <= tolerance,
+    `the notification surface does not follow intrinsic card height: ${metrics.surface.height}px / ${metrics.card.height}px`,
+  );
+  assert(
+    metrics.surface.height < viewport.height,
+    "the notification surface stretches to the available window height",
+  );
+  assert(
+    metrics.bodyBackground === "rgba(0, 0, 0, 0)",
+    `the isolated overlay body is not transparent: ${metrics.bodyBackground}`,
+  );
+  assert(
+    metrics.cardBackground === "rgb(24, 24, 24)",
+    `the notification card is not an opaque semantic surface: ${metrics.cardBackground}`,
+  );
+  assert(
+    metrics.cardBackdropFilter === "none",
+    `background content can still bleed through the card: ${metrics.cardBackdropFilter}`,
+  );
 }
 
 function validatePersonalizationSaveFeedbackMetrics(metrics) {

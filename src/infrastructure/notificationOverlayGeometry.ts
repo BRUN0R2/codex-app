@@ -1,6 +1,8 @@
 import type { NotificationPresentation } from "../contracts/notificationOverlay";
 
 export const NOTIFICATION_SCREEN_MARGIN_PX = 20;
+export const PRIORITY_NOTIFICATION_WIDTH_PX = 460;
+export const TRANSIENT_NOTIFICATION_WIDTH_PX = 390;
 
 interface Point {
   readonly x: number;
@@ -10,6 +12,29 @@ interface Point {
 interface Size {
   readonly height: number;
   readonly width: number;
+}
+
+export function resolveNotificationOverlaySize(
+  presentation: NotificationPresentation,
+  contentHeight: number,
+  workAreaHeight: number,
+): Size {
+  if (!Number.isFinite(contentHeight) || contentHeight <= 0) {
+    throw new Error("Notification content height must be a positive finite number.");
+  }
+  if (!Number.isFinite(workAreaHeight) || workAreaHeight <= NOTIFICATION_SCREEN_MARGIN_PX * 2) {
+    throw new Error("Notification work area height is invalid.");
+  }
+  return {
+    width:
+      presentation.type === "priority"
+        ? PRIORITY_NOTIFICATION_WIDTH_PX
+        : TRANSIENT_NOTIFICATION_WIDTH_PX,
+    height: Math.min(
+      Math.ceil(contentHeight),
+      Math.floor(workAreaHeight - NOTIFICATION_SCREEN_MARGIN_PX * 2),
+    ),
+  };
 }
 
 export function resolveNotificationOverlayPosition(

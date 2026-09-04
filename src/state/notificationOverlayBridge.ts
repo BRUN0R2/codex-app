@@ -1,11 +1,15 @@
 import { type Accessor, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
+import { approvalDecisionsFor } from "../contracts/approval";
 import type {
   AppNotification,
+  NotificationChannel,
   NotificationOverlayAction,
   NotificationTarget,
 } from "../contracts/notificationOverlay";
+import type { ApprovalDecision, EngineServerRequest } from "../contracts/types";
 import {
+  publishNotificationApprovalResult,
   publishNotificationPresentation,
   restoreMainApplicationWindow,
   subscribeToNotificationOverlay,
@@ -13,25 +17,57 @@ import {
 import { isDesktopRuntime } from "../platform/desktopRuntime";
 
 interface NotificationOverlayBridgeOptions {
-  readonly active: Accessor<AppNotification | null>;
-  readonly pendingCount: Accessor<number>;
+  readonly approvalFor: (notificationId: string) => EngineServerRequest | null;
+  readonly priority: NotificationOverlayLane;
+  readonly transient: NotificationOverlayLane;
   readonly dismiss: (notificationId: string) => boolean;
   readonly targetFor: (notificationId: string) => NotificationTarget | null;
   readonly onActivate: (target: NotificationTarget) => void;
   readonly reportError: (reason: unknown) => void;
+  readonly respondToApproval: (requestId: string, decision: ApprovalDecision) => Promise<boolean>;
+}
+
+interface NotificationOverlayLane {
+  readonly active: Accessor<AppNotification | null>;
+  readonly pendingCount: Accessor<number>;
 }
 
 export function createNotificationOverlayBridge(options: NotificationOverlayBridgeOptions): void {
   if (!isDesktopRuntime()) return;
 
-  const [readyRevision, setReadyRevision] = createSignal(0);
+  const [readyChannels, setReadyChannels] = createSignal<readonly NotificationChannel[]>([]);
   let disposed = false;
   let unsubscribe: (() => void) | null = null;
-  let publishQueue: Promise<void> = Promise.resolve();
+  const publishQueues: Record<NotificationChannel, Promise<void>> = {
+    priority: Promise.resolve(),
+    transient: Promise.resolve(),
+  };
 
   function handleAction(action: NotificationOverlayAction): void {
     if (action.type === "failure") {
       options.reportError(new Error(action.message));
+      return;
+    }
+    const lane = action.channel === "priority" ? options.priority : options.transient;
+    if (lane.active()?.id !== action.notificationId) return;
+    if (action.type === "respondToApproval") {
+      const request = options.approvalFor(action.notificationId);
+      if (
+        request === null ||
+        request.id !== action.requestId ||
+        !approvalDecisionsFor(request).includes(action.decision)
+      ) {
+        options.reportError(new Error("The notification approval action is not valid."));
+        void publishApprovalResult(action, false);
+        return;
+      }
+      void options.respondToApproval(action.requestId, action.decision).then(
+        (succeeded) => publishApprovalResult(action, succeeded),
+        (reason) => {
+          options.reportError(reason);
+          return publishApprovalResult(action, false);
+        },
+      );
       return;
     }
     if (action.type === "activate") {
@@ -46,10 +82,25 @@ export function createNotificationOverlayBridge(options: NotificationOverlayBrid
     options.dismiss(action.notificationId);
   }
 
+  function publishApprovalResult(
+    action: Extract<NotificationOverlayAction, { readonly type: "respondToApproval" }>,
+    succeeded: boolean,
+  ): Promise<void> {
+    return publishNotificationApprovalResult({
+      channel: action.channel,
+      notificationId: action.notificationId,
+      requestId: action.requestId,
+      succeeded,
+    }).catch(options.reportError);
+  }
+
   onMount(() => {
     void subscribeToNotificationOverlay(
       handleAction,
-      () => setReadyRevision((revision) => revision + 1),
+      (channel) =>
+        setReadyChannels((current) =>
+          current.includes(channel) ? current : [...current, channel],
+        ),
       options.reportError,
     )
       .then((dispose) => {
@@ -59,16 +110,22 @@ export function createNotificationOverlayBridge(options: NotificationOverlayBrid
       .catch(options.reportError);
   });
 
-  createEffect(() => {
-    if (readyRevision() === 0) return;
-    const payload = {
-      notification: options.active(),
-      pendingCount: options.pendingCount(),
-    };
-    publishQueue = publishQueue
-      .then(() => publishNotificationPresentation(payload))
-      .catch(options.reportError);
-  });
+  projectLane("priority", options.priority);
+  projectLane("transient", options.transient);
+
+  function projectLane(channel: NotificationChannel, lane: NotificationOverlayLane): void {
+    createEffect(() => {
+      if (!readyChannels().includes(channel)) return;
+      const payload = {
+        channel,
+        notification: lane.active(),
+        pendingCount: lane.pendingCount(),
+      };
+      publishQueues[channel] = publishQueues[channel]
+        .then(() => publishNotificationPresentation(payload))
+        .catch(options.reportError);
+    });
+  }
 
   onCleanup(() => {
     disposed = true;

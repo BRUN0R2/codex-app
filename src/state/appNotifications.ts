@@ -7,7 +7,11 @@ import type {
   NotificationTone,
 } from "../contracts/notificationOverlay";
 import { NOTIFICATION_QUEUE_CAPACITY } from "../contracts/notificationPolicy";
-import type { NotificationPreferences, NotificationRule } from "../contracts/types";
+import type {
+  EngineServerRequest,
+  NotificationPreferences,
+  NotificationRule,
+} from "../contracts/types";
 
 const MAX_REMEMBERED_NOTIFICATION_IDS = 128;
 const BASIC_NOTIFICATION_RULE = {
@@ -16,6 +20,7 @@ const BASIC_NOTIFICATION_RULE = {
 } as const satisfies NotificationRule;
 
 export interface AppNotificationInput {
+  readonly approval: EngineServerRequest | null;
   readonly id: string;
   readonly event: NotificationEventKind;
   readonly tone: NotificationTone;
@@ -25,8 +30,9 @@ export interface AppNotificationInput {
 }
 
 export interface AppNotificationCenter {
-  readonly active: Accessor<AppNotification | null>;
-  readonly pendingCount: Accessor<number>;
+  readonly approvalFor: (notificationId: string) => EngineServerRequest | null;
+  readonly priority: AppNotificationLane;
+  readonly transient: AppNotificationLane;
   readonly clear: () => void;
   readonly dismiss: (notificationId: string) => boolean;
   readonly enqueue: (input: AppNotificationInput) => boolean;
@@ -34,18 +40,25 @@ export interface AppNotificationCenter {
     input: AppNotificationInput & { readonly event: ConfigurableNotificationEventKind },
   ) => boolean;
   readonly reset: () => void;
+  readonly remove: (notificationId: string) => boolean;
   readonly targetFor: (notificationId: string) => NotificationTarget | null;
+}
+
+export interface AppNotificationLane {
+  readonly active: Accessor<AppNotification | null>;
+  readonly pendingCount: Accessor<number>;
 }
 
 export function createAppNotificationCenter(
   preferences: Accessor<NotificationPreferences>,
   now: () => number = Date.now,
 ): AppNotificationCenter {
-  const [queue, setQueue] = createSignal<readonly AppNotification[]>([]);
+  const [priorityQueue, setPriorityQueue] = createSignal<readonly AppNotification[]>([]);
+  const [transientQueue, setTransientQueue] = createSignal<readonly AppNotification[]>([]);
   const rememberedIds = new Set<string>();
   const rememberedOrder: string[] = [];
-  const active = createMemo(() => queue()[0] ?? null);
-  const pendingCount = createMemo(() => queue().length);
+  const priority = createNotificationLane(priorityQueue);
+  const transient = createNotificationLane(transientQueue);
 
   function enqueue(input: AppNotificationInput): boolean {
     const currentPreferences = preferences();
@@ -81,10 +94,14 @@ export function createAppNotificationCenter(
             position: currentPreferences.transientPosition,
           },
     };
-    const next = insertNotification(queue(), notification);
-    if (!next.some((entry) => entry.id === notification.id)) return false;
+    const [current, setCurrent] =
+      notification.presentation.type === "priority"
+        ? [priorityQueue, setPriorityQueue]
+        : [transientQueue, setTransientQueue];
+    const next = insertNotification(current(), notification);
+    if (next === null) return false;
     remember(input.id);
-    setQueue(next);
+    setCurrent(next);
     return true;
   }
 
@@ -99,25 +116,50 @@ export function createAppNotificationCenter(
   }
 
   function dismiss(notificationId: string): boolean {
-    if (active()?.id !== notificationId) return false;
-    setQueue((current) => current.slice(1));
-    return true;
+    if (priority.active()?.id === notificationId) {
+      setPriorityQueue((current) => current.slice(1));
+      return true;
+    }
+    if (transient.active()?.id === notificationId) {
+      setTransientQueue((current) => current.slice(1));
+      return true;
+    }
+    return false;
   }
 
   function targetFor(notificationId: string): NotificationTarget | null {
-    const notification = active();
-    return notification?.id === notificationId ? notification.target : null;
+    const notification = activeNotification(notificationId, priority, transient);
+    return notification?.target ?? null;
+  }
+
+  function approvalFor(notificationId: string): EngineServerRequest | null {
+    const notification = activeNotification(notificationId, priority, transient);
+    return notification?.approval ?? null;
+  }
+
+  function remove(notificationId: string): boolean {
+    const nextPriority = removeNotification(priorityQueue(), notificationId);
+    const nextTransient = removeNotification(transientQueue(), notificationId);
+    if (nextPriority !== null) setPriorityQueue(nextPriority);
+    if (nextTransient !== null) setTransientQueue(nextTransient);
+    return nextPriority !== null || nextTransient !== null;
   }
 
   return {
-    active,
-    pendingCount,
-    clear: () => setQueue([]),
+    approvalFor,
+    priority,
+    transient,
+    clear: () => {
+      setPriorityQueue([]);
+      setTransientQueue([]);
+    },
     dismiss,
     enqueue,
     preview,
+    remove,
     reset: () => {
-      setQueue([]);
+      setPriorityQueue([]);
+      setTransientQueue([]);
       rememberedIds.clear();
       rememberedOrder.length = 0;
     },
@@ -125,18 +167,40 @@ export function createAppNotificationCenter(
   };
 }
 
+function removeNotification(
+  queue: readonly AppNotification[],
+  notificationId: string,
+): readonly AppNotification[] | null {
+  const index = queue.findIndex((entry) => entry.id === notificationId);
+  if (index < 0) return null;
+  return [...queue.slice(0, index), ...queue.slice(index + 1)];
+}
+
 function insertNotification(
   current: readonly AppNotification[],
   notification: AppNotification,
-): readonly AppNotification[] {
-  const next = [...current];
-  if (notification.presentation.type === "priority") {
-    const firstTransient = next.findIndex((entry) => entry.presentation.type === "transient");
-    next.splice(firstTransient < 0 ? next.length : firstTransient, 0, notification);
-  } else {
-    next.push(notification);
+): readonly AppNotification[] | null {
+  if (current.length >= NOTIFICATION_QUEUE_CAPACITY) return null;
+  return [...current, notification];
+}
+
+function createNotificationLane(queue: Accessor<readonly AppNotification[]>): AppNotificationLane {
+  return {
+    active: createMemo(() => queue()[0] ?? null),
+    pendingCount: createMemo(() => queue().length),
+  };
+}
+
+function activeNotification(
+  notificationId: string,
+  priority: AppNotificationLane,
+  transient: AppNotificationLane,
+): AppNotification | null {
+  for (const lane of [priority, transient] as const satisfies readonly AppNotificationLane[]) {
+    const notification = lane.active();
+    if (notification?.id === notificationId) return notification;
   }
-  return next.slice(0, NOTIFICATION_QUEUE_CAPACITY);
+  return null;
 }
 
 function notificationRule(

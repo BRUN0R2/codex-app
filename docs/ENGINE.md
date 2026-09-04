@@ -50,9 +50,10 @@ synchronization fails.
 | `browser://new-window` | Validated HTTP(S) URL for a controlled new tab |
 | `browser://agent-activity` | Conversation, action, and panel-open state |
 | `browser://metric` | Bounded QA and latency sample |
-| `notification-overlay:presentation` | One strictly decoded active desktop notification and bounded pending count |
-| `notification-overlay:action` | Identity-bound dismiss, activate, or failure response from the isolated overlay |
-| `notification-overlay:ready` | Exact schema-version handshake before the first projection |
+| `notification-overlay:presentation` | One strictly decoded lane projection with its active notification and bounded pending count |
+| `notification-overlay:action` | Channel- and identity-bound dismiss, activate, approval decision, or failure response from an isolated overlay |
+| `notification-overlay:approval-result` | Identity-bound success or failure acknowledgement for an approval decision |
+| `notification-overlay:ready` | Exact schema-version and channel handshake before each lane's first projection |
 
 Accepted notifications are `account.rateLimitsUpdated`, `auth.loginCompleted`,
 `auth.sessionChanged`, `thread.created`, `thread.updated`, `thread.archived`,
