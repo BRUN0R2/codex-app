@@ -64,6 +64,9 @@ windows = { version = "=0.61.3", features = [
 ] }
 windows-native-keyring-store = { version = "1.1.0", default-features = false }
 
+[dev-dependencies]
+tauri = { version = "2.11.5", features = ["test"] }
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

@@ -14,7 +14,11 @@ mod process;
 
 use desktop_integration::{ApplicationMenuState, ApplicationPreferencesState, restore_main_window};
 use engine::{EngineManager, RuntimeDiagnosticSubsystem};
-use tauri::{Emitter as _, Manager as _};
+use tauri::{Builder, Emitter as _, Manager as _, Runtime};
+
+fn manage_pre_setup_menu_state<R: Runtime>(builder: Builder<R>) -> Builder<R> {
+    builder.manage(ApplicationMenuState::default())
+}
 
 fn focus_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     let window = app
@@ -67,7 +71,7 @@ pub fn run() {
     let browser_smoke_requested = browser::runtime_smoke_requested();
     #[cfg(not(debug_assertions))]
     let browser_smoke_requested = false;
-    let mut builder = tauri::Builder::default();
+    let mut builder = manage_pre_setup_menu_state(tauri::Builder::default());
     if !browser_smoke_requested {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Err(error) = focus_main_window(app) {
@@ -93,12 +97,6 @@ pub fn run() {
         .setup(|app| {
             app.state::<browser::BrowserManager>()
                 .initialize(app.handle())?;
-            if !app.manage(ApplicationMenuState::default()) {
-                return Err(crate::error::AppError::State(
-                    "application menu state is already managed".to_string(),
-                )
-                .into());
-            }
             let preferences = ApplicationPreferencesState::load(app.handle())?;
             if !app.manage(preferences) {
                 return Err(crate::error::AppError::State(
@@ -188,4 +186,19 @@ pub fn run() {
             tauri::async_runtime::block_on(engine.stop(app_handle));
         }
     });
+}
+
+#[cfg(test)]
+mod startup_state_tests {
+    use super::{ApplicationMenuState, manage_pre_setup_menu_state};
+    use tauri::{Manager as _, test};
+
+    #[test]
+    fn menu_command_state_exists_before_runtime_setup() -> Result<(), Box<dyn std::error::Error>> {
+        let app = manage_pre_setup_menu_state(test::mock_builder())
+            .build(test::mock_context(test::noop_assets()))?;
+
+        assert!(app.try_state::<ApplicationMenuState>().is_some());
+        Ok(())
+    }
 }
