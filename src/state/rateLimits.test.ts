@@ -24,6 +24,7 @@ function response(): AccountRateLimitsResponse {
     rateLimits: primary,
     rateLimitsByLimitId: { codex: primary },
     planPrice: { amount: 2000, currency: "USD", minorUnitExponent: 2 },
+    lunaReserveAvailable: false,
   };
 }
 

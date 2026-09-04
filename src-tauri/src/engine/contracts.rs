@@ -1253,6 +1253,7 @@ pub struct AccountRateLimitsResponse {
     pub rate_limits: RateLimitSnapshot,
     pub rate_limits_by_limit_id: BTreeMap<String, RateLimitSnapshot>,
     pub plan_price: Option<PlanPriceSnapshot>,
+    pub luna_reserve_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

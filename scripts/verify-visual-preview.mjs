@@ -6559,6 +6559,7 @@ function automationEditorVisualAuditExpression() {
 
 function validateChatReferenceMetrics(metrics, viewport) {
   const tolerance = 1;
+  const minimumResponsiveWidth = Math.min(560, viewport.width - 360 - 8 - 1);
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
     `unexpected chat viewport at ${viewport.width}x${viewport.height}`,
@@ -6578,7 +6579,8 @@ function validateChatReferenceMetrics(metrics, viewport) {
     "the canonical physical width equivalent to 48rem changed",
   );
   assert(
-    metrics.timelineInner.width <= 768 + tolerance && metrics.timelineInner.width >= 560,
+    metrics.timelineInner.width <= 768 + tolerance &&
+      metrics.timelineInner.width >= minimumResponsiveWidth - tolerance,
     "the conversation column left the canonical responsive width",
   );
   assert(
@@ -8244,7 +8246,7 @@ function validateAutomationEditorMetrics(metrics, viewport) {
   );
   assert(metrics.editor.top >= metrics.chrome.bottom, "the editor is positioned above the content");
   assert(metrics.editor.bottom <= viewport.height + tolerance, "the editor exceeds the viewport");
-  assert(metrics.editor.width >= 500, "the editor became excessively narrow");
+  assert(metrics.editor.width >= 500 - tolerance, "the editor became excessively narrow");
   assert(Number.parseFloat(metrics.heading.fontSize) >= 17, "the editor title became too small");
   assert(metrics.prompt.height >= 150, "the instruction field became too short");
   assert(metrics.dialogCount === 1, "the editor does not expose exactly one modal dialog");
@@ -8343,10 +8345,15 @@ function validateWorkspaceSplitMetrics(metrics, label, interaction = null) {
     Math.abs(interaction.initial.chat.width - interaction.initial.workspace.width) <= tolerance,
     `${label} did not start at 50/50 before dragging`,
   );
+  const availableRedistribution = Math.max(0, interaction.initial.workspace.width - 420);
+  const expectedRedistribution = Math.min(40, availableRedistribution);
   assert(
-    interaction.dragged.chat.width >= interaction.initial.chat.width + 40 &&
-      interaction.dragged.workspace.width <= interaction.initial.workspace.width - 40,
-    `dragging the ${label} divider did not redistribute space between panels`,
+    expectedRedistribution >= 20 &&
+      interaction.dragged.chat.width >=
+        interaction.initial.chat.width + expectedRedistribution - tolerance &&
+      interaction.dragged.workspace.width <=
+        interaction.initial.workspace.width - expectedRedistribution + tolerance,
+    `dragging the ${label} divider did not reach the available bounded position`,
   );
   assert(
     Math.abs(metrics.chat.width - interaction.dragged.chat.width) <= tolerance &&

@@ -1,4 +1,8 @@
 import { exceedsUtf8ByteLength, utf8ByteLength } from "../utf8";
+import {
+  TRANSIENT_NOTIFICATION_MAXIMUM_DURATION_SECONDS,
+  TRANSIENT_NOTIFICATION_MINIMUM_DURATION_SECONDS,
+} from "./notificationPolicy";
 import type {
   AccountPlanType,
   AccountProfileInvocation,
@@ -833,15 +837,17 @@ export function decodeOutputReadResponse(value: unknown): OutputReadResponse {
 export function decodeApplicationPreferences(value: unknown): ApplicationPreferences {
   const object = exactRecord(value, "$", [
     "closeToTray",
+    "notifications",
     "schemaVersion",
     "startMinimized",
     "startWithWindows",
   ]);
   const preferences: ApplicationPreferences = {
-    schemaVersion: literal(object.schemaVersion, "$.schemaVersion", [1] as const),
+    schemaVersion: literal(object.schemaVersion, "$.schemaVersion", [2] as const),
     startWithWindows: booleanValue(object.startWithWindows, "$.startWithWindows"),
     startMinimized: booleanValue(object.startMinimized, "$.startMinimized"),
     closeToTray: booleanValue(object.closeToTray, "$.closeToTray"),
+    notifications: decodeNotificationPreferences(object.notifications, "$.notifications"),
   };
   if (preferences.startMinimized && !preferences.startWithWindows) {
     throw new ContractError(
@@ -850,6 +856,72 @@ export function decodeApplicationPreferences(value: unknown): ApplicationPrefere
     );
   }
   return preferences;
+}
+
+function decodeNotificationPreferences(
+  value: unknown,
+  path: string,
+): ApplicationPreferences["notifications"] {
+  const object = exactRecord(value, path, [
+    "enabled",
+    "events",
+    "transientDurationSeconds",
+    "transientPosition",
+  ]);
+  const events = exactRecord(object.events, `${path}.events`, [
+    "approvalRequired",
+    "lunaReserveAvailable",
+    "taskCompleted",
+    "taskFailed",
+    "usageLimitReset",
+    "usageResetAvailable",
+  ]);
+  return {
+    enabled: booleanValue(object.enabled, `${path}.enabled`),
+    transientPosition: literal(object.transientPosition, `${path}.transientPosition`, [
+      "bottomLeft",
+      "bottomRight",
+      "topLeft",
+      "topRight",
+    ] as const),
+    transientDurationSeconds: integer(
+      object.transientDurationSeconds,
+      `${path}.transientDurationSeconds`,
+      TRANSIENT_NOTIFICATION_MINIMUM_DURATION_SECONDS,
+      TRANSIENT_NOTIFICATION_MAXIMUM_DURATION_SECONDS,
+    ),
+    events: {
+      approvalRequired: decodeNotificationRule(
+        events.approvalRequired,
+        `${path}.events.approvalRequired`,
+      ),
+      taskCompleted: decodeNotificationRule(events.taskCompleted, `${path}.events.taskCompleted`),
+      taskFailed: decodeNotificationRule(events.taskFailed, `${path}.events.taskFailed`),
+      usageLimitReset: decodeNotificationRule(
+        events.usageLimitReset,
+        `${path}.events.usageLimitReset`,
+      ),
+      usageResetAvailable: decodeNotificationRule(
+        events.usageResetAvailable,
+        `${path}.events.usageResetAvailable`,
+      ),
+      lunaReserveAvailable: decodeNotificationRule(
+        events.lunaReserveAvailable,
+        `${path}.events.lunaReserveAvailable`,
+      ),
+    },
+  };
+}
+
+function decodeNotificationRule(
+  value: unknown,
+  path: string,
+): ApplicationPreferences["notifications"]["events"]["approvalRequired"] {
+  const object = exactRecord(value, path, ["enabled", "priority"]);
+  return {
+    enabled: booleanValue(object.enabled, `${path}.enabled`),
+    priority: booleanValue(object.priority, `${path}.priority`),
+  };
 }
 
 export function decodeConfigReadResponse(value: unknown): ConfigReadResponse {
@@ -928,7 +1000,12 @@ export function decodeConfigUpdate(value: unknown): ConfigUpdate {
 }
 
 export function decodeAccountRateLimitsResponse(value: unknown): AccountRateLimitsResponse {
-  const object = exactRecord(value, "$", ["planPrice", "rateLimits", "rateLimitsByLimitId"]);
+  const object = exactRecord(value, "$", [
+    "lunaReserveAvailable",
+    "planPrice",
+    "rateLimits",
+    "rateLimitsByLimitId",
+  ]);
   const byId = record(object.rateLimitsByLimitId, "$.rateLimitsByLimitId");
   const decodedById: Record<string, RateLimitSnapshot> = {};
   for (const [key, entry] of Object.entries(byId)) {
@@ -940,6 +1017,7 @@ export function decodeAccountRateLimitsResponse(value: unknown): AccountRateLimi
   return {
     rateLimits: decodeRateLimitSnapshot(object.rateLimits, "$.rateLimits"),
     rateLimitsByLimitId: decodedById,
+    lunaReserveAvailable: booleanValue(object.lunaReserveAvailable, "$.lunaReserveAvailable"),
     planPrice:
       object.planPrice === null ? null : decodePlanPriceSnapshot(object.planPrice, "$.planPrice"),
   };

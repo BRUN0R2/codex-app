@@ -30,6 +30,7 @@ function response(
     rateLimits: primary,
     rateLimitsByLimitId: { codex: primary, ...additional },
     planPrice: null,
+    lunaReserveAvailable: false,
   };
 }
 

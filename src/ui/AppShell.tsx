@@ -11,8 +11,6 @@ import {
 import type { BrowserAgentActivityNotification } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
-import { openExternalUrl, openWorkspaceDirectory } from "../infrastructure/codexClient";
-import { subscribeToMenuEvents } from "../infrastructure/desktopClient";
 import { isBrowserPreview } from "../platform/desktopRuntime";
 import type { AppController } from "../state/appController";
 import { createBrowserController } from "../state/browserController";
@@ -21,6 +19,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { applyDesktopAppearance } from "./appearance";
 import { Composer, type ComposerDraftRequest } from "./Composer";
 import { formatShortDate } from "./dateFormat";
+import { useExternalNavigation } from "./ExternalNavigation";
 import { HomeComposerModeToggle } from "./HomeComposerModeToggle";
 import { Icon } from "./Icon";
 import { LatestTurnFileChangeStore } from "./reviewChanges";
@@ -91,6 +90,9 @@ export function AppShell(props: { readonly controller: AppController }) {
   const [workspaceSplitDragging, setWorkspaceSplitDragging] = createSignal(false);
   let previewBrowserPending = readPreviewBrowserOpen();
   let observedBrowserAgentActivity: BrowserAgentActivityNotification | null = null;
+  let observedNotificationSettingsRequest = props.controller.notificationUsageSettingsRequest();
+  let observedApplicationShellActionSequence =
+    props.controller.applicationShellActionRequest()?.sequence ?? 0;
   const reviewChanges = createMemo(() =>
     reviewChangeStore.project(props.controller.turns(), props.controller.activeTurnId()),
   );
@@ -104,6 +106,30 @@ export function AppShell(props: { readonly controller: AppController }) {
     setSettingsPage(page ?? null);
     setSettingsOpen(true);
   }
+
+  createEffect(() => {
+    const request = props.controller.notificationUsageSettingsRequest();
+    if (request === observedNotificationSettingsRequest) return;
+    observedNotificationSettingsRequest = request;
+    openSettings("usage");
+  });
+
+  createEffect(() => {
+    const request = props.controller.applicationShellActionRequest();
+    if (request === null || request.sequence === observedApplicationShellActionSequence) return;
+    observedApplicationShellActionSequence = request.sequence;
+    switch (request.type) {
+      case "newThread":
+        setActiveSurface("chat");
+        props.controller.newThread();
+        return;
+      case "toggleSettings":
+        openSettings();
+        return;
+      case "toggleSidebar":
+        setSidebarCollapsed((value) => !value);
+    }
+  });
   const [draftRequest, setDraftRequest] = createSignal<ComposerDraftRequest | null>(null);
   const [chatDockHeight, setChatDockHeight] = createSignal(0);
   let nextDraftRequestId = 0;
@@ -119,8 +145,6 @@ export function AppShell(props: { readonly controller: AppController }) {
   let chatDockResizeFrame: number | undefined;
   let workspaceSplitPointerId: number | undefined;
   let sidebarWidthPointerId: number | undefined;
-  let disposed = false;
-  const eventUnlisteners: Array<() => void> = [];
 
   function handleKeyboardShortcut(event: KeyboardEvent): void {
     if (event.key === "Escape" && workspaceTabs().visible) {
@@ -321,11 +345,7 @@ export function AppShell(props: { readonly controller: AppController }) {
   }
 
   async function openWorkspace(path: string): Promise<void> {
-    try {
-      await openWorkspaceDirectory(path);
-    } catch (reason) {
-      props.controller.reportError(reason);
-    }
+    await props.controller.openWorkspaceDirectory(path);
   }
 
   function synchronizeChatDockInset(): void {
@@ -582,27 +602,9 @@ export function AppShell(props: { readonly controller: AppController }) {
       workspaceSplitResizeObserver.observe(mainPanelContentElement);
       synchronizeWorkspaceSplitGeometry();
     }
-    void subscribeToMenuEvents({
-      onNewThread: () => {
-        setActiveSurface("chat");
-        props.controller.newThread();
-      },
-      onToggleSettings: () => openSettings(),
-      onToggleSidebar: () => setSidebarCollapsed((value) => !value),
-    }).then((unlisten) => {
-      if (disposed) {
-        unlisten();
-        return;
-      }
-      eventUnlisteners.push(unlisten);
-    });
   });
   onCleanup(() => {
     browserController.dispose();
-    disposed = true;
-    for (const unlisten of eventUnlisteners) {
-      unlisten();
-    }
     window.removeEventListener("keydown", handleKeyboardShortcut);
     chatDockResizeObserver?.disconnect();
     sidebarWidthResizeObserver?.disconnect();
@@ -842,6 +844,7 @@ const SETTINGS_PAGES = new Set<SettingsPage>([
   "archived",
   "diagnostics",
   "general",
+  "notifications",
   "personalization",
   "profile",
   "shortcuts",
@@ -876,6 +879,7 @@ function readPreviewBrowserOpen(): boolean {
 
 function UsageLimitBanner(props: { readonly controller: AppController }) {
   const i18n = useI18n();
+  const openExternalUrl = useExternalNavigation();
   const messages = () => i18n.messages().shell;
   const snapshot = () => props.controller.rateLimits()?.rateLimits;
   const exhausted = () => {

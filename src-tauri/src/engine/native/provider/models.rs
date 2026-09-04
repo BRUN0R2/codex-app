@@ -23,6 +23,7 @@ use crate::engine::native::multi_agent::MultiAgentVersion;
 
 const MAX_MODEL_ID_BYTES: usize = 128;
 const MAX_MODEL_TEXT_BYTES: usize = 16_384;
+const LUNA_RESERVE_MODEL_ID: &str = "gpt-reserve";
 const MAX_INSTRUCTIONS_BYTES: usize = 262_144;
 const MAX_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000_000;
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u8 = 95;
@@ -798,8 +799,25 @@ impl ModelCatalog {
         &self.models
     }
 
-    pub fn picker_models(&self) -> impl Iterator<Item = &SelectedModel> {
-        self.models.iter().filter(|model| !model.summary.hidden)
+    pub fn picker_models(
+        &self,
+        include_luna_reserve: bool,
+    ) -> impl Iterator<Item = &SelectedModel> {
+        self.models.iter().filter(move |model| {
+            !model.summary.hidden || (include_luna_reserve && model.id() == LUNA_RESERVE_MODEL_ID)
+        })
+    }
+
+    pub fn picker_model_summaries(&self, include_luna_reserve: bool) -> Vec<CodexModel> {
+        self.picker_models(include_luna_reserve)
+            .map(|model| {
+                let mut summary = model.summary();
+                if model.id() == LUNA_RESERVE_MODEL_ID {
+                    summary.hidden = false;
+                }
+                summary
+            })
+            .collect()
     }
 
     pub fn multi_agent_models(&self) -> Vec<CodexModel> {
@@ -811,7 +829,16 @@ impl ModelCatalog {
             .collect()
     }
 
-    pub fn select(&self, requested: Option<&str>) -> Result<SelectedModel, AppError> {
+    pub fn select_for_account(
+        &self,
+        requested: Option<&str>,
+        luna_reserve_available: bool,
+    ) -> Result<SelectedModel, AppError> {
+        if requested == Some(LUNA_RESERVE_MODEL_ID) && !luna_reserve_available {
+            return Err(AppError::Protocol(
+                "Luna Reserve is not available for the current account".into(),
+            ));
+        }
         let selected = match requested {
             Some(id) => self.models.iter().find(|model| model.id() == id),
             None => self.models.iter().find(|model| model.summary.is_default),
@@ -1181,6 +1208,98 @@ mod tests {
     }
 
     #[test]
+    fn astra_catalog_contract_is_executable_by_the_native_runtime() {
+        let wire: ModelsWire = serde_json::from_str(
+            r#"{
+                "models": [{
+                    "slug": "gpt-6-astra",
+                    "display_name": "GPT-6-Astra",
+                    "description": "Our most capable model for complex, demanding work.",
+                    "default_reasoning_level": "low",
+                    "supported_reasoning_levels": [
+                        {"effort":"low","description":"fast"},
+                        {"effort":"medium","description":"balanced"},
+                        {"effort":"high","description":"deep"},
+                        {"effort":"xhigh","description":"extra deep"},
+                        {"effort":"max","description":"maximum"},
+                        {"effort":"ultra","description":"delegated"}
+                    ],
+                    "visibility": "list",
+                    "priority": 1,
+                    "context_window": 272000,
+                    "max_context_window": 872000,
+                    "supports_parallel_tool_calls": true,
+                    "use_responses_lite": true,
+                    "supports_reasoning_summary_parameter": true,
+                    "default_reasoning_summary": "none",
+                    "support_verbosity": true,
+                    "default_verbosity": "low",
+                    "input_modalities": ["text", "image"],
+                    "supports_image_detail_original": true,
+                    "web_search_tool_type": "text_and_image",
+                    "tool_mode": "code_mode_only",
+                    "multi_agent_version": "v2",
+                    "multi_agent_reasoning_effort": "xhigh",
+                    "truncation_policy": {"mode": "tokens", "limit": 10000},
+                    "base_instructions": "Complete the requested work."
+                }]
+            }"#,
+        )
+        .expect("the audited Astra catalog shape should decode");
+        let catalog = ModelCatalog::from_wire(wire, 1).expect("Astra should validate");
+        let astra = catalog
+            .select_for_account(Some("gpt-6-astra"), true)
+            .expect("Astra should be selectable when the server lists it");
+        let summary = astra.summary();
+
+        assert_eq!(summary.default_reasoning_effort, Some(ReasoningEffort::Low));
+        assert_eq!(
+            summary
+                .supported_reasoning_efforts
+                .iter()
+                .map(|option| option.reasoning_effort)
+                .collect::<Vec<_>>(),
+            [
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+                ReasoningEffort::Ultra,
+            ]
+        );
+        let context = summary.context_window.expect("Astra context metadata");
+        assert_eq!(context.tokens, 272_000);
+        assert_eq!(context.usable_tokens, 258_400);
+        assert_eq!(context.usable_percent, 95);
+        assert_eq!(context.maximum_tokens, Some(872_000));
+        assert_eq!(astra.response_protocol(), ResponseProtocol::Lite);
+        assert_eq!(astra.tool_mode(), super::ModelToolMode::CodeModeOnly);
+        assert_eq!(
+            astra.provider_reasoning_effort(Some(ReasoningEffort::Ultra)),
+            Some(ReasoningEffort::XHigh)
+        );
+        assert_eq!(
+            astra.requested_reasoning_summary(),
+            Some(ReasoningSummarySetting::Auto)
+        );
+        assert_eq!(
+            astra
+                .select_verbosity(None)
+                .expect("Astra default verbosity should resolve"),
+            Some(ModelVerbosity::Low)
+        );
+        assert_eq!(
+            astra.multi_agent_version(),
+            crate::engine::native::multi_agent::MultiAgentVersion::V2
+        );
+        assert!(astra.supports_image_input());
+        assert!(astra.supports_image_detail_original());
+        assert!(astra.web_search_includes_images());
+        assert_eq!(astra.provider_output_budget().bytes(), 40_000);
+    }
+
+    #[test]
     fn picker_models_exclude_hidden_provider_entries() {
         let wire: ModelsWire = serde_json::from_str(
             r#"{
@@ -1211,10 +1330,33 @@ mod tests {
         assert_eq!(catalog.models().len(), 2);
         assert_eq!(
             catalog
-                .picker_models()
+                .picker_models(false)
                 .map(|model| model.id().to_string())
                 .collect::<Vec<_>>(),
             ["gpt-5.6-luna"]
+        );
+        assert_eq!(
+            catalog
+                .picker_models(true)
+                .map(|model| model.id().to_string())
+                .collect::<Vec<_>>(),
+            ["gpt-reserve", "gpt-5.6-luna"]
+        );
+        assert!(
+            catalog
+                .picker_model_summaries(true)
+                .iter()
+                .all(|model| !model.hidden)
+        );
+        assert!(
+            catalog
+                .select_for_account(Some("gpt-reserve"), false)
+                .is_err()
+        );
+        assert!(
+            catalog
+                .select_for_account(Some("gpt-reserve"), true)
+                .is_ok()
         );
     }
 
@@ -1295,13 +1437,13 @@ mod tests {
         assert!(code_mode.is_default);
         assert_eq!(
             catalog
-                .select(None)
+                .select_for_account(None, true)
                 .expect("the supported default should resolve")
                 .id(),
             "gpt-code-mode"
         );
         let selected = catalog
-            .select(Some("gpt-code-mode"))
+            .select_for_account(Some("gpt-code-mode"), true)
             .expect("a Code Mode model must be executable without enabling Ultra");
         assert_eq!(selected.id(), "gpt-code-mode");
         assert_eq!(selected.tool_mode(), super::ModelToolMode::CodeModeOnly);
@@ -1340,7 +1482,7 @@ mod tests {
         .expect("future runtime fixture should decode without enabling it");
         let model = ModelCatalog::from_wire(wire, 1)
             .expect("future runtime fixture should validate")
-            .select(None)
+            .select_for_account(None, true)
             .expect("non-Ultra model default should remain usable");
 
         assert_eq!(
@@ -1429,14 +1571,14 @@ mod tests {
 
         assert_eq!(
             catalog
-                .select(None)
+                .select_for_account(None, true)
                 .expect("runtime-compatible default should resolve")
                 .id(),
             "gpt-native-default"
         );
         assert!(
             !catalog
-                .select(Some("gpt-legacy-ultra"))
+                .select_for_account(Some("gpt-legacy-ultra"), true)
                 .expect("legacy model remains selectable")
                 .summary()
                 .is_default
@@ -1469,7 +1611,7 @@ mod tests {
         .expect("ultra fixture should decode");
         let model = ModelCatalog::from_wire(wire, 1)
             .expect("ultra fixture should validate")
-            .select(None)
+            .select_for_account(None, true)
             .expect("default model should resolve");
 
         assert_eq!(
@@ -1507,7 +1649,7 @@ mod tests {
         .expect("ultra fixture should decode");
         let model = ModelCatalog::from_wire(wire, 1)
             .expect("ultra fixture should validate")
-            .select(None)
+            .select_for_account(None, true)
             .expect("default model should resolve");
 
         assert_eq!(
@@ -1555,7 +1697,7 @@ mod tests {
         .expect("ultra-only fixture should decode");
         let model = ModelCatalog::from_wire(wire, 2)
             .expect("ultra-only fixture should validate")
-            .select(Some("gpt-ultra-only"))
+            .select_for_account(Some("gpt-ultra-only"), true)
             .expect("the explicit model should resolve for effort translation");
 
         assert_eq!(
@@ -1608,7 +1750,7 @@ mod tests {
         .expect("modern model fixture should decode");
         let model = ModelCatalog::from_wire(wire, 1)
             .expect("modern model fixture should validate")
-            .select(None)
+            .select_for_account(None, true)
             .expect("default model should resolve");
 
         assert_eq!(

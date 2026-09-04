@@ -343,7 +343,7 @@ mod tests {
         .expect("model fixture should decode");
         super::super::provider::ModelCatalog::from_wire(wire, 1)
             .expect("model fixture should validate")
-            .select(None)
+            .select_for_account(None, true)
             .expect("default model should resolve")
     }
 
@@ -373,7 +373,7 @@ mod tests {
         .expect("modern model fixture should decode");
         super::super::provider::ModelCatalog::from_wire(wire, 1)
             .expect("modern model fixture should validate")
-            .select(None)
+            .select_for_account(None, true)
             .expect("default model should resolve")
     }
 

@@ -34,6 +34,7 @@ function response(reserve: RateLimitSnapshot): AccountRateLimitsResponse {
       base_model_inference: reserve,
     },
     planPrice: null,
+    lunaReserveAvailable: false,
   };
 }
 

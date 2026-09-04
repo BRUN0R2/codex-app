@@ -7698,6 +7698,77 @@ pre {
   font-size: 0.79rem;
 }
 
+.notification-duration-control {
+  display: flex;
+  min-width: 228px;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-soft);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.notification-duration-control input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.notification-event-row {
+  display: flex;
+  min-height: 78px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 15px 18px;
+  border-bottom: 1px solid rgb(255 255 255 / 8%);
+}
+
+.notification-event-row > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.notification-event-row strong {
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 620;
+}
+
+.notification-event-row small {
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.notification-event-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 14px;
+}
+
+.notification-event-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+.notification-event-controls label:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.notification-event-controls input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .settings-row .language-preference-select {
   width: auto;
   min-width: 228px;
@@ -8373,6 +8444,9 @@ pre {
   .settings-row select,
   .output-detail-select { width: 100%; }
   .settings-row .language-preference-select { width: 100%; min-width: 0; }
+  .notification-duration-control { width: 100%; min-width: 0; }
+  .notification-event-row { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .notification-event-controls { width: 100%; justify-content: space-between; }
   .output-detail-menu { width: 100%; }
 }
 

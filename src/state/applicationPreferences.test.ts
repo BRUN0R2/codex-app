@@ -29,4 +29,22 @@ describe("application preferences", () => {
       ),
     ).toEqual(DEFAULT_APPLICATION_PREFERENCES);
   });
+
+  it("updates one notification rule without replacing sibling rules", () => {
+    expect(
+      mergeApplicationPreferences(DEFAULT_APPLICATION_PREFERENCES, {
+        notifications: {
+          events: {
+            taskCompleted: { enabled: false, priority: true },
+          },
+        },
+      }).notifications,
+    ).toEqual({
+      ...DEFAULT_APPLICATION_PREFERENCES.notifications,
+      events: {
+        ...DEFAULT_APPLICATION_PREFERENCES.notifications.events,
+        taskCompleted: { enabled: false, priority: true },
+      },
+    });
+  });
 });

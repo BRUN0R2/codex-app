@@ -34,6 +34,8 @@ Rust NativeEngine
 
 Invalid contracts fail at their boundary. Components never call native commands
 directly, and approximate payload formats are never accepted as fallbacks.
+An architecture regression test scans every presentation module and both UI
+entrypoints so an infrastructure import cannot reintroduce direct IPC access.
 
 ## Initialization
 
@@ -156,6 +158,21 @@ Controllers own account, project, task, browser, automation, and preference
 state. Expensive projections are memoized and large lists are virtualized.
 Markdown, syntax highlighting, diffs, and large outputs use incremental work to
 avoid blocking the main thread.
+
+Desktop notifications use the same ownership boundary. The main controller
+detects account and task transitions, resolves the per-event rule once, and
+places a bounded, deduplicated notification in a priority-first FIFO queue. A
+strict Tauri event bridge projects only the active item into an isolated,
+transparent `notification-overlay` webview. Priority items are centered,
+persistent, and draggable; transient items are placed in the configured corner
+and dismissed by an identity-bound timer whose progress animation does not
+restart when the pending count changes. Overlay actions carry the notification
+identity back to state before anything is dismissed or activated.
+
+Application preference schema 2 persists the global switch, transient position
+and duration, plus the enabled/priority rule for every notification event. Rust
+validates and writes the complete schema atomically; TypeScript decodes it with
+exact keys and serializes optimistic updates against the last confirmed value.
 
 Events may arrive while another task is visible. Every reduction carries task
 and turn identity to prevent state leaking between sessions.

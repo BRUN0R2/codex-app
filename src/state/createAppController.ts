@@ -12,6 +12,7 @@ import type {
   AccountProfileResponse,
   AccountRateLimitsResponse,
   AccountReadResponse,
+  ApplicationPreferences,
   AppProduct,
   ApprovalDecision,
   Attachment,
@@ -29,6 +30,7 @@ import type {
   EngineNotification,
   EngineServerRequest,
   EngineStartResponse,
+  OutputReadResponse,
   ProjectRecord,
   RuntimeDiagnostic,
   RuntimeStatus,
@@ -59,10 +61,14 @@ import {
   logout as logoutCommand,
   markAutomationRunReviewed as markAutomationRunReviewedCommand,
   openDesktopDialog as open,
-  openExternalUrl,
+  openExternalUrl as openExternalUrlCommand,
+  openWorkspaceDirectory as openWorkspaceDirectoryCommand,
   readAccount,
   readAccountProfile,
+  readApplicationPreferences,
+  readAttachmentImage as readAttachmentImageCommand,
   readAutoTopUpSettings,
+  readOutput as readOutputCommand,
   readRateLimits,
   readThread,
   readUsageResets,
@@ -79,15 +85,30 @@ import {
   steerTurn,
   subscribeToEvents,
   unarchiveThread as unarchiveThreadCommand,
+  updateApplicationPreferences as updateApplicationPreferencesCommand,
   updateAutomation as updateAutomationCommand,
   updateAutoTopUp as updateAutoTopUpCommand,
   updateConfig,
 } from "../infrastructure/codexClient";
+import { subscribeToMenuEvents, synchronizeApplicationMenu } from "../infrastructure/desktopClient";
+import { isBrowserPreview, isDesktopRuntime } from "../platform/desktopRuntime";
 import {
   createAccountProfileRefreshCoordinator,
   mergeAccountProfile,
 } from "./accountProfileRefresh";
-import type { AppController, DiagnosticEntry, SendMessageInput } from "./appController";
+import type {
+  AppController,
+  ApplicationShellActionRequest,
+  AttachmentSelectionResult,
+  DiagnosticEntry,
+  SendMessageInput,
+} from "./appController";
+import {
+  type ApplicationPreferencesPatch,
+  DEFAULT_APPLICATION_PREFERENCES,
+  mergeApplicationPreferences,
+} from "./applicationPreferences";
+import { type AppNotificationInput, createAppNotificationCenter } from "./appNotifications";
 import {
   unreadAutomationRuns as readUnreadAutomationRuns,
   removeAutomation,
@@ -115,6 +136,8 @@ import {
   takeQueuedMessage as reduceTakeQueuedMessage,
   saveMessageQueue,
 } from "./messageQueue";
+import { createNotificationOverlayBridge } from "./notificationOverlayBridge";
+import { findUsageLimitReset, notificationTaskLabel } from "./notificationTransitions";
 import {
   loadPinnedThreadIds,
   removePinnedThreadId,
@@ -203,10 +226,14 @@ const MAX_DIAGNOSTICS = 50;
 const EVENT_SUBSCRIPTION_TIMEOUT_MS = 15_000;
 const ENGINE_START_TIMEOUT_MS = 120_000;
 const ACCOUNT_READ_TIMEOUT_MS = 45_000;
+const APPLICATION_PREFERENCES_READ_TIMEOUT_MS = 15_000;
 const THREAD_PAGE_CACHE_CAPACITY = 8;
+const USAGE_RESET_REFRESH_STALE_MS = 5 * 60 * 1_000;
 
 interface AppControllerLocalization {
   readonly confirmations: Accessor<TranslationMessages["confirmations"]>;
+  readonly nativeMenu: Accessor<TranslationMessages["nativeMenu"]>;
+  readonly notifications: Accessor<TranslationMessages["notifications"]>;
 }
 
 export function createAppController(localization: AppControllerLocalization): AppController {
@@ -229,6 +256,16 @@ export function createAppController(localization: AppControllerLocalization): Ap
   const [chatModels, setChatModels] = createSignal<readonly ChatModelOption[]>([]);
   const [models, setModels] = createSignal<readonly CodexModel[]>([]);
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
+  const [applicationPreferences, setApplicationPreferences] = createSignal<ApplicationPreferences>(
+    DEFAULT_APPLICATION_PREFERENCES,
+  );
+  const [applicationPreferencesError, setApplicationPreferencesError] = createSignal<string | null>(
+    null,
+  );
+  const [applicationPreferencesLoaded, setApplicationPreferencesLoaded] = createSignal(false);
+  const [applicationPreferencesSaving, setApplicationPreferencesSaving] = createSignal(false);
+  const [applicationShellActionRequest, setApplicationShellActionRequest] =
+    createSignal<ApplicationShellActionRequest | null>(null);
   const [rateLimits, setRateLimits] = createSignal<AccountRateLimitsResponse | null>(null);
   const [rateLimitsError, setRateLimitsError] = createSignal<string | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = createSignal(false);
@@ -290,6 +327,10 @@ export function createAppController(localization: AppControllerLocalization): Ap
   const [diagnostics, setDiagnostics] = createSignal<readonly DiagnosticEntry[]>([]);
   const [error, setError] = createSignal<string | null>(null);
   const [pendingOperations, setPendingOperations] = createSignal(0);
+  const [notificationUsageSettingsRequest, setNotificationUsageSettingsRequest] = createSignal(0);
+  const notificationCenter = createAppNotificationCenter(
+    () => applicationPreferences().notifications,
+  );
   let pendingThreadSelectionId: string | null = null;
   let threadSelectionRevision = 0;
   const [loginPending, setLoginPending] = createSignal(false);
@@ -298,11 +339,17 @@ export function createAppController(localization: AppControllerLocalization): Ap
   let diagnosticSequence = 0;
   let pendingAccountProfileReads = 0;
   let pendingRateLimitReads = 0;
+  let lastUsageResetReadAt = 0;
   let disposed = false;
   let unsubscribe: (() => void) | null = null;
+  let unsubscribeFromMenu: (() => void) | null = null;
+  let applicationShellActionSequence = 0;
   let initializationRevision = 0;
   let initializationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let configQueue: Promise<void> = Promise.resolve();
+  let applicationPreferencesQueue: Promise<void> = Promise.resolve();
+  let confirmedApplicationPreferences: ApplicationPreferences = DEFAULT_APPLICATION_PREFERENCES;
+  let applicationPreferencesRevision = 0;
   const queuedDispatchTails = new Map<string, Promise<void>>();
   const singleFlightOperations = new SingleFlightOperations<string, boolean>();
   let authenticationSync: {
@@ -348,11 +395,13 @@ export function createAppController(localization: AppControllerLocalization): Ap
     if (signedIn()) {
       return;
     }
+    notificationCenter.reset();
     batch(() => {
       setUsageResets(null);
       setUsageResetsError(null);
       setUsageResetsLoading(false);
       setUsageResetRedeemingId(null);
+      lastUsageResetReadAt = 0;
       setAutoTopUpSettings(null);
       setAutoTopUpError(null);
       setAutoTopUpLoading(false);
@@ -362,16 +411,50 @@ export function createAppController(localization: AppControllerLocalization): Ap
   const rateLimitRefresh = createRateLimitRefreshCoordinator({
     getSessionKey: () => (signedIn() ? "chatgpt" : null),
     read: readRateLimitsWithStatus,
-    apply: (value) => {
-      setRateLimits(value);
-      setRateLimitsError(null);
-    },
+    apply: applyRateLimits,
     reportError: (reason) => {
       setRateLimitsError(describeError(reason));
       addDiagnostic({ stream: "runtime", message: describeError(reason) });
     },
     host: createBrowserRateLimitRefreshHost(),
   });
+
+  function applyRateLimits(value: AccountRateLimitsResponse): void {
+    const previous = rateLimits();
+    const reset = previous === null ? null : findUsageLimitReset(previous, value);
+    if (reset !== null) {
+      enqueueNotification({
+        id: `usage-limit-reset:${reset.limitId}:${reset.resetsAt}`,
+        event: "usageLimitReset",
+        tone: "success",
+        title: localization.notifications().usageLimitResetTitle,
+        message: formatMessage(localization.notifications().usageLimitResetMessage, {
+          percent: reset.availablePercent,
+        }),
+        target: { type: "settings", page: "usage" },
+      });
+    }
+    if (previous?.lunaReserveAvailable !== true && value.lunaReserveAvailable) {
+      enqueueNotification({
+        id: `luna-reserve-available:${value.rateLimits.primary?.resetsAt ?? "current"}`,
+        event: "lunaReserveAvailable",
+        tone: "attention",
+        title: localization.notifications().lunaReserveAvailableTitle,
+        message: localization.notifications().lunaReserveAvailableMessage,
+        target: { type: "settings", page: "usage" },
+      });
+    }
+    const previousAvailability = previous?.lunaReserveAvailable ?? false;
+    batch(() => {
+      setRateLimits(value);
+      setRateLimitsError(null);
+    });
+    if (previousAvailability !== value.lunaReserveAvailable) {
+      invalidateModelCatalogs();
+      void loadModelCatalog();
+    }
+    void refreshUsageResetsIfStale();
+  }
 
   async function readRateLimitsWithStatus(): Promise<AccountRateLimitsResponse> {
     pendingRateLimitReads += 1;
@@ -489,6 +572,16 @@ export function createAppController(localization: AppControllerLocalization): Ap
     }
   });
 
+  createEffect(() => {
+    const translation = localization.nativeMenu();
+    if (isDesktopRuntime()) void synchronizeApplicationMenu(translation).catch(reportError);
+  });
+
+  function publishApplicationShellAction(type: ApplicationShellActionRequest["type"]): void {
+    applicationShellActionSequence += 1;
+    setApplicationShellActionRequest({ sequence: applicationShellActionSequence, type });
+  }
+
   onMount(() => {
     rateLimitRefresh.start();
     if (productFlowLoadError !== null) {
@@ -509,8 +602,86 @@ export function createAppController(localization: AppControllerLocalization): Ap
     for (const warning of messageQueueLoadWarnings) {
       reportError(new Error(warning));
     }
-    beginInitialization();
+    if (isDesktopRuntime()) {
+      void subscribeToMenuEvents({
+        onNewThread: () => publishApplicationShellAction("newThread"),
+        onToggleSettings: () => publishApplicationShellAction("toggleSettings"),
+        onToggleSidebar: () => publishApplicationShellAction("toggleSidebar"),
+      })
+        .then((dispose) => {
+          if (disposed) {
+            dispose();
+          } else {
+            unsubscribeFromMenu = dispose;
+          }
+        })
+        .catch(reportError);
+    }
+    void loadApplicationPreferences().finally(() => {
+      if (!disposed) beginInitialization();
+    });
   });
+
+  async function loadApplicationPreferences(): Promise<void> {
+    if (!isDesktopRuntime() && !isBrowserPreview()) {
+      return;
+    }
+    setApplicationPreferencesError(null);
+    try {
+      const stored = await withBootTimeout(
+        "load application preferences",
+        APPLICATION_PREFERENCES_READ_TIMEOUT_MS,
+        readApplicationPreferences,
+      );
+      confirmedApplicationPreferences = stored;
+      setApplicationPreferences(stored);
+      setApplicationPreferencesLoaded(true);
+    } catch (reason) {
+      setApplicationPreferencesError(describeError(reason));
+      reportError(reason);
+    }
+  }
+
+  async function updateApplicationPreferences(
+    patch: ApplicationPreferencesPatch,
+  ): Promise<boolean> {
+    if (!applicationPreferencesLoaded()) return false;
+    const desired = mergeApplicationPreferences(applicationPreferences(), patch);
+    applicationPreferencesRevision += 1;
+    const revision = applicationPreferencesRevision;
+    batch(() => {
+      setApplicationPreferences(desired);
+      setApplicationPreferencesError(null);
+      setApplicationPreferencesSaving(true);
+    });
+
+    const operation = applicationPreferencesQueue.then(async () => {
+      const persisted = mergeApplicationPreferences(confirmedApplicationPreferences, patch);
+      const stored = await updateApplicationPreferencesCommand(persisted);
+      confirmedApplicationPreferences = stored;
+      if (!disposed && revision === applicationPreferencesRevision) {
+        setApplicationPreferences(stored);
+      }
+    });
+    applicationPreferencesQueue = settledQueueTail(operation);
+    try {
+      await operation;
+      return true;
+    } catch (reason) {
+      if (!disposed && revision === applicationPreferencesRevision) {
+        batch(() => {
+          setApplicationPreferences(confirmedApplicationPreferences);
+          setApplicationPreferencesError(describeError(reason));
+        });
+      }
+      reportError(reason);
+      return false;
+    } finally {
+      if (!disposed && revision === applicationPreferencesRevision) {
+        setApplicationPreferencesSaving(false);
+      }
+    }
+  }
 
   onCleanup(() => {
     disposed = true;
@@ -524,6 +695,8 @@ export function createAppController(localization: AppControllerLocalization): Ap
     streamDeltas.dispose();
     unsubscribe?.();
     unsubscribe = null;
+    unsubscribeFromMenu?.();
+    unsubscribeFromMenu = null;
   });
 
   function beginInitialization(): void {
@@ -692,6 +865,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
         if (loaded) {
           authenticatedStateLoaded = true;
           void rateLimitRefresh.refreshIfStale();
+          void refreshUsageResetsIfStale();
         }
       })
       .finally(() => {
@@ -981,8 +1155,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
           void rateLimitRefresh.refresh();
           return;
         }
-        setRateLimits(mergeRateLimitUpdate(current, notification.params.rateLimits));
-        setRateLimitsError(null);
+        applyRateLimits(mergeRateLimitUpdate(current, notification.params.rateLimits));
         return;
       }
       case "automation.changed":
@@ -1120,6 +1293,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
               void scheduleQueuedMessage(notification.params.threadId);
             });
           }
+          notifyTurnCompletion(notification);
           void rateLimitRefresh.refreshIfStale();
         }
         return;
@@ -1231,6 +1405,51 @@ export function createAppController(localization: AppControllerLocalization): Ap
       }
       return [...current, request];
     });
+    const task = notificationTaskLabel(
+      request.params.threadId,
+      threads(),
+      localization.notifications().untitledTask,
+    );
+    enqueueNotification({
+      id: `approval-required:${request.id}`,
+      event: "approvalRequired",
+      tone: "attention",
+      title: localization.notifications().approvalTitle,
+      message: formatMessage(localization.notifications().approvalMessage, { task }),
+      target: { type: "thread", threadId: request.params.threadId },
+    });
+  }
+
+  function enqueueNotification(input: AppNotificationInput): void {
+    if (applicationPreferencesLoaded()) notificationCenter.enqueue(input);
+  }
+
+  function notifyTurnCompletion(
+    notification: Extract<EngineNotification, { readonly method: "turn.completed" }>,
+  ): void {
+    if (notification.params.turn.status === "interrupted") return;
+    const task = notificationTaskLabel(
+      notification.params.threadId,
+      threads(),
+      localization.notifications().untitledTask,
+    );
+    const failed =
+      notification.params.turn.status === "failed" || notification.params.error !== null;
+    enqueueNotification({
+      id: `task-${failed ? "failed" : "completed"}:${notification.params.turn.id}`,
+      event: failed ? "taskFailed" : "taskCompleted",
+      tone: failed ? "error" : "success",
+      title: failed
+        ? localization.notifications().taskFailedTitle
+        : localization.notifications().taskCompletedTitle,
+      message: formatMessage(
+        failed
+          ? localization.notifications().taskFailedMessage
+          : localization.notifications().taskCompletedMessage,
+        { task },
+      ),
+      target: { type: "thread", threadId: notification.params.threadId },
+    });
   }
 
   function synchronizeAuthentication(expectedSignedIn: boolean): Promise<void> {
@@ -1288,7 +1507,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       const response = await loginWithChatGpt();
       loginId = response.loginId;
       try {
-        await openExternalUrl(response.authUrl);
+        await openExternalUrlCommand(response.authUrl);
       } catch (openError) {
         const cancelResponse = await cancelLoginCommand(response.loginId);
         loginId = null;
@@ -2216,18 +2435,57 @@ export function createAppController(localization: AppControllerLocalization): Ap
     }
   }
 
+  async function requestExternalUrl(url: string): Promise<boolean> {
+    try {
+      await openExternalUrlCommand(url);
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  async function requestWorkspaceDirectory(path: string): Promise<boolean> {
+    try {
+      await openWorkspaceDirectoryCommand(path);
+      return true;
+    } catch (reason) {
+      reportError(reason);
+      return false;
+    }
+  }
+
+  async function readAttachmentImageSource(path: string): Promise<string> {
+    return (await readAttachmentImageCommand(path)).dataUrl;
+  }
+
+  function readThreadOutput(outputId: string, cursor: string | null): Promise<OutputReadResponse> {
+    return readOutputCommand(outputId, cursor);
+  }
+
   async function refreshRateLimits(): Promise<boolean> {
     return rateLimitRefresh.refresh();
   }
 
-  async function refreshUsageResets(): Promise<boolean> {
+  function refreshUsageResets(): Promise<boolean> {
+    return singleFlightOperations.run("account:usage-resets", refreshUsageResetsOnce);
+  }
+
+  function refreshUsageResetsIfStale(): Promise<boolean> {
+    if (Date.now() - lastUsageResetReadAt < USAGE_RESET_REFRESH_STALE_MS) {
+      return Promise.resolve(true);
+    }
+    return refreshUsageResets();
+  }
+
+  async function refreshUsageResetsOnce(): Promise<boolean> {
     if (!signedIn()) {
       return false;
     }
     setUsageResetsLoading(true);
     setUsageResetsError(null);
     try {
-      setUsageResets(await readUsageResets());
+      applyUsageResets(await readUsageResets());
       return true;
     } catch (reason) {
       const message = describeError(reason);
@@ -2237,6 +2495,36 @@ export function createAppController(localization: AppControllerLocalization): Ap
     } finally {
       setUsageResetsLoading(false);
     }
+  }
+
+  function applyUsageResets(value: UsageResetCreditsResponse): void {
+    const previous = usageResets();
+    const previousAvailableIds = new Set(
+      previous?.credits
+        .filter((credit) => credit.status === "available")
+        .map((credit) => credit.id) ?? [],
+    );
+    const available = value.credits.filter((credit) => credit.status === "available");
+    const added = available.filter((credit) => !previousAvailableIds.has(credit.id));
+    const countIncreased = value.availableCount > (previous?.availableCount ?? 0);
+    lastUsageResetReadAt = Date.now();
+    setUsageResets(value);
+    const identity = added[0]?.id ?? (countIncreased ? `count-${value.availableCount}` : null);
+    if (value.availableCount === 0 || identity === null) return;
+
+    enqueueNotification({
+      id: `usage-reset-available:${identity}`,
+      event: "usageResetAvailable",
+      tone: "attention",
+      title: localization.notifications().usageResetAvailableTitle,
+      message: formatMessage(
+        value.availableCount === 1
+          ? localization.notifications().usageResetAvailableMessage
+          : localization.notifications().usageResetsAvailableMessage,
+        { count: value.availableCount },
+      ),
+      target: { type: "settings", page: "usage" },
+    });
   }
 
   async function redeemUsageReset(
@@ -2340,12 +2628,18 @@ export function createAppController(localization: AppControllerLocalization): Ap
     }
   }
 
-  async function inspectFiles(paths: readonly string[]): Promise<readonly Attachment[]> {
+  async function chooseAttachments(): Promise<AttachmentSelectionResult> {
     try {
-      return await inspectAttachments(paths);
+      const selected = await open({ directory: false, multiple: true });
+      if (selected === null) return { type: "cancelled" };
+      const paths = Array.isArray(selected) ? selected : [selected];
+      if (paths.length === 0 || paths.some((path) => path.length === 0)) {
+        throw new Error("The attachment picker returned an invalid path selection.");
+      }
+      return { type: "selected", attachments: await inspectAttachments(paths) };
     } catch (reason) {
       reportError(reason);
-      return [];
+      return { type: "failed", message: describeError(reason) };
     }
   }
 
@@ -2588,6 +2882,25 @@ export function createAppController(localization: AppControllerLocalization): Ap
     });
   }
 
+  createEffect(() => {
+    if (!applicationPreferences().notifications.enabled) notificationCenter.clear();
+  });
+
+  createNotificationOverlayBridge({
+    active: notificationCenter.active,
+    pendingCount: notificationCenter.pendingCount,
+    dismiss: notificationCenter.dismiss,
+    targetFor: notificationCenter.targetFor,
+    onActivate: (target) => {
+      if (target.type === "settings") {
+        setNotificationUsageSettingsRequest((current) => current + 1);
+      } else {
+        void openThread(target.threadId);
+      }
+    },
+    reportError,
+  });
+
   return {
     account,
     accountProfile,
@@ -2596,6 +2909,11 @@ export function createAppController(localization: AppControllerLocalization): Ap
     activePlan,
     activeTurnId,
     approvals,
+    applicationPreferences,
+    applicationPreferencesError,
+    applicationPreferencesLoaded,
+    applicationPreferencesSaving,
+    applicationShellActionRequest,
     archivedThreads: visibleArchivedThreads,
     archivedThreadsLoaded,
     archivedThreadsLoading,
@@ -2635,6 +2953,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     usageResetsError,
     usageResetsLoading,
     usageResetRedeemingId,
+    notificationUsageSettingsRequest,
     autoTopUpSettings,
     autoTopUpError,
     autoTopUpLoading,
@@ -2649,6 +2968,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     workspace,
     archiveThread,
     cancelLogin,
+    chooseAttachments,
     chooseWorkspace,
     clearError: () => setError(null),
     createAutomation,
@@ -2658,7 +2978,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
     ensureModelsForMode,
     enqueueMessage,
     forkThread,
-    inspectFiles,
     interrupt,
     isItemStreaming,
     projectExpanded,
@@ -2671,7 +2990,11 @@ export function createAppController(localization: AppControllerLocalization): Ap
     logout,
     markAutomationRunReviewed,
     newThread,
+    openExternalUrl: requestExternalUrl,
     openThread,
+    openWorkspaceDirectory: requestWorkspaceDirectory,
+    readAttachmentImage: readAttachmentImageSource,
+    readThreadOutput,
     refreshAutomations,
     refreshAccountProfile: accountProfileRefresh.refreshIfStale,
     refreshRateLimits,
@@ -2703,6 +3026,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     updateAutomation,
     updateProject,
     updateSetting,
+    updateApplicationPreferences,
     unarchiveThread,
   };
 }
@@ -2783,7 +3107,7 @@ function withBootTimeout<T>(
     timer = setTimeout(() => {
       reject(
         new InitializationTimeoutError(
-          `The engine did not respond to ${label} within ${timeoutMs / 1000} seconds. Try again.`,
+          `Initialization did not complete the "${label}" step within ${timeoutMs / 1000} seconds. Try again.`,
         ),
       );
     }, timeoutMs);

@@ -1348,6 +1348,7 @@ const PREVIEW_RATE_LIMITS = {
     },
   },
   planPrice: { amount: 52_500, currency: "BRL", minorUnitExponent: 2 },
+  lunaReserveAvailable: true,
 } as const satisfies AccountRateLimitsResponse;
 
 let previewUsageResets: UsageResetCreditsResponse = {
@@ -1375,10 +1376,23 @@ let previewAutoTopUpSettings: AutoTopUpSettingsSnapshot = {
 };
 
 let previewApplicationPreferences: ApplicationPreferences = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   startWithWindows: true,
   startMinimized: false,
   closeToTray: true,
+  notifications: {
+    enabled: true,
+    transientPosition: "bottomRight",
+    transientDurationSeconds: 8,
+    events: {
+      approvalRequired: { enabled: true, priority: true },
+      taskCompleted: { enabled: true, priority: false },
+      taskFailed: { enabled: true, priority: true },
+      usageLimitReset: { enabled: true, priority: false },
+      usageResetAvailable: { enabled: true, priority: true },
+      lunaReserveAvailable: { enabled: true, priority: true },
+    },
+  },
 } satisfies ApplicationPreferences;
 
 export function setupBrowserPreview(): void {

@@ -1,8 +1,8 @@
 import { createResource, Show } from "solid-js";
+import { describeError } from "../errorDescription";
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
-import { describeError } from "../infrastructure/errorDescription";
-
+import { useContentResourceReader } from "./ContentResourceReader";
 import { Icon } from "./Icon";
 import { useImageViewer } from "./ImageViewer";
 import { resolveImageSource } from "./imageSource";
@@ -19,7 +19,11 @@ export function ImagePreview(props: ImagePreviewProps) {
   const common = () => i18n.messages().common;
   const messages = () => i18n.messages().imagePreview;
   const viewer = useImageViewer();
-  const [resolvedSource] = createResource(() => props.source, resolveImageSource);
+  const resources = useContentResourceReader();
+  const [resolvedSource] = createResource(
+    () => props.source,
+    (source) => resolveImageSource(source, resources.readAttachmentImage),
+  );
   const label = () =>
     formatMessage(common().openNamed, { name: props.name ?? (props.alt || messages().image) });
   const failure = (): unknown => resolvedSource.error;

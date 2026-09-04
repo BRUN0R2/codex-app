@@ -200,10 +200,23 @@ describe("decodificação dos contratos nativos", () => {
 
   it("valida preferências de inicialização e bandeja", () => {
     const preferences = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       startWithWindows: true,
       startMinimized: true,
       closeToTray: true,
+      notifications: {
+        enabled: true,
+        transientPosition: "bottomRight",
+        transientDurationSeconds: 8,
+        events: {
+          approvalRequired: { enabled: true, priority: true },
+          taskCompleted: { enabled: true, priority: false },
+          taskFailed: { enabled: true, priority: true },
+          usageLimitReset: { enabled: true, priority: false },
+          usageResetAvailable: { enabled: true, priority: true },
+          lunaReserveAvailable: { enabled: true, priority: true },
+        },
+      },
     };
 
     expect(decodeApplicationPreferences(preferences)).toEqual(preferences);
@@ -211,6 +224,12 @@ describe("decodificação dos contratos nativos", () => {
       decodeApplicationPreferences({
         ...preferences,
         startWithWindows: false,
+      }),
+    ).toThrow(ContractError);
+    expect(() =>
+      decodeApplicationPreferences({
+        ...preferences,
+        notifications: { ...preferences.notifications, transientDurationSeconds: 31 },
       }),
     ).toThrow(ContractError);
     expect(() =>

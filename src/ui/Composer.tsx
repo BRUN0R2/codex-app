@@ -20,7 +20,6 @@ import type {
 } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage, type TranslationMessages } from "../i18n/messages";
-import { openDesktopDialog as open } from "../infrastructure/codexClient";
 import type { AppController } from "../state/appController";
 import {
   type ComposerDraftState,
@@ -32,6 +31,7 @@ import {
 type ComposerController = Pick<
   AppController,
   | "chatModels"
+  | "chooseAttachments"
   | "chooseWorkspace"
   | "config"
   | "contextUsage"
@@ -41,7 +41,6 @@ type ComposerController = Pick<
   | "engine"
   | "enqueueMessage"
   | "ensureModelsForMode"
-  | "inspectFiles"
   | "interrupt"
   | "models"
   | "pendingOperations"
@@ -419,18 +418,14 @@ export function Composer(props: ComposerProps) {
   }
 
   async function attachFiles(): Promise<void> {
-    try {
-      const selected = await open({ directory: false, multiple: true });
-      if (selected === null) {
-        return;
-      }
-      const paths = Array.isArray(selected) ? selected : [selected];
-      const inspected = await props.controller.inspectFiles(paths);
-      setAttachments(mergeAttachments(attachments(), inspected));
-      setAttachmentError(null);
-    } catch (reason) {
-      setAttachmentError(errorMessage(reason));
+    const result = await props.controller.chooseAttachments();
+    if (result.type === "cancelled") return;
+    if (result.type === "failed") {
+      setAttachmentError(result.message);
+      return;
     }
+    setAttachments(mergeAttachments(attachments(), result.attachments));
+    setAttachmentError(null);
   }
 
   async function send(): Promise<void> {

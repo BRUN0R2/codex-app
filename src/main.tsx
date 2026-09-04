@@ -10,6 +10,8 @@ if (root === null) {
 }
 
 const previewRequested = new URLSearchParams(window.location.search).get("preview") === "1";
+const notificationOverlayRequested =
+  new URLSearchParams(window.location.search).get("surface") === "notification-overlay";
 
 async function bootstrap(mountElement: HTMLElement): Promise<void> {
   if (previewRequested) {
@@ -20,7 +22,9 @@ async function bootstrap(mountElement: HTMLElement): Promise<void> {
     setupBrowserPreview();
   }
 
-  const { default: App } = await import("./App");
+  const { default: App } = notificationOverlayRequested
+    ? await import("./NotificationOverlayApp")
+    : await import("./App");
   render(() => <App />, mountElement);
 }
 

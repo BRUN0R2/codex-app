@@ -13,7 +13,6 @@ import { Portal } from "solid-js/web";
 import type { ProjectRecord, ThreadSummary } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
-import { openExternalUrl } from "../infrastructure/codexClient";
 import type { AppController } from "../state/appController";
 import {
   hexToHsv,
@@ -67,6 +66,7 @@ import { threadsWithoutConfiguredProject } from "../state/sidebarThreads";
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { CodexGlyph } from "./CodexGlyph";
 import { formatShortDate } from "./dateFormat";
+import { useExternalNavigation } from "./ExternalNavigation";
 import { Icon, type IconName } from "./Icon";
 import { presentLunaReserveUsage } from "./lunaReserve";
 import type { SettingsPage } from "./SettingsDialog";
@@ -1073,6 +1073,7 @@ function LunaReserveCard(props: {
   readonly response: () => ReturnType<SidebarController["rateLimits"]>;
 }) {
   const i18n = useI18n();
+  const openExternalUrl = useExternalNavigation();
   const messages = () => i18n.messages().sidebar;
   const usage = () => presentLunaReserveUsage(props.response());
 

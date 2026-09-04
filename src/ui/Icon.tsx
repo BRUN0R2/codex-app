@@ -48,6 +48,13 @@ function renderIconPath(name: IconName): JSX.Element {
       return <path d="m15 18-6-6 6-6M9 12h10" />;
     case "arrowUp":
       return <path d="m6 11 6-6 6 6M12 5v14" />;
+    case "bell":
+      return (
+        <>
+          <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+          <path d="M10 21h4" />
+        </>
+      );
     case "bot":
       return (
         <>

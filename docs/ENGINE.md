@@ -50,6 +50,9 @@ synchronization fails.
 | `browser://new-window` | Validated HTTP(S) URL for a controlled new tab |
 | `browser://agent-activity` | Conversation, action, and panel-open state |
 | `browser://metric` | Bounded QA and latency sample |
+| `notification-overlay:presentation` | One strictly decoded active desktop notification and bounded pending count |
+| `notification-overlay:action` | Identity-bound dismiss, activate, or failure response from the isolated overlay |
+| `notification-overlay:ready` | Exact schema-version handshake before the first projection |
 
 Accepted notifications are `account.rateLimitsUpdated`, `auth.loginCompleted`,
 `auth.sessionChanged`, `thread.created`, `thread.updated`, `thread.archived`,
@@ -80,11 +83,17 @@ usage; it does not infer or silently switch the active model from percentages.
 The sidebar width is a local layout preference, bounded so the main panel
 retains its minimum width and adjustable with the keyboard or pointer divider.
 
-The provider catalog retains hidden entries for native protocol metadata, but
-only `list` entries are returned to the model picker. Responses requests send
-the selected model and service tier in `x-codex-routing-hint` on both HTTP and
-WebSocket transports, including prewarmed sessions, so the service can apply
-its server-owned Luna Reserve fallback to the selected Luna model.
+Usage reads advertise the official Luna Reserve client capability with
+`x-openai-codex-luna-reserve: 1`. Reserve becomes account-selectable only when
+the authenticated account identity matches, ordinary usage is explicitly
+blocked, and the backend returns the `luna_reserve` eligibility banner. The
+hidden `gpt-reserve` catalog entry is then exposed in the picker and guarded by
+the same account state during turn creation. Percentages and the presence of an
+additional quota bucket never imply eligibility. A change in eligibility
+invalidates and reloads the frontend catalog so the model appears without an
+application restart. Responses requests still send the selected model and
+service tier in `x-codex-routing-hint` on HTTP, WebSocket, and prewarmed
+sessions.
 
 ## Models, instructions, and context
 
@@ -115,6 +124,15 @@ implemented explicitly. `direct`, `code_mode`, and `code_mode_only` select
 distinct contracts. Ultra requires multi-agent v2 and is never sent as the
 literal `ultra`; catalog capabilities determine effective effort, service tier,
 modalities, image detail, and context window.
+
+The catalog request advertises compatibility version `0.153.2`, audited against
+the official `openai/codex` `rust-v0.153.2` contract. This admits server-listed
+GPT-6-Astra entries whose minimum client version is `0.153.0`; it does not force
+an account or rollout-hidden model into the picker. A catalog contract test
+executes Astra's current requirements through the native runtime: Responses
+Lite, Code Mode only, multimodal image input and original detail, text-and-image
+web search, Multi-Agent v2, Ultra reasoning, output truncation, and its extended
+context metadata.
 
 Before compatible provider telemetry exists, the engine estimates the real
 request and applies a 12% margin. After `response.completed`, provider totals

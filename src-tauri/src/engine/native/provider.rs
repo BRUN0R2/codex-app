@@ -54,6 +54,7 @@ const MAX_MODELS: usize = 100;
 const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_RATE_LIMIT_BUCKET_ID_BYTES: usize = 128;
 const MAX_RATE_LIMIT_BUCKETS: usize = 32;
+const MAX_ACCOUNT_ID_BYTES: usize = 256;
 const MAX_USAGE_RESET_CREDITS: usize = 100;
 const MAX_USAGE_RESET_ID_BYTES: usize = 256;
 const MAX_USAGE_RESET_TITLE_BYTES: usize = 512;
@@ -92,6 +93,7 @@ const CHECKOUT_PRICING_CONFIG_BASE_URL: &str =
 pub struct ChatGptCodexProvider {
     client: ProviderClient,
     catalog: RwLock<Option<CachedModelCatalog>>,
+    luna_reserve_available: RwLock<bool>,
     refresh_gate: Mutex<()>,
 }
 
@@ -118,11 +120,9 @@ impl ChatGptCodexProvider {
         auth: &ChatGptAuth,
     ) -> Result<ModelListResponse, AppError> {
         let catalog = self.catalog(app, auth).await?;
+        let luna_reserve_available = *self.luna_reserve_available.read().await;
         Ok(ModelListResponse {
-            data: catalog
-                .picker_models()
-                .map(SelectedModel::summary)
-                .collect(),
+            data: catalog.picker_model_summaries(luna_reserve_available),
         })
     }
 
@@ -133,7 +133,8 @@ impl ChatGptCodexProvider {
         requested: Option<&str>,
     ) -> Result<SelectedModel, AppError> {
         let catalog = self.catalog(app, auth).await?;
-        catalog.select(requested)
+        let luna_reserve_available = *self.luna_reserve_available.read().await;
+        catalog.select_for_account(requested, luna_reserve_available)
     }
 
     pub async fn multi_agent_models(
@@ -248,20 +249,17 @@ impl ChatGptCodexProvider {
         let session = auth.session(app).await?;
         let payload: UsagePayload = self
             .client
-            .get_json(
-                &session,
-                client::USAGE_URL,
-                "rate limits",
-                RATE_LIMIT_BODY_MAX_BYTES,
-            )
+            .get_luna_reserve_usage_json(&session, RATE_LIMIT_BODY_MAX_BYTES)
             .await?;
+        let luna_reserve_available = payload.luna_reserve_available(session.account_id())?;
         let plan_type = payload.plan_type;
-        let mut response = payload.into_domain()?;
+        let mut response = payload.into_domain(luna_reserve_available)?;
         response.plan_price = self
             .read_plan_price(&session, session.account_id(), plan_type)
             .await
             .ok()
             .flatten();
+        *self.luna_reserve_available.write().await = luna_reserve_available;
         Ok(response)
     }
 
@@ -421,6 +419,7 @@ impl ChatGptCodexProvider {
     pub async fn clear_session_state(&self) {
         let _refresh_guard = self.refresh_gate.lock().await;
         *self.catalog.write().await = None;
+        *self.luna_reserve_available.write().await = false;
         self.client.clear_response_sessions();
     }
 
@@ -540,16 +539,45 @@ fn model_catalog_etag_changed(cached: Option<&str>, incoming: &str) -> bool {
 
 #[derive(Debug, Deserialize)]
 struct UsagePayload {
+    account_id: Option<String>,
     plan_type: AccountPlanTypeWire,
     rate_limit: Option<RateLimitDetailsWire>,
     additional_rate_limits: Option<Vec<AdditionalRateLimitWire>>,
     credits: Option<CreditsWire>,
     spend_control: Option<SpendControlWire>,
     rate_limit_reached_type: Option<RateLimitReachedWire>,
+    rate_limit_upsell: Option<RateLimitUpsellWire>,
 }
 
 impl UsagePayload {
-    fn into_domain(self) -> Result<AccountRateLimitsResponse, AppError> {
+    fn luna_reserve_available(&self, expected_account_id: &str) -> Result<bool, AppError> {
+        let Some(account_id) = self.account_id.as_deref() else {
+            return Ok(false);
+        };
+        if account_id.is_empty() || account_id.len() > MAX_ACCOUNT_ID_BYTES {
+            return Err(AppError::Provider(
+                "the rate-limit response contains an invalid account id".into(),
+            ));
+        }
+        if account_id != expected_account_id {
+            return Err(AppError::Provider(
+                "the rate-limit response belongs to a different account".into(),
+            ));
+        }
+        Ok(
+            self.rate_limit.as_ref().and_then(|limit| limit.allowed) == Some(false)
+                && self
+                    .rate_limit_upsell
+                    .as_ref()
+                    .and_then(|upsell| upsell.banner_type.as_deref())
+                    == Some("luna_reserve"),
+        )
+    }
+
+    fn into_domain(
+        self,
+        luna_reserve_available: bool,
+    ) -> Result<AccountRateLimitsResponse, AppError> {
         let plan_type = Some(self.plan_type.into_domain());
         let reached = self
             .rate_limit_reached_type
@@ -620,8 +648,14 @@ impl UsagePayload {
             rate_limits: primary,
             rate_limits_by_limit_id: by_id,
             plan_price: None,
+            luna_reserve_available,
         })
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct RateLimitUpsellWire {
+    banner_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -954,6 +988,7 @@ fn validate_snapshot(snapshot: &RateLimitSnapshot) -> Result<(), AppError> {
 
 #[derive(Debug, Deserialize)]
 struct RateLimitDetailsWire {
+    allowed: Option<bool>,
     primary_window: Option<RateLimitWindowWire>,
     secondary_window: Option<RateLimitWindowWire>,
 }
@@ -1260,7 +1295,7 @@ mod tests {
         .expect("the usage payload should decode");
 
         let response = payload
-            .into_domain()
+            .into_domain(false)
             .expect("the decoded usage payload should be valid");
 
         assert!(matches!(
@@ -1290,7 +1325,7 @@ mod tests {
         .expect("the usage payload should decode");
 
         let response = payload
-            .into_domain()
+            .into_domain(false)
             .expect("the decoded usage payload should be valid");
         let reserve = response
             .rate_limits_by_limit_id
@@ -1306,6 +1341,54 @@ mod tests {
                 .used_percent,
             14.0
         );
+    }
+
+    #[test]
+    fn exposes_luna_reserve_only_from_the_matching_backend_eligibility_banner() {
+        let payload = serde_json::from_str::<UsagePayload>(
+            r#"{
+                "account_id": "workspace-a",
+                "plan_type": "pro",
+                "rate_limit": {"allowed": false},
+                "rate_limit_upsell": {"banner_type": "luna_reserve"}
+            }"#,
+        )
+        .expect("the usage payload should decode");
+
+        assert!(
+            payload
+                .luna_reserve_available("workspace-a")
+                .expect("matching account metadata should validate")
+        );
+        assert!(payload.luna_reserve_available("workspace-b").is_err());
+    }
+
+    #[test]
+    fn does_not_infer_luna_reserve_from_exhausted_usage_alone() {
+        let payload = serde_json::from_str::<UsagePayload>(
+            r#"{
+                "plan_type": "pro",
+                "rate_limit": {"allowed": false},
+                "rate_limit_upsell": {"banner_type": "credits"}
+            }"#,
+        )
+        .expect("the usage payload should decode");
+
+        assert!(!payload.luna_reserve_available("workspace-a").unwrap());
+    }
+
+    #[test]
+    fn does_not_expose_luna_reserve_without_backend_account_identity() {
+        let payload = serde_json::from_str::<UsagePayload>(
+            r#"{
+                "plan_type": "pro",
+                "rate_limit": {"allowed": false},
+                "rate_limit_upsell": {"banner_type": "luna_reserve"}
+            }"#,
+        )
+        .expect("the usage payload should decode");
+
+        assert!(!payload.luna_reserve_available("workspace-a").unwrap());
     }
 
     #[test]
@@ -1339,7 +1422,7 @@ mod tests {
         .expect("the usage payload should decode");
 
         let response = payload
-            .into_domain()
+            .into_domain(false)
             .expect("the decoded usage payload should be valid");
         let primary = response
             .rate_limits

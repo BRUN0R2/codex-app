@@ -1,0 +1,182 @@
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
+import { emitTo } from "@tauri-apps/api/event";
+import {
+  getAllWindows,
+  getCurrentWindow,
+  type Monitor,
+  monitorFromPoint,
+  type Window as TauriWindow,
+} from "@tauri-apps/api/window";
+
+import {
+  type AppNotification,
+  decodeNotificationOverlayAction,
+  decodeNotificationOverlayPayload,
+  type NotificationOverlayAction,
+  type NotificationOverlayPayload,
+} from "../contracts/notificationOverlay";
+import {
+  NOTIFICATION_SCREEN_MARGIN_PX,
+  resolveNotificationOverlayPosition,
+} from "./notificationOverlayGeometry";
+import { listenRuntime } from "./runtimeBridge";
+
+const MAIN_WINDOW_LABEL = "main";
+const NOTIFICATION_OVERLAY_LABEL = "notification-overlay";
+const PRESENTATION_EVENT = "notification-overlay:presentation";
+const ACTION_EVENT = "notification-overlay:action";
+const READY_EVENT = "notification-overlay:ready";
+const PRIORITY_WIDTH_PX = 460;
+const TRANSIENT_WIDTH_PX = 390;
+
+interface OverlayReadyPayload {
+  readonly schemaVersion: 1;
+}
+
+export function subscribeToNotificationOverlay(
+  onAction: (action: NotificationOverlayAction) => void,
+  onReady: () => void,
+  onBoundaryError: (reason: unknown) => void,
+): Promise<() => void> {
+  return subscribeAtomically([
+    () =>
+      listenRuntime<unknown>(ACTION_EVENT, ({ payload }) => {
+        try {
+          onAction(decodeNotificationOverlayAction(payload));
+        } catch (reason) {
+          onBoundaryError(reason);
+        }
+      }),
+    () =>
+      listenRuntime<unknown>(READY_EVENT, ({ payload }) => {
+        try {
+          decodeReadyPayload(payload);
+          onReady();
+        } catch (reason) {
+          onBoundaryError(reason);
+        }
+      }),
+  ]);
+}
+
+export function subscribeToNotificationPresentations(
+  onPresentation: (payload: NotificationOverlayPayload) => void,
+  onBoundaryError: (reason: unknown) => void,
+): Promise<() => void> {
+  return listenRuntime<unknown>(PRESENTATION_EVENT, ({ payload }) => {
+    try {
+      onPresentation(decodeNotificationOverlayPayload(payload));
+    } catch (reason) {
+      onBoundaryError(reason);
+    }
+  });
+}
+
+export function publishNotificationPresentation(
+  payload: NotificationOverlayPayload,
+): Promise<void> {
+  return emitTo(NOTIFICATION_OVERLAY_LABEL, PRESENTATION_EVENT, payload);
+}
+
+export function signalNotificationOverlayReady(): Promise<void> {
+  return emitTo(MAIN_WINDOW_LABEL, READY_EVENT, { schemaVersion: 1 } satisfies OverlayReadyPayload);
+}
+
+export function sendNotificationOverlayAction(action: NotificationOverlayAction): Promise<void> {
+  return emitTo(MAIN_WINDOW_LABEL, ACTION_EVENT, action);
+}
+
+export async function presentNotificationOverlay(
+  notification: AppNotification,
+  contentHeight: number,
+  recenterPriority: boolean,
+): Promise<void> {
+  const overlay = getCurrentWindow();
+  const monitor = await mainWindowMonitor();
+  const area = monitor.workArea;
+  const areaPosition = area.position.toLogical(monitor.scaleFactor);
+  const areaSize = area.size.toLogical(monitor.scaleFactor);
+  const width =
+    notification.presentation.type === "priority" ? PRIORITY_WIDTH_PX : TRANSIENT_WIDTH_PX;
+  const height = Math.min(
+    Math.max(Math.ceil(contentHeight), 120),
+    Math.max(120, areaSize.height - NOTIFICATION_SCREEN_MARGIN_PX * 2),
+  );
+  await overlay.setSize(new LogicalSize(width, height));
+
+  if (notification.presentation.type === "transient" || recenterPriority) {
+    const position = resolveNotificationOverlayPosition(
+      notification.presentation,
+      areaPosition,
+      areaSize,
+      { width, height },
+    );
+    await overlay.setPosition(new LogicalPosition(position.x, position.y));
+  }
+
+  await overlay.setAlwaysOnTop(true);
+  await overlay.show();
+  if (notification.presentation.type === "priority") {
+    await overlay.setFocus();
+  }
+}
+
+export async function hideNotificationOverlay(): Promise<void> {
+  await getCurrentWindow().hide();
+}
+
+export async function startNotificationOverlayDrag(): Promise<void> {
+  await getCurrentWindow().startDragging();
+}
+
+export async function restoreMainApplicationWindow(): Promise<void> {
+  const main = await requiredWindow(MAIN_WINDOW_LABEL);
+  await main.show();
+  if (await main.isMinimized()) await main.unminimize();
+  await main.setFocus();
+}
+
+async function mainWindowMonitor(): Promise<Monitor> {
+  const main = await requiredWindow(MAIN_WINDOW_LABEL);
+  const [position, size] = await Promise.all([main.outerPosition(), main.outerSize()]);
+  const monitor = await monitorFromPoint(
+    position.x + Math.round(size.width / 2),
+    position.y + Math.round(size.height / 2),
+  );
+  if (monitor === null) throw new Error("The monitor containing the main window is unavailable.");
+  return monitor;
+}
+
+async function requiredWindow(label: string): Promise<TauriWindow> {
+  const window = (await getAllWindows()).find((candidate) => candidate.label === label);
+  if (window === undefined) throw new Error(`The ${label} window is unavailable.`);
+  return window;
+}
+
+function decodeReadyPayload(value: unknown): OverlayReadyPayload {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 1 ||
+    (value as { readonly schemaVersion?: unknown }).schemaVersion !== 1
+  ) {
+    throw new Error("The notification overlay ready payload is invalid.");
+  }
+  return { schemaVersion: 1 };
+}
+
+async function subscribeAtomically(
+  subscriptions: readonly (() => Promise<() => void>)[],
+): Promise<() => void> {
+  const active: Array<() => void> = [];
+  try {
+    for (const subscribe of subscriptions) active.push(await subscribe());
+  } catch (reason) {
+    for (const unsubscribe of active) unsubscribe();
+    throw reason;
+  }
+  return () => {
+    for (const unsubscribe of active) unsubscribe();
+  };
+}

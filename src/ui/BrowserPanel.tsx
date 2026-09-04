@@ -2,7 +2,6 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show }
 import type { BrowserActionMetric } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
-import { openExternalUrl } from "../infrastructure/codexClient";
 import { isBrowserPreview } from "../platform/desktopRuntime";
 import type { BrowserController } from "../state/browserController";
 import {
@@ -16,6 +15,7 @@ import {
   parseBrowserViewport,
   STANDARD_BROWSER_VIEWPORTS,
 } from "./browserViewport";
+import { useExternalNavigation } from "./ExternalNavigation";
 import { Icon } from "./Icon";
 
 export function BrowserPanel(props: {
@@ -23,6 +23,7 @@ export function BrowserPanel(props: {
   readonly conversationId: string;
 }) {
   const i18n = useI18n();
+  const openExternalUrl = useExternalNavigation();
   let surfaceElement: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let synchronizationFrame: number | undefined;

@@ -4,6 +4,7 @@ import type {
   AccountProfileResponse,
   AccountRateLimitsResponse,
   AccountReadResponse,
+  ApplicationPreferences,
   AppProduct,
   ApprovalDecision,
   Attachment,
@@ -24,6 +25,7 @@ import type {
   ModelReroutedNotification,
   ModelSafetyBufferingUpdatedNotification,
   ModelVerification,
+  OutputReadResponse,
   PlanItem,
   ProjectRecord,
   ReasoningEffort,
@@ -33,6 +35,7 @@ import type {
   UsageResetCreditsResponse,
   UsageResetRedemptionResponse,
 } from "../contracts/types";
+import type { ApplicationPreferencesPatch } from "./applicationPreferences";
 import type { QueuedMessage } from "./messageQueue";
 import type { VisibleThreadTurn, VisibleTurnSequence } from "./visibleTurnSequence";
 
@@ -49,6 +52,16 @@ export interface SendMessageInput {
   readonly serviceTier: string | null;
 }
 
+export interface ApplicationShellActionRequest {
+  readonly sequence: number;
+  readonly type: "newThread" | "toggleSettings" | "toggleSidebar";
+}
+
+export type AttachmentSelectionResult =
+  | { readonly type: "cancelled" }
+  | { readonly type: "failed"; readonly message: string }
+  | { readonly type: "selected"; readonly attachments: readonly Attachment[] };
+
 export interface AppController {
   readonly account: Accessor<AccountReadResponse | undefined>;
   readonly accountProfile: Accessor<AccountProfileResponse | null>;
@@ -57,6 +70,11 @@ export interface AppController {
   readonly activeTurnId: Accessor<string | null>;
   readonly activePlan: Accessor<PlanItem | null>;
   readonly approvals: Accessor<readonly EngineServerRequest[]>;
+  readonly applicationPreferences: Accessor<ApplicationPreferences>;
+  readonly applicationPreferencesError: Accessor<string | null>;
+  readonly applicationPreferencesLoaded: Accessor<boolean>;
+  readonly applicationPreferencesSaving: Accessor<boolean>;
+  readonly applicationShellActionRequest: Accessor<ApplicationShellActionRequest | null>;
   readonly archivedThreads: Accessor<readonly ThreadSummary[]>;
   readonly archivedThreadsLoaded: Accessor<boolean>;
   readonly archivedThreadsLoading: Accessor<boolean>;
@@ -96,6 +114,7 @@ export interface AppController {
   readonly usageResetsError: Accessor<string | null>;
   readonly usageResetsLoading: Accessor<boolean>;
   readonly usageResetRedeemingId: Accessor<string | null>;
+  readonly notificationUsageSettingsRequest: Accessor<number>;
   readonly autoTopUpSettings: Accessor<AutoTopUpSettingsSnapshot | null>;
   readonly autoTopUpError: Accessor<string | null>;
   readonly autoTopUpLoading: Accessor<boolean>;
@@ -110,6 +129,7 @@ export interface AppController {
   readonly workspace: Accessor<string | null>;
   readonly archiveThread: (threadId: string) => Promise<boolean>;
   readonly cancelLogin: () => Promise<void>;
+  readonly chooseAttachments: () => Promise<AttachmentSelectionResult>;
   readonly chooseWorkspace: () => Promise<string | null>;
   readonly clearError: () => void;
   readonly createAutomation: (input: AutomationInput) => Promise<boolean>;
@@ -119,7 +139,6 @@ export interface AppController {
   readonly ensureModelsForMode: (mode: ConversationMode) => Promise<boolean>;
   readonly enqueueMessage: (input: SendMessageInput) => boolean;
   readonly forkThread: (threadId: string) => Promise<boolean>;
-  readonly inspectFiles: (paths: readonly string[]) => Promise<readonly Attachment[]>;
   readonly interrupt: () => Promise<boolean>;
   readonly isItemStreaming: (itemId: string) => boolean;
   readonly projectExpanded: (path: string) => boolean;
@@ -132,7 +151,14 @@ export interface AppController {
   readonly logout: () => Promise<boolean>;
   readonly markAutomationRunReviewed: (runId: string) => Promise<boolean>;
   readonly newThread: (workspace?: string) => boolean;
+  readonly openExternalUrl: (url: string) => Promise<boolean>;
   readonly openThread: (threadId: string) => Promise<boolean>;
+  readonly openWorkspaceDirectory: (path: string) => Promise<boolean>;
+  readonly readAttachmentImage: (path: string) => Promise<string>;
+  readonly readThreadOutput: (
+    outputId: string,
+    cursor: string | null,
+  ) => Promise<OutputReadResponse>;
   readonly refreshAutomations: () => Promise<boolean>;
   readonly refreshAccountProfile: () => Promise<boolean>;
   readonly refreshRateLimits: () => Promise<boolean>;
@@ -182,5 +208,6 @@ export interface AppController {
     input: AutomationInput,
   ) => Promise<boolean>;
   readonly updateSetting: (update: ConfigUpdate) => Promise<boolean>;
+  readonly updateApplicationPreferences: (patch: ApplicationPreferencesPatch) => Promise<boolean>;
   readonly unarchiveThread: (threadId: string) => Promise<boolean>;
 }

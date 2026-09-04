@@ -3,7 +3,6 @@ import {
   createMemo,
   createSignal,
   For,
-  type JSX,
   Match,
   onCleanup,
   onMount,
@@ -12,7 +11,6 @@ import {
 } from "solid-js";
 
 import type {
-  ApplicationPreferences,
   AutoTopUpSettingsSnapshot,
   CreditsSnapshot,
   ModelVerbosity,
@@ -23,12 +21,6 @@ import type {
 } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage, type TranslationMessages } from "../i18n/messages";
-import {
-  describeError,
-  openExternalUrl,
-  readApplicationPreferences,
-  updateApplicationPreferences,
-} from "../infrastructure/codexClient";
 import { isBrowserPreview, isDesktopRuntime } from "../platform/desktopRuntime";
 import type { AppController } from "../state/appController";
 
@@ -38,6 +30,10 @@ type SettingsDialogController = Pick<
   | "accountProfile"
   | "accountProfileError"
   | "accountProfileLoading"
+  | "applicationPreferences"
+  | "applicationPreferencesError"
+  | "applicationPreferencesLoaded"
+  | "applicationPreferencesSaving"
   | "archivedThreads"
   | "archivedThreadsLoaded"
   | "archivedThreadsLoading"
@@ -70,17 +66,22 @@ type SettingsDialogController = Pick<
   | "reportError"
   | "unarchiveThread"
   | "updateSetting"
+  | "updateApplicationPreferences"
 >;
 
 import { accountPlanLabel } from "./accountPresentation";
-import {
-  DEFAULT_APPLICATION_PREFERENCES,
-  mergeApplicationPreferences,
-} from "./applicationPreferences";
 import { formatShortDate, formatShortDateWithTimeZone } from "./dateFormat";
+import { useExternalNavigation } from "./ExternalNavigation";
 import { Icon, type IconName } from "./Icon";
+import { NotificationSettings } from "./NotificationSettings";
 import { outputDetailLabel, outputDetailOptions } from "./outputDetail";
 import { ProfileView } from "./ProfileView";
+import {
+  PreferenceCheckbox,
+  SettingsHeading,
+  SettingsRow,
+  SettingsSection,
+} from "./SettingsPrimitives";
 import { threadTitle } from "./Sidebar";
 import { SurfaceScrollbar } from "./SurfaceScrollbar";
 import { presentUsageLimits, type UsageLimitEntry, usagePercentLabel } from "./usagePresentation";
@@ -89,6 +90,7 @@ export type SettingsPage =
   | "archived"
   | "diagnostics"
   | "general"
+  | "notifications"
   | "personalization"
   | "profile"
   | "shortcuts"
@@ -113,6 +115,7 @@ function settingsNavigation(messages: SettingsMessages): readonly SettingsNaviga
       label: messages.personalSection,
       items: [
         { icon: "settings", label: messages.general, page: "general" },
+        { icon: "bell", label: messages.notifications, page: "notifications" },
         { icon: "user", label: messages.profile, page: "profile" },
         { icon: "sparkles", label: messages.personalization, page: "personalization" },
         { icon: "keyboard", label: messages.shortcuts, page: "shortcuts" },
@@ -269,6 +272,9 @@ export function SettingsDialog(props: {
                     setDeveloperInstructions={setDeveloperInstructions}
                   />
                 </Match>
+                <Match when={page() === "notifications"}>
+                  <NotificationSettings controller={props.controller} />
+                </Match>
                 <Match when={page() === "profile"}>
                   <ProfileSettings controller={props.controller} />
                 </Match>
@@ -337,131 +343,23 @@ function normalizeSearch(value: string, locale: string): string {
     .toLocaleLowerCase(locale);
 }
 
-function SettingsHeading(props: { readonly title: string; readonly description: string }) {
-  return (
-    <header class="settings-heading">
-      <h2>{props.title}</h2>
-      <p>{props.description}</p>
-    </header>
-  );
-}
-
-function SettingsSection(props: {
-  readonly allowOverflow?: boolean;
-  readonly busy?: boolean;
-  readonly children: JSX.Element;
-  readonly description?: string;
-  readonly title: string;
-}) {
-  return (
-    <section class="settings-section">
-      <h3>{props.title}</h3>
-      <Show when={props.description}>
-        <p class="settings-section-description">{props.description}</p>
-      </Show>
-      <div
-        aria-busy={props.busy || undefined}
-        class="settings-card"
-        classList={{ "allow-overflow": props.allowOverflow }}
-      >
-        {props.children}
-      </div>
-    </section>
-  );
-}
-
 function ApplicationPreferencesSettings(props: { readonly controller: SettingsDialogController }) {
   const i18n = useI18n();
   const messages = () => i18n.messages().settings;
   const desktopRuntime = isDesktopRuntime() || isBrowserPreview();
-  const [preferences, setPreferences] = createSignal<ApplicationPreferences>(
-    DEFAULT_APPLICATION_PREFERENCES,
-  );
-  const [loaded, setLoaded] = createSignal(false);
-  const [loading, setLoading] = createSignal(desktopRuntime);
-  const [saving, setSaving] = createSignal(false);
-  const [operationError, setOperationError] = createSignal<string | null>(null);
-  let confirmedPreferences = DEFAULT_APPLICATION_PREFERENCES as ApplicationPreferences;
-  let saveQueue: Promise<void> = Promise.resolve();
-  let saveRevision = 0;
-  let active = true;
-
-  onMount(() => {
-    if (!desktopRuntime) {
-      return;
-    }
-    void readApplicationPreferences()
-      .then((storedPreferences) => {
-        if (!active) return;
-        confirmedPreferences = storedPreferences;
-        setPreferences(storedPreferences);
-        setLoaded(true);
-      })
-      .catch((reason: unknown) => {
-        if (!active) return;
-        setOperationError(describeError(reason));
-        props.controller.reportError(reason);
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-  });
-
-  onCleanup(() => {
-    active = false;
-  });
-
-  function save(patch: Partial<ApplicationPreferences>): void {
-    if (!loaded()) {
-      return;
-    }
-
-    const nextPreferences = mergeApplicationPreferences(preferences(), patch);
-    const revision = saveRevision + 1;
-    saveRevision = revision;
-    setOperationError(null);
-    setPreferences(nextPreferences);
-    setSaving(true);
-
-    const operation = saveQueue.then(() => updateApplicationPreferences(nextPreferences));
-    saveQueue = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    void operation
-      .then((storedPreferences) => {
-        confirmedPreferences = storedPreferences;
-        if (active && revision === saveRevision) {
-          setPreferences(storedPreferences);
-          setOperationError(null);
-        }
-      })
-      .catch((reason: unknown) => {
-        if (!active || revision !== saveRevision) return;
-        setPreferences(confirmedPreferences);
-        setOperationError(describeError(reason));
-        props.controller.reportError(reason);
-      })
-      .finally(() => {
-        if (active && revision === saveRevision) setSaving(false);
-      });
-  }
-
-  const controlsDisabled = () => !desktopRuntime || !loaded() || loading();
+  const preferences = props.controller.applicationPreferences;
+  const controlsDisabled = () =>
+    !desktopRuntime || !props.controller.applicationPreferencesLoaded();
   const status = () => {
-    if (!desktopRuntime) {
-      return messages().desktopOnly;
-    }
-    if (loading()) {
-      return messages().loadingAppPreferences;
-    }
-    return operationError() ?? "";
+    if (!desktopRuntime) return messages().desktopOnly;
+    if (!props.controller.applicationPreferencesLoaded()) return messages().loadingAppPreferences;
+    return props.controller.applicationPreferencesError() ?? "";
   };
 
   return (
     <>
       <SettingsSection
-        busy={loading()}
+        busy={!props.controller.applicationPreferencesLoaded()}
         description={messages().applicationDescription}
         title={messages().application}
       >
@@ -470,65 +368,42 @@ function ApplicationPreferencesSettings(props: { readonly controller: SettingsDi
           description={messages().startWithWindowsDescription}
           disabled={controlsDisabled()}
           label={messages().startWithWindows}
-          onChange={(startWithWindows) => save({ startWithWindows })}
+          onChange={(startWithWindows) =>
+            void props.controller.updateApplicationPreferences({ startWithWindows })
+          }
         />
         <PreferenceCheckbox
           checked={preferences().startMinimized}
           description={messages().startMinimizedDescription}
           disabled={controlsDisabled() || !preferences().startWithWindows}
           label={messages().startMinimized}
-          onChange={(startMinimized) => save({ startMinimized })}
+          onChange={(startMinimized) =>
+            void props.controller.updateApplicationPreferences({ startMinimized })
+          }
         />
         <PreferenceCheckbox
           checked={preferences().closeToTray}
           description={messages().closeToTrayDescription}
           disabled={controlsDisabled()}
           label={messages().closeToTray}
-          onChange={(closeToTray) => save({ closeToTray })}
+          onChange={(closeToTray) =>
+            void props.controller.updateApplicationPreferences({ closeToTray })
+          }
         />
       </SettingsSection>
       <span aria-live="polite" class="visually-hidden">
-        {saving() ? messages().savingAppPreferences : ""}
+        {props.controller.applicationPreferencesSaving() ? messages().savingAppPreferences : ""}
       </span>
       <Show when={status().length > 0}>
         <p
           aria-live="polite"
           class="application-preferences-status"
-          classList={{ error: operationError() !== null }}
+          classList={{ error: props.controller.applicationPreferencesError() !== null }}
         >
           {status()}
         </p>
       </Show>
     </>
-  );
-}
-
-function PreferenceCheckbox(props: {
-  readonly checked: boolean;
-  readonly description: string;
-  readonly disabled: boolean;
-  readonly label: string;
-  readonly onChange: (checked: boolean) => void;
-}) {
-  return (
-    <label class="application-preference" classList={{ disabled: props.disabled }}>
-      <span class="settings-checkbox-control">
-        <input
-          aria-label={props.label}
-          checked={props.checked}
-          disabled={props.disabled}
-          onChange={(event) => props.onChange(event.currentTarget.checked)}
-          type="checkbox"
-        />
-        <span aria-hidden="true" class="settings-checkbox-box">
-          <Icon name="check" size={14} />
-        </span>
-      </span>
-      <span class="application-preference-copy">
-        <strong>{props.label}</strong>
-        <small>{props.description}</small>
-      </span>
-    </label>
   );
 }
 
@@ -720,6 +595,7 @@ function ShortcutRow(props: { readonly keys: readonly string[]; readonly label: 
 
 function UsageSettings(props: { readonly controller: SettingsDialogController }) {
   const i18n = useI18n();
+  const openExternalUrl = useExternalNavigation();
   const messages = () => i18n.messages().settings;
   const rateLimits = () => props.controller.rateLimits();
   const snapshot = () => rateLimits()?.rateLimits;
@@ -1606,22 +1482,6 @@ function OutputDetailSelect(props: {
           </For>
         </div>
       </Show>
-    </div>
-  );
-}
-
-function SettingsRow(props: {
-  readonly children: JSX.Element;
-  readonly description: string;
-  readonly label: string;
-}) {
-  return (
-    <div class="settings-row">
-      <span>
-        <strong>{props.label}</strong>
-        <small>{props.description}</small>
-      </span>
-      <div>{props.children}</div>
     </div>
   );
 }

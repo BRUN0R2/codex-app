@@ -570,11 +570,35 @@ export type Personality = "friendly" | "none" | "pragmatic";
 export type MotionPreference = "full" | "reduced";
 export type DiffDisplay = "split" | "unified";
 
+export type TransientNotificationPosition = "bottomLeft" | "bottomRight" | "topLeft" | "topRight";
+
+export interface NotificationRule {
+  readonly enabled: boolean;
+  readonly priority: boolean;
+}
+
+export interface NotificationEventPreferences {
+  readonly approvalRequired: NotificationRule;
+  readonly taskCompleted: NotificationRule;
+  readonly taskFailed: NotificationRule;
+  readonly usageLimitReset: NotificationRule;
+  readonly usageResetAvailable: NotificationRule;
+  readonly lunaReserveAvailable: NotificationRule;
+}
+
+export interface NotificationPreferences {
+  readonly enabled: boolean;
+  readonly transientPosition: TransientNotificationPosition;
+  readonly transientDurationSeconds: number;
+  readonly events: NotificationEventPreferences;
+}
+
 export interface ApplicationPreferences {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly startWithWindows: boolean;
   readonly startMinimized: boolean;
   readonly closeToTray: boolean;
+  readonly notifications: NotificationPreferences;
 }
 
 export interface DesktopPreferences {
@@ -692,6 +716,7 @@ export interface AccountRateLimitsResponse {
   readonly rateLimits: RateLimitSnapshot;
   readonly rateLimitsByLimitId: Readonly<Record<string, RateLimitSnapshot>>;
   readonly planPrice: PlanPriceSnapshot | null;
+  readonly lunaReserveAvailable: boolean;
 }
 
 export interface UsageResetCredit {

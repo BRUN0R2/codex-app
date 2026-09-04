@@ -34,7 +34,9 @@ use crate::engine::native::auth::AuthSession;
 use crate::error::AppError;
 
 const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-const MODEL_CATALOG_COMPATIBILITY_VERSION: &str = "0.151.0";
+// Audited against openai/codex rust-v0.153.2. This is a capability contract with the
+// models endpoint, independent from this desktop application's package version.
+const MODEL_CATALOG_COMPATIBILITY_VERSION: &str = "0.153.2";
 pub const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -45,6 +47,7 @@ const MODEL_CATALOG_BODY_MAX_BYTES: usize = 4 * 1_048_576;
 const MAX_ETAG_BYTES: usize = 1_024;
 const ORIGINATOR: &str = "codex_desktop_next";
 const CODEX_ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
+const LUNA_RESERVE_CAPABILITY_HEADER: &str = "x-openai-codex-luna-reserve";
 const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 const RESPONSES_WEBSOCKET_BETA_HEADER: &str = "responses_websockets=2026-02-06";
 const MAX_CACHED_RESPONSE_SESSIONS: usize = 16;
@@ -393,6 +396,20 @@ impl ProviderClient {
         self.request_with_retries(operation, maximum_bytes, || {
             self.authorized(Method::GET, url, session)
                 .map(|request| request.header(ACCEPT, "application/json"))
+        })
+        .await
+    }
+
+    pub async fn get_luna_reserve_usage_json<T: DeserializeOwned>(
+        &self,
+        session: &AuthSession,
+        maximum_bytes: usize,
+    ) -> Result<T, AppError> {
+        self.request_with_retries("rate limits", maximum_bytes, || {
+            self.authorized(Method::GET, USAGE_URL, session)
+                .map(|request| {
+                    with_luna_reserve_capability(request).header(ACCEPT, "application/json")
+                })
         })
         .await
     }
@@ -862,6 +879,10 @@ impl ProviderClient {
     }
 }
 
+fn with_luna_reserve_capability(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request.header(LUNA_RESERVE_CAPABILITY_HEADER, "1")
+}
+
 fn optional_response_header(
     response: &Response,
     name: &str,
@@ -1047,12 +1068,14 @@ mod tests {
     use tokio::sync::watch;
 
     use super::CloudflareCookieStore;
+    use super::LUNA_RESERVE_CAPABILITY_HEADER;
     use super::MAX_CACHED_RESPONSE_SESSIONS;
     use super::MODEL_CATALOG_COMPATIBILITY_VERSION;
     use super::ProviderClient;
     use super::ResponseTransport;
     use super::model_catalog_url;
     use super::open_response_stream;
+    use super::with_luna_reserve_capability;
     use crate::engine::native::provider::responses::ResponseEvent;
 
     #[tokio::test]
@@ -1113,6 +1136,7 @@ mod tests {
 
     #[test]
     fn model_catalog_url_uses_the_explicit_compatibility_version() {
+        assert_eq!(MODEL_CATALOG_COMPATIBILITY_VERSION, "0.153.2");
         let url =
             reqwest::Url::parse(&model_catalog_url()).expect("model catalog URL should parse");
         let client_version = url
@@ -1122,6 +1146,23 @@ mod tests {
         assert_eq!(
             client_version.as_deref(),
             Some(MODEL_CATALOG_COMPATIBILITY_VERSION)
+        );
+    }
+
+    #[test]
+    fn luna_reserve_usage_requests_explicitly_advertise_client_support() {
+        let request = with_luna_reserve_capability(
+            reqwest::Client::new().get("https://chatgpt.com/backend-api/wham/usage"),
+        )
+        .build()
+        .expect("usage request should build");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(LUNA_RESERVE_CAPABILITY_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
         );
     }
 

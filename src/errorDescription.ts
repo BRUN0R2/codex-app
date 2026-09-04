@@ -1,4 +1,4 @@
-import { decodeCommandError } from "../contracts/decode";
+import { decodeCommandError } from "./contracts/decode";
 
 const MAX_DIAGNOSTIC_DETAIL_CHARACTERS = 4_000;
 const MAX_DIAGNOSTIC_CAUSE_DEPTH = 4;

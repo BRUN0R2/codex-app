@@ -21,6 +21,21 @@
         "decorations": false,
         "center": true,
         "backgroundColor": "#111111"
+      },
+      {
+        "label": "notification-overlay",
+        "url": "index.html?surface=notification-overlay",
+        "title": "",
+        "width": 460,
+        "height": 180,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "focus": false,
+        "shadow": false
       }
     ],
     "security": {
