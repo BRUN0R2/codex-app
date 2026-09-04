@@ -1,36 +1,40 @@
-import type { ContextUsageItem, ModelContextWindow } from "../contracts/types";
+import type { ContextUsageItem } from "../contracts/types";
 
 const COMPACT_TOKEN_THRESHOLD = 100_000;
 const THOUSAND_DIVISOR = 1_000;
 
 export interface ContextWindowMetrics {
-  readonly contextWindow: number;
-  readonly percent: number;
+  readonly usableContextWindow: number;
+  readonly usedPercent: number;
   readonly remainingPercent: number;
   readonly usedTokens: number;
 }
 
 export function calculateContextWindowMetrics(
   usage: ContextUsageItem | null,
-  contextWindow: ModelContextWindow | null = null,
 ): ContextWindowMetrics | null {
-  const window = (contextWindow ?? usage?.contextWindow)?.tokens ?? null;
+  const usableContextWindow = usage?.contextWindow?.usableTokens ?? null;
   const totalTokens = usage?.usage.totalTokens ?? null;
-  if (window === null || window <= 0 || totalTokens === null || totalTokens < 0) {
+  if (
+    usableContextWindow === null ||
+    usableContextWindow <= 0 ||
+    totalTokens === null ||
+    totalTokens < 0
+  ) {
     return null;
   }
 
-  const usedTokens = Math.min(totalTokens, window);
-  const percent = Math.max(0, Math.min((usedTokens / window) * 100, 100));
-  if (!Number.isFinite(percent)) {
+  const usedTokens = Math.min(totalTokens, usableContextWindow);
+  const usedPercent = Math.max(0, Math.min((usedTokens / usableContextWindow) * 100, 100));
+  if (!Number.isFinite(usedPercent)) {
     return null;
   }
 
-  const roundedPercent = Math.round(percent);
+  const roundedUsedPercent = Math.round(usedPercent);
   return {
-    contextWindow: window,
-    percent,
-    remainingPercent: Math.max(0, 100 - roundedPercent),
+    usableContextWindow,
+    usedPercent,
+    remainingPercent: Math.max(0, 100 - roundedUsedPercent),
     usedTokens,
   };
 }

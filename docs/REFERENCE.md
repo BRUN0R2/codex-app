@@ -7,10 +7,10 @@ local implementation remains independent.
 
 | Source | Version |
 | --- | --- |
-| [`openai/codex`](https://github.com/openai/codex) | commit `9a4b78579a7f672d5c71aa442bb95072915cc5cd`, 2026-08-31 |
-| stable release | `rust-v0.151.0`, commit `78c290807ce710180111df227df3b7a4fe845452` |
-| latest prerelease reviewed | `rust-v0.152.0-alpha.7`, commit `a43ad35f9a273e3890593c54a157d286c7de9c4b` |
-| Codex Desktop for Windows | build `26.825.5331.0`, validated 2026-08-29 |
+| [`openai/codex`](https://github.com/openai/codex) | commit `c9fac4dd5a06f29b9a6525b025a92c0bc367ae40`, 2026-09-04 |
+| stable release | `rust-v0.153.2`, commit `657a993cbee87acf52d14b758ce49dbd46d1b8eb` |
+| latest prerelease reviewed | `rust-v0.154.0-alpha.3`, commit `d58a64e690508a752c6a5a466ea752808849b7e2` |
+| Codex Desktop for Windows | build `26.901.4073.0`, validated 2026-09-04 |
 
 The ignored study clone lives in `.references/openai-codex`. No referenced
 crate, package, executable, database, configuration, or credential enters the
@@ -139,6 +139,18 @@ of that total and a fresh full estimate with margin inflated 200,340 tokens to
 252,518 and 186,851 to 250,917, causing two early compactions. The runtime now
 uses the same authoritative boundary. Full estimation is restricted to the
 phase before compatible telemetry.
+
+Upstream keeps raw, usable, and automatic-compaction limits semantically
+distinct. For a 272,000-token catalog window at 95% usability, Core publishes
+258,400 as `model_context_window` and defaults automatic compaction to 244,800.
+The audited Desktop renders `last.totalTokens / modelContextWindow` directly;
+the CLI TUI alone subtracts a 12,000-token presentation baseline. This product
+is a desktop surface and follows the Desktop projection. The former frontend
+instead preferred the currently selected catalog model and its raw 272,000
+tokens over the usage item's execution metadata. It therefore showed 10%
+remaining when compaction legitimately began. The composer now consumes only
+the usage-associated usable window, which renders that boundary as 95% used and
+5% remaining and cannot drift when the next-turn model selection changes.
 
 With compatible confirmed usage, preflight no longer serializes and scans the
 complete request. Compaction history stays borrowed unless a bounded tool output

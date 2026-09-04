@@ -1235,6 +1235,29 @@ const PREVIEW_ACTIVITY_RECONCILIATION_THREAD = {
   ],
 } as const satisfies CodexThread;
 
+const PREVIEW_PRE_COMPACTION_THREAD = withActiveContextUsage(PREVIEW_CONTEXT_THREAD, 244_800);
+
+function withActiveContextUsage(thread: CodexThread, totalTokens: number): CodexThread {
+  return {
+    ...thread,
+    turns: thread.turns.map((turn) => ({
+      ...turn,
+      items: turn.items.map((item) =>
+        item.type === "contextUsage" && item.id === "context-preview-active-turn-0"
+          ? {
+              ...item,
+              usage: {
+                ...item.usage,
+                inputTokens: Math.max(0, totalTokens - item.usage.outputTokens),
+                totalTokens,
+              },
+            }
+          : item,
+      ),
+    })),
+  };
+}
+
 const PREVIEW_THREADS = {
   data: [previewThreadSummary(PREVIEW_CONTEXT_THREAD)],
   nextCursor: null,
@@ -1435,7 +1458,9 @@ export function setupBrowserPreview(): void {
     ? timelineStressThread
     : previewParameters.get("chatReference") === "1"
       ? PREVIEW_CHAT_REFERENCE_THREAD
-      : PREVIEW_CONTEXT_THREAD;
+      : previewParameters.get("contextUsage") === "preCompact"
+        ? PREVIEW_PRE_COMPACTION_THREAD
+        : PREVIEW_CONTEXT_THREAD;
   const previewThreads = timelineStressPreview
     ? timelineStressThreads
     : previewThread === PREVIEW_CONTEXT_THREAD

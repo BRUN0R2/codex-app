@@ -886,10 +886,7 @@ export function Composer(props: ComposerProps) {
               </div>
             </Show>
             <Show when={mode() !== "chat"}>
-              <ContextWindowIndicator
-                modelWindow={selectedModelWindow()}
-                usage={props.controller.contextUsage()}
-              />
+              <ContextWindowIndicator usage={props.controller.contextUsage()} />
               <div class="composer-menu-anchor model-menu-anchor">
                 <button
                   aria-expanded={modelMenuOpen()}

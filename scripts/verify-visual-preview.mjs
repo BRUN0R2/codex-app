@@ -20,6 +20,7 @@ import { PROFILE_STORAGE_KEYS } from "../src/state/profileStorage.ts";
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PREVIEW_PLACEHOLDER_ORIGIN = "http://127.0.0.1";
 const HOME_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1`;
+const CONTEXT_USAGE_PREVIEW_URL = `${HOME_PREVIEW_URL}&contextUsage=preCompact`;
 const MODEL_WARMUP_PREVIEW_URL = `${HOME_PREVIEW_URL}&modelRefreshDelay=180`;
 const RUNTIME_RESTRICTIONS_PREVIEW_URL = `${HOME_PREVIEW_URL}&runtimeRestrictions=1`;
 const REASONING_REFLECTION_PREVIEW_URL = `${HOME_PREVIEW_URL}&reasoningReflection=1`;
@@ -128,6 +129,28 @@ const SCENARIOS = [
     })()`,
     auditExpression: composerContextWindowVisualAuditExpression,
     validate: validateComposerContextWindowMetrics,
+  },
+  {
+    id: "composer-context-usage",
+    url: CONTEXT_USAGE_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      if (!(threadButton instanceof HTMLButtonElement)) {
+        throw new Error("The context preview task is missing.");
+      }
+      threadButton.click();
+    })()`,
+    readyExpression: `document.querySelector(".composer-context-ring-anchor")?.getAttribute(
+      "aria-label",
+    ) === "Uso de contexto: 95%"`,
+    interact: hoverComposerContextUsage,
+    auditExpression: composerContextUsageVisualAuditExpression,
+    validate: validateComposerContextUsageMetrics,
   },
   {
     id: "composer-speed-options",
@@ -1196,6 +1219,29 @@ async function main() {
 function rebasePreviewUrl(url, previewOrigin) {
   const parsed = new URL(url);
   return `${previewOrigin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+async function hoverComposerContextUsage(client) {
+  const point = await client.evaluate(
+    `(() => {
+      const indicator = document.querySelector(".composer-context-ring-anchor");
+      if (!(indicator instanceof HTMLElement)) {
+        throw new Error("The context usage indicator is missing.");
+      }
+      const bounds = indicator.getBoundingClientRect();
+      return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+    })()`,
+    false,
+  );
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: point.x,
+    y: point.y,
+  });
+  await client.evaluate(
+    `new Promise((resolve) => setTimeout(resolve, 150))`,
+    true,
+  );
 }
 
 async function auditViewport(client, viewport, scenario) {
@@ -4792,6 +4838,41 @@ function composerContextWindowVisualAuditExpression() {
   return composerModelSubmenuVisualAuditExpression(".model-submenu-contextWindow");
 }
 
+function composerContextUsageVisualAuditExpression() {
+  return `(() => {
+    const normalize = (value) => value?.replace(/\\s+/gu, " ").trim() ?? null;
+    const indicator = document.querySelector(".composer-context-ring-anchor");
+    const progress = document.querySelector(".composer-context-ring-progress");
+    const popover = document.querySelector(".context-window-popover");
+    if (
+      !(indicator instanceof HTMLElement) ||
+      !(progress instanceof SVGCircleElement) ||
+      !(popover instanceof HTMLElement)
+    ) {
+      throw new Error("The context usage presentation is incomplete.");
+    }
+    const bounds = popover.getBoundingClientRect();
+    const style = getComputedStyle(popover);
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      accessibleLabel: indicator.getAttribute("aria-label"),
+      title: normalize(popover.querySelector(".context-window-popover-title")?.textContent),
+      status: normalize(popover.querySelector(".context-window-popover-percent")?.textContent),
+      tokens: normalize(popover.querySelector(".context-window-popover-tokens")?.textContent),
+      dashOffset: Number(progress.getAttribute("stroke-dashoffset")),
+      popover: {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        opacity: Number(style.opacity),
+        visibility: style.visibility,
+      },
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
 function composerServiceTierVisualAuditExpression() {
   return composerModelSubmenuVisualAuditExpression(".model-submenu-serviceTier");
 }
@@ -6865,6 +6946,31 @@ function validateComposerContextWindowMetrics(metrics, viewport) {
     `the context-window options are incomplete: ${JSON.stringify(metrics.options)}`,
   );
   validateComposerModelSubmenuPlacement(metrics, viewport, "context-window");
+}
+
+function validateComposerContextUsageMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "the context indicator created page overflow");
+  assert(metrics.accessibleLabel === "Uso de contexto: 95%", "the context percentage is stale");
+  assert(metrics.title === "Janela de contexto:", "the context tooltip title changed");
+  assert(metrics.status === "95% cheia", "the pre-compaction status is inaccurate");
+  assert(
+    metrics.tokens === "245k / 258k tokens usados",
+    `the context tooltip does not use the usable execution window: ${metrics.tokens}`,
+  );
+  assert(
+    Number.isFinite(metrics.dashOffset) && metrics.dashOffset > 1.5 && metrics.dashOffset < 1.8,
+    `the context donut geometry is inaccurate: ${metrics.dashOffset}`,
+  );
+  assert(metrics.popover.opacity === 1, "the hovered context tooltip is transparent");
+  assert(metrics.popover.visibility === "visible", "the hovered context tooltip is hidden");
+  assert(metrics.popover.top >= -tolerance, "the context tooltip escapes above the viewport");
+  assert(
+    metrics.popover.right <= viewport.width + tolerance &&
+      metrics.popover.bottom <= viewport.height + tolerance &&
+      metrics.popover.left >= -tolerance,
+    "the context tooltip escapes from the viewport",
+  );
 }
 
 function validateComposerServiceTierMetrics(metrics, viewport) {

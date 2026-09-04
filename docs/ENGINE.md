@@ -138,12 +138,14 @@ context metadata.
 Before compatible provider telemetry exists, the engine estimates the real
 request and applies a 12% margin. After `response.completed`, provider totals
 are authoritative and receive only the local cost of items added after the last
-model output. A full estimate never inflates that confirmed value again. At the
-catalog limit, Remote Compaction V2 sends only the verified incremental
-`compaction_trigger` when a response chain exists and installs one valid
-checkpoint transactionally. History remains borrowed unless a tool output must
-be rewritten to fit. `context_length_exceeded` permits one compaction recovery
-before becoming terminal.
+model output. A full estimate never inflates that confirmed value again. The
+automatic trigger and hard boundary retain distinct catalog semantics: the
+former uses `autoCompactTokenLimit`, while the latter uses the effective
+`usableTokens` window. At the first reached boundary, Remote Compaction V2 sends
+only the verified incremental `compaction_trigger` when a response chain exists
+and installs one valid checkpoint transactionally. History remains borrowed
+unless a tool output must be rewritten to fit. `context_length_exceeded` permits
+one compaction recovery before becoming terminal.
 
 Initial history and latest compatible usage come from one SQLite read
 transaction. Prompt composition, that snapshot, Code Mode session acquisition,
@@ -151,10 +153,15 @@ model/tool resolution, and transport preconnection run concurrently. This keeps
 the first request and the first request after compaction off avoidable local
 serial work while preserving one canonical snapshot.
 
-Each confirmed usage sample is persisted as `contextUsage`. During a turn, the
-UI sums provider-confirmed `output_tokens` and shows the total next to elapsed
-time. Text deltas are not tokenized or extrapolated locally. The projection is
-derived from persisted items, so the total survives completion and reload.
+Each confirmed usage sample is persisted as `contextUsage` together with the
+effective model and context metadata for that exact execution. The composer
+projects `totalTokens` against that item's `usableTokens`; it never combines an
+old measurement with the currently selected model or the catalog's raw window.
+This matches the Desktop protocol boundary and keeps a reroute or a selection
+for the next turn from relabeling active usage. During a turn, the UI also sums
+provider-confirmed `output_tokens` and shows the total next to elapsed time.
+Text deltas are not tokenized or extrapolated locally. Both projections derive
+from persisted items, so they survive completion and reload.
 
 ## Agent loop
 
