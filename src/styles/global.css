@@ -8054,9 +8054,18 @@ pre {
 }
 
 @keyframes settings-save-confirmation {
-  0% { transform: scale(0.96); }
-  60% { transform: scale(1.04); }
-  100% { transform: scale(1); }
+  0% {
+    background: #ffffff;
+    color: #171717;
+  }
+  60% {
+    background: #a7f3d0;
+    color: #064e3b;
+  }
+  100% {
+    background: #d1fae5;
+    color: #064e3b;
+  }
 }
 
 .account-settings-card {
