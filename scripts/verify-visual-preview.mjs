@@ -272,8 +272,7 @@ const SCENARIOS = [
   {
     id: "sidebar-layout",
     url: HOME_PREVIEW_URL,
-    readyExpression: `document.querySelector(".sidebar-splitter") !== null &&
-      document.querySelector(".sidebar-footer-reserve > .luna-reserve-card") !== null`,
+    readyExpression: `document.querySelector(".sidebar-splitter") !== null`,
     interact: exerciseSidebarWidthInteraction,
     auditExpression: sidebarLayoutVisualAuditExpression,
     validate: validateSidebarLayoutMetrics,
@@ -1279,7 +1278,7 @@ function browserPanelVisualAuditExpression() {
   })()`;
 }
 
-function sidebarLayoutVisualAuditExpression() {
+function sidebarLayoutVisualAuditExpression({ requireReserveCard = true } = {}) {
   return `(() => {
     const rectangle = (element, label) => {
       if (!(element instanceof HTMLElement)) {
@@ -1299,15 +1298,16 @@ function sidebarLayoutVisualAuditExpression() {
     const sidebar = document.querySelector(".sidebar");
     const splitter = document.querySelector(".sidebar-splitter");
     const main = document.querySelector(".main-panel");
-    const card = document.querySelector(".sidebar-footer-reserve > .luna-reserve-card");
+    const card = document.querySelector("#account-menu .luna-reserve-card");
+    const accountIdentity = document.querySelector("#account-menu .account-menu-identity");
     if (
       !(root instanceof HTMLElement) ||
       !(sidebar instanceof HTMLElement) ||
       !(splitter instanceof HTMLElement) ||
       !(main instanceof HTMLElement) ||
-      !(card instanceof HTMLElement)
+      (${requireReserveCard} && !(card instanceof HTMLElement))
     ) {
-      throw new Error("The persistent sidebar layout is incomplete.");
+      throw new Error("The sidebar layout or Luna Reserve account menu is incomplete.");
     }
     return {
       viewport: { width: innerWidth, height: innerHeight },
@@ -1315,9 +1315,12 @@ function sidebarLayoutVisualAuditExpression() {
       sidebar: rectangle(sidebar, ".sidebar"),
       splitter: rectangle(splitter, ".sidebar-splitter"),
       main: rectangle(main, ".main-panel"),
-      card: rectangle(card, ".luna-reserve-card"),
-      cardDisplay: getComputedStyle(card).display,
+      card: card instanceof HTMLElement ? rectangle(card, ".luna-reserve-card") : null,
+      cardDisplay: card instanceof HTMLElement ? getComputedStyle(card).display : null,
       cardVisible: (() => {
+        if (!(card instanceof HTMLElement)) {
+          return false;
+        }
         const bounds = card.getBoundingClientRect();
         const hit = document.elementFromPoint(
           bounds.left + bounds.width / 2,
@@ -1332,12 +1335,16 @@ function sidebarLayoutVisualAuditExpression() {
       ariaOrientation: splitter.getAttribute("aria-orientation"),
       ariaText: splitter.getAttribute("aria-valuetext"),
       role: splitter.getAttribute("role") ?? (splitter.tagName === "HR" ? "separator" : null),
-      persistentReserveCard: document.querySelectorAll(
+      sidebarFooterReserveCardCount: document.querySelectorAll(
         ".sidebar-footer-reserve > .luna-reserve-card",
       ).length,
       accountMenuReserveCardCount: document.querySelectorAll("#account-menu .luna-reserve-card")
         .length,
       accountMenuVisible: document.querySelector("#account-menu") instanceof HTMLElement,
+      reserveBeforeProfile:
+        card instanceof HTMLElement &&
+        accountIdentity instanceof HTMLElement &&
+        Boolean(card.compareDocumentPosition(accountIdentity) & Node.DOCUMENT_POSITION_FOLLOWING),
       persistedWidth: localStorage.getItem("codex-desktop.profile-v2.sidebar-width"),
       interaction: window.__previewSidebarWidthInteraction ?? null,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
@@ -3267,7 +3274,10 @@ async function exerciseHighlightedReadInteraction(client) {
 }
 
 async function exerciseSidebarWidthInteraction(client) {
-  const initial = await client.evaluate(sidebarLayoutVisualAuditExpression(), false);
+  const initial = await client.evaluate(
+    sidebarLayoutVisualAuditExpression({ requireReserveCard: false }),
+    false,
+  );
   const pointer = {
     startX: initial.splitter.left + initial.splitter.width / 2,
     targetX: initial.sidebar.left + 420 + initial.splitter.width / 2,
@@ -3307,7 +3317,10 @@ async function exerciseSidebarWidthInteraction(client) {
     `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
     true,
   );
-  const dragged = await client.evaluate(sidebarLayoutVisualAuditExpression(), false);
+  const dragged = await client.evaluate(
+    sidebarLayoutVisualAuditExpression({ requireReserveCard: false }),
+    false,
+  );
 
   await client.evaluate(`document.querySelector(".sidebar-splitter")?.focus()`, false);
   await client.send("Input.dispatchKeyEvent", {
@@ -3328,7 +3341,10 @@ async function exerciseSidebarWidthInteraction(client) {
     `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
     true,
   );
-  const keyboard = await client.evaluate(sidebarLayoutVisualAuditExpression(), false);
+  const keyboard = await client.evaluate(
+    sidebarLayoutVisualAuditExpression({ requireReserveCard: false }),
+    false,
+  );
 
   const reset = {
     x: keyboard.splitter.left + keyboard.splitter.width / 2,
@@ -3354,7 +3370,10 @@ async function exerciseSidebarWidthInteraction(client) {
     `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
     true,
   );
-  const restored = await client.evaluate(sidebarLayoutVisualAuditExpression(), false);
+  const restored = await client.evaluate(
+    sidebarLayoutVisualAuditExpression({ requireReserveCard: false }),
+    false,
+  );
   await client.evaluate(
     `document.querySelector(".sidebar-account-trigger")?.click()`,
     false,
@@ -4725,7 +4744,7 @@ function activeActivityReflectionVisualAuditExpression() {
         : item.getBoundingClientRect().top - previous.getBoundingClientRect().bottom;
     });
     const sidebar = document.querySelector(".sidebar");
-    const persistentReserveCard = document.querySelector(
+    const sidebarFooterReserveCard = document.querySelector(
       ".sidebar-footer-reserve > .luna-reserve-card",
     );
     const selectedThread = document.querySelector(".thread-row.active");
@@ -4823,7 +4842,7 @@ function activeActivityReflectionVisualAuditExpression() {
       alignmentError,
       sidebarItemGaps,
       sidebarWidth: sidebar instanceof HTMLElement ? sidebar.getBoundingClientRect().width : null,
-      persistentReserveCard: persistentReserveCard instanceof HTMLElement,
+      sidebarFooterReserveCard: sidebarFooterReserveCard instanceof HTMLElement,
       accountMenuReserveCardCount: document.querySelectorAll("#account-menu .luna-reserve-card")
         .length,
       selectedThreadBackground: selectedThreadStyle?.backgroundColor ?? null,
@@ -6808,13 +6827,17 @@ function validateSidebarLayoutMetrics(metrics, viewport) {
     `unexpected sidebar-layout viewport at ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.horizontalOverflow <= tolerance, "the sidebar layout created horizontal overflow");
-  assert(metrics.cardDisplay !== "none", "the persistent Luna Reserve card is hidden");
-  assert(metrics.cardVisible === true, "the account popover covers the Luna Reserve card");
-  assert(metrics.persistentReserveCard === 1, "the persistent Luna Reserve card is duplicated or missing");
+  assert(metrics.cardDisplay !== "none", "the Luna Reserve card is hidden inside the account popover");
+  assert(metrics.cardVisible === true, "the Luna Reserve card is covered inside the account popover");
   assert(
-    metrics.accountMenuReserveCardCount === 0,
-    "the Luna Reserve card is still rendered inside the account popover",
+    metrics.sidebarFooterReserveCardCount === 0,
+    "the Luna Reserve card is rendered outside the account popover",
   );
+  assert(
+    metrics.accountMenuReserveCardCount === 1,
+    "the Luna Reserve card is duplicated or missing inside the account popover",
+  );
+  assert(metrics.reserveBeforeProfile === true, "the profile menu is rendered above the Luna Reserve card");
   assert(metrics.accountMenuVisible === true, "the account popover did not open for its action check");
   assert(metrics.splitterDisplay !== "none", "the sidebar splitter is hidden");
   assert(Math.abs(metrics.splitter.width - 8) <= tolerance, "the sidebar splitter lost its 8px target");
@@ -6947,8 +6970,8 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
     `sidebar items remain visually crowded: ${JSON.stringify(metrics.sidebarItemGaps)}`,
   );
   assert(
-    metrics.persistentReserveCard === true && metrics.accountMenuReserveCardCount === 0,
-    "the Luna Reserve card is still coupled to the account popover",
+    metrics.sidebarFooterReserveCard === false && metrics.accountMenuReserveCardCount === 0,
+    "the Luna Reserve card is rendered outside the closed account popover",
   );
   assert(
     metrics.sidebarWidth !== null && metrics.sidebarWidth >= 360 - tolerance,

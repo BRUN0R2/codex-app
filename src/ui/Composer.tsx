@@ -1206,7 +1206,7 @@ function ModelMenuOptions(props: {
     >
       <div class="model-menu-options">
         <Show when={props.section === "model"}>
-          <For each={props.models}>
+          <For each={props.models.filter((entry) => !entry.hidden)}>
             {(entry) => {
               return (
                 <button

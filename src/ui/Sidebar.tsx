@@ -620,14 +620,10 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       <footer class="sidebar-footer">
-        <Show when={!props.collapsed}>
-          <div class="sidebar-footer-reserve">
-            <LunaReserveCard response={() => props.controller.rateLimits()} />
-          </div>
-        </Show>
         <div class="sidebar-footer-account">
           <Show when={!props.collapsed && accountMenuOpen()}>
             <div aria-label={messages().account} class="account-menu" id="account-menu" role="menu">
+              <LunaReserveCard response={() => props.controller.rateLimits()} />
               <div class="account-menu-identity" role="presentation">
                 <AccountAvatar account={props.controller.account()?.account} />
                 <strong>{accountLabel(props.controller)}</strong>

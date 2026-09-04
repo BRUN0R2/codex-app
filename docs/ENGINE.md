@@ -75,11 +75,16 @@ Account usage preserves the provider's additional limit buckets. When the
 server supplies the `gpt-reserve` bucket, the persistent sidebar account summary
 presents its Luna Reserve balance using the longest available quota window and
 links to the official plan and credit pages. The account popover contains only
-profile actions, while the card remains visible whenever the sidebar is
-expanded. The card is a presentation of server-provided usage; it does not
-infer or silently switch the active model from percentages. The sidebar width
-is a local layout preference, bounded so the main panel retains its minimum
-width and adjustable with the keyboard or pointer divider.
+profile actions below the card. The card is a presentation of server-provided
+usage; it does not infer or silently switch the active model from percentages.
+The sidebar width is a local layout preference, bounded so the main panel
+retains its minimum width and adjustable with the keyboard or pointer divider.
+
+The provider catalog retains hidden entries for native protocol metadata, but
+only `list` entries are returned to the model picker. Responses requests send
+the selected model and service tier in `x-codex-routing-hint` on both HTTP and
+WebSocket transports, including prewarmed sessions, so the service can apply
+its server-owned Luna Reserve fallback to the selected Luna model.
 
 ## Models, instructions, and context
 

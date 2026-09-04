@@ -24,8 +24,8 @@ use super::prompt_context::compose_prompt_context;
 use super::provider::{
     DEFAULT_FUNCTION_NAMESPACE, FunctionCallOutputPayload, ModelToolMode, ProviderResponseSession,
     ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseProtocol,
-    ResponseRequest, ResponseRequestSettings, ResponseStream, SelectedModel, WebSearchAction,
-    normalize_provider_history,
+    ResponseRequest, ResponseRequestSettings, ResponseStream, ResponseTransportConfig,
+    SelectedModel, WebSearchAction, normalize_provider_history,
 };
 use super::storage::ProviderHistorySnapshot;
 use super::stream_notifications::StreamNotificationBatcher;
@@ -257,7 +257,11 @@ pub(super) async fn prewarm_response_session(
         app,
         &inner.auth,
         response_session,
-        settings.model.response_protocol() == ResponseProtocol::Lite,
+        ResponseTransportConfig {
+            uses_responses_lite: settings.model.response_protocol() == ResponseProtocol::Lite,
+            model: settings.model.id(),
+            service_tier: settings.service_tier.as_deref(),
+        },
         &mut cancellation,
     );
     let multi_agent_models = async {
@@ -394,7 +398,11 @@ pub(super) async fn run_turn(
             &app,
             &inner.auth,
             &mut response_session,
-            run.model.response_protocol() == ResponseProtocol::Lite,
+            ResponseTransportConfig {
+                uses_responses_lite: run.model.response_protocol() == ResponseProtocol::Lite,
+                model: run.model.id(),
+                service_tier: run.service_tier.as_deref(),
+            },
             &mut preconnect_cancellation,
         );
         let multi_agent_models_future = async {

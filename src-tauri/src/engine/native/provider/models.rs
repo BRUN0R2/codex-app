@@ -793,8 +793,13 @@ impl ModelCatalog {
         Ok(Self { models })
     }
 
+    #[cfg(test)]
     pub fn models(&self) -> &[SelectedModel] {
         &self.models
+    }
+
+    pub fn picker_models(&self) -> impl Iterator<Item = &SelectedModel> {
+        self.models.iter().filter(|model| !model.summary.hidden)
     }
 
     pub fn multi_agent_models(&self) -> Vec<CodexModel> {
@@ -1172,6 +1177,44 @@ mod tests {
                 .select_verbosity(None)
                 .expect("default verbosity should resolve"),
             Some(ModelVerbosity::Low)
+        );
+    }
+
+    #[test]
+    fn picker_models_exclude_hidden_provider_entries() {
+        let wire: ModelsWire = serde_json::from_str(
+            r#"{
+                "models": [
+                    {
+                        "slug": "gpt-reserve",
+                        "display_name": "GPT-Reserve",
+                        "supported_reasoning_levels": [],
+                        "visibility": "hide",
+                        "priority": 0,
+                        "base_instructions": "Be useful."
+                    },
+                    {
+                        "slug": "gpt-5.6-luna",
+                        "display_name": "GPT-5.6 Luna",
+                        "supported_reasoning_levels": [{"effort":"medium","description":"balanced"}],
+                        "visibility": "list",
+                        "priority": 1,
+                        "default_reasoning_level": "medium",
+                        "base_instructions": "Be useful."
+                    }
+                ]
+            }"#,
+        )
+        .expect("catalog fixture should decode");
+        let catalog = ModelCatalog::from_wire(wire, 2).expect("catalog should validate");
+
+        assert_eq!(catalog.models().len(), 2);
+        assert_eq!(
+            catalog
+                .picker_models()
+                .map(|model| model.id().to_string())
+                .collect::<Vec<_>>(),
+            ["gpt-5.6-luna"]
         );
     }
 

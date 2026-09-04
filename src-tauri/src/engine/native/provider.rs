@@ -12,6 +12,7 @@ use tauri::AppHandle;
 use tokio::sync::{Mutex, RwLock};
 
 pub(crate) use self::client::ProviderResponseSession;
+pub(crate) use self::client::ResponseTransportConfig;
 use self::client::{ContinuationPolicy, ProviderClient};
 pub(crate) use self::models::ModelCatalog;
 pub(crate) use self::models::ModelToolMode;
@@ -119,8 +120,7 @@ impl ChatGptCodexProvider {
         let catalog = self.catalog(app, auth).await?;
         Ok(ModelListResponse {
             data: catalog
-                .models()
-                .iter()
+                .picker_models()
                 .map(SelectedModel::summary)
                 .collect(),
         })
@@ -220,17 +220,12 @@ impl ChatGptCodexProvider {
         app: &AppHandle,
         auth: &ChatGptAuth,
         response_session: &mut ProviderResponseSession,
-        uses_responses_lite: bool,
+        config: ResponseTransportConfig<'_>,
         cancellation: &mut tokio::sync::watch::Receiver<bool>,
     ) -> Result<Option<String>, AppError> {
         let session = auth.session(app).await?;
         self.client
-            .preconnect_response(
-                &session,
-                response_session,
-                uses_responses_lite,
-                cancellation,
-            )
+            .preconnect_response(&session, response_session, config, cancellation)
             .await
     }
 

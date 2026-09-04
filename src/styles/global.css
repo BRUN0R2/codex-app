@@ -1465,11 +1465,6 @@ pre {
   background: var(--sidebar-bg);
 }
 
-.sidebar-footer-reserve {
-  min-width: 0;
-  margin-bottom: 7px;
-}
-
 .sidebar-footer-account {
   min-width: 0;
 }

@@ -44,6 +44,7 @@ const RETRY_BACKOFF_BASE_MILLIS: u64 = 500;
 const MODEL_CATALOG_BODY_MAX_BYTES: usize = 4 * 1_048_576;
 const MAX_ETAG_BYTES: usize = 1_024;
 const ORIGINATOR: &str = "codex_desktop_next";
+const CODEX_ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
 const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 const RESPONSES_WEBSOCKET_BETA_HEADER: &str = "responses_websockets=2026-02-06";
 const MAX_CACHED_RESPONSE_SESSIONS: usize = 16;
@@ -67,6 +68,7 @@ pub struct ProviderResponseSession {
     transport: ResponseTransport,
     websocket: Option<ResponsesWebSocketConnection>,
     websocket_uses_responses_lite: Option<bool>,
+    websocket_routing_hint: Option<HeaderValue>,
     last_request: Option<ResponseRequestBaseline>,
     last_response: Option<oneshot::Receiver<CompletedWebSocketResponse>>,
     has_requested: bool,
@@ -83,6 +85,21 @@ enum ResponseTransport {
 pub(super) enum ContinuationPolicy {
     Preserve,
     ResetAfterResponse,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResponseTransportConfig<'a> {
+    pub uses_responses_lite: bool,
+    pub model: &'a str,
+    pub service_tier: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
+struct WebSocketConnectOptions<'a> {
+    turn_state: Option<&'a str>,
+    routing_hint: Option<&'a HeaderValue>,
+    uses_responses_lite: bool,
+    maximum_attempts: usize,
 }
 
 enum WebSocketConnectionOutcome {
@@ -111,6 +128,7 @@ struct CachedResponseSession {
     transport: ResponseTransport,
     websocket: Option<ResponsesWebSocketConnection>,
     websocket_uses_responses_lite: Option<bool>,
+    websocket_routing_hint: Option<HeaderValue>,
     last_request: Option<ResponseRequestBaseline>,
     last_response: Option<oneshot::Receiver<CompletedWebSocketResponse>>,
     has_requested: bool,
@@ -193,6 +211,7 @@ impl ProviderResponseSession {
             transport,
             websocket,
             websocket_uses_responses_lite,
+            websocket_routing_hint,
             last_request,
             last_response,
             has_requested,
@@ -200,6 +219,7 @@ impl ProviderResponseSession {
         ) = cached.map_or(
             (
                 ResponseTransport::WebSocket,
+                None,
                 None,
                 None,
                 None,
@@ -212,6 +232,7 @@ impl ProviderResponseSession {
                     cached.transport,
                     cached.websocket,
                     cached.websocket_uses_responses_lite,
+                    cached.websocket_routing_hint,
                     cached.last_request,
                     cached.last_response,
                     cached.has_requested,
@@ -226,6 +247,7 @@ impl ProviderResponseSession {
             transport,
             websocket,
             websocket_uses_responses_lite,
+            websocket_routing_hint,
             last_request,
             last_response,
             has_requested,
@@ -241,6 +263,7 @@ impl ProviderResponseSession {
     fn reset_websocket_state(&mut self) {
         self.websocket = None;
         self.websocket_uses_responses_lite = None;
+        self.websocket_routing_hint = None;
         self.last_request = None;
         self.last_response = None;
         self.has_requested = false;
@@ -280,6 +303,7 @@ impl Drop for ProviderResponseSession {
                 transport: self.transport,
                 websocket: self.websocket.take(),
                 websocket_uses_responses_lite: self.websocket_uses_responses_lite,
+                websocket_routing_hint: self.websocket_routing_hint.take(),
                 last_request: self.last_request.take(),
                 last_response: self.last_response.take(),
                 has_requested: self.has_requested,
@@ -472,8 +496,10 @@ impl ProviderClient {
                 .await;
         }
         let uses_responses_lite = request.uses_responses_lite();
+        let routing_hint = Self::build_routing_hint_header(request.model, request.service_tier)?;
         if session.websocket.is_some()
-            && session.websocket_uses_responses_lite != Some(uses_responses_lite)
+            && (session.websocket_uses_responses_lite != Some(uses_responses_lite)
+                || session.websocket_routing_hint.as_ref() != Some(&routing_hint))
         {
             session.reset_websocket_state();
         }
@@ -487,9 +513,12 @@ impl ProviderClient {
                 .connect_websocket(
                     auth,
                     &session.thread_id,
-                    turn_state,
-                    request.uses_responses_lite(),
-                    MAX_REQUEST_ATTEMPTS,
+                    WebSocketConnectOptions {
+                        turn_state,
+                        routing_hint: Some(&routing_hint),
+                        uses_responses_lite,
+                        maximum_attempts: MAX_REQUEST_ATTEMPTS,
+                    },
                     cancellation,
                 )
                 .await?
@@ -497,6 +526,7 @@ impl ProviderClient {
                 WebSocketConnectionOutcome::Connected(connection) => {
                     session.websocket = Some(connection);
                     session.websocket_uses_responses_lite = Some(uses_responses_lite);
+                    session.websocket_routing_hint = Some(routing_hint.clone());
                 }
                 WebSocketConnectionOutcome::HttpFallback(reason) => {
                     session.transport = ResponseTransport::Http;
@@ -576,15 +606,17 @@ impl ProviderClient {
         &self,
         auth: &AuthSession,
         session: &mut ProviderResponseSession,
-        uses_responses_lite: bool,
+        config: ResponseTransportConfig<'_>,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<Option<String>, AppError> {
         if session.transport == ResponseTransport::Http {
             return Ok(None);
         }
+        let routing_hint = Self::build_routing_hint_header(config.model, config.service_tier)?;
         if let Some(websocket) = session.websocket.as_ref()
             && !websocket.is_closed().await
-            && session.websocket_uses_responses_lite == Some(uses_responses_lite)
+            && session.websocket_uses_responses_lite == Some(config.uses_responses_lite)
+            && session.websocket_routing_hint.as_ref() == Some(&routing_hint)
         {
             return Ok(None);
         }
@@ -593,16 +625,20 @@ impl ProviderClient {
             .connect_websocket(
                 auth,
                 &session.thread_id,
-                None,
-                uses_responses_lite,
-                1,
+                WebSocketConnectOptions {
+                    turn_state: None,
+                    routing_hint: Some(&routing_hint),
+                    uses_responses_lite: config.uses_responses_lite,
+                    maximum_attempts: 1,
+                },
                 cancellation,
             )
             .await?
         {
             WebSocketConnectionOutcome::Connected(connection) => {
                 session.websocket = Some(connection);
-                session.websocket_uses_responses_lite = Some(uses_responses_lite);
+                session.websocket_uses_responses_lite = Some(config.uses_responses_lite);
+                session.websocket_routing_hint = Some(routing_hint);
                 Ok(None)
             }
             WebSocketConnectionOutcome::HttpFallback(reason) => {
@@ -616,14 +652,12 @@ impl ProviderClient {
         &self,
         session: &AuthSession,
         thread_id: &str,
-        turn_state: Option<&str>,
-        uses_responses_lite: bool,
-        maximum_attempts: usize,
+        options: WebSocketConnectOptions<'_>,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<WebSocketConnectionOutcome, AppError> {
         let url = format!("{CODEX_BASE_URL}/responses");
         let request_id = Uuid::now_v7().to_string();
-        for attempt in 0..maximum_attempts {
+        for attempt in 0..options.maximum_attempts {
             if *cancellation.borrow() {
                 return Err(AppError::Cancelled(
                     "websocket connection was cancelled".into(),
@@ -635,10 +669,13 @@ impl ProviderClient {
                 .header("session-id", thread_id)
                 .header("thread-id", thread_id)
                 .header("x-client-request-id", &request_id);
-            if let Some(turn_state) = turn_state {
+            if let Some(turn_state) = options.turn_state {
                 request_builder = request_builder.header("x-codex-turn-state", turn_state);
             }
-            if uses_responses_lite {
+            if let Some(routing_hint) = options.routing_hint {
+                request_builder = request_builder.header(CODEX_ROUTING_HINT_HEADER, routing_hint);
+            }
+            if options.uses_responses_lite {
                 request_builder = request_builder.header(RESPONSES_LITE_HEADER, "true");
             }
             match ResponsesWebSocketConnection::connect(request_builder, cancellation).await {
@@ -649,7 +686,7 @@ impl ProviderClient {
                     return Err(AppError::Cancelled(message));
                 }
                 Err(WebSocketConnectError::Error(error))
-                    if error.is_transient() && attempt + 1 < maximum_attempts =>
+                    if error.is_transient() && attempt + 1 < options.maximum_attempts =>
                 {
                     if retry_delay_or_cancel(attempt, cancellation).await {
                         return Err(AppError::Cancelled(
@@ -673,14 +710,14 @@ impl ProviderClient {
                         self.clear_cloudflare_cookies()?;
                     }
                     if (failure.edge_blocked || status.is_server_error())
-                        && attempt + 1 < maximum_attempts
+                        && attempt + 1 < options.maximum_attempts
                         && retry_delay_or_cancel(attempt, cancellation).await
                     {
                         return Err(AppError::Cancelled(
                             "websocket connection retry was cancelled".into(),
                         ));
                     }
-                    if attempt + 1 == maximum_attempts
+                    if attempt + 1 == options.maximum_attempts
                         || (!failure.edge_blocked && !status.is_server_error())
                     {
                         return Err(failure.error);
@@ -704,6 +741,7 @@ impl ProviderClient {
         let url = format!("{CODEX_BASE_URL}/responses");
         let request_id = Uuid::now_v7().to_string();
         let uses_responses_lite = request.uses_responses_lite();
+        let routing_hint = Self::build_routing_hint_header(request.model, request.service_tier)?;
         for attempt in 0..MAX_REQUEST_ATTEMPTS {
             if *cancellation.borrow() {
                 return Err(AppError::Cancelled(
@@ -720,6 +758,7 @@ impl ProviderClient {
             if let Some(turn_state) = turn_state {
                 request_builder = request_builder.header("x-codex-turn-state", turn_state);
             }
+            request_builder = request_builder.header(CODEX_ROUTING_HINT_HEADER, &routing_hint);
             if uses_responses_lite {
                 request_builder = request_builder.header(RESPONSES_LITE_HEADER, "true");
             }
@@ -777,6 +816,19 @@ impl ProviderClient {
         Err(AppError::Transport(
             "response connection exhausted its retry budget".into(),
         ))
+    }
+
+    fn build_routing_hint_header(
+        model: &str,
+        service_tier: Option<&str>,
+    ) -> Result<HeaderValue, AppError> {
+        let value = match service_tier {
+            Some(service_tier) => format!("model={model};tier={service_tier}"),
+            None => format!("model={model}"),
+        };
+        HeaderValue::from_str(&value).map_err(|_| {
+            AppError::Protocol("the model routing hint contains invalid characters".into())
+        })
     }
 
     fn authorized(
@@ -1071,6 +1123,29 @@ mod tests {
             client_version.as_deref(),
             Some(MODEL_CATALOG_COMPATIBILITY_VERSION)
         );
+    }
+
+    #[test]
+    fn routing_hint_identifies_model_and_optional_service_tier() {
+        assert_eq!(
+            ProviderClient::build_routing_hint_header("gpt-5.6-luna", None)
+                .expect("model routing hint should be valid")
+                .to_str()
+                .expect("routing hint should be ASCII"),
+            "model=gpt-5.6-luna"
+        );
+        assert_eq!(
+            ProviderClient::build_routing_hint_header("gpt-5.6-luna", Some("priority"))
+                .expect("model routing hint should be valid")
+                .to_str()
+                .expect("routing hint should be ASCII"),
+            "model=gpt-5.6-luna;tier=priority"
+        );
+    }
+
+    #[test]
+    fn routing_hint_rejects_invalid_header_values() {
+        assert!(ProviderClient::build_routing_hint_header("gpt\nreserve", None).is_err());
     }
 
     #[test]
