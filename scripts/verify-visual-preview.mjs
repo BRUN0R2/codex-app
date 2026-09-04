@@ -35,6 +35,7 @@ const SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&
 const NOTIFICATION_SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=notifications`;
 const PERSONALIZATION_SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=personalization`;
 const USAGE_SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=usage`;
+const EMPTY_USAGE_SETTINGS_PREVIEW_URL = `${USAGE_SETTINGS_PREVIEW_URL}&usageResets=empty`;
 const SETTINGS_INTERACTION_PREVIEW_URL = `${SETTINGS_PREVIEW_URL}&preferenceDelay=400`;
 const AUTOMATIONS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&surface=automations`;
 const PROFILE_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=profile`;
@@ -768,6 +769,19 @@ const SCENARIOS = [
       document.querySelectorAll(".usage-meter-row").length >= 4`,
     auditExpression: usageSettingsVisualAuditExpression,
     validate: validateUsageSettingsMetrics,
+  },
+  {
+    id: "usage-settings-empty-resets",
+    url: EMPTY_USAGE_SETTINGS_PREVIEW_URL,
+    initialReadyExpression: `document.querySelector(".usage-reset-empty") !== null`,
+    prepareExpression: `document.querySelector(".usage-reset-empty")?.scrollIntoView({ block: "center" })`,
+    readyExpression: `(() => {
+      const state = document.querySelector(".usage-reset-empty");
+      const bounds = state?.getBoundingClientRect();
+      return bounds !== undefined && bounds.top >= 0 && bounds.bottom <= innerHeight;
+    })()`,
+    auditExpression: emptyUsageResetsVisualAuditExpression,
+    validate: validateEmptyUsageResetsMetrics,
   },
   {
     id: "notification-settings",
@@ -6340,6 +6354,27 @@ function usageSettingsVisualAuditExpression() {
   })()`;
 }
 
+function emptyUsageResetsVisualAuditExpression() {
+  return `(() => {
+    const state = document.querySelector(".usage-reset-empty");
+    const card = state?.closest(".settings-card");
+    if (!(state instanceof HTMLElement) || !(card instanceof HTMLElement)) {
+      throw new Error("The empty reset state is missing.");
+    }
+    const stateBounds = state.getBoundingClientRect();
+    const cardBounds = card.getBoundingClientRect();
+    return {
+      text: state.textContent?.trim() ?? null,
+      textAlign: getComputedStyle(state).textAlign,
+      centerDelta: Math.abs(
+        stateBounds.left + stateBounds.width / 2 - (cardBounds.left + cardBounds.width / 2),
+      ),
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      resetRowCount: card.querySelectorAll(".usage-reset-row").length,
+    };
+  })()`;
+}
+
 function usageSettingsInteractionVisualAuditExpression() {
   return `(() => ({
     resetRows: document.querySelectorAll(".usage-reset-row").length,
@@ -8204,6 +8239,15 @@ function validateUsageSettingsMetrics(metrics, viewport) {
       metrics.sectionHeadings.includes("Redefinições do limite de uso"),
     "the canonical limits and resets structure is incomplete",
   );
+}
+
+function validateEmptyUsageResetsMetrics(metrics) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "the empty reset state created overflow");
+  assert(metrics.text === "Nenhuma redefinição disponível.", "the empty reset copy changed");
+  assert(metrics.textAlign === "center", "the empty reset copy is not centered");
+  assert(metrics.centerDelta <= tolerance, "the empty reset state is not centered in its card");
+  assert(metrics.resetRowCount === 0, "an unavailable reset still renders an action row");
 }
 
 function validateUsageSettingsInteractionMetrics(metrics) {

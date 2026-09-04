@@ -1012,7 +1012,9 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
           >
             <Show
               when={resetRows().length > 0}
-              fallback={<div class="usage-reset-state">{messages().noResets}</div>}
+              fallback={
+                <div class="usage-reset-state usage-reset-empty">{messages().noResets}</div>
+              }
             >
               <For each={resetRows()}>
                 {(credit) => {

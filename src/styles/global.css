@@ -7448,6 +7448,11 @@ pre {
   font-size: 0.74rem;
 }
 
+.usage-reset-empty {
+  justify-content: center;
+  text-align: center;
+}
+
 .usage-inline-action {
   flex: 0 0 auto;
   padding: 4px 8px;

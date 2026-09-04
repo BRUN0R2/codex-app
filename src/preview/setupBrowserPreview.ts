@@ -1397,6 +1397,13 @@ let previewApplicationPreferences: ApplicationPreferences = {
 
 export function setupBrowserPreview(): void {
   const previewParameters = new URLSearchParams(window.location.search);
+  if (previewParameters.get("usageResets") === "empty") {
+    previewUsageResets = {
+      credits: [],
+      availableCount: 0,
+      immediateResetPurchaseEligible: false,
+    };
+  }
   const previewModelCatalog =
     previewParameters.get("runtimeRestrictions") === "1"
       ? PREVIEW_RUNTIME_RESTRICTED_MODEL_CATALOG
