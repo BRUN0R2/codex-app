@@ -239,8 +239,9 @@
       "projectColor": "Project color"
     },
     "shell": {
-      "openBrowser": "Open internal browser",
-      "openBrowserShortcut": "Open internal browser (Ctrl+Shift+B)",
+      "openWorkspace": "Open workspace",
+      "closeWorkspace": "Close workspace",
+      "toggleWorkspaceShortcut": "Toggle workspace (Ctrl+Shift+B)",
       "resizeWorkspace": "Resize chat and workspace",
       "workspaceRatio": "Chat {chat}%, workspace {workspace}%",
       "resizeWorkspaceTitle": "Drag to resize; double-click to split evenly",
@@ -319,9 +320,7 @@
       "tabs": "Workspace tabs",
       "review": "Review",
       "reviewTitle": "Changed files review",
-      "newTab": "New browser tab",
-      "closeWorkspace": "Close workspace",
-      "backToChat": "Back to chat"
+      "newTab": "New browser tab"
     },
     "review": {
       "label": "Changed files review",
@@ -369,7 +368,6 @@
       "responsiveViewport": "Responsive viewport",
       "toggleDiagnostics": "Toggle browser diagnostics",
       "diagnosticsAndMetrics": "Diagnostics and metrics",
-      "openDefaultBrowser": "Open in default browser",
       "responsiveConfiguration": "Responsive viewport configuration",
       "dimensions": "Dimensions:",
       "standardResolution": "Standard resolution",

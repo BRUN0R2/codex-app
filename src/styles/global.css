@@ -5218,9 +5218,9 @@ pre {
   background: var(--bg);
 }
 
-.browser-panel-toggle {
+.workspace-panel-toggle {
   position: absolute;
-  z-index: 12;
+  z-index: 20;
   top: 8px;
   right: 20px;
   display: grid;
@@ -5234,8 +5234,8 @@ pre {
   color: var(--color-token-text-tertiary);
 }
 
-.browser-panel-toggle:hover,
-.browser-panel-toggle:focus-visible {
+.workspace-panel-toggle:hover,
+.workspace-panel-toggle:focus-visible {
   border-color: var(--color-token-border-heavy);
   background: var(--gray-750);
   color: var(--color-token-text-primary);
@@ -5287,7 +5287,7 @@ pre {
   flex: 0 0 auto;
   align-items: center;
   gap: 4px;
-  padding: 0 8px;
+  padding: 0 54px 0 8px;
   border-bottom: 1px solid var(--color-token-border);
   background: var(--gray-900);
 }
@@ -5295,8 +5295,7 @@ pre {
 .workspace-tabs-scroll {
   display: flex;
   min-width: 0;
-  max-width: calc(100% - 80px);
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   align-items: center;
   gap: 4px;
   overflow-x: auto;
@@ -5395,16 +5394,6 @@ pre {
 .workspace-bar-button:focus-visible {
   background: var(--surface-hover);
   color: var(--color-token-text-primary);
-}
-
-.workspace-bar-spacer {
-  min-width: 0;
-  flex: 1;
-}
-
-.workspace-panel-close {
-  border: 1px solid rgb(255 255 255 / 4%);
-  background: rgb(255 255 255 / 3%);
 }
 
 .workspace-active-surface {
@@ -5952,7 +5941,7 @@ pre {
 @container workspace-panel (max-width: 560px) {
   .workspace-tab-bar {
     height: 38px;
-    padding-inline: 6px;
+    padding: 0 50px 0 6px;
   }
 
   .workspace-tab {

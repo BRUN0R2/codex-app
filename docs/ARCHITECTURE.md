@@ -136,7 +136,10 @@ Browser Use runs in a visible child WebView2 separate from the main interface.
 The backend owns tabs, navigation, viewport, snapshots, screenshots, pointer,
 keyboard, waits, and metrics. Sensitive navigation and actions respect origin
 approval and the permission profile. The agent receives structured results or
-images, never arbitrary access to the application DOM.
+images, never arbitrary access to the application DOM. One permanent shell
+control opens or closes the active right-hand workspace surface; individual
+tabs own only selection and disposal, so browser and review surfaces never
+introduce competing panel toggles.
 
 ## Persistence and secrets
 

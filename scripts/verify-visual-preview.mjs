@@ -991,16 +991,39 @@ const SCENARIOS = [
             (button) => button.textContent?.includes("Estresse de timeline expandida"),
           );
           threadButton?.click();
-          let closeButton;
+          let toggle;
           for (let index = 0; index < 30; index += 1) {
             await frame();
-            closeButton = document.querySelector('[aria-label="Fechar área de trabalho"]');
-            if (closeButton !== null) break;
+            toggle = document.querySelector(".workspace-panel-toggle");
+            if (toggle?.getAttribute("aria-expanded") === "true") break;
           }
-          if (!(closeButton instanceof HTMLButtonElement)) {
+          if (!(toggle instanceof HTMLButtonElement)) {
             throw new Error("The browser did not open for its disposal check.");
           }
-          closeButton.click();
+          toggle.click();
+          await frame();
+          await frame();
+          if (
+            toggle.getAttribute("aria-expanded") !== "false" ||
+            document.querySelector(".browser-panel") !== null
+          ) {
+            throw new Error("The permanent workspace control did not close the browser.");
+          }
+          toggle.click();
+          for (let index = 0; index < 30; index += 1) {
+            await frame();
+            if (
+              toggle.getAttribute("aria-expanded") === "true" &&
+              document.querySelector(".browser-panel") !== null
+            ) {
+              window.__previewBrowserPanelReopened = true;
+              break;
+            }
+          }
+          if (window.__previewBrowserPanelReopened !== true) {
+            throw new Error("The permanent workspace control did not reopen the browser.");
+          }
+          toggle.click();
           await frame();
           await frame();
         } catch (error) {
@@ -1280,13 +1303,15 @@ function browserPanelVisualAuditExpression() {
     const toolbar = document.querySelector(".browser-toolbar");
     const address = document.querySelector(".browser-address");
     const surface = document.querySelector(".browser-native-surface");
+    const toggle = document.querySelector(".workspace-panel-toggle");
     if (
       !(workspace instanceof HTMLElement) ||
       !(panel instanceof HTMLElement) ||
       !(tabs instanceof HTMLElement) ||
       !(toolbar instanceof HTMLElement) ||
       !(address instanceof HTMLElement) ||
-      !(surface instanceof HTMLElement)
+      !(surface instanceof HTMLElement) ||
+      !(toggle instanceof HTMLButtonElement)
     ) {
       throw new Error("The built-in browser surface is incomplete.");
     }
@@ -1311,6 +1336,9 @@ function browserPanelVisualAuditExpression() {
       toolbar: rectangle(toolbar),
       address: rectangle(address),
       surface: rectangle(surface),
+      toggle: rectangle(toggle),
+      toggleCount: document.querySelectorAll(".workspace-panel-toggle").length,
+      toggleExpanded: toggle.getAttribute("aria-expanded"),
       tabCount: workspace.querySelectorAll('[role="tab"]').length,
       selectedTabs: workspace.querySelectorAll('[role="tab"][aria-selected="true"]').length,
       navigationButtons: panel.querySelectorAll(".browser-toolbar > .browser-toolbar-button").length,
@@ -1542,6 +1570,11 @@ function browserPanelLifecycleVisualAuditExpression() {
     return {
       viewport: { width: innerWidth, height: innerHeight },
       panelCount: document.querySelectorAll(".browser-panel").length,
+      toggleCount: document.querySelectorAll(".workspace-panel-toggle").length,
+      toggleExpanded: document
+        .querySelector(".workspace-panel-toggle")
+        ?.getAttribute("aria-expanded") ?? null,
+      reopened: window.__previewBrowserPanelReopened === true,
       failureCount: document.querySelectorAll(
         ".bootstrap-failure, .render-failure, .frontend-failure, [role='alert']",
       ).length,
@@ -8454,7 +8487,13 @@ function validateBrowserPanelMetrics(metrics, viewport) {
   assert(metrics.address.width >= 180, "the address bar became too narrow");
   assert(metrics.tabCount >= 1, "the browser did not create its initial tab");
   assert(metrics.selectedTabs === 1, "the browser does not have exactly one active tab");
-  assert(metrics.navigationButtons === 6, "navigation or viewport controls are missing from the toolbar");
+  assert(metrics.navigationButtons === 5, "the browser toolbar controls do not match the native set");
+  assert(metrics.toggleCount === 1, "the workspace does not have exactly one permanent toggle");
+  assert(metrics.toggleExpanded === "true", "the workspace toggle does not expose its open state");
+  assert(
+    metrics.toggle.right <= viewport.width + tolerance && metrics.toggle.top >= 34 - tolerance,
+    "the permanent workspace toggle escaped the usable window",
+  );
   assert(metrics.addressInputs === 1, "the address bar does not contain exactly one field");
   assert(metrics.previewPages === 1, "the preview does not expose the native-webview substitute surface");
 }
@@ -8594,6 +8633,9 @@ function validateBrowserPanelLifecycleMetrics(metrics, viewport) {
     `unexpected browser-lifecycle viewport at ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.panelCount === 0, "the browser panel remained mounted after closing");
+  assert(metrics.toggleCount === 1, "the workspace toggle disappeared while the panel was closed");
+  assert(metrics.toggleExpanded === "false", "the workspace toggle does not expose its closed state");
+  assert(metrics.reopened === true, "the workspace toggle could not reopen the browser panel");
   assert(metrics.failureCount === 0, "closing the browser produced a render failure");
   assert(metrics.chatVisible === true, "chat did not return after closing the browser");
   assert(metrics.horizontalOverflow <= tolerance, "closing the browser created horizontal overflow");

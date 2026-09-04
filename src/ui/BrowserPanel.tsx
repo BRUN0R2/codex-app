@@ -15,7 +15,6 @@ import {
   parseBrowserViewport,
   STANDARD_BROWSER_VIEWPORTS,
 } from "./browserViewport";
-import { useExternalNavigation } from "./ExternalNavigation";
 import { Icon } from "./Icon";
 
 export function BrowserPanel(props: {
@@ -23,7 +22,6 @@ export function BrowserPanel(props: {
   readonly conversationId: string;
 }) {
   const i18n = useI18n();
-  const openExternalUrl = useExternalNavigation();
   let surfaceElement: HTMLDivElement | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let synchronizationFrame: number | undefined;
@@ -253,20 +251,6 @@ export function BrowserPanel(props: {
           type="button"
         >
           <Icon name="bug" size={14} />
-        </button>
-        <button
-          aria-label={i18n.messages().browser.openDefaultBrowser}
-          class="browser-toolbar-button"
-          disabled={activeTab() === null || activeTab()?.url === "about:blank"}
-          onClick={() => {
-            const url = activeTab()?.url;
-            if (url !== undefined) {
-              void openExternalUrl(url);
-            }
-          }}
-          type="button"
-        >
-          <Icon name="externalLink" size={14} />
         </button>
       </div>
       <Show when={responsiveViewport() !== null}>

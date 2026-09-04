@@ -239,8 +239,9 @@
       "projectColor": "Cor do projeto"
     },
     "shell": {
-      "openBrowser": "Abrir navegador interno",
-      "openBrowserShortcut": "Abrir navegador interno (Ctrl+Shift+B)",
+      "openWorkspace": "Abrir área de trabalho",
+      "closeWorkspace": "Fechar área de trabalho",
+      "toggleWorkspaceShortcut": "Alternar área de trabalho (Ctrl+Shift+B)",
       "resizeWorkspace": "Redimensionar chat e área de trabalho",
       "workspaceRatio": "Chat {chat}%, área de trabalho {workspace}%",
       "resizeWorkspaceTitle": "Arraste para redimensionar; clique duas vezes para dividir igualmente",
@@ -319,9 +320,7 @@
       "tabs": "Abas da área de trabalho",
       "review": "Revisão",
       "reviewTitle": "Revisão dos arquivos alterados",
-      "newTab": "Nova aba do navegador",
-      "closeWorkspace": "Fechar área de trabalho",
-      "backToChat": "Voltar ao chat"
+      "newTab": "Nova aba do navegador"
     },
     "review": {
       "label": "Revisão dos arquivos alterados",
@@ -369,7 +368,6 @@
       "responsiveViewport": "Viewport responsivo",
       "toggleDiagnostics": "Alternar diagnóstico do navegador",
       "diagnosticsAndMetrics": "Diagnóstico e métricas",
-      "openDefaultBrowser": "Abrir no navegador padrão",
       "responsiveConfiguration": "Configuração do viewport responsivo",
       "dimensions": "Dimensões:",
       "standardResolution": "Resolução padrão",

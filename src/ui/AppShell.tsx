@@ -154,14 +154,7 @@ export function AppShell(props: { readonly controller: AppController }) {
     }
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "b") {
       event.preventDefault();
-      const conversationId = props.controller.currentThread()?.id;
-      if (conversationId !== undefined) {
-        if (workspaceTabs().visible && activeWorkspaceSurface()?.kind === "browser") {
-          setWorkspaceTabs(hideWorkspaceTabs);
-        } else {
-          void openBrowserWorkspace(conversationId);
-        }
-      }
+      toggleWorkspacePanel();
       return;
     }
     if (event.ctrlKey && event.key === ",") {
@@ -269,6 +262,22 @@ export function AppShell(props: { readonly controller: AppController }) {
         browserTabId,
       ),
     );
+  }
+
+  function toggleWorkspacePanel(): void {
+    if (workspaceTabs().visible) {
+      setWorkspaceTabs(hideWorkspaceTabs);
+      return;
+    }
+    const activeTab = activeWorkspaceSurface();
+    if (activeTab !== null) {
+      setWorkspaceTabs((current) => showWorkspaceTab(current, activeTab.id));
+      return;
+    }
+    const conversationId = props.controller.currentThread()?.id;
+    if (conversationId !== undefined) {
+      void openBrowserWorkspace(conversationId);
+    }
   }
 
   function activateWorkspaceSurface(tab: WorkspaceTab): void {
@@ -678,26 +687,19 @@ export function AppShell(props: { readonly controller: AppController }) {
           }}
           ref={mainPanelContentElement}
         >
-          <Show
-            when={
-              activeSurface() === "chat" &&
-              !workspaceTabs().visible &&
-              props.controller.currentThread() !== null
-            }
-          >
+          <Show when={activeSurface() === "chat" && props.controller.currentThread() !== null}>
             <button
-              aria-label={messages().openBrowser}
-              class="browser-panel-toggle"
-              onClick={() => {
-                const conversationId = props.controller.currentThread()?.id;
-                if (conversationId !== undefined) {
-                  void openBrowserWorkspace(conversationId);
-                }
-              }}
-              title={messages().openBrowserShortcut}
+              aria-controls="workspace-panel"
+              aria-expanded={workspaceTabs().visible}
+              aria-label={
+                workspaceTabs().visible ? messages().closeWorkspace : messages().openWorkspace
+              }
+              class="workspace-panel-toggle"
+              onClick={toggleWorkspacePanel}
+              title={messages().toggleWorkspaceShortcut}
               type="button"
             >
-              <Icon name="globe" size={15} />
+              <Icon name="panel" size={15} />
             </button>
           </Show>
           <section
@@ -792,7 +794,6 @@ export function AppShell(props: { readonly controller: AppController }) {
                   mode={props.controller.config()?.config.desktop.diffDisplay ?? "unified"}
                   onActivate={activateWorkspaceSurface}
                   onClose={closeWorkspaceSurface}
-                  onHide={() => setWorkspaceTabs(hideWorkspaceTabs)}
                   onNewBrowserTab={openNewBrowserTab}
                   state={workspaceTabs()}
                 />
