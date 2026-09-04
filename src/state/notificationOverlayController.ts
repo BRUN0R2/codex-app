@@ -196,6 +196,7 @@ export function createNotificationOverlayController(
 
   onMount(() => {
     void subscribeToNotificationOverlaySurface(
+      channel,
       applyPresentation,
       applyApprovalResult,
       reportFailure,

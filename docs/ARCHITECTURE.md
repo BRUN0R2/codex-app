@@ -168,9 +168,10 @@ places each bounded, deduplicated notification in its presentation lane. A
 strict Tauri event bridge projects the active priority and transient items into
 separate isolated webviews, so a centered priority request never blocks a corner
 notification. Each lane has its own FIFO capacity, readiness handshake,
-publication queue, and lifecycle. Priority items are persistent and draggable;
-transient items are dismissed by an identity-bound timer whose progress
-animation does not restart when that lane's pending count changes. Both windows
+publication queue, channel-specific event names, and lifecycle. Priority items
+are persistent and draggable; transient items are dismissed by an identity-bound
+timer whose progress animation does not restart when that lane's pending count
+changes. Both windows
 derive their height from intrinsic content, and their opaque cards prevent the
 application beneath them from becoming competing text. Overlay actions carry
 the channel and notification identity back to state before anything is
