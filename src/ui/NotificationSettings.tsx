@@ -1,5 +1,6 @@
-import { For, Show } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 
+import type { ConfigurableNotificationEventKind } from "../contracts/notificationOverlay";
 import {
   TRANSIENT_NOTIFICATION_MAXIMUM_DURATION_SECONDS,
   TRANSIENT_NOTIFICATION_MINIMUM_DURATION_SECONDS,
@@ -10,6 +11,7 @@ import type {
   TransientNotificationPosition,
 } from "../contracts/types";
 import { useI18n } from "../i18n/context";
+import { formatMessage } from "../i18n/messages";
 import type { AppController } from "../state/appController";
 import type { NotificationEventPreferencePatch } from "../state/applicationPreferences";
 import { Icon } from "./Icon";
@@ -26,10 +28,11 @@ type NotificationSettingsController = Pick<
   | "applicationPreferencesError"
   | "applicationPreferencesLoaded"
   | "applicationPreferencesSaving"
+  | "previewNotification"
   | "updateApplicationPreferences"
 >;
 
-type NotificationEvent = keyof NotificationEventPreferences;
+type NotificationEvent = ConfigurableNotificationEventKind & keyof NotificationEventPreferences;
 
 export function NotificationSettings(props: {
   readonly controller: NotificationSettingsController;
@@ -38,6 +41,8 @@ export function NotificationSettings(props: {
   const messages = () => i18n.messages().settings;
   const preferences = () => props.controller.applicationPreferences().notifications;
   const controlsDisabled = () => !props.controller.applicationPreferencesLoaded();
+  const [durationDraft, setDurationDraft] = createSignal<number | null>(null);
+  const visibleDuration = () => durationDraft() ?? preferences().transientDurationSeconds;
   const eventRows = () => [
     {
       event: "approvalRequired" as const,
@@ -133,21 +138,24 @@ export function NotificationSettings(props: {
               max={TRANSIENT_NOTIFICATION_MAXIMUM_DURATION_SECONDS}
               min={TRANSIENT_NOTIFICATION_MINIMUM_DURATION_SECONDS}
               onChange={(event) => {
-                const transientDurationSeconds = Number(event.currentTarget.value);
-                if (
-                  Number.isInteger(transientDurationSeconds) &&
-                  transientDurationSeconds >= TRANSIENT_NOTIFICATION_MINIMUM_DURATION_SECONDS &&
-                  transientDurationSeconds <= TRANSIENT_NOTIFICATION_MAXIMUM_DURATION_SECONDS
-                ) {
+                const transientDurationSeconds = parseDuration(event.currentTarget.value);
+                if (transientDurationSeconds !== undefined) {
                   void props.controller.updateApplicationPreferences({
                     notifications: { transientDurationSeconds },
                   });
+                  setDurationDraft(null);
+                }
+              }}
+              onInput={(event) => {
+                const transientDurationSeconds = parseDuration(event.currentTarget.value);
+                if (transientDurationSeconds !== undefined) {
+                  setDurationDraft(transientDurationSeconds);
                 }
               }}
               type="range"
-              value={preferences().transientDurationSeconds}
+              value={visibleDuration()}
             />
-            <span>{preferences().transientDurationSeconds}s</span>
+            <span>{visibleDuration()}s</span>
           </label>
         </SettingsRow>
       </SettingsSection>
@@ -163,6 +171,15 @@ export function NotificationSettings(props: {
                 <small>{row.description}</small>
               </span>
               <div class="notification-event-controls">
+                <button
+                  aria-label={formatMessage(messages().notificationTestNamed, { name: row.label })}
+                  class="notification-test-button"
+                  disabled={controlsDisabled()}
+                  onClick={() => props.controller.previewNotification(row.event)}
+                  type="button"
+                >
+                  {messages().notificationTest}
+                </button>
                 <label>
                   <input
                     checked={preferences().events[row.event].enabled}
@@ -207,6 +224,15 @@ export function NotificationSettings(props: {
       </Show>
     </div>
   );
+}
+
+function parseDuration(value: string): number | undefined {
+  const duration = Number(value);
+  return Number.isInteger(duration) &&
+    duration >= TRANSIENT_NOTIFICATION_MINIMUM_DURATION_SECONDS &&
+    duration <= TRANSIENT_NOTIFICATION_MAXIMUM_DURATION_SECONDS
+    ? duration
+    : undefined;
 }
 
 function parsePosition(value: string): TransientNotificationPosition | undefined {

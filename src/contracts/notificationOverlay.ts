@@ -4,13 +4,21 @@ import {
   TRANSIENT_NOTIFICATION_MINIMUM_DURATION_SECONDS,
 } from "./notificationPolicy";
 
-export const NOTIFICATION_EVENT_KINDS = [
+export const CONFIGURABLE_NOTIFICATION_EVENT_KINDS = [
   "approvalRequired",
   "lunaReserveAvailable",
   "taskCompleted",
   "taskFailed",
   "usageLimitReset",
   "usageResetAvailable",
+] as const;
+
+export type ConfigurableNotificationEventKind =
+  (typeof CONFIGURABLE_NOTIFICATION_EVENT_KINDS)[number];
+
+export const NOTIFICATION_EVENT_KINDS = [
+  ...CONFIGURABLE_NOTIFICATION_EVENT_KINDS,
+  "settingsSaved",
 ] as const;
 
 export type NotificationEventKind = (typeof NOTIFICATION_EVENT_KINDS)[number];

@@ -53,6 +53,42 @@ describe("app notification center", () => {
     expect(center.enqueue({ ...base, id: "failure:1", event: "taskFailed" })).toBe(false);
   });
 
+  it("previews a disabled event with its configured presentation", () => {
+    const center = createAppNotificationCenter(() => ({
+      ...DEFAULT_APPLICATION_PREFERENCES.notifications,
+      enabled: false,
+      transientDurationSeconds: 17,
+      transientPosition: "topLeft" as const,
+      events: {
+        ...DEFAULT_APPLICATION_PREFERENCES.notifications.events,
+        taskCompleted: { enabled: false, priority: false },
+      },
+    }));
+
+    expect(center.preview({ ...base, id: "preview:done:1", event: "taskCompleted" })).toBe(true);
+    expect(center.active()).toMatchObject({
+      id: "preview:done:1",
+      presentation: { type: "transient", durationSeconds: 17, position: "topLeft" },
+    });
+  });
+
+  it("presents settings feedback as a basic transient notification", () => {
+    const center = createAppNotificationCenter(() => ({
+      ...DEFAULT_APPLICATION_PREFERENCES.notifications,
+      events: {
+        ...DEFAULT_APPLICATION_PREFERENCES.notifications.events,
+        taskCompleted: { enabled: true, priority: true },
+      },
+    }));
+
+    expect(center.enqueue({ ...base, id: "settings:1", event: "settingsSaved" })).toBe(true);
+    expect(center.active()?.presentation).toEqual({
+      type: "transient",
+      durationSeconds: 8,
+      position: "bottomRight",
+    });
+  });
+
   it("reports saturation instead of remembering notifications that were not queued", () => {
     const center = createAppNotificationCenter(() => DEFAULT_APPLICATION_PREFERENCES.notifications);
     for (let index = 0; index < NOTIFICATION_QUEUE_CAPACITY; index += 1) {

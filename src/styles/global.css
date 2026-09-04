@@ -7754,6 +7754,29 @@ pre {
   gap: 14px;
 }
 
+.notification-test-button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-soft);
+  font-size: 0.72rem;
+  font-weight: 600;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.notification-test-button:hover:not(:disabled),
+.notification-test-button:focus-visible {
+  border-color: var(--border-heavy);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.notification-test-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
 .notification-event-controls label {
   display: inline-flex;
   align-items: center;
@@ -8025,6 +8048,22 @@ pre {
 }
 
 .settings-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+
+.settings-save-confirmed {
+  background: #d1fae5;
+  color: #064e3b;
+  animation: settings-save-confirmation 260ms ease-out;
+}
+
+.settings-save-confirmed:not(:disabled):hover {
+  background: #ecfdf5;
+}
+
+@keyframes settings-save-confirmation {
+  0% { transform: scale(0.96); }
+  60% { transform: scale(1.04); }
+  100% { transform: scale(1); }
+}
 
 .account-settings-card {
   display: flex;

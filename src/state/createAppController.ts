@@ -8,6 +8,7 @@ import {
   onMount,
 } from "solid-js";
 
+import type { ConfigurableNotificationEventKind } from "../contracts/notificationOverlay";
 import type {
   AccountProfileResponse,
   AccountRateLimitsResponse,
@@ -137,6 +138,7 @@ import {
   saveMessageQueue,
 } from "./messageQueue";
 import { createNotificationOverlayBridge } from "./notificationOverlayBridge";
+import { createNotificationPreview } from "./notificationPreview";
 import { findUsageLimitReset, notificationTaskLabel } from "./notificationTransitions";
 import {
   loadPinnedThreadIds,
@@ -344,6 +346,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   let unsubscribe: (() => void) | null = null;
   let unsubscribeFromMenu: (() => void) | null = null;
   let applicationShellActionSequence = 0;
+  let notificationSequence = 0;
   let initializationRevision = 0;
   let initializationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let configQueue: Promise<void> = Promise.resolve();
@@ -666,6 +669,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     applicationPreferencesQueue = settledQueueTail(operation);
     try {
       await operation;
+      notifySettingsSaved();
       return true;
     } catch (reason) {
       if (!disposed && revision === applicationPreferencesRevision) {
@@ -1422,6 +1426,26 @@ export function createAppController(localization: AppControllerLocalization): Ap
 
   function enqueueNotification(input: AppNotificationInput): void {
     if (applicationPreferencesLoaded()) notificationCenter.enqueue(input);
+  }
+
+  function previewNotification(event: ConfigurableNotificationEventKind): boolean {
+    if (!applicationPreferencesLoaded()) return false;
+    notificationSequence += 1;
+    return notificationCenter.preview(
+      createNotificationPreview(event, localization.notifications(), notificationSequence),
+    );
+  }
+
+  function notifySettingsSaved(): void {
+    notificationSequence += 1;
+    enqueueNotification({
+      id: `settings-saved:${notificationSequence}`,
+      event: "settingsSaved",
+      tone: "success",
+      title: localization.notifications().settingsSavedTitle,
+      message: localization.notifications().settingsSavedMessage,
+      target: null,
+    });
   }
 
   function notifyTurnCompletion(
@@ -2435,6 +2459,12 @@ export function createAppController(localization: AppControllerLocalization): Ap
     }
   }
 
+  async function saveSetting(update: ConfigUpdate): Promise<boolean> {
+    const saved = await updateSetting(update);
+    if (saved) notifySettingsSaved();
+    return saved;
+  }
+
   async function requestExternalUrl(url: string): Promise<boolean> {
     try {
       await openExternalUrlCommand(url);
@@ -2982,6 +3012,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     isItemStreaming,
     projectExpanded,
     projectThreadListExpanded,
+    previewNotification,
     isThreadActive,
     loadMoreThreads,
     loadMoreArchivedThreads,
@@ -3011,6 +3042,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     retryInitialization,
     respondToApproval,
     runAutomationNow,
+    saveSetting,
     saveClipboardImage: saveClipboard,
     selectProject,
     selectProduct,

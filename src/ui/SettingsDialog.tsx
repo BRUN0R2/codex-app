@@ -44,6 +44,7 @@ type SettingsDialogController = Pick<
   | "engine"
   | "loadMoreArchivedThreads"
   | "logout"
+  | "previewNotification"
   | "rateLimits"
   | "rateLimitsError"
   | "rateLimitsLoading"
@@ -65,7 +66,7 @@ type SettingsDialogController = Pick<
   | "disableAutoTopUp"
   | "reportError"
   | "unarchiveThread"
-  | "updateSetting"
+  | "saveSetting"
   | "updateApplicationPreferences"
 >;
 
@@ -137,6 +138,7 @@ const AUTO_TOP_UP_DEFAULT_RECHARGE_TARGET: string = "250";
 const AUTO_TOP_UP_DEFAULT_RECHARGE_THRESHOLD: string = "125";
 const DEVELOPER_INSTRUCTIONS_MAXIMUM_BYTES: number = 262_144;
 const OUTPUT_DETAIL_MENU_ESTIMATED_HEIGHT_PX: number = 224;
+const SETTINGS_SAVE_CONFIRMATION_DURATION_MS: number = 1_800;
 
 export function SettingsDialog(props: {
   readonly controller: SettingsDialogController;
@@ -425,7 +427,7 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
           <OutputDetailSelect
             disabled={configuration() === undefined}
             onChange={(value) =>
-              void props.controller.updateSetting({ type: "modelVerbosity", value })
+              void props.controller.saveSetting({ type: "modelVerbosity", value })
             }
             value={configuration()?.modelVerbosity ?? null}
           />
@@ -437,7 +439,7 @@ function GeneralSettings(props: { readonly controller: SettingsDialogController 
             onChange={(event) => {
               const value = parseWebSearch(event.currentTarget.value);
               if (value !== undefined)
-                void props.controller.updateSetting({ type: "webSearch", value });
+                void props.controller.saveSetting({ type: "webSearch", value });
             }}
             value={configuration()?.webSearch ?? "disabled"}
           >
@@ -507,6 +509,46 @@ function PersonalizationSettings(props: {
   const i18n = useI18n();
   const messages = () => i18n.messages().settings;
   const personality = () => props.controller.config()?.config.personality ?? "pragmatic";
+  const [instructionSaveState, setInstructionSaveState] = createSignal<"idle" | "saved" | "saving">(
+    "idle",
+  );
+  let confirmationTimer: ReturnType<typeof setTimeout> | null = null;
+  let active = true;
+
+  onCleanup(() => {
+    active = false;
+    if (confirmationTimer !== null) clearTimeout(confirmationTimer);
+  });
+
+  function clearSaveConfirmation(): void {
+    if (confirmationTimer !== null) {
+      clearTimeout(confirmationTimer);
+      confirmationTimer = null;
+    }
+    if (instructionSaveState() === "saved") setInstructionSaveState("idle");
+  }
+
+  async function saveDeveloperInstructions(): Promise<void> {
+    if (instructionSaveState() === "saving") return;
+    clearSaveConfirmation();
+    const instructions = props.developerInstructions.trim() || null;
+    setInstructionSaveState("saving");
+    const saved = await props.controller.saveSetting({
+      type: "developerInstructions",
+      value: instructions,
+    });
+    if (!active) return;
+    if (!saved || (props.developerInstructions.trim() || null) !== instructions) {
+      setInstructionSaveState("idle");
+      return;
+    }
+    setInstructionSaveState("saved");
+    confirmationTimer = setTimeout(() => {
+      confirmationTimer = null;
+      setInstructionSaveState("idle");
+    }, SETTINGS_SAVE_CONFIRMATION_DURATION_MS);
+  }
+
   return (
     <div class="settings-page">
       <SettingsHeading
@@ -518,7 +560,7 @@ function PersonalizationSettings(props: {
           onChange={(event) => {
             const value = parsePersonality(event.currentTarget.value);
             if (value !== undefined)
-              void props.controller.updateSetting({ type: "personality", value });
+              void props.controller.saveSetting({ type: "personality", value });
           }}
           value={personality()}
         >
@@ -534,7 +576,10 @@ function PersonalizationSettings(props: {
         </span>
         <textarea
           maxlength={DEVELOPER_INSTRUCTIONS_MAXIMUM_BYTES}
-          onInput={(event) => props.setDeveloperInstructions(event.currentTarget.value)}
+          onInput={(event) => {
+            clearSaveConfirmation();
+            props.setDeveloperInstructions(event.currentTarget.value);
+          }}
           placeholder={messages().developerInstructionsPlaceholder}
           rows={9}
           value={props.developerInstructions}
@@ -542,16 +587,23 @@ function PersonalizationSettings(props: {
       </label>
       <div class="settings-actions">
         <button
+          aria-busy={instructionSaveState() === "saving"}
           class="primary-button"
-          onClick={() =>
-            void props.controller.updateSetting({
-              type: "developerInstructions",
-              value: props.developerInstructions.trim() || null,
-            })
-          }
+          classList={{ "settings-save-confirmed": instructionSaveState() === "saved" }}
+          disabled={instructionSaveState() === "saving"}
+          onClick={() => void saveDeveloperInstructions()}
           type="button"
         >
-          {messages().saveInstructions}
+          <Show when={instructionSaveState() === "saved"}>
+            <Icon name="check" size={15} />
+          </Show>
+          <span aria-live="polite">
+            {instructionSaveState() === "saving"
+              ? messages().savingInstructions
+              : instructionSaveState() === "saved"
+                ? messages().instructionsSaved
+                : messages().saveInstructions}
+          </span>
         </button>
       </div>
     </div>

@@ -1,5 +1,6 @@
 import { createEffect, onCleanup, Show } from "solid-js";
 
+import type { NotificationEventKind } from "./contracts/notificationOverlay";
 import { createI18nController, I18nProvider, useI18n } from "./i18n/context";
 import { formatMessage, type TranslationMessages } from "./i18n/messages";
 import { createNotificationOverlayController } from "./state/notificationOverlayController";
@@ -159,13 +160,7 @@ function toneIcon(tone: "attention" | "error" | "success"): IconName {
 }
 
 function eventLabel(
-  event:
-    | "approvalRequired"
-    | "lunaReserveAvailable"
-    | "taskCompleted"
-    | "taskFailed"
-    | "usageLimitReset"
-    | "usageResetAvailable",
+  event: NotificationEventKind,
   messages: TranslationMessages["notifications"],
 ): string {
   return messages.events[event];

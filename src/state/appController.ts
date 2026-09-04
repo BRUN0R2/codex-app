@@ -1,5 +1,6 @@
 import type { Accessor } from "solid-js";
 
+import type { ConfigurableNotificationEventKind } from "../contracts/notificationOverlay";
 import type {
   AccountProfileResponse,
   AccountRateLimitsResponse,
@@ -143,6 +144,7 @@ export interface AppController {
   readonly isItemStreaming: (itemId: string) => boolean;
   readonly projectExpanded: (path: string) => boolean;
   readonly projectThreadListExpanded: (path: string) => boolean;
+  readonly previewNotification: (event: ConfigurableNotificationEventKind) => boolean;
   readonly isThreadActive: (threadId: string) => boolean;
   readonly loadMoreThreads: () => Promise<boolean>;
   readonly loadMoreArchivedThreads: () => Promise<boolean>;
@@ -186,6 +188,7 @@ export interface AppController {
   readonly retryInitialization: () => void;
   readonly respondToApproval: (requestId: string, decision: ApprovalDecision) => Promise<boolean>;
   readonly runAutomationNow: (automationId: string) => Promise<boolean>;
+  readonly saveSetting: (update: ConfigUpdate) => Promise<boolean>;
   readonly saveClipboardImage: (dataBase64: string) => Promise<Attachment | null>;
   readonly selectProject: (path: string) => boolean;
   readonly selectProduct: (product: AppProduct) => Promise<boolean>;

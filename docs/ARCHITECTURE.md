@@ -173,6 +173,11 @@ Application preference schema 2 persists the global switch, transient position
 and duration, plus the enabled/priority rule for every notification event. Rust
 validates and writes the complete schema atomically; TypeScript decodes it with
 exact keys and serializes optimistic updates against the last confirmed value.
+The settings preview path bypasses delivery filters but resolves the same live
+presentation rule, so every event can be tested without mutating preferences.
+Successful preference and configuration writes enqueue a basic transient
+confirmation only after persistence succeeds; manual saves expose the same
+confirmed state on their action control.
 
 Events may arrive while another task is visible. Every reduction carries task
 and turn identity to prevent state leaking between sessions.

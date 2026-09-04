@@ -1,6 +1,7 @@
 import { type Accessor, createMemo, createSignal } from "solid-js";
 import type {
   AppNotification,
+  ConfigurableNotificationEventKind,
   NotificationEventKind,
   NotificationTarget,
   NotificationTone,
@@ -9,6 +10,10 @@ import { NOTIFICATION_QUEUE_CAPACITY } from "../contracts/notificationPolicy";
 import type { NotificationPreferences, NotificationRule } from "../contracts/types";
 
 const MAX_REMEMBERED_NOTIFICATION_IDS = 128;
+const BASIC_NOTIFICATION_RULE = {
+  enabled: true,
+  priority: false,
+} as const satisfies NotificationRule;
 
 export interface AppNotificationInput {
   readonly id: string;
@@ -25,6 +30,9 @@ export interface AppNotificationCenter {
   readonly clear: () => void;
   readonly dismiss: (notificationId: string) => boolean;
   readonly enqueue: (input: AppNotificationInput) => boolean;
+  readonly preview: (
+    input: AppNotificationInput & { readonly event: ConfigurableNotificationEventKind },
+  ) => boolean;
   readonly reset: () => void;
   readonly targetFor: (notificationId: string) => NotificationTarget | null;
 }
@@ -46,6 +54,22 @@ export function createAppNotificationCenter(
       return false;
     }
 
+    return insert(input, rule, currentPreferences);
+  }
+
+  function preview(
+    input: AppNotificationInput & { readonly event: ConfigurableNotificationEventKind },
+  ): boolean {
+    const currentPreferences = preferences();
+    return insert(input, notificationRule(currentPreferences, input.event), currentPreferences);
+  }
+
+  function insert(
+    input: AppNotificationInput,
+    rule: NotificationRule,
+    currentPreferences: NotificationPreferences,
+  ): boolean {
+    if (rememberedIds.has(input.id)) return false;
     const notification: AppNotification = {
       ...input,
       createdAt: now(),
@@ -91,6 +115,7 @@ export function createAppNotificationCenter(
     clear: () => setQueue([]),
     dismiss,
     enqueue,
+    preview,
     reset: () => {
       setQueue([]);
       rememberedIds.clear();
@@ -118,5 +143,5 @@ function notificationRule(
   preferences: NotificationPreferences,
   event: NotificationEventKind,
 ): NotificationRule {
-  return preferences.events[event];
+  return event === "settingsSaved" ? BASIC_NOTIFICATION_RULE : preferences.events[event];
 }

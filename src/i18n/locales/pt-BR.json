@@ -81,7 +81,8 @@
         "taskFailed": "Falha na tarefa",
         "usageLimitReset": "Uso restaurado",
         "usageResetAvailable": "Redefinição disponível",
-        "lunaReserveAvailable": "Luna Reserve"
+        "lunaReserveAvailable": "Luna Reserve",
+        "settingsSaved": "Configurações salvas"
       },
       "approvalTitle": "Uma tarefa precisa da sua aprovação",
       "approvalMessage": "Revise a ação pendente em {task} para que o trabalho possa continuar.",
@@ -95,7 +96,9 @@
       "usageResetAvailableMessage": "Você tem {count} crédito de redefinição disponível para usar antes de expirar.",
       "usageResetsAvailableMessage": "Você tem {count} créditos de redefinição disponíveis para usar antes de expirarem.",
       "lunaReserveAvailableTitle": "Luna Reserve está disponível",
-      "lunaReserveAvailableMessage": "Seu limite padrão do Codex se esgotou; agora o modelo reserva pode ser selecionado."
+      "lunaReserveAvailableMessage": "Seu limite padrão do Codex se esgotou; agora o modelo reserva pode ser selecionado.",
+      "settingsSavedTitle": "Configurações salvas",
+      "settingsSavedMessage": "Suas alterações foram salvas com sucesso."
     },
     "confirmations": {
       "cancel": "Cancelar",
@@ -673,6 +676,8 @@
       "notificationEventsDescription": "Eventos prioritários abrem centralizados, permanecem visíveis e podem ser arrastados. Os demais usam o canto e o temporizador acima.",
       "notificationEventEnabled": "Ativa",
       "notificationEventPriority": "Prioridade",
+      "notificationTest": "Testar",
+      "notificationTestNamed": "Testar {name}",
       "notificationApprovalRequired": "Aprovação necessária",
       "notificationApprovalRequiredDescription": "Uma tarefa aguarda aprovação de comando ou origem do navegador.",
       "notificationTaskCompleted": "Tarefa concluída",
@@ -719,6 +724,8 @@
       "developerInstructionsDescription": "Até 256 KiB, armazenadas localmente no SQLite do app.",
       "developerInstructionsPlaceholder": "Ex.: prefira APIs pequenas e explique decisões arquiteturais importantes.",
       "saveInstructions": "Salvar instruções",
+      "savingInstructions": "Salvando…",
+      "instructionsSaved": "Salvo",
       "shortcutsDescription": "Atalhos disponíveis no aplicativo de desktop.",
       "shortcutGeneral": "Geral",
       "newChat": "Novo chat",
