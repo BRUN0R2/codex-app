@@ -321,13 +321,13 @@ export function createBrowserController(reportError: (reason: unknown) => void):
     }
     const current = states().get(conversationId);
     if (current === undefined) {
-      return newTab(conversationId);
+      return true;
     }
     const closedIndex = current.tabs.findIndex((tab) => tab.browserTabId === browserTabId);
     const remaining = current.tabs.filter((tab) => tab.browserTabId !== browserTabId);
     if (remaining.length === 0) {
       updateConversation(conversationId, () => null);
-      return newTab(conversationId);
+      return true;
     }
     const successorIndex = Math.min(Math.max(0, closedIndex), remaining.length - 1);
     const successor = remaining[successorIndex];

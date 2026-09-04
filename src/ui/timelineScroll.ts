@@ -2,6 +2,7 @@ const TIMELINE_END_THRESHOLD_PX = 24;
 const SCROLLBAR_MIN_THUMB_PX = 84;
 const SCROLLBAR_OVERFLOW_EPSILON_PX = 2;
 const TIMELINE_PROGRAMMATIC_SCROLL_EPSILON_PX = 1;
+const TIMELINE_VISUAL_ANCHOR_EPSILON_PX = 0.5;
 
 export type TimelineProgrammaticScrollKind = "instant" | "smooth";
 
@@ -93,6 +94,32 @@ export function resolveTimelineAnchorCorrection(input: {
     throw new Error("Timeline anchor correction requires finite non-negative scroll metrics.");
   }
   return Math.max(0, input.currentScrollTop + input.nextAnchorOffset - input.previousAnchorOffset);
+}
+
+export function resolveTimelineElementAnchorScrollTop(input: {
+  readonly capturedAnchorOffset: number;
+  readonly capturedScrollTop: number;
+  readonly currentAnchorOffset: number;
+  readonly currentScrollTop: number;
+}): number | null {
+  for (const value of Object.values(input)) {
+    if (!Number.isFinite(value)) {
+      throw new Error("Timeline element anchoring requires finite scroll metrics.");
+    }
+  }
+  if (input.capturedScrollTop < 0 || input.currentScrollTop < 0) {
+    throw new Error("Timeline element anchoring requires non-negative scroll positions.");
+  }
+  if (
+    Math.abs(input.currentScrollTop - input.capturedScrollTop) >
+    TIMELINE_VISUAL_ANCHOR_EPSILON_PX
+  ) {
+    return null;
+  }
+  return Math.max(
+    0,
+    input.currentScrollTop + input.currentAnchorOffset - input.capturedAnchorOffset,
+  );
 }
 
 export class TimelineProgrammaticScrollTracker {

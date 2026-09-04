@@ -354,6 +354,20 @@ function renderIconPath(name: IconName): JSX.Element {
           <line x1="10" x2="21" y1="14" y2="3" />
         </>
       );
+    case "exitFullscreen":
+      return (
+        <>
+          <path d="M9 3v6H3M15 21v-6h6" />
+          <path d="m3 9 6-6M21 15l-6 6" />
+        </>
+      );
+    case "fullscreen":
+      return (
+        <>
+          <path d="M15 3h6v6M9 21H3v-6" />
+          <path d="m21 3-7 7M3 21l7-7" />
+        </>
+      );
     case "sliders":
       return (
         <>

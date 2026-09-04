@@ -5,6 +5,7 @@ import {
   findTimelineAnchorIndex,
   isTimelineNearEnd,
   resolveTimelineAnchorCorrection,
+  resolveTimelineElementAnchorScrollTop,
   resolveTimelineFollowing,
   resolveTimelineMessageOffset,
   resolveTimelineRestorationTop,
@@ -132,6 +133,28 @@ describe("timeline scroll metrics", () => {
         previousAnchorOffset: 400,
       }),
     ).toBe(500);
+  });
+
+  it("keeps a disclosure trigger stable when expanded content collapses", () => {
+    expect(
+      resolveTimelineElementAnchorScrollTop({
+        capturedAnchorOffset: 400,
+        capturedScrollTop: 3_200,
+        currentAnchorOffset: 120,
+        currentScrollTop: 3_200,
+      }),
+    ).toBe(2_920);
+  });
+
+  it("rejects a stale layout anchor after the user keeps scrolling", () => {
+    expect(
+      resolveTimelineElementAnchorScrollTop({
+        capturedAnchorOffset: 400,
+        capturedScrollTop: 3_200,
+        currentAnchorOffset: 120,
+        currentScrollTop: 3_320,
+      }),
+    ).toBeNull();
   });
 
   it("classifies programmatic scroll by explicit target rather than elapsed time", () => {

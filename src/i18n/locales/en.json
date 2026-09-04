@@ -216,6 +216,7 @@
       "resizeSidebar": "Resize sidebar",
       "sidebarWidth": "Sidebar width {width}px",
       "resizeSidebarTitle": "Drag to resize; double-click to reset",
+      "loadingConversation": "Loading conversation…",
       "closeError": "Close error",
       "usageExhausted": "You have exhausted Codex and Work usage",
       "usageExhaustedDescription": "Add credits or upgrade your plan—or wait for usage to reset at {date}.",
@@ -289,6 +290,8 @@
       "review": "Review",
       "reviewTitle": "Changed files review",
       "newTab": "New browser tab",
+      "fullscreen": "Fullscreen",
+      "exitFullscreen": "Exit fullscreen",
       "closeWorkspace": "Close workspace",
       "backToChat": "Back to chat"
     },

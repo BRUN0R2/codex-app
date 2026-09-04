@@ -2,6 +2,7 @@ export const REVIEW_WORKSPACE_TAB_ID = "review" as const;
 
 export type BrowserWorkspaceTabId = `browser:${string}`;
 export type WorkspaceTabId = BrowserWorkspaceTabId | typeof REVIEW_WORKSPACE_TAB_ID;
+export type WorkspaceLayoutMode = "full" | "split";
 
 export type WorkspaceTab =
   | {
@@ -17,6 +18,7 @@ export type WorkspaceTab =
 export interface WorkspaceTabsState {
   readonly activeTabId: WorkspaceTabId | null;
   readonly conversationId: string | null;
+  readonly layoutMode: WorkspaceLayoutMode;
   readonly tabs: readonly WorkspaceTab[];
   readonly visible: boolean;
 }
@@ -25,6 +27,7 @@ export function emptyWorkspaceTabsState(): WorkspaceTabsState {
   return {
     activeTabId: null,
     conversationId: null,
+    layoutMode: "split",
     tabs: [],
     visible: false,
   };
@@ -70,6 +73,7 @@ export function reconcileBrowserWorkspaceTabs(
   const next: WorkspaceTabsState = {
     activeTabId,
     conversationId: input.conversationId,
+    layoutMode: conversationChanged || activeTabId === null ? "split" : current.layoutMode,
     tabs,
     visible: conversationChanged ? false : current.visible && activeTabId !== null,
   };
@@ -81,6 +85,16 @@ export function showBrowserWorkspaceTab(
   browserTabId: string,
 ): WorkspaceTabsState {
   return showWorkspaceTab(current, browserWorkspaceTabId(browserTabId));
+}
+
+export function showBrowserWorkspaceTabFromAgent(
+  current: WorkspaceTabsState,
+  browserTabId: string,
+): WorkspaceTabsState {
+  const activeTab = activeWorkspaceTab(current);
+  return current.visible && activeTab?.kind === "review"
+    ? current
+    : showBrowserWorkspaceTab(current, browserTabId);
 }
 
 export function showReviewWorkspaceTab(current: WorkspaceTabsState): WorkspaceTabsState {
@@ -110,7 +124,23 @@ export function showWorkspaceTab(
 }
 
 export function hideWorkspaceTabs(current: WorkspaceTabsState): WorkspaceTabsState {
-  return current.visible ? { ...current, visible: false } : current;
+  return current.visible || current.layoutMode !== "split"
+    ? { ...current, layoutMode: "split", visible: false }
+    : current;
+}
+
+export function toggleWorkspaceFullscreen(current: WorkspaceTabsState): WorkspaceTabsState {
+  if (!current.visible || current.activeTabId === null) {
+    return current;
+  }
+  return {
+    ...current,
+    layoutMode: current.layoutMode === "full" ? "split" : "full",
+  };
+}
+
+export function restoreWorkspaceSplitLayout(current: WorkspaceTabsState): WorkspaceTabsState {
+  return current.layoutMode === "full" ? { ...current, layoutMode: "split" } : current;
 }
 
 export function closeWorkspaceTab(
@@ -129,6 +159,7 @@ export function closeWorkspaceTab(
   return {
     ...current,
     activeTabId: successor?.id ?? null,
+    layoutMode: successor === null ? "split" : current.layoutMode,
     tabs,
     visible: current.visible && successor !== null,
   };
@@ -168,6 +199,7 @@ function sameWorkspaceTabsState(left: WorkspaceTabsState, right: WorkspaceTabsSt
   return (
     left.activeTabId === right.activeTabId &&
     left.conversationId === right.conversationId &&
+    left.layoutMode === right.layoutMode &&
     left.visible === right.visible &&
     left.tabs.length === right.tabs.length &&
     left.tabs.every((tab, index) => {

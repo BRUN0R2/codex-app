@@ -4,10 +4,9 @@ use tauri_plugin_opener::OpenerExt as _;
 
 use crate::attachments::{AttachmentKind, persist_attachment};
 use crate::command_validation::{
-    MAX_TURN_ATTACHMENTS, MAX_TURN_TEXT_BYTES, validate_decimal_cursor,
-    validate_diagnostic_message, validate_model_name, validate_protocol_id,
-    validate_thread_history_cursor, validate_timezone, validate_timezone_offset,
-    validate_workspace,
+    MAX_TURN_ATTACHMENTS, MAX_TURN_TEXT_BYTES, validate_decimal_cursor, validate_model_name,
+    validate_protocol_id, validate_thread_history_cursor, validate_timezone,
+    validate_timezone_offset, validate_workspace,
 };
 use crate::engine::{
     AccountProfileResponse, AccountRateLimitsResponse, AccountReadResponse,
@@ -172,12 +171,6 @@ pub struct AutoTopUpSettingsRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RuntimeDiagnosticRequest {
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AutomationCreateRequest {
     name: String,
     prompt: String,
@@ -225,11 +218,9 @@ pub async fn engine_start(
 #[tauri::command]
 pub fn engine_runtime_diagnostic_report(
     engine: State<'_, EngineManager>,
-    request: RuntimeDiagnosticRequest,
 ) -> CommandResult<OperationAck> {
-    let message = validate_diagnostic_message(request.message)?;
     engine
-        .persist_runtime_error(RuntimeDiagnosticSubsystem::Frontend, &message)
+        .persist_runtime_error(RuntimeDiagnosticSubsystem::Frontend)
         .map_err(CommandError::from)?;
     Ok(OperationAck { applied: true })
 }

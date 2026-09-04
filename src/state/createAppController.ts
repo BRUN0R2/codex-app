@@ -169,6 +169,7 @@ import {
   type StreamDelta,
 } from "./streamDeltas";
 import { applyThreadSummary, prependThreadHistory } from "./threadHistory";
+import { hydrateInitialThreadPage, type HydratedThreadPage } from "./threadHydration";
 import { cachedThreadMatchesSummary, ThreadPageCache } from "./threadPageCache";
 import {
   applyThreadRuntimeStreamDeltas,
@@ -290,7 +291,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   const [diagnostics, setDiagnostics] = createSignal<readonly DiagnosticEntry[]>([]);
   const [error, setError] = createSignal<string | null>(null);
   const [pendingOperations, setPendingOperations] = createSignal(0);
-  let pendingThreadSelectionId: string | null = null;
+  const [openingThreadId, setOpeningThreadId] = createSignal<string | null>(null);
   let threadSelectionRevision = 0;
   const [loginPending, setLoginPending] = createSignal(false);
   const [workspace, setWorkspace] = createSignal<string | null>(null);
@@ -1475,11 +1476,15 @@ export function createAppController(localization: AppControllerLocalization): Ap
         if (cached.thread.mode !== mode) {
           throw new Error("The stored conversation belongs to another application mode.");
         }
-        if (!selectThreadProject(cached.thread)) {
+        const hydrated = await hydrateSelectedThreadPage(cached, selectionRevision);
+        if (hydrated === null) {
           return false;
         }
-        activateThreadPage(cached.thread, cached.nextCursor);
-        rememberDestination(mode, cached.thread.id, cached.thread.projectPath);
+        if (!selectThreadProject(hydrated.thread)) {
+          return false;
+        }
+        activateThreadPage(hydrated.thread, hydrated.nextCursor);
+        rememberDestination(mode, hydrated.thread.id, hydrated.thread.projectPath);
         return true;
       }
       const response = await withPending(() => resumeThread(threadId));
@@ -1489,12 +1494,16 @@ export function createAppController(localization: AppControllerLocalization): Ap
       if (response.thread.mode !== mode) {
         throw new Error("The restored conversation belongs to another application mode.");
       }
-      if (!selectThreadProject(response.thread)) {
+      const hydrated = await hydrateSelectedThreadPage(response, selectionRevision);
+      if (hydrated === null) {
         return false;
       }
-      activateThreadPage(response.thread, response.nextCursor);
-      mergeThread(response.thread);
-      rememberDestination(mode, response.thread.id, response.thread.projectPath);
+      if (!selectThreadProject(hydrated.thread)) {
+        return false;
+      }
+      activateThreadPage(hydrated.thread, hydrated.nextCursor);
+      mergeThread(hydrated.thread);
+      rememberDestination(mode, hydrated.thread.id, hydrated.thread.projectPath);
       return true;
     } catch (reason) {
       if (!isCurrentThreadSelection(selectionRevision)) {
@@ -1739,7 +1748,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   }
 
   async function openThread(threadId: string): Promise<boolean> {
-    if (pendingThreadSelectionId === threadId) {
+    if (openingThreadId() === threadId) {
       return false;
     }
     if (currentThread()?.id === threadId) {
@@ -1753,11 +1762,19 @@ export function createAppController(localization: AppControllerLocalization): Ap
         if (!alignProductFlowToThread(cached.thread.mode)) {
           throw new Error("The selected conversation belongs to another application product.");
         }
-        if (!selectThreadProject(cached.thread)) {
+        const hydrated = await hydrateSelectedThreadPage(cached, selectionRevision);
+        if (hydrated === null) {
           return false;
         }
-        activateThreadPage(cached.thread, cached.nextCursor);
-        rememberDestination(cached.thread.mode, cached.thread.id, cached.thread.projectPath);
+        if (!selectThreadProject(hydrated.thread)) {
+          return false;
+        }
+        activateThreadPage(hydrated.thread, hydrated.nextCursor);
+        rememberDestination(
+          hydrated.thread.mode,
+          hydrated.thread.id,
+          hydrated.thread.projectPath,
+        );
         return true;
       }
       const response = await resumeThread(threadId);
@@ -1770,12 +1787,20 @@ export function createAppController(localization: AppControllerLocalization): Ap
       if (!alignProductFlowToThread(response.thread.mode)) {
         throw new Error("The selected conversation belongs to another application product.");
       }
-      if (!selectThreadProject(response.thread)) {
+      const hydrated = await hydrateSelectedThreadPage(response, selectionRevision);
+      if (hydrated === null) {
         return false;
       }
-      activateThreadPage(response.thread, response.nextCursor);
-      mergeThread(response.thread);
-      rememberDestination(response.thread.mode, response.thread.id, response.thread.projectPath);
+      if (!selectThreadProject(hydrated.thread)) {
+        return false;
+      }
+      activateThreadPage(hydrated.thread, hydrated.nextCursor);
+      mergeThread(hydrated.thread);
+      rememberDestination(
+        hydrated.thread.mode,
+        hydrated.thread.id,
+        hydrated.thread.projectPath,
+      );
       return true;
     } catch (reason) {
       if (!isCurrentThreadSelection(selectionRevision)) {
@@ -2499,8 +2524,19 @@ export function createAppController(localization: AppControllerLocalization): Ap
 
   function beginThreadSelection(threadId: string): number {
     threadSelectionRevision += 1;
-    pendingThreadSelectionId = threadId;
+    setOpeningThreadId(threadId);
     return threadSelectionRevision;
+  }
+
+  function hydrateSelectedThreadPage(
+    page: HydratedThreadPage,
+    selectionRevision: number,
+  ): Promise<HydratedThreadPage | null> {
+    return hydrateInitialThreadPage({
+      initialPage: page,
+      isCurrent: () => isCurrentThreadSelection(selectionRevision),
+      readOlderPage: (cursor) => readThread(page.thread.id, cursor),
+    });
   }
 
   function isCurrentThreadSelection(revision: number): boolean {
@@ -2509,13 +2545,13 @@ export function createAppController(localization: AppControllerLocalization): Ap
 
   function finishThreadSelection(revision: number): void {
     if (isCurrentThreadSelection(revision)) {
-      pendingThreadSelectionId = null;
+      setOpeningThreadId(null);
     }
   }
 
   function invalidateThreadSelection(): void {
     threadSelectionRevision += 1;
-    pendingThreadSelectionId = null;
+    setOpeningThreadId(null);
   }
 
   function clearCurrentThread(): void {
@@ -2559,7 +2595,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     setError(message);
     addDiagnostic({ stream: "runtime", message: diagnostic });
     if (engine() !== null) {
-      void reportFrontendDiagnostic(diagnostic).catch((persistenceFailure: unknown) => {
+      void reportFrontendDiagnostic().catch((persistenceFailure: unknown) => {
         addDiagnostic({
           stream: "runtime",
           message: `Failed to persist frontend diagnostic: ${describeError(persistenceFailure)}`,
@@ -2621,6 +2657,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     models,
     modelReroute,
     modelVerifications,
+    openingThreadId,
     pendingOperations,
     pinnedProjectPaths,
     pinnedThreadIds,

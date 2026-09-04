@@ -7,14 +7,15 @@ export interface TimelineDisclosureBinding {
   readonly descendantContext: TimelineDisclosureContextValue;
   readonly isOpen: () => boolean;
   readonly openDescendantCount: () => number;
-  readonly setOpen: (open: boolean) => void;
+  readonly setOpen: (open: boolean, anchorElement?: HTMLElement | null) => void;
   readonly storageKey: () => TimelineDisclosureKey;
   readonly subtreeRevision: () => number;
-  readonly toggle: () => void;
+  readonly toggle: (event?: MouseEvent) => void;
 }
 
 export interface TimelineDisclosureContextValue {
   readonly keyPrefix: () => TimelineDisclosureKey;
+  readonly onBeforeLayoutChange: (anchorElement: HTMLElement | null) => void;
   readonly onLayoutChange: () => void;
   readonly store: TimelineDisclosureStore;
 }
@@ -47,10 +48,11 @@ export function useTimelineDisclosure(
 
   const storageKey = createMemo(() => timelineDisclosureChildKey(context.keyPrefix(), key()));
   const isOpen = createMemo(() => context.store.read(storageKey(), initialOpen()));
-  const setOpen = (open: boolean) => {
+  const setOpen = (open: boolean, anchorElement: HTMLElement | null = null) => {
     if (isOpen() === open) {
       return;
     }
+    context.onBeforeLayoutChange(anchorElement);
     context.store.setOpen(storageKey(), open);
     context.onLayoutChange();
   };
@@ -58,6 +60,7 @@ export function useTimelineDisclosure(
   return {
     descendantContext: {
       keyPrefix: storageKey,
+      onBeforeLayoutChange: context.onBeforeLayoutChange,
       onLayoutChange: context.onLayoutChange,
       store: context.store,
     },
@@ -66,7 +69,11 @@ export function useTimelineDisclosure(
     setOpen,
     storageKey,
     subtreeRevision: () => context.store.subtreeRevision(storageKey()),
-    toggle: () => setOpen(!isOpen()),
+    toggle: (event) =>
+      setOpen(
+        !isOpen(),
+        event?.currentTarget instanceof HTMLElement ? event.currentTarget : null,
+      ),
   };
 }
 

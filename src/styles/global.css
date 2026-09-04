@@ -1775,6 +1775,21 @@ pre {
   grid-column: 1;
 }
 
+.main-panel-content.workspace-visible.workspace-fullscreen {
+  display: flex;
+}
+
+.main-panel-content.workspace-visible.workspace-fullscreen > .chat-page,
+.main-panel-content.workspace-visible.workspace-fullscreen > .workspace-splitter {
+  display: none;
+}
+
+.main-panel-content.workspace-visible.workspace-fullscreen > .workspace-panel {
+  width: 100%;
+  height: auto;
+  flex: 1;
+}
+
 .workspace-splitter {
   position: relative;
   z-index: 18;
@@ -2839,6 +2854,46 @@ pre {
   min-width: 0;
   min-height: 0;
   flex: 1;
+}
+
+.conversation-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 12px;
+  color: var(--text-soft);
+  font-size: 13px;
+  text-align: center;
+}
+
+.conversation-loading-indicator {
+  width: 28px;
+  height: 2px;
+  margin: 0 auto;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border-soft);
+}
+
+.conversation-loading-indicator::after {
+  display: block;
+  width: 50%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--text-secondary);
+  content: "";
+  animation: conversation-loading-progress 900ms ease-in-out infinite alternate;
+}
+
+@keyframes conversation-loading-progress {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(100%);
+  }
 }
 
 .chat-dock {
@@ -5290,7 +5345,6 @@ pre {
 .workspace-tabs-scroll {
   display: flex;
   min-width: 0;
-  max-width: calc(100% - 80px);
   flex: 0 1 auto;
   align-items: center;
   gap: 4px;

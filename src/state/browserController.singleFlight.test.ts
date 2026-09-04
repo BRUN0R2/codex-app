@@ -175,6 +175,29 @@ describe("browser native-tab single flight", () => {
     expect(loadPersistedBrowserConversations()).toEqual({ conversations: [], error: null });
     expect(errors).toEqual([]);
   });
+
+  it("closes the final tab without recreating a blank tab", async () => {
+    savePersistedBrowserConversations([
+      {
+        activeBrowserTabId: "tab-a",
+        conversationId: "conversation-a",
+        tabs: [{ browserTabId: "tab-a", url: "https://example.com/" }],
+      },
+    ]);
+    const errors: unknown[] = [];
+    const controller = createBrowserController((reason) => errors.push(reason));
+
+    await expect(controller.closeTab("conversation-a", "tab-a")).resolves.toBe(true);
+
+    expect(browserMocks.closeBrowserTab).toHaveBeenCalledWith({
+      browserTabId: "tab-a",
+      conversationId: "conversation-a",
+    });
+    expect(browserMocks.createBrowserTab).not.toHaveBeenCalled();
+    expect(controller.tabs("conversation-a")).toEqual([]);
+    expect(loadPersistedBrowserConversations()).toEqual({ conversations: [], error: null });
+    expect(errors).toEqual([]);
+  });
 });
 
 function browserSnapshot(

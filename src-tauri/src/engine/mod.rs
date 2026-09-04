@@ -39,6 +39,17 @@ impl RuntimeDiagnosticSubsystem {
             Self::Window => "window",
         }
     }
+
+    pub(crate) const fn persisted_summary(self) -> &'static str {
+        match self {
+            Self::Authentication => "An authentication operation failed.",
+            Self::Frontend => "A frontend operation failed.",
+            Self::Menu => "A native menu operation failed.",
+            Self::Provider => "A provider operation failed.",
+            Self::Runtime => "A runtime operation failed.",
+            Self::Window => "A window operation failed.",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -342,9 +353,8 @@ impl EngineManager {
     pub(crate) fn persist_runtime_error(
         &self,
         subsystem: RuntimeDiagnosticSubsystem,
-        message: &str,
     ) -> Result<(), AppError> {
-        self.engine.persist_runtime_error(subsystem, message)
+        self.engine.persist_runtime_error(subsystem)
     }
 
     pub async fn stop(&self, app: &AppHandle) {

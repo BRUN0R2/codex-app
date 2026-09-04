@@ -327,7 +327,7 @@ mod tests {
             profile: Some(ChatGptProfileWire {
                 display_name: Some(" Ada ".into()),
                 username: Some(" ada.dev ".into()),
-                profile_picture_url: Some("https://images.example.com/ada.png".into()),
+                profile_picture_url: Some("https://images.openai.com/ada.png".into()),
             }),
             stats: ChatGptProfileStatsWire {
                 lifetime_tokens: Some(9_000_000_000),

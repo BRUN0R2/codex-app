@@ -1,4 +1,5 @@
 import { exceedsUtf8ByteLength, utf8ByteLength } from "../utf8";
+import { ICON_NAMES } from "./iconNames";
 import type {
   AccountPlanType,
   AccountProfileInvocation,
@@ -34,6 +35,15 @@ import type {
   ConfigUpdateResponse,
   CreditsSnapshot,
   DesktopPreferences,
+  DesktopProfile,
+  DesktopProfileBrowserConversation,
+  DesktopProfileChatIntelligence,
+  DesktopProfileConversationDestination,
+  DesktopProfileMessageQueue,
+  DesktopProfileProductFlow,
+  DesktopProfileProjectSidebar,
+  DesktopProfileQueuedMessage,
+  DesktopProfileReadResponse,
   EngineCapability,
   EngineNotification,
   EngineServerRequest,
@@ -59,6 +69,7 @@ import type {
   Personality,
   PlanPriceSnapshot,
   PlanStepStatus,
+  ProjectRecord,
   RateLimitReachedType,
   RateLimitSnapshot,
   RateLimitUpdateSnapshot,
@@ -106,6 +117,15 @@ const TIMEZONE_OFFSET_MINIMUM_MINUTES = -840;
 const TIMEZONE_OFFSET_MAXIMUM_MINUTES = 840;
 const UI_FONT_SIZE_MINIMUM = 12;
 const UI_FONT_SIZE_MAXIMUM = 24;
+const DESKTOP_PROFILE_MAXIMUM_PROJECTS = 32;
+const DESKTOP_PROFILE_MAXIMUM_PINNED_THREADS = 128;
+const DESKTOP_PROFILE_MAXIMUM_PROJECT_STATE_ENTRIES = 32;
+const DESKTOP_PROFILE_MAXIMUM_MESSAGE_QUEUES = 128;
+const DESKTOP_PROFILE_MAXIMUM_MESSAGES_PER_QUEUE = 64;
+const DESKTOP_PROFILE_MAXIMUM_TOTAL_MESSAGES = 256;
+const DESKTOP_PROFILE_MAXIMUM_ATTACHMENTS_PER_MESSAGE = 32;
+const DESKTOP_PROFILE_MAXIMUM_BROWSER_CONVERSATIONS = 256;
+const DESKTOP_PROFILE_MAXIMUM_BROWSER_TABS = 16;
 
 const RUNTIME_STATES = ["failed", "ready", "starting", "stopped"] as const;
 const CONVERSATION_MODES = ["chat", "work", "codex"] as const;
@@ -308,7 +328,7 @@ export function decodeAccountProfileResponse(value: unknown): AccountProfileResp
     displayName:
       object.displayName === null ? null : text(object.displayName, "$.displayName", 256),
     username: object.username === null ? null : text(object.username, "$.username", 64),
-    picture: object.picture === null ? null : urlText(object.picture, "$.picture", ["https:"]),
+    picture: object.picture === null ? null : profilePictureUrl(object.picture, "$.picture"),
     statisticsStatus: literal(object.statisticsStatus, "$.statisticsStatus", [
       "available",
       "unavailable",
@@ -852,6 +872,373 @@ export function decodeApplicationPreferences(value: unknown): ApplicationPrefere
   return preferences;
 }
 
+export function decodeDesktopProfileReadResponse(value: unknown): DesktopProfileReadResponse {
+  const object = exactRecord(value, "$", ["initialized", "profile", "revision"]);
+  const initialized = booleanValue(object.initialized, "$.initialized");
+  const revision = integer(object.revision, "$.revision", 0, Number.MAX_SAFE_INTEGER);
+  if (initialized !== (revision > 0)) {
+    throw new ContractError("$.revision", "must be positive exactly when the profile is initialized");
+  }
+  return {
+    initialized,
+    profile: decodeDesktopProfile(object.profile),
+    revision,
+  };
+}
+
+export function decodeDesktopProfile(value: unknown): DesktopProfile {
+  const object = exactRecord(value, "$", [
+    "browserConversations",
+    "chatIntelligence",
+    "followUpBehavior",
+    "locale",
+    "messageQueues",
+    "pinnedProjectPaths",
+    "pinnedThreadIds",
+    "productFlow",
+    "projectSidebar",
+    "projects",
+    "schemaVersion",
+    "workspaceSplitRatio",
+  ]);
+  const projects = decodeDesktopProfileProjects(object.projects, "$.projects");
+  const projectPathKeys = new Set(projects.map((project) => comparableProfilePath(project.path)));
+  const pinnedProjectPaths = decodeDesktopProfilePaths(
+    object.pinnedProjectPaths,
+    "$.pinnedProjectPaths",
+    DESKTOP_PROFILE_MAXIMUM_PROJECTS,
+  );
+  const projectSidebar = decodeDesktopProfileProjectSidebar(
+    object.projectSidebar,
+    "$.projectSidebar",
+  );
+  for (const [profilePath, pathLabel] of [
+    ...pinnedProjectPaths.map(
+      (profilePath, index) => [profilePath, `$.pinnedProjectPaths[${index}]`] as const,
+    ),
+    ...projectSidebar.collapsedProjectPaths.map(
+      (profilePath, index) =>
+        [profilePath, `$.projectSidebar.collapsedProjectPaths[${index}]`] as const,
+    ),
+    ...projectSidebar.expandedProjectThreadListPaths.map(
+      (profilePath, index) =>
+        [profilePath, `$.projectSidebar.expandedProjectThreadListPaths[${index}]`] as const,
+    ),
+  ]) {
+    if (!projectPathKeys.has(comparableProfilePath(profilePath))) {
+      throw new ContractError(pathLabel, "must reference a project in the profile");
+    }
+  }
+  return {
+    schemaVersion: literal(object.schemaVersion, "$.schemaVersion", [1] as const),
+    locale: literal(object.locale, "$.locale", ["auto", "en", "pt-BR"] as const),
+    workspaceSplitRatio: finiteNumber(
+      object.workspaceSplitRatio,
+      "$.workspaceSplitRatio",
+      0.2,
+      0.8,
+    ),
+    projects,
+    pinnedProjectPaths,
+    pinnedThreadIds: uniqueIdentifiers(
+      object.pinnedThreadIds,
+      "$.pinnedThreadIds",
+      DESKTOP_PROFILE_MAXIMUM_PINNED_THREADS,
+    ),
+    projectSidebar,
+    productFlow: decodeDesktopProfileProductFlow(object.productFlow, "$.productFlow"),
+    messageQueues: decodeDesktopProfileMessageQueues(object.messageQueues, "$.messageQueues"),
+    followUpBehavior: literal(object.followUpBehavior, "$.followUpBehavior", [
+      "queue",
+      "steer",
+    ] as const),
+    chatIntelligence:
+      object.chatIntelligence === null
+        ? null
+        : decodeDesktopProfileChatIntelligence(
+            object.chatIntelligence,
+            "$.chatIntelligence",
+          ),
+    browserConversations: decodeDesktopProfileBrowserConversations(
+      object.browserConversations,
+      "$.browserConversations",
+    ),
+  };
+}
+
+function decodeDesktopProfileProjects(value: unknown, path: string): readonly ProjectRecord[] {
+  const projects = array(
+    value,
+    path,
+    (entry, entryPath): ProjectRecord => {
+      const object = record(entry, entryPath);
+      const expectedKeys = [
+        "name",
+        "path",
+        ...(Object.hasOwn(object, "icon") ? ["icon"] : []),
+        ...(Object.hasOwn(object, "color") ? ["color"] : []),
+      ];
+      exactKeys(object, entryPath, expectedKeys);
+      const projectPath = desktopProfilePath(object["path"], `${entryPath}.path`);
+      const name = controlFreeText(object["name"], `${entryPath}.name`, 256);
+      const icon = Object.hasOwn(object, "icon")
+        ? literal(object["icon"], `${entryPath}.icon`, ICON_NAMES)
+        : undefined;
+      const color = Object.hasOwn(object, "color")
+        ? desktopProfileColor(object["color"], `${entryPath}.color`)
+        : undefined;
+      return {
+        name,
+        path: projectPath,
+        ...(icon === undefined ? {} : { icon }),
+        ...(color === undefined ? {} : { color }),
+      };
+    },
+    DESKTOP_PROFILE_MAXIMUM_PROJECTS,
+  );
+  const paths = new Set<string>();
+  for (const [index, project] of projects.entries()) {
+    const key = comparableProfilePath(project.path);
+    if (paths.has(key)) {
+      throw new ContractError(`${path}[${index}].path`, "duplicates another project path");
+    }
+    paths.add(key);
+  }
+  return projects;
+}
+
+function decodeDesktopProfileProjectSidebar(
+  value: unknown,
+  path: string,
+): DesktopProfileProjectSidebar {
+  const object = exactRecord(value, path, [
+    "collapsedProjectPaths",
+    "expandedProjectThreadListPaths",
+    "projectsExpanded",
+    "version",
+  ]);
+  return {
+    version: literal(object.version, `${path}.version`, [1] as const),
+    projectsExpanded: booleanValue(object.projectsExpanded, `${path}.projectsExpanded`),
+    collapsedProjectPaths: decodeDesktopProfilePaths(
+      object.collapsedProjectPaths,
+      `${path}.collapsedProjectPaths`,
+      DESKTOP_PROFILE_MAXIMUM_PROJECT_STATE_ENTRIES,
+    ),
+    expandedProjectThreadListPaths: decodeDesktopProfilePaths(
+      object.expandedProjectThreadListPaths,
+      `${path}.expandedProjectThreadListPaths`,
+      DESKTOP_PROFILE_MAXIMUM_PROJECT_STATE_ENTRIES,
+    ),
+  };
+}
+
+function decodeDesktopProfileProductFlow(
+  value: unknown,
+  path: string,
+): DesktopProfileProductFlow {
+  const object = exactRecord(value, path, ["chatGptMode", "destinations", "product", "version"]);
+  const destinations = exactRecord(object.destinations, `${path}.destinations`, [
+    "chat",
+    "codex",
+    "work",
+  ]);
+  return {
+    version: literal(object.version, `${path}.version`, [1] as const),
+    product: literal(object.product, `${path}.product`, ["chatgpt", "codex"] as const),
+    chatGptMode: literal(object.chatGptMode, `${path}.chatGptMode`, ["chat", "work"] as const),
+    destinations: {
+      chat: decodeDesktopProfileDestination(destinations.chat, `${path}.destinations.chat`),
+      codex: decodeDesktopProfileDestination(destinations.codex, `${path}.destinations.codex`),
+      work: decodeDesktopProfileDestination(destinations.work, `${path}.destinations.work`),
+    },
+  };
+}
+
+function decodeDesktopProfileDestination(
+  value: unknown,
+  path: string,
+): DesktopProfileConversationDestination {
+  const object = exactRecord(value, path, ["threadId", "workspace"]);
+  return {
+    threadId: object.threadId === null ? null : identifier(object.threadId, `${path}.threadId`),
+    workspace:
+      object.workspace === null ? null : desktopProfilePath(object.workspace, `${path}.workspace`),
+  };
+}
+
+function decodeDesktopProfileChatIntelligence(
+  value: unknown,
+  path: string,
+): DesktopProfileChatIntelligence {
+  const object = exactRecord(value, path, ["optionId", "version"]);
+  return {
+    version: literal(object.version, `${path}.version`, [2] as const),
+    optionId: identifier(object.optionId, `${path}.optionId`),
+  };
+}
+
+function decodeDesktopProfileMessageQueues(
+  value: unknown,
+  path: string,
+): readonly DesktopProfileMessageQueue[] {
+  let totalMessages = 0;
+  const threadIds = new Set<string>();
+  return array(
+    value,
+    path,
+    (entry, entryPath): DesktopProfileMessageQueue => {
+      const object = exactRecord(entry, entryPath, ["messages", "threadId"]);
+      const threadId = identifier(object.threadId, `${entryPath}.threadId`);
+      if (threadIds.has(threadId)) {
+        throw new ContractError(`${entryPath}.threadId`, "duplicates another message queue");
+      }
+      threadIds.add(threadId);
+      const messageIds = new Set<string>();
+      const messages = array(
+        object.messages,
+        `${entryPath}.messages`,
+        (message, messagePath): DesktopProfileQueuedMessage => {
+          const decoded = decodeDesktopProfileQueuedMessage(message, messagePath);
+          if (messageIds.has(decoded.id)) {
+            throw new ContractError(`${messagePath}.id`, "duplicates another queued message");
+          }
+          messageIds.add(decoded.id);
+          return decoded;
+        },
+        DESKTOP_PROFILE_MAXIMUM_MESSAGES_PER_QUEUE,
+      );
+      if (messages.length === 0) {
+        throw new ContractError(`${entryPath}.messages`, "message queues cannot be empty");
+      }
+      totalMessages += messages.length;
+      if (totalMessages > DESKTOP_PROFILE_MAXIMUM_TOTAL_MESSAGES) {
+        throw new ContractError(path, "contains too many queued messages");
+      }
+      return { threadId, messages };
+    },
+    DESKTOP_PROFILE_MAXIMUM_MESSAGE_QUEUES,
+  );
+}
+
+function decodeDesktopProfileQueuedMessage(
+  value: unknown,
+  path: string,
+): DesktopProfileQueuedMessage {
+  const object = exactRecord(value, path, [
+    "attachments",
+    "effort",
+    "id",
+    "model",
+    "serviceTier",
+    "text",
+  ]);
+  return {
+    id: identifier(object.id, `${path}.id`),
+    text: text(object.text, `${path}.text`, 1_048_576, true),
+    attachments: array(
+      object.attachments,
+      `${path}.attachments`,
+      decodeAttachmentAt,
+      DESKTOP_PROFILE_MAXIMUM_ATTACHMENTS_PER_MESSAGE,
+    ),
+    model: object.model === null ? null : identifier(object.model, `${path}.model`),
+    effort:
+      object.effort === null
+        ? null
+        : literal(object.effort, `${path}.effort`, REASONING_EFFORTS),
+    serviceTier:
+      object.serviceTier === null
+        ? null
+        : identifier(object.serviceTier, `${path}.serviceTier`),
+  };
+}
+
+function decodeDesktopProfileBrowserConversations(
+  value: unknown,
+  path: string,
+): readonly DesktopProfileBrowserConversation[] {
+  const conversationIds = new Set<string>();
+  const browserTabIds = new Set<string>();
+  return array(
+    value,
+    path,
+    (entry, entryPath): DesktopProfileBrowserConversation => {
+      const object = exactRecord(entry, entryPath, [
+        "activeBrowserTabId",
+        "conversationId",
+        "tabs",
+      ]);
+      const conversationId = identifier(object.conversationId, `${entryPath}.conversationId`);
+      if (conversationIds.has(conversationId)) {
+        throw new ContractError(`${entryPath}.conversationId`, "duplicates another conversation");
+      }
+      conversationIds.add(conversationId);
+      const activeBrowserTabId = identifier(
+        object.activeBrowserTabId,
+        `${entryPath}.activeBrowserTabId`,
+      );
+      const tabs = array(
+        object.tabs,
+        `${entryPath}.tabs`,
+        (tab, tabPath) => {
+          const tabObject = exactRecord(tab, tabPath, ["browserTabId", "url"]);
+          const browserTabId = identifier(tabObject.browserTabId, `${tabPath}.browserTabId`);
+          if (browserTabIds.has(browserTabId)) {
+            throw new ContractError(`${tabPath}.browserTabId`, "duplicates another browser tab");
+          }
+          browserTabIds.add(browserTabId);
+          return {
+            browserTabId,
+            url: browserUrl(tabObject.url, `${tabPath}.url`),
+          };
+        },
+        DESKTOP_PROFILE_MAXIMUM_BROWSER_TABS,
+      );
+      if (tabs.length === 0) {
+        throw new ContractError(`${entryPath}.tabs`, "browser conversations require a tab");
+      }
+      if (!tabs.some((tab) => tab.browserTabId === activeBrowserTabId)) {
+        throw new ContractError(
+          `${entryPath}.activeBrowserTabId`,
+          "must identify a tab in the conversation",
+        );
+      }
+      return { activeBrowserTabId, conversationId, tabs };
+    },
+    DESKTOP_PROFILE_MAXIMUM_BROWSER_CONVERSATIONS,
+  );
+}
+
+function decodeDesktopProfilePaths(
+  value: unknown,
+  path: string,
+  maximumLength: number,
+): readonly string[] {
+  const paths = array(value, path, desktopProfilePath, maximumLength);
+  const keys = new Set<string>();
+  for (const [index, projectPath] of paths.entries()) {
+    const key = comparableProfilePath(projectPath);
+    if (keys.has(key)) {
+      throw new ContractError(`${path}[${index}]`, "duplicates another path");
+    }
+    keys.add(key);
+  }
+  return paths;
+}
+
+function uniqueIdentifiers(value: unknown, path: string, maximumLength: number): readonly string[] {
+  const identifiers = array(value, path, identifier, maximumLength);
+  const seen = new Set<string>();
+  for (const [index, identifierValue] of identifiers.entries()) {
+    if (seen.has(identifierValue)) {
+      throw new ContractError(`${path}[${index}]`, "duplicates another identifier");
+    }
+    seen.add(identifierValue);
+  }
+  return identifiers;
+}
+
 export function decodeConfigReadResponse(value: unknown): ConfigReadResponse {
   const object = exactRecord(value, "$", ["config", "version"]);
   return {
@@ -1298,10 +1685,7 @@ function decodeAccount(value: unknown, path: string): ChatGptAccount {
     type: literal(object.type, `${path}.type`, ["chatgpt"] as const),
     email: nullableText(object.email, `${path}.email`),
     name: object.name === null ? null : text(object.name, `${path}.name`, 256),
-    picture:
-      object.picture === null
-        ? null
-        : urlText(object.picture, `${path}.picture`, ["data:", "https:"]),
+    picture: object.picture === null ? null : profilePictureUrl(object.picture, `${path}.picture`),
     planType:
       object.planType === null ? null : literal(object.planType, `${path}.planType`, PLAN_TYPES),
   };
@@ -2432,6 +2816,45 @@ function identifier(value: unknown, path: string): string {
   return decoded;
 }
 
+function controlFreeText(
+  value: unknown,
+  path: string,
+  maximumBytes: number,
+  allowEmpty = false,
+): string {
+  const decoded = text(value, path, maximumBytes, allowEmpty);
+  if (/\p{Cc}/u.test(decoded)) {
+    throw new ContractError(path, "contains control characters");
+  }
+  return decoded;
+}
+
+function desktopProfilePath(value: unknown, path: string): string {
+  const decoded = controlFreeText(value, path, 4_096);
+  const driveRoot = /^[A-Za-z]:\\$/u.test(decoded);
+  const driveAbsolute = /^[A-Za-z]:\\.+/u.test(decoded);
+  const uncAbsolute = /^\\\\[^\\]+\\[^\\]+(?:\\.*)?$/u.test(decoded);
+  if ((!driveRoot && !driveAbsolute && !uncAbsolute) || decoded.includes("/")) {
+    throw new ContractError(path, "expected a normalized absolute Windows path");
+  }
+  if (!driveRoot && decoded.endsWith("\\")) {
+    throw new ContractError(path, "must not contain a trailing separator");
+  }
+  return decoded;
+}
+
+function comparableProfilePath(path: string): string {
+  return path.toLocaleLowerCase("en-US");
+}
+
+function desktopProfileColor(value: unknown, path: string): string {
+  const decoded = text(value, path, 7);
+  if (!/^#[\da-f]{6}$/u.test(decoded)) {
+    throw new ContractError(path, "expected a canonical #rrggbb color");
+  }
+  return decoded;
+}
+
 function nullableText(
   value: unknown,
   path: string,
@@ -2508,6 +2931,26 @@ function urlText(value: unknown, path: string, protocols: readonly string[]): st
   }
   if (!protocols.includes(url.protocol)) {
     throw new ContractError(path, `URL protocol ${url.protocol} is not allowed`);
+  }
+  return decoded;
+}
+
+function profilePictureUrl(value: unknown, path: string): string {
+  const decoded = urlText(value, path, ["https:"]);
+  const url = new URL(decoded);
+  const trustedSuffixes = ["openai.com", "oaistatic.com", "oaiusercontent.com"] as const;
+  const trustedHost = trustedSuffixes.some(
+    (suffix) => url.hostname === suffix || url.hostname.endsWith(`.${suffix}`),
+  );
+  if (
+    !trustedHost ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.port.length > 0 ||
+    url.search.length > 0 ||
+    url.hash.length > 0
+  ) {
+    throw new ContractError(path, "profile picture URL destination is not allowed");
   }
   return decoded;
 }

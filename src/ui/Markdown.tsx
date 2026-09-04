@@ -187,7 +187,7 @@ export function Markdown(props: MarkdownProps) {
         .catch((reason: unknown) => {
           if (image.isConnected && image.getAttribute("data-image-source") === source) {
             image.classList.add("image-load-failed");
-            reportFailure(frontendFailureMessage(`Failed to load image \`${source}\``, reason));
+            reportFailure(frontendFailureMessage("Failed to load a Markdown image", reason));
           }
         })
         .finally(() => {

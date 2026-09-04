@@ -216,6 +216,7 @@
       "resizeSidebar": "Redimensionar barra lateral",
       "sidebarWidth": "Largura da barra lateral: {width}px",
       "resizeSidebarTitle": "Arraste para redimensionar; clique duas vezes para redefinir",
+      "loadingConversation": "Carregando conversa…",
       "closeError": "Fechar erro",
       "usageExhausted": "Você esgotou o uso do Codex e do Work",
       "usageExhaustedDescription": "Adicione créditos ou faça upgrade do seu plano — ou aguarde a redefinição do uso em {date}.",
@@ -289,6 +290,8 @@
       "review": "Revisão",
       "reviewTitle": "Revisão dos arquivos alterados",
       "newTab": "Nova aba do navegador",
+      "fullscreen": "Tela cheia",
+      "exitFullscreen": "Sair da tela cheia",
       "closeWorkspace": "Fechar área de trabalho",
       "backToChat": "Voltar ao chat"
     },

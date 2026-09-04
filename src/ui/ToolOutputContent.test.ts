@@ -56,10 +56,13 @@ describe("tool output content", () => {
   });
 
   it("decodes only the closed view_image envelope and safe image origins", () => {
+    const png =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     const svg =
       "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%2F%3E";
 
-    expect(projectImageToolOutput(JSON.stringify({ image_url: svg }))).toBe(svg);
+    expect(projectImageToolOutput(JSON.stringify({ image_url: png }))).toBe(png);
+    expect(projectImageToolOutput(JSON.stringify({ image_url: svg }))).toBeNull();
     expect(
       projectImageToolOutput(JSON.stringify({ image_url: "https://example.com/image.png" })),
     ).toBe("https://example.com/image.png");
@@ -73,7 +76,7 @@ describe("tool output content", () => {
     expect(
       projectImageToolOutput(JSON.stringify({ image_path: "C:\\workspace\\image.png\ninvalid" })),
     ).toBeNull();
-    expect(projectImageToolOutput(JSON.stringify({ image_url: svg, unexpected: true }))).toBeNull();
+    expect(projectImageToolOutput(JSON.stringify({ image_url: png, unexpected: true }))).toBeNull();
     expect(projectImageToolOutput("not JSON")).toBeNull();
   });
 });

@@ -141,7 +141,7 @@ import {
   calculateTimelineScrollbar,
   findTimelineAnchorIndex,
   isTimelineNearEnd,
-  resolveTimelineAnchorCorrection,
+  resolveTimelineElementAnchorScrollTop,
   resolveTimelineFollowing,
   resolveTimelineMessageOffset,
   resolveTimelineRestorationTop,
@@ -152,6 +152,7 @@ import {
   shouldSynchronizeTimelineToEnd,
   TimelineProgrammaticScrollTracker,
 } from "./timelineScroll";
+import { preserveTimelineElementPosition } from "./timelineElementAnchor";
 import { TimelineThreadSessionStore, type TimelineViewportAnchor } from "./timelineSession";
 import { presentTurnFailure } from "./turnFailure";
 import {
@@ -216,7 +217,7 @@ interface PendingUserMessageNavigation {
 }
 
 interface CapturedTimelineViewportAnchor extends TimelineViewportAnchor {
-  readonly contentOffset: number;
+  readonly scrollTop: number;
   readonly threadId: string;
 }
 
@@ -265,7 +266,7 @@ export function Timeline(props: {
   let pendingHistoryLayout: PendingHistoryLayout | undefined;
   let pendingVirtualAnchorCorrection: CapturedTimelineViewportAnchor | undefined;
   let pendingActivityVisualAnchor: TimelineActivityVisualAnchor | undefined;
-  let timelineLayoutSnapshot: TimelineLayoutSnapshot | undefined;
+  let releaseDisclosureElementAnchor: (() => void) | undefined;
   let virtualMeasurementGeneration = 0;
   let virtualMeasurementScheduledGeneration: number | undefined;
   let activeTimelineThreadId: string | null = null;
@@ -323,6 +324,7 @@ export function Timeline(props: {
   const disclosures = createTimelineDisclosureStore();
   const disclosureContext: TimelineDisclosureContextValue = {
     keyPrefix: () => timelineDisclosureNamespacePrefix(props.controller.currentThread()?.id ?? ""),
+    onBeforeLayoutChange: prepareTimelineDisclosureMutation,
     onLayoutChange: () => {
       recordTimelineLayoutChange();
       queueMicrotask(measureMountedVirtualTurns);
@@ -536,7 +538,7 @@ export function Timeline(props: {
                   viewportBounds.top - mountedAnchor.bounds.top,
                 ),
           },
-          contentOffset: scrollElement.scrollTop + viewportOffset,
+          scrollTop: scrollElement.scrollTop,
           threadId,
           viewportOffset,
         };
@@ -556,7 +558,7 @@ export function Timeline(props: {
     const contentOffset = listOffset + projectVirtualLogicalOffset(viewport, anchorOffset);
     return {
       anchor,
-      contentOffset,
+      scrollTop: scrollElement.scrollTop,
       threadId,
       viewportOffset: contentOffset - scrollElement.scrollTop,
     };
@@ -795,7 +797,8 @@ export function Timeline(props: {
     pendingUnownedScrollMeasurement = false;
     pendingVirtualMeasurements.clear();
     pendingActivityVisualAnchor = undefined;
-    timelineLayoutSnapshot = undefined;
+    releaseDisclosureElementAnchor?.();
+    releaseDisclosureElementAnchor = undefined;
     pendingHistoryLayout = undefined;
     pendingVirtualAnchorCorrection = undefined;
     cancelActivityContentDeferral();
@@ -950,7 +953,9 @@ export function Timeline(props: {
     synchronizeScroll();
   }
 
-  function applyPendingVirtualAnchorCorrection(): void {
+  function applyPendingVirtualAnchorCorrection(
+    synchronizedLayout: TimelineLayoutSnapshot | undefined,
+  ): void {
     const pending = pendingVirtualAnchorCorrection;
     pendingVirtualAnchorCorrection = undefined;
     if (
@@ -964,7 +969,17 @@ export function Timeline(props: {
     if (nextAnchorOffset === null) {
       return;
     }
-    const anchorDelta = nextAnchorOffset - pending.contentOffset;
+    const currentScrollTop = scrollElement.scrollTop;
+    const targetScrollTop = resolveTimelineElementAnchorScrollTop({
+      capturedAnchorOffset: pending.viewportOffset,
+      capturedScrollTop: pending.scrollTop,
+      currentAnchorOffset: nextAnchorOffset - currentScrollTop,
+      currentScrollTop,
+    });
+    if (targetScrollTop === null) {
+      return;
+    }
+    const anchorDelta = targetScrollTop - currentScrollTop;
     if (
       !shouldPreserveTimelineAnchor({
         anchorDelta,
@@ -974,16 +989,8 @@ export function Timeline(props: {
     ) {
       return;
     }
-    const previousScrollTop = scrollElement.scrollTop;
-    scrollTimelineTo(
-      resolveTimelineAnchorCorrection({
-        currentScrollTop: previousScrollTop,
-        nextAnchorOffset,
-        previousAnchorOffset: pending.contentOffset,
-      }),
-      "auto",
-      timelineLayoutSnapshot,
-    );
+    const previousScrollTop = currentScrollTop;
+    scrollTimelineTo(targetScrollTop, "auto", synchronizedLayout);
     if (dragState !== undefined) {
       dragState = {
         ...dragState,
@@ -992,7 +999,9 @@ export function Timeline(props: {
     }
   }
 
-  function applyPendingActivityVisualAnchor(): void {
+  function applyPendingActivityVisualAnchor(
+    synchronizedLayout: TimelineLayoutSnapshot | undefined,
+  ): void {
     const anchor = pendingActivityVisualAnchor;
     pendingActivityVisualAnchor = undefined;
     if (
@@ -1000,7 +1009,6 @@ export function Timeline(props: {
       scrollElement === undefined ||
       followingLatest() ||
       programmaticTimelineNavigationActive() ||
-      Math.abs(scrollElement.scrollTop - anchor.scrollTop) > 0.5 ||
       !anchor.element.isConnected ||
       anchor.element.getAttribute("data-virtual-activity-key") !== anchor.key
     ) {
@@ -1008,12 +1016,17 @@ export function Timeline(props: {
     }
     const viewportOffset =
       anchor.element.getBoundingClientRect().top - scrollElement.getBoundingClientRect().top;
-    const correction = viewportOffset - anchor.viewportOffset;
-    if (!Number.isFinite(correction) || correction === 0) {
+    const targetScrollTop = resolveTimelineElementAnchorScrollTop({
+      capturedAnchorOffset: anchor.viewportOffset,
+      capturedScrollTop: anchor.scrollTop,
+      currentAnchorOffset: viewportOffset,
+      currentScrollTop: scrollElement.scrollTop,
+    });
+    if (targetScrollTop === null || targetScrollTop === scrollElement.scrollTop) {
       return;
     }
     const previousScrollTop = scrollElement.scrollTop;
-    scrollTimelineTo(previousScrollTop + correction, "auto", timelineLayoutSnapshot);
+    scrollTimelineTo(targetScrollTop, "auto", synchronizedLayout);
     if (dragState !== undefined) {
       dragState = {
         ...dragState,
@@ -1081,14 +1094,12 @@ export function Timeline(props: {
     if (scrollElement === undefined || virtualListElement === undefined) {
       return null;
     }
-    const snapshot = {
+    return {
       clientHeight: scrollElement.clientHeight,
       listOffset: virtualListElement.offsetTop,
       scrollHeight: scrollElement.scrollHeight,
       trackHeight: scrollbarTrackElement?.clientHeight ?? 0,
     } satisfies TimelineLayoutSnapshot;
-    timelineLayoutSnapshot = snapshot;
-    return snapshot;
   }
 
   function measureScroll(
@@ -1098,7 +1109,7 @@ export function Timeline(props: {
     if (scrollElement === undefined || virtualListElement === undefined) {
       return;
     }
-    const layout = synchronizedLayout ?? timelineLayoutSnapshot ?? readTimelineLayoutSnapshot();
+    const layout = synchronizedLayout ?? readTimelineLayoutSnapshot();
     if (layout === null) {
       return;
     }
@@ -1151,6 +1162,8 @@ export function Timeline(props: {
   }
 
   function claimTimelineScrollOwnership(): void {
+    releaseDisclosureElementAnchor?.();
+    releaseDisclosureElementAnchor = undefined;
     cancelPendingUserMessageNavigation();
     if (timelineRestorationFrame !== undefined) {
       cancelAnimationFrame(timelineRestorationFrame);
@@ -1164,6 +1177,17 @@ export function Timeline(props: {
     pendingActivityVisualAnchor = undefined;
     pendingVirtualAnchorCorrection = undefined;
     setActiveTimelineFollowing(false);
+  }
+
+  function prepareTimelineDisclosureMutation(anchorElement: HTMLElement | null): void {
+    claimTimelineScrollOwnership();
+    if (scrollElement === undefined || anchorElement === null) {
+      return;
+    }
+    releaseDisclosureElementAnchor = preserveTimelineElementPosition(
+      scrollElement,
+      anchorElement,
+    );
   }
 
   function readNestedTimelineScrollRegion(target: EventTarget | null): HTMLElement | null {
@@ -1239,8 +1263,7 @@ export function Timeline(props: {
       return;
     }
     event.preventDefault();
-    claimTimelineScrollOwnership();
-    setActiveTimelineFollowing(false);
+    prepareTimelineDisclosureMutation(summary);
     disclosures.setOpen(storageKey as TimelineDisclosureKey, !details.open);
     disclosureContext.onLayoutChange();
   }
@@ -1260,8 +1283,8 @@ export function Timeline(props: {
       return;
     }
     const synchronizedLayout = shouldSynchronizeLayout ? readTimelineLayoutSnapshot() : null;
-    applyPendingVirtualAnchorCorrection();
-    applyPendingActivityVisualAnchor();
+    applyPendingVirtualAnchorCorrection(synchronizedLayout ?? undefined);
+    applyPendingActivityVisualAnchor(synchronizedLayout ?? undefined);
     if (shouldMeasureAsUserScroll) {
       measureScroll(true, synchronizedLayout);
     }
@@ -1655,7 +1678,8 @@ export function Timeline(props: {
     virtualMeasurementScheduledGeneration = undefined;
     pendingVirtualMeasurements.clear();
     pendingActivityVisualAnchor = undefined;
-    timelineLayoutSnapshot = undefined;
+    releaseDisclosureElementAnchor?.();
+    releaseDisclosureElementAnchor = undefined;
     pendingHistoryLayout = undefined;
     pendingVirtualAnchorCorrection = undefined;
     cancelActivityContentDeferral();

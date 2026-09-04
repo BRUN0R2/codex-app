@@ -14,6 +14,7 @@ import {
   decodeBrowserNewWindowNotification,
   decodeBrowserTabSnapshot,
   decodeChatModelListResponse,
+  decodeDesktopProfile,
   decodeEngineNotification,
   decodeEngineServerRequest,
   decodeEngineStartResponse,
@@ -285,7 +286,7 @@ describe("decodificação dos contratos nativos", () => {
         type: "chatgpt",
         email: "ada@example.com",
         name: "Ada",
-        picture: "https://images.example.com/ada.png",
+        picture: "https://images.openai.com/ada.png",
         planType: "plus",
       },
       requiresOpenaiAuth: true,
@@ -293,14 +294,14 @@ describe("decodificação dos contratos nativos", () => {
     });
 
     expect(decoded.account?.name).toBe("Ada");
-    expect(decoded.account?.picture).toBe("https://images.example.com/ada.png");
+    expect(decoded.account?.picture).toBe("https://images.openai.com/ada.png");
   });
 
   it("valida identidade e atividade carregadas pelo endpoint oficial do ChatGPT", () => {
     const profile = {
       displayName: "Ada Lovelace",
       username: "ada.dev",
-      picture: "https://images.example.com/ada.png",
+      picture: "https://images.openai.com/ada.png",
       statisticsStatus: "available",
       summary: {
         lifetimeTokens: 9_000_000_000,
@@ -1065,6 +1066,72 @@ describe("decodificação dos contratos nativos", () => {
         },
       }),
     ).toThrow("turn updatedAt must not precede createdAt");
+  });
+
+  it("decodes a valid desktop profile with projects and rejects duplicate paths", () => {
+    const validProfile = {
+      schemaVersion: 1,
+      locale: "en",
+      workspaceSplitRatio: 0.5,
+      projects: [
+        {
+          name: "Project Alpha",
+          path: "C:\\projects\\alpha",
+          icon: "folder",
+          color: "#3b82f6",
+        },
+        {
+          name: "Project Beta",
+          path: "C:\\projects\\beta",
+        },
+      ],
+      pinnedProjectPaths: ["C:\\projects\\alpha"],
+      pinnedThreadIds: ["thread-1"],
+      projectSidebar: {
+        collapsedProjectPaths: [],
+        expandedProjectThreadListPaths: ["C:\\projects\\alpha"],
+      },
+      productFlow: {
+        destinations: {
+          chat: { threadId: null, workspace: null },
+          codex: { threadId: null, workspace: null },
+          work: { threadId: null, workspace: null },
+        },
+        lastSelectedFlow: "chat",
+      },
+      messageQueues: {},
+      followUpBehavior: "steer",
+      chatIntelligence: null,
+      browserConversations: {},
+    };
+
+    const decoded = decodeDesktopProfile(validProfile);
+    expect(decoded.projects).toHaveLength(2);
+    expect(decoded.projects[0]?.name).toBe("Project Alpha");
+    expect(decoded.projects[0]?.icon).toBe("folder");
+    expect(decoded.projects[0]?.color).toBe("#3b82f6");
+    expect(decoded.projects[1]?.name).toBe("Project Beta");
+    expect(decoded.projects[1]?.icon).toBeUndefined();
+    expect(decoded.projects[1]?.color).toBeUndefined();
+
+    // Duplicate project paths
+    expect(() =>
+      decodeDesktopProfile({
+        ...validProfile,
+        projects: [
+          validProfile.projects[0],
+          { ...validProfile.projects[1], path: "C:\\projects\\alpha" },
+        ],
+      }),
+    ).toThrow("duplicates another project path");
+
+    // Pinned path referencing nonexistent project
+    expect(() =>
+      decodeDesktopProfile({
+        ...validProfile,
+        pinnedProjectPaths: ["C:\\projects\\nonexistent"],
+      }),
+    ).toThrow("must reference a project in the profile");
   });
 });
 

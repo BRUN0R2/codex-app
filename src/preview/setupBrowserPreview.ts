@@ -136,8 +136,7 @@ const PREVIEW_ACCOUNT = {
     type: "chatgpt",
     email: null,
     name: "Ada",
-    picture:
-      "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23546673'/%3E%3Ccircle cx='32' cy='25' r='14' fill='%23f0c6a7'/%3E%3Cpath d='M8 64c3-17 13-25 24-25s21 8 24 25' fill='%23c03f77'/%3E%3Cpath d='M18 24c1-14 26-18 30 1-10-4-18-9-30-1' fill='%23302028'/%3E%3C/svg%3E",
+    picture: null,
     planType: "pro",
   },
   requiresOpenaiAuth: true,
@@ -147,9 +146,6 @@ const PREVIEW_ACCOUNT = {
 const PREVIEW_ACCOUNT_PROFILE = {
   displayName: "ADA",
   username: "ada.dev",
-  // The production endpoint only accepts HTTPS profile URLs. Keep the
-  // self-contained data URI on the base account and exercise a valid nullable
-  // profile response without weakening the IPC contract for browser preview.
   picture: null,
   statisticsStatus: "available",
   summary: {

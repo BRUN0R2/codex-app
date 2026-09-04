@@ -7,7 +7,6 @@ pub const MAX_MODEL_NAME_BYTES: usize = 256;
 pub const MAX_TIMEZONE_BYTES: usize = 128;
 pub const MAX_TURN_TEXT_BYTES: usize = 1_048_576;
 pub const MAX_TURN_ATTACHMENTS: usize = 12;
-pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 4_096;
 pub const DECIMAL_CURSOR_MAXIMUM_BYTES: usize = 20;
 pub const THREAD_HISTORY_CURSOR_MAXIMUM_BYTES: usize = 1_024;
 pub const TIMEZONE_OFFSET_MINIMUM: i32 = -840;
@@ -129,22 +128,6 @@ pub fn validate_timezone(value: String) -> CommandResult<String> {
     Ok(value)
 }
 
-pub fn validate_diagnostic_message(value: String) -> CommandResult<String> {
-    let value = value.trim().to_string();
-    if value.is_empty()
-        || value.len() > MAX_DIAGNOSTIC_MESSAGE_BYTES
-        || value
-            .chars()
-            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-    {
-        return Err(AppError::Protocol(format!(
-            "diagnostic message must contain between 1 and {MAX_DIAGNOSTIC_MESSAGE_BYTES} bytes"
-        ))
-        .into());
-    }
-    Ok(value)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -153,9 +136,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        normalize_windows_canonical_path, validate_decimal_cursor, validate_diagnostic_message,
-        validate_protocol_id, validate_thread_history_cursor, validate_timezone_offset,
-        validate_workspace,
+        normalize_windows_canonical_path, validate_decimal_cursor, validate_protocol_id,
+        validate_thread_history_cursor, validate_timezone_offset, validate_workspace,
     };
 
     #[test]
@@ -252,20 +234,5 @@ mod tests {
         assert!(validate_timezone_offset(0).is_ok());
         assert!(validate_timezone_offset(super::TIMEZONE_OFFSET_MINIMUM - 1).is_err());
         assert!(validate_timezone_offset(super::TIMEZONE_OFFSET_MAXIMUM + 1).is_err());
-    }
-
-    #[test]
-    fn frontend_diagnostics_are_bounded_and_reject_hidden_controls() {
-        assert_eq!(
-            validate_diagnostic_message("  markdown worker failed  ".into())
-                .expect("valid diagnostic should be accepted"),
-            "markdown worker failed"
-        );
-        assert!(validate_diagnostic_message("".into()).is_err());
-        assert!(validate_diagnostic_message("invalid\u{0000}message".into()).is_err());
-        assert!(
-            validate_diagnostic_message("x".repeat(super::MAX_DIAGNOSTIC_MESSAGE_BYTES + 1))
-                .is_err()
-        );
     }
 }

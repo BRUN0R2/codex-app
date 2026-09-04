@@ -7,7 +7,6 @@ use chrono::Utc;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _};
 
-use super::text::truncate_utf8;
 use crate::engine::{
     DiagnosticStream, RUNTIME_DIAGNOSTIC_EVENT, RuntimeDiagnostic, RuntimeDiagnosticSubsystem,
 };
@@ -17,7 +16,6 @@ const LOG_DIRECTORY: &str = "logs";
 const CURRENT_LOG_FILE: &str = "runtime.jsonl";
 const PREVIOUS_LOG_FILE: &str = "runtime.previous.jsonl";
 const MAX_LOG_BYTES: u64 = 1_048_576;
-const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -53,7 +51,6 @@ impl RuntimeDiagnostics {
         &self,
         level: DiagnosticLevel,
         subsystem: RuntimeDiagnosticSubsystem,
-        message: &str,
     ) -> Result<(), AppError> {
         let path = self
             .path
@@ -61,12 +58,11 @@ impl RuntimeDiagnostics {
             .map_err(|_| AppError::State("diagnostic log ownership was poisoned".into()))?
             .clone()
             .ok_or_else(|| AppError::State("diagnostic log is not initialized".into()))?;
-        let message = truncate_utf8(message.trim(), MAX_DIAGNOSTIC_MESSAGE_BYTES);
         let record = PersistedDiagnostic {
             timestamp: Utc::now().to_rfc3339(),
             level,
             subsystem: subsystem.as_str(),
-            message: &message,
+            message: subsystem.persisted_summary(),
         };
         let mut encoded = serde_json::to_vec(&record).map_err(|error| {
             AppError::State(format!("diagnostic could not be encoded: {error}"))
@@ -78,9 +74,8 @@ impl RuntimeDiagnostics {
     pub(super) fn record_error(
         &self,
         subsystem: RuntimeDiagnosticSubsystem,
-        message: &str,
     ) -> Result<(), AppError> {
-        self.record(DiagnosticLevel::Error, subsystem, message)
+        self.record(DiagnosticLevel::Error, subsystem)
     }
 
     pub(super) fn emit(
@@ -89,24 +84,24 @@ impl RuntimeDiagnostics {
         subsystem: RuntimeDiagnosticSubsystem,
         message: String,
     ) {
-        let visible_message = match self.record(DiagnosticLevel::Error, subsystem, &message) {
+        let visible_message = match self.record(DiagnosticLevel::Error, subsystem) {
             Ok(()) => message,
             Err(error) => {
-                eprintln!(
-                    "diagnostic persistence failed for `{}`: {error}",
-                    subsystem.as_str()
-                );
+                eprintln!("diagnostic persistence failed for `{}`", subsystem.as_str());
                 format!("{message}; diagnostic persistence failed: {error}")
             }
         };
-        if let Err(error) = app.emit(
-            RUNTIME_DIAGNOSTIC_EVENT,
-            RuntimeDiagnostic {
-                stream: DiagnosticStream::Runtime,
-                message: visible_message,
-            },
-        ) {
-            eprintln!("runtime diagnostic delivery failed: {error}");
+        if app
+            .emit(
+                RUNTIME_DIAGNOSTIC_EVENT,
+                RuntimeDiagnostic {
+                    stream: DiagnosticStream::Runtime,
+                    message: visible_message,
+                },
+            )
+            .is_err()
+        {
+            eprintln!("runtime diagnostic delivery failed");
         }
     }
 
@@ -210,17 +205,14 @@ mod tests {
             .expect("diagnostic log should initialize");
 
         diagnostics
-            .record(
-                DiagnosticLevel::Error,
-                RuntimeDiagnosticSubsystem::Runtime,
-                "command failed",
-            )
+            .record(DiagnosticLevel::Error, RuntimeDiagnosticSubsystem::Runtime)
             .expect("diagnostic should persist");
 
         let content = fs::read_to_string(path).expect("diagnostic log should be readable");
         assert!(content.contains(r#""level":"error""#));
         assert!(content.contains(r#""subsystem":"runtime""#));
-        assert!(content.contains(r#""message":"command failed""#));
+        assert!(content.contains(r#""message":"A runtime operation failed.""#));
+        assert!(!content.contains("command failed"));
         fs::remove_dir_all(directory).expect("temporary diagnostic directory should be removed");
     }
 

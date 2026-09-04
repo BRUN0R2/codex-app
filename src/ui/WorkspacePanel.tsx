@@ -24,6 +24,7 @@ interface WorkspacePanelProps {
   readonly onClose: (tab: WorkspaceTab) => void;
   readonly onHide: () => void;
   readonly onNewBrowserTab: () => void;
+  readonly onToggleFullscreen: () => void;
   readonly state: WorkspaceTabsState;
 }
 
@@ -106,6 +107,27 @@ export function WorkspacePanel(props: WorkspacePanelProps) {
           <Icon name="plus" size={15} />
         </button>
         <span aria-hidden="true" class="workspace-bar-spacer" />
+        <button
+          aria-label={
+            props.state.layoutMode === "full"
+              ? i18n.messages().workspace.exitFullscreen
+              : i18n.messages().workspace.fullscreen
+          }
+          aria-pressed={props.state.layoutMode === "full"}
+          class="workspace-bar-button workspace-layout-button"
+          onClick={props.onToggleFullscreen}
+          title={
+            props.state.layoutMode === "full"
+              ? i18n.messages().workspace.exitFullscreen
+              : i18n.messages().workspace.fullscreen
+          }
+          type="button"
+        >
+          <Icon
+            name={props.state.layoutMode === "full" ? "exitFullscreen" : "fullscreen"}
+            size={15}
+          />
+        </button>
         <button
           aria-label={i18n.messages().workspace.closeWorkspace}
           class="workspace-bar-button workspace-panel-close"

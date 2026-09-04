@@ -940,3 +940,76 @@ export interface ProjectRecord {
   readonly icon?: string | undefined;
   readonly color?: string | undefined;
 }
+
+export type DesktopProfileLocalePreference = "auto" | "en" | "pt-BR";
+export type FollowUpBehavior = "queue" | "steer";
+
+export interface DesktopProfileConversationDestination {
+  readonly threadId: string | null;
+  readonly workspace: string | null;
+}
+
+export interface DesktopProfileProductFlow {
+  readonly version: 1;
+  readonly product: AppProduct;
+  readonly chatGptMode: ChatGptMode;
+  readonly destinations: Readonly<Record<ConversationMode, DesktopProfileConversationDestination>>;
+}
+
+export interface DesktopProfileProjectSidebar {
+  readonly version: 1;
+  readonly projectsExpanded: boolean;
+  readonly collapsedProjectPaths: readonly string[];
+  readonly expandedProjectThreadListPaths: readonly string[];
+}
+
+export interface DesktopProfileChatIntelligence {
+  readonly version: 2;
+  readonly optionId: string;
+}
+
+export interface DesktopProfileQueuedMessage {
+  readonly id: string;
+  readonly text: string;
+  readonly attachments: readonly Attachment[];
+  readonly model: string | null;
+  readonly effort: ReasoningEffort | null;
+  readonly serviceTier: string | null;
+}
+
+export interface DesktopProfileMessageQueue {
+  readonly threadId: string;
+  readonly messages: readonly DesktopProfileQueuedMessage[];
+}
+
+export interface DesktopProfileBrowserTab {
+  readonly browserTabId: string;
+  readonly url: string;
+}
+
+export interface DesktopProfileBrowserConversation {
+  readonly activeBrowserTabId: string;
+  readonly conversationId: string;
+  readonly tabs: readonly DesktopProfileBrowserTab[];
+}
+
+export interface DesktopProfile {
+  readonly schemaVersion: 1;
+  readonly locale: DesktopProfileLocalePreference;
+  readonly workspaceSplitRatio: number;
+  readonly projects: readonly ProjectRecord[];
+  readonly pinnedProjectPaths: readonly string[];
+  readonly pinnedThreadIds: readonly string[];
+  readonly projectSidebar: DesktopProfileProjectSidebar;
+  readonly productFlow: DesktopProfileProductFlow;
+  readonly messageQueues: readonly DesktopProfileMessageQueue[];
+  readonly followUpBehavior: FollowUpBehavior;
+  readonly chatIntelligence: DesktopProfileChatIntelligence | null;
+  readonly browserConversations: readonly DesktopProfileBrowserConversation[];
+}
+
+export interface DesktopProfileReadResponse {
+  readonly initialized: boolean;
+  readonly profile: DesktopProfile;
+  readonly revision: number;
+}

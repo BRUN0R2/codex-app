@@ -82,6 +82,7 @@ export interface AppController {
   readonly models: Accessor<readonly CodexModel[]>;
   readonly modelReroute: Accessor<ModelReroutedNotification["params"] | null>;
   readonly modelVerifications: Accessor<readonly ModelVerification[]>;
+  readonly openingThreadId: Accessor<string | null>;
   readonly pendingOperations: Accessor<number>;
   readonly pinnedProjectPaths: Accessor<readonly string[]>;
   readonly pinnedThreadIds: Accessor<readonly string[]>;

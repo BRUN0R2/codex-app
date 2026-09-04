@@ -8,8 +8,11 @@ import {
   hideWorkspaceTabs,
   reconcileBrowserWorkspaceTabs,
   removeReviewWorkspaceTab,
+  restoreWorkspaceSplitLayout,
   showBrowserWorkspaceTab,
+  showBrowserWorkspaceTabFromAgent,
   showReviewWorkspaceTab,
+  toggleWorkspaceFullscreen,
 } from "./workspaceTabs";
 
 describe("workspace tabs", () => {
@@ -99,5 +102,41 @@ describe("workspace tabs", () => {
 
     expect(showBrowserWorkspaceTab(state, "missing")).toBe(state);
     expect(closeWorkspaceTab(state, browserWorkspaceTabId("missing"))).toBe(state);
+  });
+
+  it("does not let background browser activity take focus from review", () => {
+    const state = showReviewWorkspaceTab(
+      reconcileBrowserWorkspaceTabs(emptyWorkspaceTabsState(), {
+        activeBrowserTabId: "one",
+        browserTabIds: ["one"],
+        conversationId: "thread-1",
+      }),
+    );
+
+    expect(showBrowserWorkspaceTabFromAgent(state, "one")).toBe(state);
+    expect(activeWorkspaceTab(state)?.kind).toBe("review");
+  });
+
+  it("applies fullscreen to the workspace and restores split layout predictably", () => {
+    const browser = showBrowserWorkspaceTab(
+      reconcileBrowserWorkspaceTabs(emptyWorkspaceTabsState(), {
+        activeBrowserTabId: "one",
+        browserTabIds: ["one"],
+        conversationId: "thread-1",
+      }),
+      "one",
+    );
+    const fullscreen = toggleWorkspaceFullscreen(browser);
+    const review = showReviewWorkspaceTab(fullscreen);
+    const hidden = hideWorkspaceTabs(review);
+
+    expect(fullscreen.layoutMode).toBe("full");
+    expect(review.layoutMode).toBe("full");
+    expect(restoreWorkspaceSplitLayout(review)).toMatchObject({
+      layoutMode: "split",
+      visible: true,
+    });
+    expect(hidden).toMatchObject({ layoutMode: "split", visible: false });
+    expect(toggleWorkspaceFullscreen(hidden)).toBe(hidden);
   });
 });

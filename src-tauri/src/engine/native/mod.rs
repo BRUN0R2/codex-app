@@ -1619,9 +1619,8 @@ impl NativeEngine {
     pub fn persist_runtime_error(
         &self,
         subsystem: RuntimeDiagnosticSubsystem,
-        message: &str,
     ) -> Result<(), AppError> {
-        self.inner.diagnostics.record_error(subsystem, message)
+        self.inner.diagnostics.record_error(subsystem)
     }
 
     pub async fn stop(&self, app: &AppHandle) {

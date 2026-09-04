@@ -542,20 +542,20 @@ mod tests {
         let profile = AccountProfile::from(UserInfoResponse {
             email: Some(" ada@example.com ".into()),
             name: Some(" Ada ".into()),
-            picture: Some("https://images.example.com/ada.png".into()),
+            picture: Some("https://images.openai.com/ada.png".into()),
         });
 
         assert_eq!(profile.email.as_deref(), Some("ada@example.com"));
         assert_eq!(profile.name.as_deref(), Some("Ada"));
         assert_eq!(
             profile.picture.as_deref(),
-            Some("https://images.example.com/ada.png")
+            Some("https://images.openai.com/ada.png")
         );
 
         let rejected = AccountProfile::from(UserInfoResponse {
             email: None,
             name: Some("Ada\nLovelace".into()),
-            picture: Some("http://images.example.com/ada.png".into()),
+            picture: Some("https://attacker.example/ada.png".into()),
         });
         assert_eq!(rejected.name, None);
         assert_eq!(rejected.picture, None);

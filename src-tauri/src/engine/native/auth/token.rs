@@ -245,8 +245,22 @@ pub(super) fn clean_profile_text(value: Option<String>, maximum_length: usize) -
 pub(super) fn clean_profile_picture(value: Option<String>) -> Option<String> {
     let value = clean_profile_text(value, MAX_PROFILE_PICTURE_BYTES)?;
     let url = Url::parse(&value).ok()?;
-    (url.scheme() == "https" && url.username().is_empty() && url.password().is_none())
-        .then_some(value)
+    let host = url.host_str()?;
+    (url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && is_trusted_profile_picture_host(host))
+    .then_some(value)
+}
+
+fn is_trusted_profile_picture_host(host: &str) -> bool {
+    const TRUSTED_SUFFIXES: [&str; 3] = ["openai.com", "oaistatic.com", "oaiusercontent.com"];
+    TRUSTED_SUFFIXES
+        .iter()
+        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
 }
 
 fn parse_expiration(token: &SecretString) -> Result<Option<DateTime<Utc>>, AuthError> {
@@ -366,7 +380,7 @@ mod tests {
                 "idToken": jwt(json!({
                     "email": "person@example.com",
                     "name": "Person Example",
-                    "picture": "https://images.example.com/person.png",
+                    "picture": "https://images.openai.com/person.png",
                     "https://api.openai.com/auth": {
                         "chatgpt_plan_type": "plus",
                         "chatgpt_account_id": "account-1"
@@ -387,7 +401,7 @@ mod tests {
         assert_eq!(claims.name.as_deref(), Some("Person Example"));
         assert_eq!(
             claims.picture.as_deref(),
-            Some("https://images.example.com/person.png")
+            Some("https://images.openai.com/person.png")
         );
         assert_eq!(claims.plan_type.as_deref(), Some("plus"));
         assert_eq!(claims.account_id.as_deref(), Some("account-1"));

@@ -155,10 +155,8 @@ export function startEngine(): Promise<EngineStartResponse> {
   return invokeDecoded("engine_start", decodeEngineStartResponse);
 }
 
-export function reportFrontendDiagnostic(message: string): Promise<OperationAck> {
-  return invokeDecoded("engine_runtime_diagnostic_report", decodeOperationAck, {
-    request: { message },
-  });
+export function reportFrontendDiagnostic(): Promise<OperationAck> {
+  return invokeDecoded("engine_runtime_diagnostic_report", decodeOperationAck);
 }
 
 export function readAccount(): Promise<AccountReadResponse> {

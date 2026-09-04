@@ -51,9 +51,12 @@ import {
   hideWorkspaceTabs,
   reconcileBrowserWorkspaceTabs,
   removeReviewWorkspaceTab,
+  restoreWorkspaceSplitLayout,
   showBrowserWorkspaceTab,
+  showBrowserWorkspaceTabFromAgent,
   showReviewWorkspaceTab,
   showWorkspaceTab,
+  toggleWorkspaceFullscreen,
   type WorkspaceTab,
 } from "./workspaceTabs";
 
@@ -117,15 +120,19 @@ export function AppShell(props: { readonly controller: AppController }) {
   let sidebarWidthResizeObserver: ResizeObserver | undefined;
   let workspaceSplitResizeObserver: ResizeObserver | undefined;
   let chatDockResizeFrame: number | undefined;
-  let workspaceSplitPointerId: number | undefined;
   let sidebarWidthPointerId: number | undefined;
+  let workspaceSplitPointerId: number | undefined;
   let disposed = false;
   const eventUnlisteners: Array<() => void> = [];
 
   function handleKeyboardShortcut(event: KeyboardEvent): void {
     if (event.key === "Escape" && workspaceTabs().visible) {
       event.preventDefault();
-      setWorkspaceTabs(hideWorkspaceTabs);
+      setWorkspaceTabs((current) =>
+        current.layoutMode === "full"
+          ? restoreWorkspaceSplitLayout(current)
+          : hideWorkspaceTabs(current),
+      );
       return;
     }
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "b") {
@@ -170,6 +177,12 @@ export function AppShell(props: { readonly controller: AppController }) {
   });
 
   createEffect(() => {
+    if (props.controller.openingThreadId() !== null) {
+      setWorkspaceTabs(hideWorkspaceTabs);
+    }
+  });
+
+  createEffect(() => {
     if (!previewBrowserPending) {
       return;
     }
@@ -207,7 +220,7 @@ export function AppShell(props: { readonly controller: AppController }) {
     const browserTabId = activity.activeBrowserTabId;
     if (browserTabId !== null) {
       setWorkspaceTabs((current) =>
-        showBrowserWorkspaceTab(
+        showBrowserWorkspaceTabFromAgent(
           reconcileBrowserWorkspaceTabs(current, {
             activeBrowserTabId: browserTabId,
             browserTabIds: activity.tabs.map((tab) => tab.browserTabId),
@@ -672,7 +685,15 @@ export function AppShell(props: { readonly controller: AppController }) {
           class="main-panel-content"
           classList={{
             "workspace-split-dragging": workspaceSplitDragging(),
-            "workspace-visible": activeSurface() === "chat" && workspaceTabs().visible,
+            "workspace-visible":
+              activeSurface() === "chat" &&
+              props.controller.openingThreadId() === null &&
+              workspaceTabs().visible,
+            "workspace-fullscreen":
+              activeSurface() === "chat" &&
+              props.controller.openingThreadId() === null &&
+              workspaceTabs().visible &&
+              workspaceTabs().layoutMode === "full",
           }}
           ref={mainPanelContentElement}
         >
@@ -680,6 +701,7 @@ export function AppShell(props: { readonly controller: AppController }) {
             when={
               activeSurface() === "chat" &&
               !workspaceTabs().visible &&
+              props.controller.openingThreadId() === null &&
               props.controller.currentThread() !== null
             }
           >
@@ -710,43 +732,49 @@ export function AppShell(props: { readonly controller: AppController }) {
             hidden={activeSurface() !== "chat"}
             ref={chatPageElement}
           >
-            <Timeline
-              bottomOcclusion={chatDockHeight()}
-              controller={props.controller}
-              onSelectSuggestion={requestDraft}
-            />
-            <div class="chat-dock" ref={chatDockElement}>
-              <Show when={shouldShowTurnProgress(props.controller.activePlan(), reviewChanges())}>
-                <TurnProgress
-                  changes={reviewChanges()}
-                  onToggleReview={() => {
-                    setWorkspaceTabs((current) =>
-                      reviewOpen() ? hideWorkspaceTabs(current) : showReviewWorkspaceTab(current),
-                    );
-                  }}
-                  plan={props.controller.activePlan()}
-                  reviewOpen={reviewOpen()}
-                />
-              </Show>
-              <ApprovalCard controller={props.controller} />
-              <ModelSafetyNotice controller={props.controller} />
-              <Show when={props.controller.conversationMode() !== "chat"}>
-                <UsageLimitBanner controller={props.controller} />
-              </Show>
-              <Composer
+            <Show
+              when={props.controller.openingThreadId() === null}
+              fallback={<ConversationLoading label={messages().loadingConversation} />}
+            >
+              <Timeline
+                bottomOcclusion={chatDockHeight()}
                 controller={props.controller}
-                draftRequest={draftRequest()}
-                onDraftConsumed={(requestId) =>
-                  setDraftRequest((current) => (current?.id === requestId ? null : current))
-                }
-                onOpenSettings={() => openSettings()}
+                onSelectSuggestion={requestDraft}
               />
-            </div>
+              <div class="chat-dock" ref={chatDockElement}>
+                <Show when={shouldShowTurnProgress(props.controller.activePlan(), reviewChanges())}>
+                  <TurnProgress
+                    changes={reviewChanges()}
+                    onToggleReview={() => {
+                      setWorkspaceTabs((current) =>
+                        reviewOpen() ? hideWorkspaceTabs(current) : showReviewWorkspaceTab(current),
+                      );
+                    }}
+                    plan={props.controller.activePlan()}
+                    reviewOpen={reviewOpen()}
+                  />
+                </Show>
+                <ApprovalCard controller={props.controller} />
+                <ModelSafetyNotice controller={props.controller} />
+                <Show when={props.controller.conversationMode() !== "chat"}>
+                  <UsageLimitBanner controller={props.controller} />
+                </Show>
+                <Composer
+                  controller={props.controller}
+                  draftRequest={draftRequest()}
+                  onDraftConsumed={(requestId) =>
+                    setDraftRequest((current) => (current?.id === requestId ? null : current))
+                  }
+                  onOpenSettings={() => openSettings()}
+                />
+              </div>
+            </Show>
           </section>
           <Show
             when={
               activeSurface() === "chat" &&
               workspaceTabs().visible &&
+              workspaceTabs().layoutMode === "split" &&
               props.controller.currentThread() !== null
             }
           >
@@ -792,6 +820,7 @@ export function AppShell(props: { readonly controller: AppController }) {
                   onClose={closeWorkspaceSurface}
                   onHide={() => setWorkspaceTabs(hideWorkspaceTabs)}
                   onNewBrowserTab={openNewBrowserTab}
+                  onToggleFullscreen={() => setWorkspaceTabs(toggleWorkspaceFullscreen)}
                   state={workspaceTabs()}
                 />
               </Suspense>
@@ -928,6 +957,15 @@ function formatResetDate(resetAt: number | null, locale: string, soonLabel: stri
     return soonLabel;
   }
   return formatShortDate(resetAt, locale, soonLabel);
+}
+
+function ConversationLoading(props: { readonly label: string }) {
+  return (
+    <section aria-live="polite" class="conversation-loading" role="status">
+      <span aria-hidden="true" class="conversation-loading-indicator" />
+      <span>{props.label}</span>
+    </section>
+  );
 }
 
 function ModelSafetyNotice(props: { readonly controller: AppController }) {

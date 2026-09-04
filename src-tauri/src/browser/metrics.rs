@@ -74,6 +74,40 @@ pub(crate) struct BrowserActionMetric {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedBrowserActionMetric<'a> {
+    timestamp_ms: i64,
+    action: &'a str,
+    status: BrowserActionStatus,
+    queue_ms: u64,
+    action_ms: u64,
+    load_ms: u64,
+    snapshot_ms: u64,
+    screenshot_ms: u64,
+    total_ms: u64,
+    screenshot_bytes: Option<u64>,
+    page: Option<&'a BrowserPageMetricSummary>,
+}
+
+impl<'a> From<&'a BrowserActionMetric> for PersistedBrowserActionMetric<'a> {
+    fn from(metric: &'a BrowserActionMetric) -> Self {
+        Self {
+            timestamp_ms: metric.timestamp_ms,
+            action: &metric.action,
+            status: metric.status,
+            queue_ms: metric.queue_ms,
+            action_ms: metric.action_ms,
+            load_ms: metric.load_ms,
+            snapshot_ms: metric.snapshot_ms,
+            screenshot_ms: metric.screenshot_ms,
+            total_ms: metric.total_ms,
+            screenshot_bytes: metric.screenshot_bytes,
+            page: metric.page.as_ref(),
+        }
+    }
+}
+
 impl BrowserActionMetric {
     pub(crate) fn failed(
         conversation_id: &str,
@@ -178,7 +212,8 @@ impl BrowserMetrics {
                 let path = state.path.clone().ok_or_else(|| {
                     AppError::State("browser metrics log is not initialized".into())
                 })?;
-                let mut encoded = serde_json::to_vec(&metric).map_err(|error| {
+                let persisted = PersistedBrowserActionMetric::from(&metric);
+                let mut encoded = serde_json::to_vec(&persisted).map_err(|error| {
                     AppError::State(format!("browser metric could not be encoded: {error}"))
                 })?;
                 encoded.push(b'\n');
@@ -188,18 +223,20 @@ impl BrowserMetrics {
         Ok(metric)
     }
 
-    pub(crate) fn recent(&self, conversation_id: &str) -> Vec<BrowserActionMetric> {
-        self.state
+    pub(crate) fn recent(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<BrowserActionMetric>, AppError> {
+        let state = self
+            .state
             .lock()
-            .map(|state| {
-                state
-                    .recent
-                    .iter()
-                    .filter(|metric| metric.conversation_id == conversation_id)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
+            .map_err(|_| AppError::State("browser metrics ownership was poisoned".into()))?;
+        Ok(state
+            .recent
+            .iter()
+            .filter(|metric| metric.conversation_id == conversation_id)
+            .cloned()
+            .collect())
     }
 }
 
@@ -327,9 +364,67 @@ mod tests {
                 })
                 .expect("metric should persist");
         }
-        assert_eq!(metrics.recent("thread").len(), super::MAX_RECENT_METRICS);
+        assert_eq!(
+            metrics
+                .recent("thread")
+                .expect("recent metrics should be readable")
+                .len(),
+            super::MAX_RECENT_METRICS
+        );
         if let Some(path) = metrics.state.lock().expect("metrics state").path.clone() {
             let _ = fs::remove_file(path);
         }
+    }
+
+    #[test]
+    fn persisted_browser_metrics_exclude_private_context() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-browser-private-metrics-{}.jsonl",
+            Uuid::now_v7()
+        ));
+        let metrics = BrowserMetrics::default();
+        metrics.state.lock().expect("metrics state").path = Some(path.clone());
+
+        metrics
+            .record(BrowserActionMetric {
+                id: "private-metric-id".into(),
+                session_id: String::new(),
+                timestamp_ms: 42,
+                conversation_id: "private-conversation-id".into(),
+                turn_id: "private-turn-id".into(),
+                item_id: "private-item-id".into(),
+                browser_tab_id: Some("private-tab-id".into()),
+                action: "snapshot".into(),
+                status: BrowserActionStatus::Failed,
+                origin: Some("https://private.example".into()),
+                url: Some("https://private.example/account?token=secret".into()),
+                queue_ms: 1,
+                action_ms: 2,
+                load_ms: 3,
+                snapshot_ms: 4,
+                screenshot_ms: 5,
+                total_ms: 15,
+                screenshot_bytes: Some(128),
+                page: None,
+                error: Some(r"failed at C:\Users\private\workspace".into()),
+            })
+            .expect("metric should persist");
+
+        let content = fs::read_to_string(&path).expect("metric log should be readable");
+        for private_value in [
+            "private-metric-id",
+            "private-conversation-id",
+            "private-turn-id",
+            "private-item-id",
+            "private-tab-id",
+            "private.example",
+            "token=secret",
+            "Users\\\\private",
+        ] {
+            assert!(!content.contains(private_value));
+        }
+        assert!(content.contains(r#""action":"snapshot""#));
+        assert!(content.contains(r#""status":"failed""#));
+        fs::remove_file(path).expect("temporary metric log should be removed");
     }
 }
