@@ -7,17 +7,20 @@ local implementation remains independent.
 
 | Source | Version |
 | --- | --- |
-| [`openai/codex`](https://github.com/openai/codex) | commit `c9fac4dd5a06f29b9a6525b025a92c0bc367ae40`, 2026-09-04 |
-| stable release | `rust-v0.153.2`, commit `657a993cbee87acf52d14b758ce49dbd46d1b8eb` |
-| latest prerelease reviewed | `rust-v0.154.0-alpha.3`, commit `d58a64e690508a752c6a5a466ea752808849b7e2` |
-| Codex Desktop for Windows | build `26.901.4073.0`, validated 2026-09-04 |
+| [`openai/codex`](https://github.com/openai/codex/tree/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a) | stable `rust-v0.153.4`, audited 2026-09-05 |
+| audited source commit | `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` |
+| Codex Desktop for Windows | installed package `26.901.5003.0`, inspected 2026-09-05 |
 
-The ignored study clone lives in `.references/openai-codex`. No referenced
-crate, package, executable, database, configuration, or credential enters the
-local build or runtime.
+Study checkouts live outside the build, including `.references/openai-codex`.
+No referenced crate, package, executable, database, configuration, or credential
+enters the local build or runtime.
 
-The local catalog's `client_version` is `0.151.0`, the latest stable
-release whose protocol was audited.
+Desktop conclusions cover the installed package, documented product behavior,
+and its public core and app-server contracts. The private Desktop interface
+source is outside this source audit.
+
+The local catalog's `client_version` remains `0.153.2`, its explicit protocol
+compatibility version. Auditing a newer release does not change that contract.
 
 ## Upstream topology
 
@@ -86,6 +89,15 @@ Responses Lite preserves semantics over a different wire shape:
 `additional_tools`, a `functions` namespace, and base instructions encoded as
 a developer message with stable IDs. Model capability selects the contract
 before the request; a failed request never triggers a protocol fallback.
+
+The [upstream request projection](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/src/client_common.rs)
+removes image `detail` from messages and both function and custom tool outputs
+for Lite. The native projection follows all three paths, including Code Mode
+screenshots, while preserving canonical image bytes and detail. Continuation
+compares the same wire semantics by borrowing those bytes instead of cloning
+each image for every round. Changed text, audio, images, call identity, or
+request policy still invalidates reuse.
+
 The audited Desktop resolves an absent `model_reasoning_summary` preference to
 `auto`, even though current model metadata commonly publishes `none` as the Core
 default. The local native client applies that same explicit product preference
@@ -180,11 +192,29 @@ invalidates immediately, and a missing header does not destroy a valid entry.
 The stable task ID is the prompt-cache key, avoiding fragmentation across rounds
 and polls.
 
-The local audit validated `PRAGMA integrity_check`, persisted JSON, and table
-references without finding database, catalog-cache, or prompt-cache corruption.
-It did find a nested Code Mode read-cache defect: a mutation could leave an old
-read reusable. Every mutation now advances the cache generation, with write and
-patch regressions.
+The [official caching contract](https://developers.openai.com/api/docs/guides/prompt-caching)
+reuses matching prefixes without changing answer generation. A smaller wire
+payload alone cannot prove a cache hit or lower billable usage. Only confirmed
+provider usage establishes those results. The native transport preserves
+reasoning effort, encrypted context, tools, and output verbosity.
+
+The stable source contains an experimental `concurrent_reasoning_summaries`
+flag, disabled by default and marked `UnderDevelopment`. Its
+`sequential_cutoff` delivery changes summary event handling. This audit does
+not treat that experimental flag as a supported latency setting.
+
+A read-only `PRAGMA quick_check` returned `ok`. The inspected thread-item table
+contained no persisted runs, so it could not establish a live latency or usage
+baseline. Code Mode advances the read-cache generation around mutations, with
+write and patch regressions preventing reuse of an earlier observation.
+
+Read-cache admission is bounded before an operation starts. Failed and
+oversized results are delivered to their callers without being retained;
+concurrent callers already sharing an operation still observe its typed result.
+Entry identity prevents an evicted operation from accounting or removing a newer
+read. Polling independent processes shares the normal execution gate; cache
+invalidation runs on entry and scope exit, including cancellation, without
+serializing those waits. Mutations still own the exclusive gate.
 
 Upstream does not impose the former local 2,000-line read window and treats EOF
 as normal completion. The local tool keeps its 2 MiB per-file bound, accepts

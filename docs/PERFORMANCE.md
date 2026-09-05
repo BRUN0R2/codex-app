@@ -12,6 +12,8 @@ pnpm measure:tokens           # catalog, context, and compaction
 pnpm measure:credentials      # cold vault versus process-local session cache
 pnpm measure:context-window   # confirmed-use preflight and compaction preparation
 pnpm measure:response-transport # full versus incremental Responses payload
+pnpm measure:multimodal-continuation # image-preserving continuation comparison
+pnpm measure:nested-polls     # independent Code Mode waits through the native gate
 pnpm measure:release          # release startup and memory
 pnpm measure:browser          # Browser Use metrics
 ```
@@ -35,6 +37,29 @@ known input and lets the provider reuse response state, but only provider usage
 telemetry can establish token billing. The runtime therefore keeps the
 catalog-selected output verbosity and never truncates an answer merely to make
 a benchmark smaller.
+
+### Visual measurement isolation
+
+Each scenario and viewport owns one background browser target, closed through
+the browser protocol before the next measurement. Closure runs after success
+or failure; simultaneous measurement and cleanup failures are both preserved.
+
+Reusing one target across all 153 cases retained earlier documents in Chromium.
+A CPU profile captured 12.816 ms of V8 garbage collection inside a 17.9 ms
+timeline callback. Comparing the complete corpus before and after target
+isolation recorded these renderer maxima:
+
+| Resource | Reused target | Isolated targets |
+| --- | ---: | ---: |
+| documents | 107 | 32 |
+| DOM nodes | 64,549 | 34,737 |
+| event listeners | 1,084 | 86 |
+| JavaScript heap | 97,568,944 B | 43,462,216 B |
+
+All 153 isolated cases passed with the same fixtures, motion settings, frame
+budgets, and 12 ms maximum application-work limit. These are measurements of
+the QA renderer, not application memory savings. Profiling is diagnostic only
+and does not run in the verification gate.
 
 ## Solid transform analysis
 
@@ -79,8 +104,9 @@ actual compiler invocations, and keep the warning enabled.
 
 ## Current baseline
 
-Local sample from 2026-08-31 on Windows with 28 logical processors. These values
-describe that run; they are not universal guarantees.
+Measurements use Windows with 28 logical processors. Startup and compaction
+samples date from 2026-08-31; Code Mode and multimodal continuation were measured
+on 2026-09-05. These values describe local runs, not universal guarantees.
 
 ### Agent startup, continuation, and compaction
 
@@ -103,6 +129,34 @@ provider time. There is no authenticated time-to-first-delta claim in this
 snapshot. First-turn work is nevertheless removed from the serial path by
 background `generate:false` prewarm, parallel prompt/session preparation, and
 connection reuse, with loopback protocol tests guarding the behavior.
+
+### Independent polls and multimodal continuation
+
+Three optimized runs per scenario used the same native contracts. Each poll run
+compares five samples of four independent 100 ms waits under the previous
+exclusive gate and the current shared gate, with identical cache invalidation.
+Each continuation run prepares 40 requests over a 3 MiB image after constructing
+the baselines outside the timed region. The previous implementation was measured
+before replacing the image-copying comparison.
+
+| Scenario | Previous work | Current work | Result |
+| --- | ---: | ---: | ---: |
+| four independent Code Mode polls | 426.770-436.840 ms | 107.936-109.631 ms | 3.893x-4.047x faster |
+| prepare an incremental image request | 1.471-1.544 ms | 0.412-0.458 ms | 3.21x-3.75x faster |
+| compare copied versus borrowed image content, 40 samples | 53.131-54.232 ms | 8.803-9.607 ms | 5.641x-6.161x faster |
+| incremental image request payload | 493 B | 493 B | same continuation and content |
+| represented large Code Mode results in a 1,000-token budget fixture | 1 of 4 | 4 of 4 | each keeps its own head and tail |
+
+Poll tests exercise the scheduling boundary with deterministic waits, not remote
+process execution. Image comparison removes a repeated 3 MiB allocation while
+checking the same bytes and policy. These improvements do not alter model,
+reasoning effort, service tier, encrypted reasoning, or output verbosity.
+Provider time to first delta, actual cache hits, billed tokens, and task quality
+still require paired authenticated measurements; see [TODO.md](TODO.md).
+
+The output fixture verifies information coverage within the existing limit;
+it does not estimate downstream token savings. Fitting outputs remain exact,
+and a large earlier result cannot hide a later small result or script error.
 
 ### Context and tools
 
@@ -142,11 +196,12 @@ not alter the engine capability gate.
 
 | Check | Result |
 | --- | ---: |
-| encoding | 412 valid UTF-8 files |
-| frontend | 92 files; 491 passing tests |
-| main JavaScript bundle | 449.16 kB; 133.81 kB gzip |
-| CSS | 144.93 kB; 25.99 kB gzip |
-| Rust | 454 passing; 13 ignored benchmarks; no failures |
+| encoding | 460 valid UTF-8 files |
+| frontend | 107 files; 551 passing tests |
+| main JavaScript bundle | 434.21 kB; 129.22 kB gzip |
+| CSS | 149.35 kB; 26.65 kB gzip |
+| visual QA | 153 passing scenario/viewport cases |
+| Rust | 486 passing; 15 ignored benchmarks; no failures |
 | Cargo, formatting, and Clippy | passed without warnings |
 
 ## Regression protection
@@ -165,10 +220,16 @@ not alter the engine capability gate.
 | WebSocket buffering grows without a limit | 1,024-message and 16 MiB raw-frame budgets plus bounded decoded events |
 | a stale startup warmup replaces an active turn | generation-tagged session leases and invalidation tests |
 | concurrency changes order | barriers and parallel-command benchmark |
+| independent polls serialize inside Code Mode | native shared-gate benchmark and mutation-exclusion tests |
+| a transient read failure poisons subsequent attempts | shared failure followed by a fresh successful execution |
+| pending, failed, or oversized reads exceed cache bounds | admission, retention, cancellation, and late-completion identity tests |
+| a large Code Mode result hides later results or errors | fair bounded output projection with UTF-8 and media regressions |
+| Lite image output changes canonical history or defeats continuation | message, function, and custom-output projection and identity tests |
 | tools consume unbounded context | catalog budget and `measure:tokens` |
 | local estimates compact early | provider-confirmed use plus post-model delta only |
 | browser degrades layout | viewport matrix, metrics, and WebView2 smoke test |
 | refresh rate distorts QA | controlled identity probe separate from fast scrolling |
+| previous visual cases contaminate later measurements | one scoped browser target per case with confirmed cleanup and failure tests |
 | processes escape a turn | Windows tests with Job Object and a real descendant |
 | translations diverge | exact catalog and placeholder validation tests |
 
