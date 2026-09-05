@@ -14,6 +14,7 @@ pnpm measure:context-window   # confirmed-use preflight and compaction preparati
 pnpm measure:response-transport # full versus incremental Responses payload
 pnpm measure:multimodal-continuation # image-preserving continuation comparison
 pnpm measure:nested-polls     # independent Code Mode waits through the native gate
+pnpm measure:patch-preparation # bounded 128-file native patch preparation
 pnpm measure:release          # release startup and memory
 pnpm measure:browser          # Browser Use metrics
 ```
@@ -60,6 +61,14 @@ All 153 isolated cases passed with the same fixtures, motion settings, frame
 budgets, and 12 ms maximum application-work limit. These are measurements of
 the QA renderer, not application memory savings. Profiling is diagnostic only
 and does not run in the verification gate.
+
+The 100,000-file scenario also probes six small overlapping scrolls before
+timing rapid motion. Its fixed-height branch previously keyed components by
+window position, replacing all 118 retained summaries and wrappers at 920x640.
+It now uses the same bounded keyed-slot store as variable-height activities.
+The focused regression compared 118, 147, and 192 retained items at the three
+viewports with zero replacements. Rapid-scroll timing and identity limits
+remain unchanged.
 
 ## Solid transform analysis
 
@@ -158,14 +167,39 @@ The output fixture verifies information coverage within the existing limit;
 it does not estimate downstream token savings. Fitting outputs remain exact,
 and a large earlier result cannot hide a later small result or script error.
 
+### Multi-file patch preparation
+
+Three before/after runs used the same debug profile, workspace fixture, and
+nine samples per run. Each patch updates 128 existing files of roughly 3.5 KiB;
+fixture creation and parsing are outside the timer. The previous implementation
+was measured before changing preparation or content validation.
+
+| Scenario | Previous median range | Current median range | Result |
+| --- | ---: | ---: | ---: |
+| prepare 128 file updates | 154.310-162.374 ms | 38.706-39.660 ms | 3.89x-4.20x faster |
+
+One blocking preparation task replaces repeated asynchronous filesystem
+dispatch, and exact retained bytes remove redundant hashing. These numbers
+measure preparation only, excluding persistence and provider latency. The
+release benchmark is reproducible with `pnpm measure:patch-preparation` and
+guards a 500 ms median limit in `pnpm verify:benchmarks`. The optimized full-gate
+run prepared the same 128 updates in 30.142 ms median; the debug speedup ratio
+does not claim an unmeasured release baseline.
+
+Focused tests cover nested directories, moves, append positions, original
+context bytes and line endings, size limits, Windows aliases and attributes,
+failure at every commit position, cancellation, concurrent changes, and V8 Code
+Mode executing a batch followed by a dependent patch. The tool description
+includes the complete grouping contract for the nested freeform route.
+
 ### Context and tools
 
 | Scenario | Result |
 | --- | ---: |
-| base catalog, 20 tools | 14,264 B; ~3,566 tokens |
+| base catalog, 20 tools | 14,639 B; ~3,660 tokens |
 | read-only catalog, 16 tools | 9,885 B; ~2,472 tokens |
-| read-only catalog reduction | 30.70% |
-| catalog build and encode | 0.023 ms median |
+| read-only catalog reduction | 32.47% |
+| catalog build and encode | 0.0214 ms median |
 | provider output, 2,439,995 B -> 6,372 B | 99.7389% smaller |
 | moderate command, 3,216 B -> 414 B | 87.1269% smaller |
 | large command, 6,018 B -> 633 B | 89.4816% smaller |
@@ -196,12 +230,12 @@ not alter the engine capability gate.
 
 | Check | Result |
 | --- | ---: |
-| encoding | 460 valid UTF-8 files |
+| encoding | 464 valid UTF-8 files |
 | frontend | 107 files; 551 passing tests |
-| main JavaScript bundle | 434.21 kB; 129.22 kB gzip |
+| main JavaScript bundle | 434.35 kB; 129.26 kB gzip |
 | CSS | 149.35 kB; 26.65 kB gzip |
 | visual QA | 153 passing scenario/viewport cases |
-| Rust | 486 passing; 15 ignored benchmarks; no failures |
+| Rust | 507 passing; 16 ignored benchmarks; no failures |
 | Cargo, formatting, and Clippy | passed without warnings |
 
 ## Regression protection
@@ -213,6 +247,7 @@ not alter the engine capability gate.
 | output fills memory or IPC | spool, cursor, compaction, and a 64 MiB scenario |
 | diff mounts the whole document | virtual window and a 150,000-line corpus |
 | long commands block the agent | yield, incremental polling, and independent work |
+| multi-file edits require avoidable retries | batch preparation benchmark, transactional failures, and Code Mode integration |
 | first `exec` pays cold V8 cost | tracked prewarm, `OnceLock`, and release benchmark |
 | first response pays vault, catalog, and socket setup serially | credential cache, startup prewarm, and parallel preparation |
 | every tool round resends the complete transcript | strict `previous_response_id` continuation with full-request reset on mismatch |
@@ -229,6 +264,7 @@ not alter the engine capability gate.
 | local estimates compact early | provider-confirmed use plus post-model delta only |
 | browser degrades layout | viewport matrix, metrics, and WebView2 smoke test |
 | refresh rate distorts QA | controlled identity probe separate from fast scrolling |
+| fixed-height scrolling replaces retained file components | overlapping-scroll identity probe over 100,000 files and shared keyed slots |
 | previous visual cases contaminate later measurements | one scoped browser target per case with confirmed cleanup and failure tests |
 | processes escape a turn | Windows tests with Job Object and a real descendant |
 | translations diverge | exact catalog and placeholder validation tests |
