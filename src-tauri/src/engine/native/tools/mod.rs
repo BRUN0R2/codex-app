@@ -584,7 +584,7 @@ impl ToolRegistry {
             json!({
                 "type": "custom",
                 "name": "apply_patch",
-                "description": "Edit files with the supplied patch grammar. Send raw patch text, never JSON. `@@` opens a change block and never closes one: before another `@@`, file marker, or `*** End Patch`, every block must contain at least one `+` or `-` line. Never emit a trailing or standalone `@@`. A valid block is `@@\\n context\\n-old\\n+new`, with no closing marker. Prefix unchanged context with one space and include boundary lines exactly once. To append, keep context and `+` lines in the same block.",
+                "description": super::apply_patch::DESCRIPTION,
                 "format": {
                     "type": "grammar",
                     "syntax": "lark",

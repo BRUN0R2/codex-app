@@ -25,6 +25,10 @@ use crate::error::AppError;
 
 mod output;
 
+#[cfg(test)]
+#[path = "code_mode/patch_tests.rs"]
+mod patch_tests;
+
 use output::{adapt_response, content_text};
 
 #[derive(Default)]

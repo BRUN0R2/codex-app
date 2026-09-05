@@ -236,8 +236,23 @@ subject to provider compaction and becomes paginated output when over budget.
 
 Paths are normalized inside the workspace. Writes are UTF-8 and atomic.
 `apply_patch` uses a dedicated Lark grammar without a shell or `git apply`.
-It plans every file in memory, rejects escapes, symlinks, and overlaps,
-revalidates snapshots, and commits or rolls back the complete transaction.
+It prepares up to 256 file hunks in one blocking task, with a 2 MiB per-file
+limit and 64 MiB for retained original and final content. Preparation has no
+filesystem effects. It rejects escapes, reparse points, ambiguous Windows
+names, aliases, and file/directory overlaps. Unchanged text and context line
+terminators remain exact; addition-only update blocks append at EOF.
+
+Commit stages missing parent directories and temporary files, revalidates
+content byte-for-byte with bounded buffers, and records each applied effect.
+Cancellation or failure restores recorded files and removes only directories
+created by that transaction. A newer concurrent edit is preserved and reported
+as an integrity conflict if rollback can no longer restore the original
+safely. Patches remain exclusive within the tool scheduler; related file edits
+belong in one patch, followed by awaited dependent work.
+
+Staging files stay writable until persistence. Permissions are applied to the
+persisted handle because Windows persistence clears temporary-file attributes;
+commit and rollback preserve the original read-only attribute.
 
 `search_text` executes bundled ripgrep by absolute path without a shell or
 `PATH` dependency. The engine applies ignore rules, limits, timeout,

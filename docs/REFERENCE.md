@@ -71,6 +71,31 @@ scheduling depends on handlers and barriers. Its Unified Exec manager accepts up
 to 64 processes. This project limits one round to eight tools and its registry
 to 32 sessions. Both limits are intentional and tested.
 
+## Astra and multi-file patches
+
+The audited [`apply_patch` grammar](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/assets/tools/apply_patch.lark)
+already accepts multiple file hunks in one envelope. The
+[`handler`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/src/tools/handlers/apply_patch.rs)
+retains the executor's default exclusive scheduling. Multi-file editing does
+not require concurrent, unordered mutations or a model-name switch.
+
+The native tool and its Code Mode declaration share one description that
+explains grouping files, creating parent directories, moving files, appending,
+and awaiting dependent edits. A V8 integration test runs a multi-file patch and
+a dependent patch in one cell. Preparation validates the whole batch before
+commit; failure reverses only recorded effects and removes directories created
+by that transaction. Rollback reports integrity conflicts and preserves newer
+concurrent content instead of replacing it with a stale snapshot.
+
+[GPT-6 Astra's async tool calling](https://developers.openai.com/api/docs/guides/async-tool-calling)
+is a distinct Responses capability for direct function/custom calls, with
+pending call IDs and later outputs. The documented compatibility explicitly
+excludes programmatic tool calling. The catalog-selected Code Mode/Lite route
+therefore keeps its existing `exec`/`wait` lifecycle; it does not attach an
+unsupported `async` flag to nested patches. The public API's built-in
+[`apply_patch_call`](https://developers.openai.com/api/docs/guides/tools-apply-patch)
+format is separate from the freeform tool used by the audited Codex harness.
+
 ## Instructions, transport, and context
 
 The upstream instruction flow is layered:
