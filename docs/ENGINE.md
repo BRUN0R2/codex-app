@@ -296,6 +296,19 @@ cancellation signals the session and drains callbacks that own visual items;
 those futures are never aborted after `item.started`. Mutations serialize the
 cell and invalidate its read cache before the next call.
 
+Independent command polls share the execution gate with reads. Cache
+invalidation is a separate scope that starts before the operation and ends even
+when its future is cancelled. Read-cache admission limits pending and completed
+entries to 64 and retained outputs to 64 MiB. Failures are shared only with
+existing observers; the next attempt executes again. Late completions cannot
+replace a newer entry with the same key.
+
+Code Mode distributes its output budget across content items in their original
+order. Small results and terminal errors survive a preceding large result;
+large text items retain their own head, tail, and explicit truncation marker.
+Text and media omission markers consume the same bounded budget. Outputs that
+fit are preserved exactly.
+
 ### Multi-agent v2
 
 Six collaboration tools operate on a persistent tree. A tree allows four active
