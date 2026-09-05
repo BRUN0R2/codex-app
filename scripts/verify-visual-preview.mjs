@@ -5196,6 +5196,7 @@ function timelineExtremeFilesPrepareExpression() {
   return `(() => {
     void (async () => {
       try {
+        const compareRetainedIdentities = ${compareRetainedIdentities.toString()};
         const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
         const waitUntil = async (label, predicate, timeoutMs) => {
           const deadline = performance.now() + timeoutMs;
@@ -5231,6 +5232,41 @@ function timelineExtremeFilesPrepareExpression() {
         const timeline = document.querySelector(".timeline");
         if (!(timeline instanceof HTMLElement)) {
           throw new Error("The extreme timeline is missing.");
+        }
+
+        const readMountedIdentities = () => {
+          const summaries = new Map();
+          const wrappers = new Map();
+          for (const wrapper of document.querySelectorAll(".agent-activity-virtual-item")) {
+            const key = wrapper.getAttribute("data-virtual-activity-key");
+            const summary = wrapper.querySelector("summary");
+            if (key !== null && summary instanceof HTMLElement) {
+              summaries.set(key, summary);
+              wrappers.set(key, wrapper);
+            }
+          }
+          return { summaries, wrappers };
+        };
+        const probeMaximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+        const probeStep = Math.max(1, Math.min(timeline.clientHeight / 4, probeMaximum / 8));
+        timeline.scrollTop = probeMaximum / 4;
+        await frame();
+        await frame();
+        let previousProbe = readMountedIdentities();
+        let retainedProbeComparisons = 0;
+        let retainedProbeSummaryChanges = 0;
+        let retainedProbeWrapperChanges = 0;
+        for (let index = 0; index < 6; index += 1) {
+          timeline.scrollTop = Math.min(probeMaximum, timeline.scrollTop + probeStep);
+          await frame();
+          await frame();
+          const current = readMountedIdentities();
+          const summaries = compareRetainedIdentities(previousProbe.summaries, current.summaries);
+          const wrappers = compareRetainedIdentities(previousProbe.wrappers, current.wrappers);
+          retainedProbeComparisons += summaries.retainedCount;
+          retainedProbeSummaryChanges += summaries.replacementCount;
+          retainedProbeWrapperChanges += wrappers.replacementCount;
+          previousProbe = current;
         }
 
         const frameIntervals = [];
@@ -5465,6 +5501,9 @@ function timelineExtremeFilesPrepareExpression() {
           values[Math.min(values.length - 1, Math.floor(values.length * percentileValue))] ?? 0;
         const list = document.querySelector(".agent-activity-virtual-list");
         window.__timelineExtremeFilesMetrics = {
+          retainedProbeComparisons,
+          retainedProbeSummaryChanges,
+          retainedProbeWrapperChanges,
           totalActivities: Number(list?.getAttribute("data-virtual-activity-total") ?? 0),
           physicalListHeight: list?.getBoundingClientRect().height ?? 0,
           rapidFrames: sortedFrames.length,
@@ -9085,6 +9124,11 @@ function validateTimelineExtremeFilesMetrics(metrics, viewport) {
     `unexpected 100,000-file viewport at ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.totalActivities === 100_000, "the extreme projection lost files");
+  assert(metrics.retainedProbeComparisons > 0, "the extreme probe did not compare retained file identities");
+  assert(
+    metrics.retainedProbeSummaryChanges === 0 && metrics.retainedProbeWrapperChanges === 0,
+    `the extreme probe replaced ${metrics.retainedProbeSummaryChanges} summaries and ${metrics.retainedProbeWrapperChanges} wrappers that remained mounted`,
+  );
   assert(
     metrics.physicalListHeight > 2_000_000 && metrics.physicalListHeight <= 8_000_000,
     `the extreme physical height became invalid (${metrics.physicalListHeight}px)`,

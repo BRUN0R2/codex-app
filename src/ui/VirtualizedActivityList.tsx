@@ -166,17 +166,7 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
     },
   );
   const renderSlotStore = createKeyedVirtualRenderSlotStore<TItemSource>();
-  const uniformRenderSlots = createMemo<readonly number[]>((previousSlots) => {
-    const current = mountedRange();
-    const slotCount = current.end - current.start;
-    return previousSlots !== undefined && previousSlots.length === slotCount
-      ? previousSlots
-      : Array.from({ length: slotCount }, (_, index) => index);
-  });
   createEffect(() => {
-    if (usesUniformCollapsedEstimates()) {
-      return;
-    }
     const source = props.itemSource;
     const current = mountedRange();
     renderSlotStore.reconcileRange(
@@ -185,7 +175,7 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
       current.end,
       readVirtualItemKey,
       props.reuseGroupForItem,
-      3,
+      usesUniformCollapsedEstimates() ? 0 : 3,
     );
   });
   const physicalTotalSize = createMemo(() => {
@@ -608,18 +598,22 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
             </For>
           }
         >
-          <For each={uniformRenderSlots()}>
-            {(slotIndex) => {
-              const itemIndex = createMemo(() => mountedRange().start + slotIndex);
-              const itemSource = () => props.itemSource;
-              const itemKey = createMemo(() => itemSource().keyAt(itemIndex()));
+          <For each={renderSlotStore.renderSlots()}>
+            {(slot) => {
+              const active = () => slot.position().active;
+              const itemIndex = () => slot.position().index;
+              const itemSource = () => slot.position().source;
+              const itemKey = () => slot.position().key;
               return (
                 <div
-                  class="agent-activity-render-slot agent-activity-virtual-item"
-                  data-activity-content="materialized"
-                  data-virtual-activity-key={itemKey()}
+                  aria-hidden={active() ? undefined : "true"}
+                  class="agent-activity-render-slot"
+                  classList={{ "agent-activity-virtual-item": active() }}
+                  data-activity-content={active() ? "materialized" : undefined}
+                  data-virtual-activity-key={active() ? itemKey() : undefined}
                   style={{
-                    transform: `translateY(${Math.round(slotIndex * uniformItemSize())}px)`,
+                    display: active() ? undefined : "none",
+                    transform: `translateY(${Math.round((itemIndex() - mountedRange().start) * uniformItemSize())}px)`,
                   }}
                 >
                   {renderUniformItem(itemSource, itemKey, itemIndex)}
