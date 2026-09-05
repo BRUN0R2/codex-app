@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -12,6 +11,12 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use uuid::Uuid;
+
+mod request_item;
+use request_item::RequestResponseItem;
+
+#[cfg(test)]
+mod continuation_tests;
 
 use super::AccountPlanTypeWire;
 use super::CreditsWire;
@@ -563,9 +568,7 @@ impl ResponseRequestInput<'_> {
         let Some(current) = self.response_item(index) else {
             return false;
         };
-        current
-            .for_request(self.strip_image_detail)
-            .equivalent_for_continuation(previous)
+        current.equivalent_for_continuation(previous, self.strip_image_detail)
     }
 
     fn clone_owned(&self, index: usize) -> Option<OwnedResponseRequestInput> {
@@ -833,22 +836,6 @@ impl<'a> ContentItemKinds<'a> {
         Self {
             content_item_kinds: [kind],
         }
-    }
-}
-
-struct RequestResponseItem<'a> {
-    item: &'a ResponseItem,
-    strip_image_detail: bool,
-}
-
-impl Serialize for RequestResponseItem<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.item
-            .for_request(self.strip_image_detail)
-            .serialize(serializer)
     }
 }
 
@@ -1175,99 +1162,6 @@ impl ResponseItem {
                 .as_ref()
                 .and_then(|metadata| metadata.turn_id.as_deref()),
         ))
-    }
-
-    fn for_request(&self, strip_image_detail: bool) -> Cow<'_, Self> {
-        if !strip_image_detail || !self.has_image_detail() {
-            return Cow::Borrowed(self);
-        }
-        let mut item = self.clone();
-        match &mut item {
-            Self::Message { content, .. } => {
-                for part in content {
-                    if let ResponseContent::InputImage { detail, .. } = part {
-                        *detail = None;
-                    }
-                }
-            }
-            Self::FunctionCallOutput {
-                output: FunctionCallOutputPayload::Content(content),
-                ..
-            } => {
-                for part in content {
-                    if let FunctionCallOutputContent::InputImage { detail, .. } = part {
-                        *detail = None;
-                    }
-                }
-            }
-            _ => {}
-        }
-        Cow::Owned(item)
-    }
-
-    fn equivalent_for_continuation(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                Self::Message {
-                    id: left_id,
-                    role: left_role,
-                    content: left_content,
-                    phase: left_phase,
-                    ..
-                },
-                Self::Message {
-                    id: right_id,
-                    role: right_role,
-                    content: right_content,
-                    phase: right_phase,
-                    ..
-                },
-            ) => {
-                left_id == right_id
-                    && left_role == right_role
-                    && left_content == right_content
-                    && left_phase == right_phase
-            }
-            (
-                Self::Compaction {
-                    id: left_id,
-                    encrypted_content: left_content,
-                    ..
-                },
-                Self::Compaction {
-                    id: right_id,
-                    encrypted_content: right_content,
-                    ..
-                },
-            ) => left_id == right_id && left_content == right_content,
-            _ => self == other,
-        }
-    }
-
-    fn has_image_detail(&self) -> bool {
-        match self {
-            Self::Message { content, .. } => content.iter().any(|part| {
-                matches!(
-                    part,
-                    ResponseContent::InputImage {
-                        detail: Some(_),
-                        ..
-                    }
-                )
-            }),
-            Self::FunctionCallOutput { output, .. } => output.content().is_some_and(|content| {
-                content.iter().any(|part| {
-                    matches!(
-                        part,
-                        FunctionCallOutputContent::InputImage {
-                            detail: Some(_),
-                            ..
-                        }
-                    )
-                })
-            }),
-            _ => false,
-        }
     }
 }
 
