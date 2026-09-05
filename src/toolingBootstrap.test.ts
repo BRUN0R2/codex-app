@@ -60,7 +60,7 @@ describe("tooling bootstrap contract", () => {
     );
   });
 
-  it("uses one background Chromium target for the visual run and closes it explicitly", () => {
+  it("scopes a background Chromium target to each visual scenario and viewport", () => {
     expect(packageManifest.scripts?.["verify:visual"]).toContain(
       "node --experimental-strip-types scripts/verify-visual-preview.mjs",
     );
@@ -68,10 +68,9 @@ describe("tooling bootstrap contract", () => {
     expect(visualAuditRuntime).toContain('"--edge-skip-compat-layer-relaunch"');
     expect(visualAuditRuntime).toContain('"--no-startup-window"');
     expect(visualAuditScript).toContain("chromiumAuditArguments(browserProfile)");
-    expect(visualAuditScript.match(/createAuditTarget\(browserController\)/gu)).toHaveLength(1);
-    expect(
-      visualAuditScript.match(/closeAuditTarget\(browserController, auditTargetId\)/gu),
-    ).toHaveLength(1);
+    expect(visualAuditScript).toMatch(
+      /for \(const viewport of scenario.viewports \?\? VIEWPORTS\) \{\s*reports\.push\(\s*await withAuditTarget\(browserController,/u,
+    );
     expect(visualAuditScript).not.toContain("/json/new");
     expect(visualAuditScript).not.toContain("/json/close");
     expect(visualAuditScript).toContain("waitForDevToolsEndpoint");

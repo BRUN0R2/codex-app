@@ -8,15 +8,14 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   chromiumAuditArguments,
-  closeAuditTarget,
   compareRetainedIdentities,
-  createAuditTarget,
   type DevToolsCommandClient,
   loopbackHttpOrigin,
   type ObservedProcess,
   observeProcess,
   parseDevToolsActivePort,
   waitForDevToolsEndpoint,
+  withAuditTarget,
 } from "./visualAuditRuntime";
 
 const temporaryDirectories: string[] = [];
@@ -43,34 +42,71 @@ describe("visual audit runtime", () => {
     expect(arguments_).not.toContain("about:blank");
   });
 
-  it("creates one background audit target for the entire visual run", async () => {
-    const client = commandClient([{ targetId: "audit-target" }]);
+  it("isolates consecutive measurements and closes each target before returning", async () => {
+    const client = commandClient([
+      { targetId: "first-page" },
+      { success: true },
+      { targetId: "second-page" },
+      { success: true },
+    ]);
 
-    await expect(createAuditTarget(client)).resolves.toBe("audit-target");
+    await expect(withAuditTarget(client, async (id) => id)).resolves.toBe("first-page");
+    await expect(withAuditTarget(client, async (id) => id)).resolves.toBe("second-page");
     expect(client.calls).toEqual([
       {
         method: "Target.createTarget",
         params: { background: true, url: "about:blank" },
       },
+      { method: "Target.closeTarget", params: { targetId: "first-page" } },
+      {
+        method: "Target.createTarget",
+        params: { background: true, url: "about:blank" },
+      },
+      { method: "Target.closeTarget", params: { targetId: "second-page" } },
     ]);
   });
 
   it("fails rather than leaking an audit target when creation or closure is unconfirmed", async () => {
-    await expect(createAuditTarget(commandClient([{}]))).rejects.toThrow(
+    await expect(withAuditTarget(commandClient([{}]), async () => undefined)).rejects.toThrow(
       /did not return an audit target id/u,
     );
     await expect(
-      closeAuditTarget(commandClient([{ success: false }]), "audit-target"),
+      withAuditTarget(
+        commandClient([{ targetId: "audit-target" }, { success: false }]),
+        async () => undefined,
+      ),
     ).rejects.toThrow(/did not confirm/u);
   });
 
-  it("closes every audit target through the browser protocol", async () => {
-    const client = commandClient([{ success: true }]);
+  it("closes an audit target even when the measurement fails", async () => {
+    const client = commandClient([{ targetId: "audit-target" }, { success: true }]);
+    const failure = new Error("Invalid timeline measurement");
 
-    await expect(closeAuditTarget(client, "audit-target")).resolves.toBeUndefined();
-    expect(client.calls).toEqual([
-      { method: "Target.closeTarget", params: { targetId: "audit-target" } },
-    ]);
+    await expect(
+      withAuditTarget(client, async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(client.calls.at(-1)).toEqual({
+      method: "Target.closeTarget",
+      params: { targetId: "audit-target" },
+    });
+  });
+
+  it("preserves both the measurement failure and an unconfirmed cleanup", async () => {
+    const client = commandClient([{ targetId: "audit-target" }, { success: false }]);
+    const failure = new Error("Invalid timeline measurement");
+
+    await expect(
+      withAuditTarget(client, async () => {
+        throw failure;
+      }),
+    ).rejects.toMatchObject({
+      errors: [
+        failure,
+        expect.objectContaining({ message: expect.stringMatching(/did not confirm/u) }),
+      ],
+    });
   });
 
   it("rejects a relative browser profile", () => {

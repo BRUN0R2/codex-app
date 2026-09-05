@@ -64,7 +64,30 @@ export function chromiumAuditArguments(userDataDirectory: string): readonly stri
   ];
 }
 
-export async function createAuditTarget(client: DevToolsCommandClient): Promise<string> {
+export async function withAuditTarget<TResult>(
+  client: DevToolsCommandClient,
+  audit: (targetId: string) => Promise<TResult>,
+): Promise<TResult> {
+  const targetId = await createAuditTarget(client);
+  let result: TResult;
+  try {
+    result = await audit(targetId);
+  } catch (auditError) {
+    try {
+      await closeAuditTarget(client, targetId);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [auditError, cleanupError],
+        "The visual audit failed and its target could not be closed.",
+      );
+    }
+    throw auditError;
+  }
+  await closeAuditTarget(client, targetId);
+  return result;
+}
+
+async function createAuditTarget(client: DevToolsCommandClient): Promise<string> {
   const result = await client.send("Target.createTarget", {
     background: true,
     url: "about:blank",
@@ -72,10 +95,7 @@ export async function createAuditTarget(client: DevToolsCommandClient): Promise<
   return requiredTargetId(result, "Target.createTarget");
 }
 
-export async function closeAuditTarget(
-  client: DevToolsCommandClient,
-  targetId: string,
-): Promise<void> {
+async function closeAuditTarget(client: DevToolsCommandClient, targetId: string): Promise<void> {
   const result = await client.send("Target.closeTarget", { targetId });
   if (commandResponse(result)?.success !== true) {
     throw new Error("Target.closeTarget did not confirm that the audit target was closed.");

@@ -7,13 +7,12 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 
 import {
-  closeAuditTarget,
-  createAuditTarget,
   chromiumAuditArguments,
   compareRetainedIdentities,
   loopbackHttpOrigin,
   observeProcess,
   waitForDevToolsEndpoint,
+  withAuditTarget,
 } from "../src/tooling/visualAuditRuntime.ts";
 import { PROFILE_STORAGE_KEYS } from "../src/state/profileStorage.ts";
 
@@ -1181,41 +1180,38 @@ async function main() {
     browserController = await CdpClient.connect(devToolsEndpoint.browserWebSocketUrl);
     await mkdir(ARTIFACT_DIRECTORY, { recursive: true });
 
-    const auditTargetId = await createAuditTarget(browserController);
-    try {
-      const auditClient = await browserController.attachToTarget(auditTargetId);
-      await auditClient.send("Page.enable");
-      await auditClient.send("Runtime.enable");
-      await auditClient.send("Page.addScriptToEvaluateOnNewDocument", {
-        source: `localStorage.setItem(${JSON.stringify(PROFILE_STORAGE_KEYS.locale)}, ${JSON.stringify(VISUAL_AUDIT_LOCALE)});`,
-      });
-
-      const reports = [];
-      const selectedScenarios =
-        REQUESTED_SCENARIOS.size === 0
-          ? SCENARIOS
-          : SCENARIOS.filter((scenario) => REQUESTED_SCENARIOS.has(scenario.id));
-      if (selectedScenarios.length !== (REQUESTED_SCENARIOS.size || SCENARIOS.length)) {
-        const knownScenarios = new Set(SCENARIOS.map((scenario) => scenario.id));
-        const unknownScenarios = [...REQUESTED_SCENARIOS].filter(
-          (scenarioId) => !knownScenarios.has(scenarioId),
-        );
-        throw new Error(`Unknown visual scenarios: ${unknownScenarios.join(", ")}`);
-      }
-      const scenarios = selectedScenarios.map((scenario) => ({
-        ...scenario,
-        url: rebasePreviewUrl(scenario.url, previewOrigin),
-      }));
-      for (const scenario of scenarios) {
-        for (const viewport of scenario.viewports ?? VIEWPORTS) {
-          reports.push(await auditViewport(auditClient, viewport, scenario));
-        }
-      }
-
-      process.stdout.write(`${JSON.stringify({ browserPath, reports }, null, 2)}\n`);
-    } finally {
-      await closeAuditTarget(browserController, auditTargetId);
+    const reports = [];
+    const selectedScenarios =
+      REQUESTED_SCENARIOS.size === 0
+        ? SCENARIOS
+        : SCENARIOS.filter((scenario) => REQUESTED_SCENARIOS.has(scenario.id));
+    if (selectedScenarios.length !== (REQUESTED_SCENARIOS.size || SCENARIOS.length)) {
+      const knownScenarios = new Set(SCENARIOS.map((scenario) => scenario.id));
+      const unknownScenarios = [...REQUESTED_SCENARIOS].filter(
+        (scenarioId) => !knownScenarios.has(scenarioId),
+      );
+      throw new Error(`Unknown visual scenarios: ${unknownScenarios.join(", ")}`);
     }
+    const scenarios = selectedScenarios.map((scenario) => ({
+      ...scenario,
+      url: rebasePreviewUrl(scenario.url, previewOrigin),
+    }));
+    for (const scenario of scenarios) {
+      for (const viewport of scenario.viewports ?? VIEWPORTS) {
+        reports.push(
+          await withAuditTarget(browserController, async (targetId) => {
+            const auditClient = await browserController.attachToTarget(targetId);
+            await auditClient.send("Page.enable");
+            await auditClient.send("Runtime.enable");
+            await auditClient.send("Page.addScriptToEvaluateOnNewDocument", {
+              source: `localStorage.setItem(${JSON.stringify(PROFILE_STORAGE_KEYS.locale)}, ${JSON.stringify(VISUAL_AUDIT_LOCALE)});`,
+            });
+            return auditViewport(auditClient, viewport, scenario);
+          }),
+        );
+      }
+    }
+    process.stdout.write(`${JSON.stringify({ browserPath, reports }, null, 2)}\n`);
   } finally {
     if (browserController !== undefined) {
       await Promise.race([
