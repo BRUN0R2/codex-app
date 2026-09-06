@@ -2577,7 +2577,18 @@ function nestedScrollContainmentPrepareExpression() {
             };
             const run = async (region, requestedTop, deltaY) => {
               timeline.scrollTop = baseTimelineScroll;
-              await frame();
+              let previousGeometry = "";
+              let quietFrames = 0;
+              const settlementDeadline = performance.now() + 1000;
+              while (quietFrames < 8) {
+                await frame();
+                const geometry = [timeline.scrollTop, timeline.scrollHeight, region.scrollHeight].join(":");
+                quietFrames = geometry === previousGeometry ? quietFrames + 1 : 0;
+                previousGeometry = geometry;
+                if (performance.now() > settlementDeadline) {
+                  throw new Error("Nested-scroll setup geometry did not settle.");
+                }
+              }
               region.scrollTop = requestedTop;
               const nestedStart = region.scrollTop;
               const overscrollBehaviorY = originalGetComputedStyle(region).overscrollBehaviorY;
@@ -7255,8 +7266,8 @@ function validateComposerFastModeMetrics(metrics, viewport) {
   assert(metrics.indicator.width >= 12, "the bolt became too small");
   assert(metrics.fullAccessColor === "rgb(251, 106, 34)", "Full access lost its orange color");
   assert(metrics.projectIconColor === "rgb(74, 222, 128)", "the project icon color was not applied");
-  assert(metrics.diffAddedColor === "#4ade80", "additions do not use semantic lime green");
-  assert(metrics.diffDeletedColor === "#ff6764", "deletions do not use semantic red");
+  assert(metrics.diffAddedColor === "#5ecc71", "additions do not use the audited diff green");
+  assert(metrics.diffDeletedColor === "#ff6762", "deletions do not use the audited diff red");
 }
 
 function validateComposerContextWindowMetrics(metrics, viewport) {
