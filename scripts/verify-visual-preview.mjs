@@ -535,6 +535,8 @@ const SCENARIOS = [
     validate: (samples) => {
       assert(samples.length === 32, "the intrinsic diff sizing matrix is incomplete");
       for (const sample of samples) {
+        assert(sample.mode === "split" ? sample.splitProjectionReads > 0 : sample.splitProjectionReads === 0,
+          `diff projection did not follow the display mode: ${JSON.stringify(sample)}`);
         const detail = JSON.stringify(sample);
         assert(sample.longLines === (sample.horizontalOverflow > 0), `unexpected horizontal scrolling: ${detail}`);
         if (sample.rowCount < 18) {

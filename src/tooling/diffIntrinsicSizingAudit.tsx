@@ -25,6 +25,12 @@ export async function auditDiffIntrinsicSizing() {
                 ),
               ].join("\n"),
             );
+            let splitProjectionReads = 0;
+            const readSplitProjection = diff.splitProjection.bind(diff);
+            diff.splitProjection = () => {
+              splitProjectionReads += 1;
+              return readSplitProjection();
+            };
             const dispose = render(
               () => (
                 <I18nProvider controller={createI18nController({ storage: null })}>
@@ -52,6 +58,7 @@ export async function auditDiffIntrinsicSizing() {
                 mode,
                 rowCount,
                 longLines,
+                splitProjectionReads,
                 clientHeight: viewport.clientHeight,
                 outerHeight: bounds.height / zoom,
                 verticalOverflow: viewport.scrollHeight - viewport.clientHeight,

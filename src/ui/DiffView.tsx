@@ -38,7 +38,7 @@ export function DiffView(props: {
   const usesContainerSizing = props.viewportSizing === "container";
   const viewportMeasurement = usesContainerSizing ? createSignal<number | null>(null) : undefined;
   const [scrollTop, setScrollTop] = createSignal(0);
-  const splitProjection = createMemo(() => props.document.splitProjection());
+  const splitProjection = () => props.document.splitProjection();
   const rowCount = createMemo(() =>
     props.mode === "split" ? splitProjection().rows.length : props.document.unifiedRows.length,
   );

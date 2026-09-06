@@ -198,6 +198,8 @@ Browser checks retain native scrollbars and cover normal and fractional zoom.
 Diffs, file reads, and search matches preserve source whitespace and share the
 four-column tab stops used by width projection. Short file reads also declare
 their intrinsic content size so horizontal scrollbars cannot clip the first line.
+Split projections are computed only when the selected diff mode needs them;
+the document owns their cached result.
 
 Desktop notifications use the same ownership boundary. The main controller
 detects account and task transitions, resolves the per-event rule once, and
