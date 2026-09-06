@@ -14,6 +14,7 @@ import {
   waitForDevToolsEndpoint,
   withAuditTarget,
 } from "../src/tooling/visualAuditRuntime.ts";
+import { observeTimelineScrollWork, probeTimelineScrollCommit } from "../src/tooling/timelineScrollAudit.ts";
 import { PROFILE_STORAGE_KEYS } from "../src/state/profileStorage.ts";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -328,54 +329,24 @@ const SCENARIOS = [
     auditExpression: activeActivityReflectionVisualAuditExpression,
     validate: validateReasoningActivityReflectionMetrics,
   },
-  {
-    id: "user-message-navigation",
+  ...[false, true].map((reducedMotion) => ({
+    id: reducedMotion ? "user-message-navigation-reduced-motion" : "user-message-navigation",
     url: HOME_PREVIEW_URL,
+    reducedMotion,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
-      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
-    )`,
-    prepareExpression: `(() => {
-      const threadButton = [...document.querySelectorAll(".thread-main")].find(
-        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
-      );
-      threadButton?.click();
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        const activeTurn = [...document.querySelectorAll(".conversation-turn")].at(-1);
-        const group = activeTurn?.querySelector(".agent-activity-group:not([open]) > summary");
-        group?.click();
-        queueMicrotask(() => {
-          document.querySelectorAll(".user-message-navigator button")[2]?.click();
-          requestAnimationFrame(() => {
-            window.__previewUserMessageNavigationRequested = true;
-          });
-        });
-      }));
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"))`,
+    prepareExpression: `void (async () => {
+      try { window.__previewUserNavigationMetrics = await (await import("/src/tooling/userMessageNavigationAudit.ts")).auditUserMessageNavigation(); }
+      catch (error) { window.__previewUserNavigationError = String(error?.stack ?? error); }
+      finally { window.__previewUserNavigationReady = true; }
     })()`,
-    readyExpression: `(() => {
-      if (window.__previewUserMessageNavigationRequested !== true) {
-        return false;
-      }
-      const timeline = document.querySelector(".timeline");
-      const target = document.getElementById("user-message-preview-image-user-message");
-      const marker = document.querySelectorAll(".user-message-navigator button")[2];
-      if (
-        !(timeline instanceof HTMLElement) ||
-        !(target instanceof HTMLElement) ||
-        !(marker instanceof HTMLButtonElement)
-      ) {
-        return false;
-      }
-      const targetGap =
-        target.getBoundingClientRect().top - timeline.getBoundingClientRect().top;
-      const targetOffset = timeline.scrollTop + targetGap;
-      const maximumScroll = timeline.scrollHeight - timeline.clientHeight;
-      const expectedScroll = Math.min(maximumScroll, Math.max(0, targetOffset - 32));
-      return Math.abs(timeline.scrollTop - expectedScroll) <= 2 &&
-        marker.getAttribute("aria-current") === "true";
+    readyExpression: "window.__previewUserNavigationReady === true",
+    auditExpression: () => `(() => {
+      if (window.__previewUserNavigationError !== undefined) throw new Error(window.__previewUserNavigationError);
+      return { viewport: { width: innerWidth, height: innerHeight }, ...window.__previewUserNavigationMetrics };
     })()`,
-    auditExpression: userMessageNavigationVisualAuditExpression,
     validate: validateUserMessageNavigationMetrics,
-  },
+  })),
   {
     id: "manual-scroll-ownership",
     url: HOME_PREVIEW_URL,
@@ -519,6 +490,7 @@ const SCENARIOS = [
         element.closest(".file-change-diff")?.querySelector(".syntax-token") !== null,
     )`,
     auditExpression: syntaxHighlightedDiffVisualAuditExpression,
+    interact: exerciseDiffFill,
     validate: validateSyntaxHighlightedDiffMetrics,
   },
   {
@@ -1142,6 +1114,19 @@ const SCENARIOS = [
     auditExpression: timelineExtremeFilesAuditExpression,
     validate: validateTimelineExtremeFilesMetrics,
   },
+
+  {
+    id: "timeline-expanded-100k",
+    url: TIMELINE_EXTREME_PREVIEW_URL,
+    readyTimeoutMs: 660_000,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de 100000 arquivos"),
+    )`,
+    prepare: prepareExpandedTimeline,
+    readyExpression: `window.__timelineExtremeFilesReady === true`,
+    auditExpression: timelineExtremeFilesAuditExpression,
+    validate: validateTimelineExpandedFilesMetrics,
+  },
 ];
 
 async function main() {
@@ -1275,7 +1260,7 @@ async function auditViewport(client, viewport, scenario) {
     mobile: false,
   });
   await client.send("Emulation.setEmulatedMedia", {
-    features: [{ name: "prefers-reduced-motion", value: "no-preference" }],
+    features: [{ name: "prefers-reduced-motion", value: scenario.reducedMotion === true ? "reduce" : "no-preference" }],
   });
   const loaded = client.waitForEvent("Page.loadEventFired");
   await client.send("Page.navigate", { url: scenario.url });
@@ -1285,8 +1270,9 @@ async function auditViewport(client, viewport, scenario) {
     scenario.initialReadyExpression ?? scenario.readyExpression,
     scenario.id,
   );
-  if (scenario.prepareExpression !== undefined) {
-    await client.evaluate(scenario.prepareExpression, false);
+  if (scenario.prepare !== undefined || scenario.prepareExpression !== undefined) {
+    if (scenario.prepare !== undefined) await scenario.prepare(client, viewport);
+    else await client.evaluate(scenario.prepareExpression, false);
     await waitForPreview(
       client,
       scenario.readyExpression,
@@ -1306,6 +1292,10 @@ async function auditViewport(client, viewport, scenario) {
   );
 
   const metrics = await client.evaluate(scenario.auditExpression(), false);
+  await writeFile(
+    path.join(ARTIFACT_DIRECTORY, `${scenario.id}-${viewport.width}x${viewport.height}.metrics.json`),
+    JSON.stringify(metrics, null, 2),
+  );
   try {
     scenario.validate(metrics, viewport);
   } catch (error) {
@@ -3963,6 +3953,7 @@ function timelinePerformanceStressPrepareExpression() {
           visited: visited.size,
         };
 
+        const scrollCommit = await (${probeTimelineScrollCommit.toString()})(timeline);
         const mountedSummariesByKey = () => {
           const summaries = new Map();
           for (const wrapper of document.querySelectorAll(".agent-activity-virtual-item")) {
@@ -4002,6 +3993,7 @@ function timelinePerformanceStressPrepareExpression() {
           previousProbeSummaries = currentProbeSummaries;
         }
 
+        const scrollWork = (${observeTimelineScrollWork.toString()})(timeline);
         const frameIntervals = [];
         const animationWorkByFrame = new Map();
         const animationCallbackOutliers = [];
@@ -4025,12 +4017,13 @@ function timelinePerformanceStressPrepareExpression() {
                 };
                 animationWorkByFrame.set(timestamp, measurement);
               }
+              const scrollDuration = scrollWork.takeDuration();
               measurement.applicationDuration +=
-                callback === auditAnimationCallback ? 0 : duration;
+                scrollDuration + (callback === auditAnimationCallback ? 0 : duration);
               measurement.auditDuration +=
                 callback === auditAnimationCallback ? duration : 0;
               measurement.callbacks += 1;
-              measurement.duration += duration;
+              measurement.duration += duration + scrollDuration;
               measurement.durations.push(duration);
               if (callback !== auditAnimationCallback && duration > 8) {
                 animationCallbackOutliers.push({
@@ -4098,6 +4091,14 @@ function timelinePerformanceStressPrepareExpression() {
                 mountedCount,
                 phase: phaseLabel,
                 scrollTop: timeline.scrollTop,
+                range: [list.dataset.virtualActivityStart, list.dataset.virtualActivityEnd],
+                windowTransform: list.querySelector('.agent-activity-virtual-window')?.style.transform,
+                items: [...list.querySelectorAll('.agent-activity-virtual-item')].slice(0, 6).map((item) => ({
+                  key: item.dataset.virtualActivityKey,
+                  top: item.getBoundingClientRect().top,
+                  bottom: item.getBoundingClientRect().bottom,
+                  transform: item.style.transform,
+                })),
                 total,
                 visibleBottom,
                 visibleTop,
@@ -4181,13 +4182,14 @@ function timelinePerformanceStressPrepareExpression() {
           requestAnimationFrame(tick);
         });
         window.requestAnimationFrame = nativeRequestAnimationFrame;
+        scrollWork.dispose();
         observer?.disconnect();
         const rapidElapsed = performance.now() - rapidStarted;
         const sortedFrames = frameIntervals.slice(1).sort((left, right) => left - right);
         const sortedAnimationWork = [...animationWorkByFrame.values()]
           .map((measurement) => measurement.duration)
           .sort((left, right) => left - right);
-        const sortedApplicationAnimationWork = [...animationWorkByFrame.values()]
+        const sortedApplicationWork = [...animationWorkByFrame.values()]
           .map((measurement) => measurement.applicationDuration)
           .sort((left, right) => left - right);
         const sortedAuditAnimationWork = [...animationWorkByFrame.values()]
@@ -4334,7 +4336,8 @@ function timelinePerformanceStressPrepareExpression() {
           );
         }
         const timelineTop = restoredTimeline.getBoundingClientRect().top;
-        const topWrappers = [...document.querySelectorAll(".agent-activity-virtual-item")];
+        const topWrappers = [...document.querySelectorAll(".agent-activity-virtual-item")]
+          .sort((left, right) => left.getBoundingClientRect().top - right.getBoundingClientRect().top);
         const sourceAtTop = topWrappers.find(
           (element) => element.querySelector("details[open] > summary") !== null,
         );
@@ -4408,6 +4411,7 @@ function timelinePerformanceStressPrepareExpression() {
             const rowTops = rows.map((row) => row.getBoundingClientRect().top);
             const canvas = viewport.querySelector(".diff-virtual-canvas");
             return {
+              active: viewport.closest('.agent-activity-render-slot')?.classList.contains('agent-activity-virtual-item') === true,
               canvasConnected:
                 canvas instanceof HTMLElement &&
                 canvas.isConnected &&
@@ -4427,6 +4431,7 @@ function timelinePerformanceStressPrepareExpression() {
         );
 
         window.__timelinePerformanceStressMetrics = {
+          scrollCommit,
           visitedItems: visited.size,
           expansionBoundaryPasses: boundaryPasses,
           expansionIterations: iterations,
@@ -4443,15 +4448,15 @@ function timelinePerformanceStressPrepareExpression() {
             (total, measurement) => total + measurement.callbacks,
             0,
           ),
-          rapidMedianAnimationWorkMs: percentile(sortedAnimationWork, 0.5),
-          rapidP95AnimationWorkMs: percentile(sortedAnimationWork, 0.95),
-          rapidP99AnimationWorkMs: percentile(sortedAnimationWork, 0.99),
-          rapidMaximumAnimationWorkMs: sortedAnimationWork.at(-1) ?? 0,
-          rapidP95ApplicationAnimationWorkMs: percentile(sortedApplicationAnimationWork, 0.95),
-          rapidP99ApplicationAnimationWorkMs: percentile(sortedApplicationAnimationWork, 0.99),
-          rapidMaximumApplicationAnimationWorkMs: sortedApplicationAnimationWork.at(-1) ?? 0,
+          rapidMedianFrameWorkMs: percentile(sortedAnimationWork, 0.5),
+          rapidP95FrameWorkMs: percentile(sortedAnimationWork, 0.95),
+          rapidP99FrameWorkMs: percentile(sortedAnimationWork, 0.99),
+          rapidMaximumFrameWorkMs: sortedAnimationWork.at(-1) ?? 0,
+          rapidP95ApplicationWorkMs: percentile(sortedApplicationWork, 0.95),
+          rapidP99ApplicationWorkMs: percentile(sortedApplicationWork, 0.99),
+          rapidMaximumApplicationWorkMs: sortedApplicationWork.at(-1) ?? 0,
           rapidAnimationCallbackOutliers: animationCallbackOutliers,
-          rapidP95AuditAnimationWorkMs: percentile(sortedAuditAnimationWork, 0.95),
+          rapidP95AuditFrameWorkMs: percentile(sortedAuditAnimationWork, 0.95),
           rapidP95AnimationCallbackRanksMs: animationCallbackRanks.map((durations) =>
             percentile(durations, 0.95),
           ),
@@ -5047,47 +5052,6 @@ function activeActivityReflectionVisualAuditExpression() {
   })()`;
 }
 
-function userMessageNavigationVisualAuditExpression() {
-  return `(() => {
-    const timeline = document.querySelector(".timeline");
-    const target = document.getElementById("user-message-preview-image-user-message");
-    const targetTurn = target?.closest(".timeline-virtual-item");
-    const marker = document.querySelectorAll(".user-message-navigator button")[2];
-    const activeTurn = [...document.querySelectorAll(".conversation-turn")].at(-1);
-    if (
-      !(timeline instanceof HTMLElement) ||
-      !(target instanceof HTMLElement) ||
-      !(targetTurn instanceof HTMLElement) ||
-      !(marker instanceof HTMLButtonElement) ||
-      !(activeTurn instanceof HTMLElement)
-    ) {
-      throw new Error("The third user-message anchor is missing.");
-    }
-    return {
-      viewport: { width: innerWidth, height: innerHeight },
-      targetGap:
-        target.getBoundingClientRect().top - timeline.getBoundingClientRect().top,
-      targetOffsetWithinTurn:
-        target.getBoundingClientRect().top - targetTurn.getBoundingClientRect().top,
-      markerCurrent: marker.getAttribute("aria-current"),
-      expandedGroupCount: activeTurn.querySelectorAll(".agent-activity-group[open]").length,
-      scrollTop: timeline.scrollTop,
-      maximumScroll: timeline.scrollHeight - timeline.clientHeight,
-      expectedTargetGap: (() => {
-        const targetOffset =
-          timeline.scrollTop +
-          target.getBoundingClientRect().top -
-          timeline.getBoundingClientRect().top;
-        const expectedScroll = Math.min(
-          timeline.scrollHeight - timeline.clientHeight,
-          Math.max(0, targetOffset - 32),
-        );
-        return targetOffset - expectedScroll;
-      })(),
-      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
-    };
-  })()`;
-}
 
 function manualScrollOwnershipVisualAuditExpression() {
   return `(() => {
@@ -5193,7 +5157,15 @@ function nestedScrollFollowingVisualAuditExpression() {
   })()`;
 }
 
-function timelineExtremeFilesPrepareExpression() {
+async function prepareExpandedTimeline(client, viewport) {
+  const metrics = { width: viewport.width, deviceScaleFactor: 1, mobile: false };
+  await client.send("Emulation.setDeviceMetricsOverride", { ...metrics, height: 8192 });
+  await client.evaluate(timelineExtremeFilesPrepareExpression(true, viewport), false);
+  await waitForPreview(client, "window.__timelineExtremeFilesExpanded === true || window.__timelineExtremeFilesError !== undefined", "expanded file preparation", 620_000);
+  await client.send("Emulation.setDeviceMetricsOverride", { ...metrics, height: viewport.height });
+}
+
+function timelineExtremeFilesPrepareExpression(expanded = false, measuredViewport = null) {
   return `(() => {
     void (async () => {
       try {
@@ -5235,6 +5207,13 @@ function timelineExtremeFilesPrepareExpression() {
           throw new Error("The extreme timeline is missing.");
         }
 
+        const expansion = ${expanded ? `await (await import("/src/tooling/timelineExpansionAudit.ts")).expandTimelineFileDetails(timeline, 100000)` : "null"};
+        ${measuredViewport === null ? "" : `window.__timelineExtremeFilesExpanded = true;
+        await waitUntil("the measured viewport", () => innerWidth === ${measuredViewport.width} && innerHeight === ${measuredViewport.height}, 10_000);
+        await frame();
+        await frame();` }
+
+        const scrollCommit = await (${probeTimelineScrollCommit.toString()})(timeline);
         const readMountedIdentities = () => {
           const summaries = new Map();
           const wrappers = new Map();
@@ -5270,6 +5249,7 @@ function timelineExtremeFilesPrepareExpression() {
           previousProbe = current;
         }
 
+        const scrollWork = (${observeTimelineScrollWork.toString()})(timeline);
         const frameIntervals = [];
         const animationWorkByFrame = new Map();
         const animationCallbackOutliers = [];
@@ -5287,9 +5267,10 @@ function timelineExtremeFilesPrepareExpression() {
                 measurement = { applicationDuration: 0, duration: 0 };
                 animationWorkByFrame.set(timestamp, measurement);
               }
+              const scrollDuration = scrollWork.takeDuration();
               measurement.applicationDuration +=
-                callback === auditAnimationCallback ? 0 : duration;
-              measurement.duration += duration;
+                scrollDuration + (callback === auditAnimationCallback ? 0 : duration);
+              measurement.duration += duration + scrollDuration;
               if (callback !== auditAnimationCallback && duration > 8) {
                 animationCallbackOutliers.push({
                   duration,
@@ -5309,6 +5290,11 @@ function timelineExtremeFilesPrepareExpression() {
         let legacyPlaceholderFrames = 0;
         let maximumMountedItems = 0;
         let missingSummaryFrames = 0;
+        let expandedItemFailures = 0;
+        let expandedItemComparisons = 0;
+        let maximumVisibleGapPx = 0;
+        let visibleCoverageComparisons = 0;
+        const visibleGapSamples = [];
         let consecutiveSummaryComparisons = 0;
         let summaryIdentityChanges = 0;
         let wrapperIdentityChanges = 0;
@@ -5354,6 +5340,7 @@ function timelineExtremeFilesPrepareExpression() {
           requestAnimationFrame(tick);
         });
         window.requestAnimationFrame = nativeRequestAnimationFrame;
+        scrollWork.dispose();
         observer?.disconnect();
         const rapidElapsed = performance.now() - rapidStarted;
         await frame();
@@ -5417,6 +5404,40 @@ function timelineExtremeFilesPrepareExpression() {
               '[data-activity-content="deferred"]',
             );
             const timelineBounds = timeline.getBoundingClientRect();
+            if (${expanded}) {
+              for (const wrapper of mountedWrappers) {
+                const bounds = wrapper.getBoundingClientRect();
+                if (bounds.bottom <= timelineBounds.top || bounds.top >= timelineBounds.bottom) continue;
+                expandedItemComparisons += 1;
+                const details = wrapper.querySelector("details");
+                if (details?.open !== true || wrapper.querySelectorAll(".diff-virtual-row").length !== 2) expandedItemFailures += 1;
+              }
+            }
+            const listBounds = virtualList.getBoundingClientRect();
+            const visibleTop = Math.max(timelineBounds.top, listBounds.top);
+            const visibleBottom = Math.min(
+              timelineBounds.bottom, listBounds.bottom,
+              document.querySelector('.chat-dock').getBoundingClientRect().top,
+            );
+            if (visibleBottom > visibleTop) {
+              visibleCoverageComparisons++;
+              let coveredThrough = visibleTop;
+              let gap = 0;
+              const bounds = [...mountedWrappers].map((wrapper) => wrapper.getBoundingClientRect())
+                .filter((bounds) => bounds.bottom > visibleTop && bounds.top < visibleBottom)
+                .sort((left, right) => left.top - right.top);
+              for (const item of bounds) {
+                gap = Math.max(gap, item.top - coveredThrough);
+                coveredThrough = Math.max(coveredThrough, item.bottom);
+              }
+              gap = Math.max(gap, visibleBottom - coveredThrough);
+              maximumVisibleGapPx = Math.max(maximumVisibleGapPx, gap);
+              if (gap > 1 && visibleGapSamples.length < 6) visibleGapSamples.push({
+                gap, scrollTop: timeline.scrollTop, mountedRange,
+                listTop: listBounds.top, visibleTop, visibleBottom,
+                items: bounds.map(({top, bottom}) => ({top, bottom})),
+              });
+            }
             const visibleDeferredBodies = [...deferredBodyElements].filter((element) => {
               const bounds = element.getBoundingClientRect();
               return bounds.bottom > timelineBounds.top && bounds.top < timelineBounds.bottom;
@@ -5495,13 +5516,20 @@ function timelineExtremeFilesPrepareExpression() {
         const sortedAnimationWork = [...animationWorkByFrame.values()]
           .map((measurement) => measurement.duration)
           .sort((left, right) => left - right);
-        const sortedApplicationAnimationWork = [...animationWorkByFrame.values()]
+        const sortedApplicationWork = [...animationWorkByFrame.values()]
           .map((measurement) => measurement.applicationDuration)
           .sort((left, right) => left - right);
         const percentile = (values, percentileValue) =>
           values[Math.min(values.length - 1, Math.floor(values.length * percentileValue))] ?? 0;
         const list = document.querySelector(".agent-activity-virtual-list");
         window.__timelineExtremeFilesMetrics = {
+          expansion,
+          expandedItemComparisons,
+          expandedItemFailures,
+          maximumVisibleGapPx,
+          visibleCoverageComparisons,
+          visibleGapSamples,
+          scrollCommit,
           retainedProbeComparisons,
           retainedProbeSummaryChanges,
           retainedProbeWrapperChanges,
@@ -5515,18 +5543,18 @@ function timelineExtremeFilesPrepareExpression() {
           rapidP99FrameMs: percentile(sortedFrames, 0.99),
           rapidMaximumFrameMs: sortedFrames.at(-1) ?? 0,
           rapidAnimationWorkFrames: sortedAnimationWork.length,
-          rapidP95AnimationWorkMs: percentile(sortedAnimationWork, 0.95),
-          rapidP99AnimationWorkMs: percentile(sortedAnimationWork, 0.99),
-          rapidP95ApplicationAnimationWorkMs: percentile(
-            sortedApplicationAnimationWork,
+          rapidP95FrameWorkMs: percentile(sortedAnimationWork, 0.95),
+          rapidP99FrameWorkMs: percentile(sortedAnimationWork, 0.99),
+          rapidP95ApplicationWorkMs: percentile(
+            sortedApplicationWork,
             0.95,
           ),
-          rapidP99ApplicationAnimationWorkMs: percentile(
-            sortedApplicationAnimationWork,
+          rapidP99ApplicationWorkMs: percentile(
+            sortedApplicationWork,
             0.99,
           ),
-          rapidMaximumApplicationAnimationWorkMs:
-            sortedApplicationAnimationWork.at(-1) ?? 0,
+          rapidMaximumApplicationWorkMs:
+            sortedApplicationWork.at(-1) ?? 0,
           rapidAnimationCallbackOutliers: animationCallbackOutliers,
           rapidLongTasks: longTasks.length,
           rapidLongTaskTotalMs: longTasks.reduce((total, value) => total + value, 0),
@@ -5759,6 +5787,7 @@ function syntaxHighlightedDiffVisualAuditExpression() {
     const rootStyle = getComputedStyle(document.documentElement);
     return {
       viewport: { width: innerWidth, height: innerHeight },
+      diffFill: window.__previewDiffFill,
       tokenKinds,
       tokenColorCount: tokenColors.length,
       tokenCount: tokens.length,
@@ -6110,6 +6139,93 @@ function highlightedToolOutputVisualAuditExpression() {
     };
   })()`;
 }
+
+async function exerciseDiffFill(client) {
+  const originalZoom = await client.evaluate('document.documentElement.style.zoom', false);
+  const samples = [];
+  try {
+    for (const zoom of [1, 1.125]) {
+      const geometry = await client.evaluate(`(async () => {
+        document.documentElement.style.zoom = ${zoom};
+        const file = [...document.querySelectorAll('.diff-file-identity code')].find(
+          (element) => element.textContent?.trim() === 'engine.rs',
+        );
+        const block = file?.closest('.file-change-diff');
+        block.scrollIntoView({ behavior: 'instant', block: 'start' });
+        for (let index = 0; index < 4; index++) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        const viewport = block.querySelector('.diff-viewport');
+        const bounds = viewport.getBoundingClientRect();
+        const points = [];
+        for (const [kind, selector] of [
+          ['addition', '.unified-diff-row.is-addition'],
+          ['deletion', '.unified-diff-row.is-deletion'],
+        ]) {
+          const rows = [...viewport.querySelectorAll(selector)].slice(0, 2);
+          if (rows.length !== 2) throw new Error('The diff paint probe requires consecutive changed rows.');
+          const first = rows[0].getBoundingClientRect();
+          const last = rows[1].getBoundingClientRect();
+          for (let y = Math.ceil(first.top) + 1; y < Math.floor(last.bottom) - 1; y++) {
+            points.push({ kind, x: bounds.right - 2, y });
+          }
+        }
+        return {
+          points,
+          unusedGutter: viewport.offsetWidth - viewport.clientWidth,
+          verticalOverflow: viewport.scrollHeight - viewport.clientHeight,
+          stripedRows: [...viewport.querySelectorAll('.unified-diff-row.is-deletion')].filter(
+            (row) => getComputedStyle(row).backgroundImage !== 'none',
+          ).length,
+        };
+      })()`, true);
+      const screenshot = await client.send('Page.captureScreenshot', {
+        format: 'png', fromSurface: true, captureBeyondViewport: false,
+      });
+      const paint = await client.evaluate(`(async () => {
+        const image = new Image();
+        image.src = ${JSON.stringify(`data:image/png;base64,${screenshot.data}`)};
+        await image.decode();
+        const canvas = document.createElement('canvas');
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        const expected = {};
+        for (const [kind, color] of [['addition', '#5ecc71'], ['deletion', '#ff6762']]) {
+          context.fillStyle = 'color-mix(in lab, #181818 80%, ' + color + ')';
+          context.fillRect(0, 0, 1, 1);
+          expected[kind] = [...context.getImageData(0, 0, 1, 1).data];
+        }
+        context.drawImage(image, 0, 0);
+        let mismatches = 0;
+        const mismatchSamples = [];
+        for (const point of ${JSON.stringify(geometry.points)}) {
+          const actual = [...context.getImageData(
+            Math.floor(point.x * image.width / innerWidth),
+            Math.floor(point.y * image.height / innerHeight), 1, 1,
+          ).data];
+          if (actual.some((value, index) => Math.abs(value - expected[point.kind][index]) > 1)) {
+            mismatches++;
+            if (mismatchSamples.length < 4) mismatchSamples.push({ ...point, actual });
+          }
+        }
+        return { expected, mismatches, mismatchSamples };
+      })()`, true);
+      samples.push({ zoom, comparisons: geometry.points.length,
+        unusedGutter: geometry.unusedGutter, verticalOverflow: geometry.verticalOverflow,
+        stripedRows: geometry.stripedRows, ...paint });
+    }
+    await client.evaluate(`window.__previewDiffFill = ${JSON.stringify(samples)}`, false);
+  } finally {
+    await client.evaluate(`(async () => {
+      document.documentElement.style.zoom = ${JSON.stringify(originalZoom)};
+      for (let index = 0; index < 4; index++) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    })()`, true);
+  }
+}
+
 
 async function exerciseComposerFooterOcclusion(client) {
   const initial = await client.evaluate(`(() => ({
@@ -7510,25 +7626,15 @@ function validateReasoningActivityReflectionMetrics(metrics, viewport) {
 }
 
 function validateUserMessageNavigationMetrics(metrics, viewport) {
-  const tolerance = 2;
-  assert(
-    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `unexpected message-navigation viewport at ${viewport.width}x${viewport.height}`,
-  );
-  assert(
-    metrics.horizontalOverflow <= tolerance,
-    "message navigation created horizontal overflow",
-  );
-  assert(
-    Math.abs(metrics.targetGap - metrics.expectedTargetGap) <= tolerance,
-    `the marker did not navigate to the message's currently reachable position: ${JSON.stringify(metrics)}`,
-  );
-  assert(
-    metrics.targetOffsetWithinTurn > 500,
-    "the scenario did not validate a later message within the same turn",
-  );
-  assert(metrics.markerCurrent === "true", "the selected marker did not remain active");
-  assert(metrics.expandedGroupCount >= 1, "the turn did not remain expanded during navigation");
+  assert(metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height, "message-navigation viewport changed");
+  assert(metrics.cancellationDriftPx <= 1, "message navigation continued after manual scrolling");
+  assert(metrics.liveMarkerCount === 4 && metrics.samples.length === 5, "the marker index omitted live or existing messages");
+  for (const sample of metrics.samples) {
+    assert(sample.visible && sample.hit, "a message marker is hidden or obstructed");
+    assert(sample.errorPx <= 1 && sample.current, "message navigation missed its precise target");
+    if (sample.distance > 100 && !metrics.reducedMotion) assert(sample.intermediatePositions >= 3, "message navigation jumped instead of scrolling smoothly");
+    if (metrics.reducedMotion) assert(sample.intermediatePositions <= 1, "message navigation ignored reduced motion");
+  }
 }
 
 function validateManualScrollOwnershipMetrics(metrics, viewport) {
@@ -7995,12 +8101,14 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
   assert(metrics.tokenColorCount >= 7, "the syntax palette does not contain enough distinct colors");
   assert(metrics.contextHasSyntax === true, "context lines did not receive syntax highlighting");
   assert(
-    metrics.additionBackground === "rgb(31, 73, 50)",
-    "the semantic addition background is not solid and crisp",
+    metrics.diffFill.length === 2 && metrics.diffFill.every((sample) =>
+      sample.verticalOverflow <= tolerance && sample.unusedGutter === 0),
+    `the short diff reserves an unused scrollbar gutter: ${JSON.stringify(metrics.diffFill)}`,
   );
   assert(
-    metrics.deletionBackground === "rgb(82, 39, 37)",
-    "the semantic deletion background is not solid and crisp",
+    metrics.diffFill.every((sample) => sample.comparisons >= 70 &&
+      sample.mismatches === 0 && sample.stripedRows === 0),
+    `diff fill diverges from the official palette or has gaps/stripes: ${JSON.stringify(metrics.diffFill)}`,
   );
   assert(
     metrics.additionBackground !== metrics.deletionBackground,
@@ -9039,6 +9147,8 @@ function validateImageViewGroupMetrics(metrics, viewport) {
 }
 
 function validateTimelinePerformanceStressMetrics(metrics, viewport) {
+  assert(metrics.scrollCommit.geometryReadsAfterMutation === 0, "the scroll event read layout after mutating activity DOM");
+  assert(metrics.scrollCommit.rangeChanged, "the scheduled frame did not update the activity range");
   const tolerance = 1;
   const exceptionalApplicationCallbacks = metrics.rapidAnimationCallbackOutliers.filter(
     (outlier) => outlier.duration > 10,
@@ -9095,21 +9205,21 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
     "instrumentation did not cover every rapid-scroll frame",
   );
   assert(
-    metrics.rapidP95ApplicationAnimationWorkMs <= 10,
-    `P95 application work was ${metrics.rapidP95ApplicationAnimationWorkMs.toFixed(2)} ms`,
+    metrics.rapidP95ApplicationWorkMs <= 10,
+    `P95 application work was ${metrics.rapidP95ApplicationWorkMs.toFixed(2)} ms`,
   );
   assert(
-    metrics.rapidP99AnimationWorkMs <= 20,
-    `total P99 work was ${metrics.rapidP99AnimationWorkMs.toFixed(2)} ms`,
+    metrics.rapidP99FrameWorkMs <= 20,
+    `total P99 work was ${metrics.rapidP99FrameWorkMs.toFixed(2)} ms`,
   );
   assert(
-    metrics.rapidP99ApplicationAnimationWorkMs <= 10,
-    `P99 application work was ${metrics.rapidP99ApplicationAnimationWorkMs.toFixed(2)} ms`,
+    metrics.rapidP99ApplicationWorkMs <= 10,
+    `P99 application work was ${metrics.rapidP99ApplicationWorkMs.toFixed(2)} ms`,
   );
   assert(
-    metrics.rapidMaximumApplicationAnimationWorkMs <= 12 &&
+    metrics.rapidMaximumApplicationWorkMs <= 12 &&
       exceptionalApplicationCallbacks.length <= 1,
-    `exceptional application work exceeded the contract: maximum ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms across ${exceptionalApplicationCallbacks.length} callbacks`,
+    `exceptional application work exceeded the contract: maximum ${metrics.rapidMaximumApplicationWorkMs.toFixed(2)} ms across ${exceptionalApplicationCallbacks.length} callbacks`,
   );
   assert(
     metrics.rapidP95FrameMs <= 25,
@@ -9139,16 +9249,17 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
   assert(metrics.mountedSourceRows <= 800, "too many tool rows remained mounted");
   assert(metrics.mountedDiffRows <= 500, "too many diff rows remained mounted");
   assert(
-    metrics.diffViewportIntegrity.length > 0 &&
+    metrics.diffViewportIntegrity.some((entry) => entry.active) &&
       metrics.diffViewportIntegrity.every(
-        (entry) =>
+        (entry) => entry.active ?
           entry.canvasConnected === true &&
           entry.canvasHeight !== null &&
           entry.canvasHeight >= entry.clientHeight &&
           entry.scrollHeight >= entry.clientHeight &&
           entry.declaredRows > 0 &&
           entry.mountedRows > 0 &&
-          entry.rowGaps.every((gap) => Math.abs(gap - 20) <= tolerance),
+          entry.rowGaps.every((gap) => Math.abs(gap - 20) <= tolerance) :
+          entry.canvasConnected === false && entry.clientHeight === 0 && entry.mountedRows === 0,
       ),
     `diff canvases lost rows or geometry after recycling: ${JSON.stringify(metrics.diffViewportIntegrity)}`,
   );
@@ -9245,13 +9356,25 @@ function validateActivityShimmerMetrics(metrics, viewport) {
   assert(metrics.horizontalOverflow <= tolerance, "shimmer created horizontal overflow");
 }
 
+function validateTimelineExpandedFilesMetrics(metrics, viewport) {
+  assert(metrics.expansion?.expandedCount === 100_000, "the extreme test did not open every file");
+  assert(metrics.expandedItemComparisons > 0 && metrics.expandedItemFailures === 0, "expanded scrolling lost open details or actual diff rows");
+  validateTimelineExtremeFilesMetrics(metrics, viewport);
+}
+
 function validateTimelineExtremeFilesMetrics(metrics, viewport) {
+  assert(metrics.scrollCommit.geometryReadsAfterMutation === 0, "the scroll event read layout after mutating activity DOM");
+  assert(metrics.scrollCommit.rangeChanged, "the scheduled frame did not update the activity range");
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
     `unexpected 100,000-file viewport at ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.totalActivities === 100_000, "the extreme projection lost files");
+  assert(
+    metrics.visibleCoverageComparisons >= 60 && metrics.maximumVisibleGapPx <= 1,
+    `the extreme timeline left visible gaps: ${JSON.stringify(metrics.visibleGapSamples)}`,
+  );
   assert(metrics.retainedProbeComparisons > 0, "the extreme probe did not compare retained file identities");
   assert(
     metrics.retainedProbeSummaryChanges === 0 && metrics.retainedProbeWrapperChanges === 0,
@@ -9267,20 +9390,20 @@ function validateTimelineExtremeFilesMetrics(metrics, viewport) {
     "instrumentation did not cover the 100,000-file frames",
   );
   assert(
-    metrics.rapidP95ApplicationAnimationWorkMs <= 8,
-    `application work for 100,000 files was ${metrics.rapidP95ApplicationAnimationWorkMs.toFixed(2)} ms at P95`,
+    metrics.rapidP95ApplicationWorkMs <= 8,
+    `application work for 100,000 files was ${metrics.rapidP95ApplicationWorkMs.toFixed(2)} ms at P95`,
   );
   assert(
-    metrics.rapidP99AnimationWorkMs <= 10,
-    `total work for 100,000 files was ${metrics.rapidP99AnimationWorkMs.toFixed(2)} ms at P99`,
+    metrics.rapidP99FrameWorkMs <= 10,
+    `total work for 100,000 files was ${metrics.rapidP99FrameWorkMs.toFixed(2)} ms at P99`,
   );
   assert(
-    metrics.rapidP99ApplicationAnimationWorkMs <= 8,
-    `application work for 100,000 files was ${metrics.rapidP99ApplicationAnimationWorkMs.toFixed(2)} ms at P99`,
+    metrics.rapidP99ApplicationWorkMs <= 8,
+    `application work for 100,000 files was ${metrics.rapidP99ApplicationWorkMs.toFixed(2)} ms at P99`,
   );
   assert(
-    metrics.rapidMaximumApplicationAnimationWorkMs <= 10,
-    `maximum application work for 100,000 files was ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms`,
+    metrics.rapidMaximumApplicationWorkMs <= 10,
+    `maximum application work for 100,000 files was ${metrics.rapidMaximumApplicationWorkMs.toFixed(2)} ms`,
   );
   assert(metrics.rapidP95FrameMs <= 20, "100,000-file P95 exceeded 20ms");
   assert(metrics.rapidP99FrameMs <= 34, "100,000-file P99 exceeded 34ms");

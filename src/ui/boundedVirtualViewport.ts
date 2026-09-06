@@ -57,6 +57,7 @@ export function virtualLogicalToPhysicalOffset(
     maximumLogicalOffset,
     nonNegativeFinite(logicalOffset, "logical offset"),
   );
+  if (total === physicalTotal) return boundedLogicalOffset;
   return maximumLogicalOffset === 0
     ? 0
     : (boundedLogicalOffset / maximumLogicalOffset) * maximumPhysicalOffset;
@@ -69,7 +70,7 @@ export function projectVirtualLogicalOffset(
   if (!Number.isFinite(logicalOffset) || logicalOffset < 0) {
     throw new Error("Projected virtual offsets must be non-negative finite numbers.");
   }
-  return viewport.physicalOffset + logicalOffset - viewport.logicalOffset;
+  return logicalOffset + (viewport.physicalOffset - viewport.logicalOffset);
 }
 
 function physicalToLogicalOffset(
@@ -78,6 +79,7 @@ function physicalToLogicalOffset(
   physicalTotalSize: number,
   viewportSize: number,
 ): number {
+  if (logicalTotalSize === physicalTotalSize) return physicalOffset;
   const maximumPhysicalOffset = Math.max(0, physicalTotalSize - viewportSize);
   const maximumLogicalOffset = Math.max(0, logicalTotalSize - viewportSize);
   return maximumPhysicalOffset === 0

@@ -6,7 +6,8 @@
   multi-file refactor through Code Mode. Local benchmarks
   do not establish provider latency or billed-token savings.
 - [ ] Run an authenticated 72-hour workload with network interruptions and
-  compaction; record retained memory, task correctness, recovery, and cancellation.
+  compaction; exercise expanded-history scrolling and live message navigation;
+  record retained memory, task correctness, recovery, and cancellation.
   Bounded synthetic soak coverage does not establish multi-day live parity.
 - [ ] Configure the four signing secrets in `RELEASE.md` before the first stable
   release when the Authenticode certificate becomes available.

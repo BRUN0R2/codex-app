@@ -172,6 +172,26 @@ at its midpoint, and remains opaque through the footer. Composer growth, notices
 and progress controls resize that same layer without another measurement loop.
 The scrollbar and conversation navigation remain above the backdrop.
 
+Scroll events publish one measured viewport snapshot in a batch. Nested activity
+lists measure their origin against the same live DOM scroll position and account
+for the parent canvas's translation when history exceeds the physical scroll
+limit. Geometry reads precede render mutations. Render slots retain the active
+window, explicitly guarded identities, and at most one spare window; contraction
+releases the former peak. A materialized body stops tracking viewport eligibility
+until its slot changes identity.
+
+Message navigation indexes the visible history, including the live overlay.
+Markers reserve their own gutter at every supported width while message and
+composer borders remain aligned. Logical message anchors map to physical scroll
+destinations with the leading and footer space preserved. Native smooth scrolling
+settles against the selected anchor, honors reduced motion, and yields to manual
+input or task changes.
+
+Diff rows use the audited Desktop dark palette, mixed with the surface in Lab.
+Code and line-number backgrounds remain solid across consecutive changed rows.
+Only an actual scrollbar reserves width; short diffs fill the panel through its
+right edge. Pixel checks cover normal and fractional zoom.
+
 Desktop notifications use the same ownership boundary. The main controller
 detects account and task transitions, resolves the per-event rule once, and
 places each bounded, deduplicated notification in its presentation lane. A

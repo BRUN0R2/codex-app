@@ -75,6 +75,26 @@ The focused regression compared 118, 147, and 192 retained items at the three
 viewports with zero replacements. Rapid-scroll timing and identity limits
 remain unchanged.
 
+### Expanded timelines
+
+The browser gate covers 100,000 collapsed files and the same 100,000 files with
+every detail opened through its real summary control. Each file contains a
+two-line diff. A separate 180-item corpus covers mixed commands, tools, and
+larger diffs. Expansion setup temporarily grows the viewport to 8,192 pixels
+and restores the measured size before timing, exercising release of the peak
+render window as well as steady scrolling.
+
+Frame-work accounting includes native scroll handlers and animation callbacks;
+audit work remains separately visible. Whole-frame intervals and long tasks
+protect the complete rendering path. Correctness runs check continuous visible
+coverage above the composer, expanded contents, retained element identities,
+reversal, resizing, and anchor drift. Each case writes its metrics and screenshot
+to `.artifacts/visual-audit` after measurement.
+
+Navigation probes cover existing and live user messages, both motion
+preferences, manual cancellation, and one-pixel target accuracy. Fractional
+and compressed coordinates also have 100,000-position numerical regressions.
+
 ## Solid transform analysis
 
 The reported message

@@ -56,7 +56,7 @@ describe("tooling bootstrap contract", () => {
     expect(visualAuditRuntime).toContain('"--enable-smooth-scrolling"');
     expect(visualAuditRuntime).toContain('"--force-prefers-no-reduced-motion"');
     expect(visualAuditScript).toContain(
-      'features: [{ name: "prefers-reduced-motion", value: "no-preference" }]',
+      'features: [{ name: "prefers-reduced-motion", value: scenario.reducedMotion === true ? "reduce" : "no-preference" }]',
     );
   });
 

@@ -11,7 +11,7 @@ local implementation remains independent.
 | audited source commit | `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` |
 | additional core inspection | `d4dc882998ddf7f3d2b40893ef2f77a5fdfa5715`, audited 2026-09-05 |
 | Codex Desktop for Windows | installed package `26.901.5280.0`, inspected 2026-09-05 |
-| Desktop footer layout | installed package `26.901.6511.0`, inspected 2026-09-06 |
+| Desktop conversation and diff presentation | installed package `26.901.6511.0`, inspected 2026-09-06 |
 
 Study checkouts live outside the build, including `.references/openai-codex`.
 No referenced crate, package, executable, database, configuration, or credential
@@ -244,6 +244,14 @@ behavior. Bottom spacing is covered along with the composer; the scrollbar stays
 above that layer and final-item scroll padding retains its full-height contract.
 Pixel regressions verify the fade, opaque footer, and visible lower scroll arrow
 with both normal and expanded drafts at three viewports.
+
+The diff renderer in `app-initial-f87238153a19.js` uses dark change bases
+`#5ecc71` and `#ff6762`, mixed with 80% of the surface in Lab. The presentation
+rules in `app-primary-428a0a65766f.js` use an automatic scrollbar gutter and
+explicit line fills. Native diff rows use those colors with continuous solid
+fills, including the number column; patterned deletion decorations are excluded
+as requested. The regression checks the right edge and consecutive changed rows
+at 100% and 112.5% zoom.
 
 ## Windows command environment and outcomes
 

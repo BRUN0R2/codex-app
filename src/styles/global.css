@@ -87,10 +87,10 @@
   --red-soft: rgb(250 66 62 / 18%);
   --diff-surface: var(--bg);
   --diff-gutter: var(--diff-surface);
-  --diff-added-background: #1f4932;
-  --diff-deleted-background: #522725;
-  --diff-added-foreground: #4ade80;
-  --diff-deleted-foreground: #ff6764;
+  --diff-added-background: color-mix(in lab, var(--diff-surface) 80%, var(--diff-added-foreground));
+  --diff-deleted-background: color-mix(in lab, var(--diff-surface) 80%, var(--diff-deleted-foreground));
+  --diff-added-foreground: #5ecc71;
+  --diff-deleted-foreground: #ff6762;
   --syntax-attribute: #f2b8ff;
   --syntax-comment: #a9b2bd;
   --syntax-constant: #b8e8b0;
@@ -121,6 +121,7 @@
   --padding-toolbar: calc(var(--spacing) * 4);
   /* Official Desktop uses 48rem at a 16px root; this root is configurable. */
   --thread-content-max-width: 768px;
+  --thread-inline-gutter: 16px;
   --timeline-work-gap: calc(var(--spacing) * 3);
   --sidebar-width: clamp(240px, 360px, min(520px, calc(100vw - 438px)));
   --settings-nav-width: clamp(240px, 275px, min(520px, calc(100vw - 320px)));
@@ -2861,8 +2862,12 @@ pre {
 
 .timeline-inner,
 .composer-wrap {
-  width: min(var(--thread-content-max-width), calc(100% - 32px));
+  width: min(var(--thread-content-max-width), calc(100% - 2 * var(--thread-inline-gutter)));
   margin: 0 auto;
+}
+
+.chat-page:has(.user-message-navigator) {
+  --thread-inline-gutter: 48px;
 }
 
 .chat-page.chatgpt-empty .timeline-inner {
@@ -3091,7 +3096,7 @@ pre {
   z-index: 6;
   top: 96px;
   bottom: calc(var(--chat-dock-height) + 48px);
-  left: 24px;
+  left: 12px;
   display: flex;
   width: 32px;
   flex-direction: column;
@@ -4703,7 +4708,7 @@ pre {
 
 .model-safety-notice {
   display: flex;
-  width: min(var(--thread-content-max-width), calc(100% - 32px));
+  width: min(var(--thread-content-max-width), calc(100% - 2 * var(--thread-inline-gutter)));
   margin: 0 auto 8px;
   padding: 9px 11px;
   gap: 9px;
@@ -4726,7 +4731,7 @@ pre {
 
 .usage-limit-banner {
   display: flex;
-  width: min(var(--thread-content-max-width), calc(100% - 32px));
+  width: min(var(--thread-content-max-width), calc(100% - 2 * var(--thread-inline-gutter)));
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -4822,7 +4827,7 @@ pre {
 }
 
 .approval-card {
-  width: min(var(--thread-content-max-width), calc(100% - 32px));
+  width: min(var(--thread-content-max-width), calc(100% - 2 * var(--thread-inline-gutter)));
   margin: 0 auto 10px;
   padding: 14px;
   border: 1px solid var(--border-heavy);
@@ -5039,7 +5044,7 @@ pre {
   position: relative;
   z-index: var(--layer-chat-status);
   display: flex;
-  width: min(var(--thread-content-max-width), calc(100% - 32px));
+  width: min(var(--thread-content-max-width), calc(100% - 2 * var(--thread-inline-gutter)));
   justify-content: center;
   margin: 0 auto 10px;
   pointer-events: none;
@@ -8468,10 +8473,6 @@ pre {
 .error-toast button { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 5px; background: transparent; color: inherit; }
 .error-toast button:hover { background: rgb(255 255 255 / 8%); }
 
-@media (max-width: 1080px) {
-  .user-message-navigator { display: none; }
-}
-
 @media (max-width: 780px) {
   .app-shell {
     grid-template-columns: minmax(0, 1fr);
@@ -8558,7 +8559,6 @@ pre {
   overflow: auto;
   overscroll-behavior-x: contain;
   overscroll-behavior-y: contain;
-  scrollbar-gutter: stable;
   background: var(--diff-surface);
   outline: none;
   contain: strict;
