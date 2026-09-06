@@ -84,6 +84,12 @@ larger diffs. Expansion setup temporarily grows the viewport to 8,192 pixels
 and restores the measured size before timing, exercising release of the peak
 render window as well as steady scrolling.
 
+`pnpm measure:disclosure-memory` retains all 100,000 expansion states and caps
+their incremental Node heap at 28 MiB. Child indexes are allocated only for
+parents: the same corpus fell from 41,041,120 to 22,637,704 bytes (44.8%). Explicit
+collection belongs only to this isolated retained-memory benchmark; the browser
+gate measures normal collection and frame latency without forcing collection.
+
 Frame-work accounting includes native scroll handlers and animation callbacks;
 audit work remains separately visible. Whole-frame intervals and long tasks
 protect the complete rendering path. Correctness runs check continuous visible
