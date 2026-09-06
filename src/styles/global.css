@@ -8565,11 +8565,6 @@ pre {
   overflow-anchor: none;
 }
 
-.diff-viewport[data-viewport-sizing="intrinsic"] {
-  contain: content;
-  min-height: 1px;
-}
-
 .diff-viewport:focus-visible {
   box-shadow: inset 0 0 0 1px var(--focus-ring);
 }
