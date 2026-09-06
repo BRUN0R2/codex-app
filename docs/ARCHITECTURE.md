@@ -190,7 +190,9 @@ input or task changes.
 Diff rows use the audited Desktop dark palette, mixed with the surface in Lab.
 Code and line-number backgrounds remain solid across consecutive changed rows.
 Only an actual scrollbar reserves width; short diffs fill the panel through its
-right edge. Pixel checks cover normal and fractional zoom.
+right edge. Intrinsic diff panels use native content height so horizontal
+scrollbars do not consume line space; large panels remain capped at 360 pixels.
+Browser checks retain native scrollbars and cover normal and fractional zoom.
 
 Desktop notifications use the same ownership boundary. The main controller
 detects account and task transitions, resolves the per-event rule once, and

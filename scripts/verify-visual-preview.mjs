@@ -494,6 +494,35 @@ const SCENARIOS = [
     validate: validateSyntaxHighlightedDiffMetrics,
   },
   {
+    id: "short-diff-sizing",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: 'document.querySelector(".chat-page") !== null',
+    prepareExpression: `void (async () => {
+      try { window.__shortDiffSizing = await (await import("/src/tooling/diffIntrinsicSizingAudit.tsx")).auditDiffIntrinsicSizing(); }
+      catch (error) { window.__shortDiffSizingError = String(error?.stack ?? error); }
+      finally { window.__shortDiffSizingReady = true; }
+    })()`,
+    readyExpression: "window.__shortDiffSizingReady === true",
+    auditExpression: () => `(() => {
+      if (window.__shortDiffSizingError !== undefined) throw new Error(window.__shortDiffSizingError);
+      return window.__shortDiffSizing;
+    })()`,
+    validate: (samples) => {
+      assert(samples.length === 32, "the intrinsic diff sizing matrix is incomplete");
+      for (const sample of samples) {
+        const detail = JSON.stringify(sample);
+        assert(sample.longLines === (sample.horizontalOverflow > 0), `unexpected horizontal scrolling: ${detail}`);
+        if (sample.rowCount < 18) {
+          assert(sample.verticalOverflow <= 1 && sample.clippedRows === 0 &&
+            sample.mountedRows === sample.rowCount, `short diff lines were clipped: ${detail}`);
+        } else {
+          assert(sample.outerHeight <= 360.5 && sample.verticalOverflow > 0 &&
+            sample.mountedRows <= 19, `large diff lost bounded virtualization: ${detail}`);
+        }
+      }
+    },
+  },
+  {
     id: "review-file-layout",
     url: TIMELINE_STRESS_PREVIEW_URL,
     viewports: FILE_VIEWER_VIEWPORTS,
@@ -8224,8 +8253,9 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
   assert(
     metrics.diffCanvasHeight !== null &&
       metrics.diffCanvasHeight >= metrics.diffRowTopOffsets.length * 20 &&
-      metrics.diffViewportHeight === metrics.diffViewportClientHeight &&
-      metrics.diffViewportScrollHeight >= metrics.diffViewportClientHeight,
+      metrics.diffViewportHeight > metrics.diffViewportClientHeight &&
+      metrics.diffViewportClientHeight === metrics.diffCanvasHeight &&
+      metrics.diffViewportScrollHeight === metrics.diffViewportClientHeight,
     "the diff's virtual canvas does not represent the document's scrollable geometry",
   );
   assert(metrics.viewportHorizontalOverflow > 0, "the regression did not exercise horizontal scrolling");

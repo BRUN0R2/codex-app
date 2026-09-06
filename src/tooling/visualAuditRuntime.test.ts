@@ -40,6 +40,7 @@ describe("visual audit runtime", () => {
       `--user-data-dir=${profile}`,
     ]);
     expect(arguments_).not.toContain("about:blank");
+    expect(arguments_).not.toContain("--hide-scrollbars");
   });
 
   it("isolates consecutive measurements and closes each target before returning", async () => {

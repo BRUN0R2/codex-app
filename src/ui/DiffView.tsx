@@ -142,9 +142,6 @@ export function DiffView(props: {
       hidden={props.hidden}
       onScroll={updateViewportScroll}
       ref={viewportElement}
-      style={{
-        height: usesContainerSizing ? undefined : `${intrinsicViewportHeight()}px`,
-      }}
       // biome-ignore lint/a11y/noNoninteractiveTabindex: the virtual diff viewport must remain keyboard-scrollable without mounting the full document.
       tabIndex={0}
     >

@@ -55,7 +55,6 @@ export function chromiumAuditArguments(userDataDirectory: string): readonly stri
     "--edge-skip-compat-layer-relaunch",
     "--enable-smooth-scrolling",
     "--force-prefers-no-reduced-motion",
-    "--hide-scrollbars",
     "--metrics-recording-only",
     "--no-first-run",
     "--no-startup-window",
