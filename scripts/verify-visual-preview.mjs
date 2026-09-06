@@ -1956,6 +1956,7 @@ function previewHighlightedToolOutputsPrepareExpression() {
             return {
               canvasHeight: currentCanvas.getBoundingClientRect().height,
               clientHeight: currentViewport.clientHeight,
+              outerHeight: viewportBounds.height,
               lineNumbers: currentRows.map(
                 (row) => row.querySelector(".tool-source-line-number")?.textContent?.trim() ?? "",
               ),
@@ -2097,6 +2098,7 @@ function previewHighlightedToolOutputsPrepareExpression() {
               sourceInlineOverlapCount,
               sourceCanvasHeight: sourceCanvas.getBoundingClientRect().height,
               sourceViewportClientHeight: sourceViewport.clientHeight,
+              sourceViewportHeight: sourceViewportBounds.height,
               sourceViewportScrollHeight: sourceViewport.scrollHeight,
               sourceVirtualizationCycle: { firstOpen, reopened, bottom, restored },
               sourceTokenKinds: [
@@ -7110,6 +7112,11 @@ function automationEditorVisualAuditExpression() {
     const heading = rectangle(".automation-editor h2");
     const prompt = rectangle(".automation-editor textarea");
     const editorElement = document.querySelector(".automation-editor");
+    const backdropElement = document.querySelector(".automation-editor-backdrop");
+    if (!(backdropElement instanceof HTMLElement)) throw new Error("The Automation editor backdrop is missing.");
+    const backdropStyle = getComputedStyle(backdropElement);
+    const availableEditorWidth = backdropElement.clientWidth -
+      Number.parseFloat(backdropStyle.paddingLeft) - Number.parseFloat(backdropStyle.paddingRight);
     const switchElement = document.querySelector('.automation-enabled-field input[role="switch"]');
     if (!(editorElement instanceof HTMLElement) || !(switchElement instanceof HTMLInputElement)) {
       throw new Error("The Automation editor controls are missing.");
@@ -7125,6 +7132,7 @@ function automationEditorVisualAuditExpression() {
       prompt,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
       editorHorizontalOverflow: editorElement.scrollWidth - editorElement.clientWidth,
+      availableEditorWidth,
       dialogCount: document.querySelectorAll('.automation-editor[role="dialog"][aria-modal="true"]').length,
       namedFields: document.querySelectorAll(".automation-editor input, .automation-editor textarea, .automation-editor select").length,
       footerButtons: document.querySelectorAll(".automation-editor footer button").length,
@@ -8358,7 +8366,9 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
   );
   assert(
     metrics.sourceCanvasHeight >= metrics.sourceViewportScrollHeight - tolerance &&
-      metrics.sourceViewportClientHeight === 205,
+      metrics.sourceViewportHeight === 205 &&
+      metrics.sourceViewportClientHeight > 0 &&
+      metrics.sourceViewportClientHeight <= metrics.sourceViewportHeight,
     "the file-read canvas does not fully represent its virtual range",
   );
   const virtualizationCycle = metrics.sourceVirtualizationCycle;
@@ -8373,7 +8383,8 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
       (phase) =>
         phase !== undefined &&
         Math.abs(phase.canvasHeight - 56 * 22) <= tolerance &&
-        phase.clientHeight === 205 &&
+        phase.outerHeight === 205 &&
+        phase.clientHeight > 0 && phase.clientHeight <= phase.outerHeight &&
         Math.abs(phase.scrollHeight - 56 * 22) <= tolerance &&
         phase.rowGaps.length === 9 &&
         phase.rowGaps.every((gap) => Math.abs(gap - 22) <= tolerance) &&
@@ -8980,7 +8991,10 @@ function validateAutomationEditorMetrics(metrics, viewport) {
   );
   assert(metrics.editor.top >= metrics.chrome.bottom, "the editor is positioned above the content");
   assert(metrics.editor.bottom <= viewport.height + tolerance, "the editor exceeds the viewport");
-  assert(metrics.editor.width >= 500 - tolerance, "the editor became excessively narrow");
+  assert(
+    Math.abs(metrics.editor.width - Math.min(680, metrics.availableEditorWidth)) <= tolerance,
+    "the editor does not fill its available width up to its 680px limit",
+  );
   assert(Number.parseFloat(metrics.heading.fontSize) >= 17, "the editor title became too small");
   assert(metrics.prompt.height >= 150, "the instruction field became too short");
   assert(metrics.dialogCount === 1, "the editor does not expose exactly one modal dialog");
