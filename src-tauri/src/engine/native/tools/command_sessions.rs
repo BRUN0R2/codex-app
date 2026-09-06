@@ -1433,6 +1433,7 @@ mod tests {
             cwd: ".".into(),
             reason: "test background yield".into(),
             parallel_safe: false,
+            login: Some(false),
             yield_time_ms: Some(2_000),
             timeout_seconds: Some(30),
         };
@@ -1499,6 +1500,7 @@ mod tests {
             cwd: ".".into(),
             reason: "test turn-owned background cleanup".into(),
             parallel_safe: false,
+            login: Some(false),
             yield_time_ms: Some(250),
             timeout_seconds: Some(60),
         };
@@ -1550,6 +1552,7 @@ mod tests {
             cwd: ".".into(),
             reason: "test foreground completion".into(),
             parallel_safe: false,
+            login: Some(false),
             yield_time_ms: Some(20_000),
             timeout_seconds: Some(30),
         };
@@ -1706,6 +1709,7 @@ mod tests {
             cwd: ".".into(),
             reason: "benchmark background responsiveness".into(),
             parallel_safe: false,
+            login: Some(false),
             yield_time_ms: Some(250),
             timeout_seconds: Some(30),
         };
@@ -1764,6 +1768,7 @@ mod tests {
             cwd: ".".into(),
             reason: "benchmark independent work".into(),
             parallel_safe: true,
+            login: Some(false),
             yield_time_ms: Some(20_000),
             timeout_seconds: Some(30),
         };

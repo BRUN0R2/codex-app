@@ -206,6 +206,8 @@ struct ExecCommandArgs {
     reason: String,
     parallel_safe: bool,
     #[serde(default)]
+    login: Option<bool>,
+    #[serde(default)]
     yield_time_ms: Option<u64>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
@@ -475,7 +477,7 @@ impl ToolRegistry {
             ),
             function_tool(
                 "exec_command",
-                "Run one non-interactive PowerShell command in the workspace. Commands that outlive yield_time_ms continue in an engine-owned background session that can be checked with poll_command while other work proceeds. Full output is spooled for read_output after completion. External windows remain unsupported and child processes stay headless. Workspace-write mode asks the user first.",
+                "Run one non-interactive PowerShell command in the workspace. Commands that outlive yield_time_ms continue in an engine-owned background session; use poll_command to wait or read new output instead of executing the command again. Full output is spooled for read_output after completion. Nonzero exit codes are command outcomes, not transport failures: inspect the result before deciding whether to retry. PowerShell can emit output and still fail; SilentlyContinue hides error messages without making a failed cmdlet successful. When missing process or file matches are expected, enumerate existing entries and filter them. External windows remain unsupported and child processes stay headless. Workspace-write mode asks the user first.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -485,6 +487,10 @@ impl ToolRegistry {
                         "parallel_safe": {
                             "type": "boolean",
                             "description": "Set true only when this command is independent of every other command emitted in the same response, does not mutate shared files or configuration, and does not depend on another command's output. Otherwise set false. Parallel execution is additionally restricted by the active permission profile."
+                        },
+                        "login": {
+                            "type": ["boolean", "null"],
+                            "description": "Load the user's PowerShell profile. Defaults to true; set false for a command that needs a clean session without profile-defined functions or environment changes."
                         },
                         "yield_time_ms": {
                             "type": ["integer", "null"],
@@ -499,7 +505,7 @@ impl ToolRegistry {
                             "description": "Execution budget in seconds, chosen by the agent from the command's expected worst-case duration. Use null for the safe one-hour default. Do not guess short limits for recursive searches, builds, tests, installs, or external tools; long-running work can request up to seven days."
                         }
                     },
-                    "required": ["command", "cwd", "reason", "parallel_safe", "yield_time_ms", "timeout_seconds"],
+                    "required": ["command", "cwd", "reason", "parallel_safe", "login", "yield_time_ms", "timeout_seconds"],
                     "additionalProperties": false
                 }),
             ),
@@ -2275,6 +2281,7 @@ mod tests {
                 "cwd",
                 "reason",
                 "parallel_safe",
+                "login",
                 "yield_time_ms",
                 "timeout_seconds"
             ])
@@ -2289,6 +2296,7 @@ mod tests {
             BTreeSet::from([
                 "command",
                 "cwd",
+                "login",
                 "parallel_safe",
                 "reason",
                 "timeout_seconds",
@@ -2296,6 +2304,10 @@ mod tests {
             ])
         );
         assert_eq!(parameters["properties"]["parallel_safe"]["type"], "boolean");
+        assert_eq!(
+            parameters["properties"]["login"]["type"],
+            serde_json::json!(["boolean", "null"])
+        );
         assert!(
             parameters["properties"]["parallel_safe"]["description"]
                 .as_str()

@@ -55,9 +55,15 @@ impl Ripgrep {
             .executable()?
             .parent()
             .ok_or_else(|| AppError::State("ripgrep executable has no parent directory".into()))?;
+        let current_path = command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| key.as_encoded_bytes().eq_ignore_ascii_case(b"PATH"))
+            .map(|(_, value)| value.map(OsString::from))
+            .unwrap_or_else(|| env::var_os("PATH"));
         command.env(
             "PATH",
-            prepend_path_entry(executable_directory, env::var_os("PATH"))?,
+            prepend_path_entry(executable_directory, current_path)?,
         );
         Ok(())
     }
@@ -201,7 +207,7 @@ mod tests {
     use super::Ripgrep;
     use super::prepend_path_entry;
     #[cfg(windows)]
-    use crate::process::headless_shell_command;
+    use crate::process::{ShellProfile, headless_shell_command};
 
     #[test]
     fn bundled_directory_is_first_and_not_duplicated() {
@@ -230,7 +236,9 @@ mod tests {
     #[tokio::test]
     async fn child_powershell_resolves_the_bundled_ripgrep() {
         let ripgrep = Ripgrep::for_project_tests();
-        let mut command = headless_shell_command("rg --version | Select-Object -First 1");
+        let mut command =
+            headless_shell_command("rg --version | Select-Object -First 1", ShellProfile::Skip)
+                .expect("command environment should be prepared");
         ripgrep
             .configure_child_command(&mut command)
             .expect("child PATH should be configured");
@@ -247,6 +255,36 @@ mod tests {
                 env!("CODEX_BUNDLED_RG_VERSION"),
                 env!("CODEX_BUNDLED_RG_REVISION")
             )
+        );
+    }
+
+    #[test]
+    fn bundled_tool_preserves_the_prepared_child_environment() {
+        let ripgrep = Ripgrep::for_project_tests();
+        let mut command = crate::process::headless_command("unused-test-command");
+        let prepared = env::join_paths([Path::new("prepared-tool-directory")])
+            .expect("prepared path should encode");
+        command.env("PATH", &prepared);
+        ripgrep
+            .configure_child_command(&mut command)
+            .expect("bundled tool should join prepared PATH");
+        let path = command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| key.as_encoded_bytes().eq_ignore_ascii_case(b"PATH"))
+            .and_then(|(_, value)| value)
+            .expect("child PATH should exist");
+        assert_eq!(
+            env::split_paths(path).collect::<Vec<_>>(),
+            vec![
+                ripgrep
+                    .executable()
+                    .expect("bundled tool exists")
+                    .parent()
+                    .expect("directory exists")
+                    .to_path_buf(),
+                Path::new("prepared-tool-directory").to_path_buf(),
+            ]
         );
     }
 }

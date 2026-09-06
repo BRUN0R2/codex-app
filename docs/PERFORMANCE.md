@@ -33,6 +33,10 @@ produce a sample.
 Time to first delta requires a controlled authenticated task. An error, rate
 limit, or total request duration is not a substitute.
 
+Controlled command benchmarks explicitly skip PowerShell profiles, preserving
+their previous execution conditions. Normal agent commands load profiles by
+default; user profile startup work is outside these controlled measurements.
+
 Wire payload bytes and local serialization time are not billable-token or
 end-to-end latency measurements. `previous_response_id` avoids retransmitting
 known input and lets the provider reuse response state, but only provider usage
@@ -116,7 +120,8 @@ actual compiler invocations, and keep the warning enabled.
 
 Measurements use Windows with 28 logical processors. Credential and encoding
 baselines date from 2026-08-31; context boundaries, streamed dispatch, Code Mode,
-and the current gate were measured on 2026-09-05. These values describe local runs.
+were measured on 2026-09-05; the current gate and tool catalog were measured on
+2026-09-06. These values describe local runs.
 
 ### Agent startup, continuation, and compaction
 
@@ -184,7 +189,7 @@ dispatch, and exact retained bytes remove redundant hashing. These numbers
 measure preparation only, excluding persistence and provider latency. The
 release benchmark is reproducible with `pnpm measure:patch-preparation` and
 guards a 500 ms median limit in `pnpm verify:benchmarks`. The optimized full-gate
-run prepared the same 128 updates in 29.373 ms median; the debug speedup ratio
+run prepared the same 128 updates in 34.882 ms median; the debug speedup ratio
 does not claim an unmeasured release baseline.
 
 Focused tests cover nested directories, moves, append positions, original
@@ -197,7 +202,7 @@ includes the complete grouping contract for the nested freeform route.
 
 `pnpm measure:tool-dispatch` runs five controlled rounds with a 100 ms response
 tail and 100 ms of tool work. Deferring execution until the response ended took
-1,100 ms total; eager bounded dispatch took 547 ms (2.01x). The gate requires at
+1,084 ms total; eager bounded dispatch took 543 ms (2.00x). The gate requires at
 least 20% reduction. This measures local overlap, not authenticated provider
 latency or model quality.
 
@@ -212,10 +217,10 @@ separate from these bounded simulations.
 
 | Scenario | Result |
 | --- | ---: |
-| base catalog, 20 tools | 14,639 B; ~3,660 tokens |
+| base catalog, 20 tools | 15,219 B; ~3,805 tokens |
 | read-only catalog, 16 tools | 9,885 B; ~2,472 tokens |
-| read-only catalog reduction | 32.47% |
-| catalog build and encode | 0.0214 ms median |
+| read-only catalog reduction | 35.05% |
+| catalog build and encode | 0.0325 ms median |
 | provider output, 2,439,995 B -> 6,372 B | 99.7389% smaller |
 | moderate command, 3,216 B -> 414 B | 87.1269% smaller |
 | large command, 6,018 B -> 633 B | 89.4816% smaller |
@@ -229,14 +234,14 @@ separate from these bounded simulations.
 
 | Scenario | Result |
 | --- | ---: |
-| batched text streaming | 202.817x the sequential path |
-| framed command streaming | 73.276x the sequential path |
-| cold Code Mode runtime warm-up | 5.761 ms; one initialization |
-| 150,001-line diff | 45 mounted rows; 0.256 ms visible window |
-| incremental 64 MiB terminal | 1,263.008 ms; 50.7 MiB/s |
-| command after yield | response in 260 ms; independent work in 449 ms |
+| batched text streaming | 212.958x the sequential path |
+| framed command streaming | 76.848x the sequential path |
+| cold Code Mode runtime warm-up | 6.378 ms; one initialization |
+| 150,001-line diff | 45 mounted rows; 0.151 ms visible window |
+| incremental 64 MiB terminal | 1,586.538 ms; 40.3 MiB/s |
+| command after yield | response in 262 ms; independent work in 532 ms |
 | incremental polling | 146 B versus a 16,513 B snapshot |
-| four independent commands | 696.079 ms parallel versus 2,707.635 ms sequential |
+| four independent commands | 790.152 ms parallel versus 2,989.990 ms sequential |
 
 Visual QA passed at 920x640, 1280x820, and 1920x1080 without horizontal
 overflow. Ultra rendered as `rgb(167, 139, 250)` (`#a78bfa`); appearance does
@@ -246,12 +251,12 @@ not alter the engine capability gate.
 
 | Check | Result |
 | --- | ---: |
-| encoding | 469 valid UTF-8 files |
+| encoding | 471 valid UTF-8 files |
 | frontend | 107 files; 549 passing tests |
-| main JavaScript bundle | 433.47 kB; 129.01 kB gzip |
-| CSS | 149.23 kB; 26.62 kB gzip |
+| main JavaScript bundle | 433.47 kB; 129.02 kB gzip |
+| CSS | 149.17 kB; 26.62 kB gzip |
 | visual QA | 153 passing scenario/viewport cases |
-| Rust | 522 passing; 17 ignored checks; no failures |
+| Rust | 529 passing; 17 ignored checks; no failures |
 | Cargo, formatting, and Clippy | passed without warnings |
 
 ## Regression protection
@@ -284,10 +289,13 @@ not alter the engine capability gate.
 | local estimates compact early | provider-confirmed use plus additions after its durable boundary |
 | interrupted output shifts an older context measurement | durable response boundary, transactional migration, restart and fork tests |
 | browser degrades layout | viewport matrix, metrics, and WebView2 smoke test |
+| messages diverge from composer edges or show through the footer | shared-column bounds plus fade, footer-opacity, and scrollbar pixel checks with normal and expanded drafts |
 | refresh rate distorts QA | controlled identity probe separate from fast scrolling |
 | fixed-height scrolling replaces retained file components | overlapping-scroll identity probe over 100,000 files and shared keyed slots |
 | previous visual cases contaminate later measurements | one scoped browser target per case with confirmed cleanup and failure tests |
 | processes escape a turn | Windows tests with Job Object and a real descendant |
+| long-lived launch environments hide newly installed tools | fresh registered Windows paths, preserved child overrides, and native executable lookup tests |
+| partial PowerShell output is mistaken for success or an automatic retry | real process/file failures, explicit exit codes, stderr-on-success, and single-execution coverage |
 | translations diverge | exact catalog and placeholder validation tests |
 
 Thresholds live in scripts so documentation and gates cannot diverge. Changing a

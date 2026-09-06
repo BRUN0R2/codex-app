@@ -90,7 +90,7 @@ mod tests {
     use tokio::io::BufReader;
 
     use super::WindowsProcessJob;
-    use crate::process::headless_shell_command;
+    use crate::process::{ShellProfile, headless_shell_command};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn terminating_a_job_prevents_descendant_process_work() {
@@ -109,7 +109,7 @@ mod tests {
         let script_literal = powershell_literal(&descendant_script);
         let mut command = headless_shell_command(&format!(
             "Start-Process -FilePath pwsh.exe -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', '{script_literal}') -Wait:$false; [Console]::Out.WriteLine('descendant-started'); Start-Sleep -Seconds 30"
-        ));
+        ), ShellProfile::Skip).expect("command environment should be prepared");
         let job = WindowsProcessJob::new().expect("process job should be created");
         let mut child = command
             .stdin(Stdio::null())

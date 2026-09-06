@@ -11,6 +11,7 @@ local implementation remains independent.
 | audited source commit | `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` |
 | additional core inspection | `d4dc882998ddf7f3d2b40893ef2f77a5fdfa5715`, audited 2026-09-05 |
 | Codex Desktop for Windows | installed package `26.901.5280.0`, inspected 2026-09-05 |
+| Desktop footer layout | installed package `26.901.6511.0`, inspected 2026-09-06 |
 
 Study checkouts live outside the build, including `.references/openai-codex`.
 No referenced crate, package, executable, database, configuration, or credential
@@ -229,6 +230,49 @@ SSE text deltas do not contain exact usage. `response.completed` supplies the
 confirmed usage retained for context management. The frontend never attempts to
 reproduce the tokenizer. Turn headers display elapsed time without a separate
 token-spend projection.
+
+## Conversation footer
+
+Desktop's `thread-scroll-layout-99b3ea3429c1.js` keeps the normal conversation
+viewport beneath an absolutely positioned, measured footer. The shared backdrop
+in `app-primary-428a0a65766f.js` transitions from transparent to the chat surface
+at its midpoint and stays opaque below it. Compact presentation uses a separate
+scroll mask; it is not the normal conversation layout.
+
+The native timeline uses the measured dock height for the same surface-gradient
+behavior. Bottom spacing is covered along with the composer; the scrollbar stays
+above that layer and final-item scroll padding retains its full-height contract.
+Pixel regressions verify the fade, opaque footer, and visible lower scroll arrow
+with both normal and expanded drafts at three viewports.
+
+## Windows command environment and outcomes
+
+The installed Desktop's `src-VqXTPopo.js` prepares executable directories before
+starting its local backend. Its Windows workspace runtime contributes Git,
+PowerShell, Node, and validated native executables to the child `PATH`. The
+public core's `shell.rs` adds `-NoProfile` only when login-shell loading is
+disabled; the unified-exec handler resolves the model's `login` preference.
+
+NativeEngine prepares its own child environment. It merges the inherited launch
+path with a fresh registered Windows user/system path for every command and
+preserves that result when adding its bundled ripgrep. It does not inspect or
+depend on Desktop's runtime directories. PowerShell profile loading is available
+through the explicit `login` argument, enabled by default.
+
+The reported `Get-Process cargo,rustc,link -ErrorAction SilentlyContinue` failures
+were recorded as exit code 1. An isolated PowerShell reproduction confirms that
+requesting an absent process can return existing processes and still fail.
+`SilentlyContinue` hides the diagnostic, not the exit status. The same issue can
+affect file queries. This matches [PowerShell's command exit semantics](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_pwsh?view=powershell-7.6).
+The runtime keeps those outcomes intact; its command contract explains optional
+matching, inspecting failures, and polling existing sessions before any retry.
+
+Focused Windows coverage exercises an inherited path missing system tools, a new
+executable directory, bounded path composition, process/file queries with partial
+output, stderr on success, explicit failure codes, and single execution of a
+failed command. Registered paths come from the native
+[CreateEnvironmentBlock API](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-createenvironmentblock),
+with owned token lifetime and explicit environment-block release.
 
 ## Cache and integrity
 

@@ -285,6 +285,19 @@ cancellation, and incremental reads.
 tree enters a Job Object with `KILL_ON_JOB_CLOSE`; launch fails if ownership
 cannot be established.
 
+Every command composes its inherited launch `PATH` with the current registered
+Windows user/system paths, preserving launch precedence and removing duplicate
+entries. Windows expands registered environment references. Bundled ripgrep is
+prepended to that prepared child path. The parent environment and registry are
+never changed; new installations become discoverable without restarting the app.
+Environment acquisition and size failures are explicit command preparation errors.
+
+The `login` argument loads PowerShell profiles by default; `false` selects a clean
+session. Internal shell discovery and controlled command fixtures skip profiles.
+Exit codes remain authoritative even when stdout contains partial results or
+`SilentlyContinue` hides cmdlet errors. The tool contract distinguishes these
+outcomes from transport errors and directs yielded work through `poll_command`.
+
 | Limit | Value |
 | --- | ---: |
 | concurrent sessions | 32 |
