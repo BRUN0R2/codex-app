@@ -121,10 +121,7 @@
   --padding-toolbar: calc(var(--spacing) * 4);
   /* Official Desktop uses 48rem at a 16px root; this root is configurable. */
   --thread-content-max-width: 768px;
-  --thread-content-inline-padding: 16px;
   --timeline-work-gap: calc(var(--spacing) * 3);
-  --composer-inline-overhang: calc(var(--spacing) * 6);
-  --home-composer-inline-inset: calc(var(--spacing) * 3.25);
   --sidebar-width: clamp(240px, 360px, min(520px, calc(100vw - 438px)));
   --settings-nav-width: clamp(240px, 275px, min(520px, calc(100vw - 320px)));
   --spacing-token-sidebar: clamp(240px, 275px, min(520px, calc(100vw - 320px)));
@@ -132,6 +129,7 @@
   --layer-modal: 10000;
   --layer-settings: 200;
   --layer-toast: 300;
+  --layer-chat-backdrop: 5;
   --layer-chat-dock: 9;
   --layer-chat-status: 1;
   --layer-chat-composer: 2;
@@ -2861,14 +2859,16 @@ pre {
   pointer-events: auto;
 }
 
-.chat-page.chatgpt-surface .composer-wrap {
+.timeline-inner,
+.composer-wrap {
   width: min(var(--thread-content-max-width), calc(100% - 32px));
+  margin: 0 auto;
 }
 
 .chat-page.chatgpt-empty .timeline-inner {
   height: 100%;
   min-height: 0;
-  padding: 0 var(--thread-content-inline-padding);
+  padding: 0;
 }
 
 .chat-page.chatgpt-empty .empty-conversation {
@@ -2903,9 +2903,22 @@ pre {
   min-height: 0;
 }
 
+.chat-page:not(.chatgpt-empty) .timeline-frame::after {
+  position: absolute;
+  z-index: var(--layer-chat-backdrop);
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: var(--chat-dock-height);
+  background: linear-gradient(to bottom, transparent, var(--bg) 50%);
+  content: "";
+  pointer-events: none;
+}
+
 .timeline {
   min-height: 0;
   flex: 1;
+  isolation: isolate;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -3018,13 +3031,10 @@ pre {
 }
 
 .timeline-inner {
-  width: min(var(--thread-content-max-width), 100%);
   min-width: 0;
   max-width: 100%;
   min-height: 100%;
-  margin: 0 auto;
-  padding: 32px var(--thread-content-inline-padding)
-    calc(var(--chat-dock-height) + 32px);
+  padding: 32px 0 calc(var(--chat-dock-height) + 32px);
   /* Virtualizer applies the only anchor correction; native scroll anchoring would double it. */
   overflow-anchor: none;
 }
@@ -4893,8 +4903,6 @@ pre {
 .composer-wrap {
   position: relative;
   z-index: var(--layer-chat-composer);
-  width: min(var(--thread-content-max-width), calc(100% - 32px));
-  margin: 0 auto;
   padding: 0 0 16px;
   isolation: isolate;
 }

@@ -656,6 +656,7 @@ const SCENARIOS = [
     prepareExpression: composerPopoverLayeringPrepareExpression(),
     readyExpression: `window.__previewComposerPopoverLayeringReady === true`,
     auditExpression: composerPopoverLayeringVisualAuditExpression,
+    interact: exerciseComposerFooterOcclusion,
     validate: validateComposerPopoverLayeringMetrics,
   },
   {
@@ -6110,6 +6111,90 @@ function highlightedToolOutputVisualAuditExpression() {
   })()`;
 }
 
+async function exerciseComposerFooterOcclusion(client) {
+  const initial = await client.evaluate(`(() => ({
+    draft: document.querySelector(".composer textarea").value,
+    background: document.querySelector(".timeline").style.backgroundColor,
+  }))()`, false);
+  const samples = [];
+  try {
+    for (const [name, draft] of [
+      ["default", initial.draft],
+      ["expanded", Array.from({ length: 12 }, (_, index) => "Draft line " + index).join("\n")],
+    ]) {
+      const geometry = await client.evaluate(`(async () => {
+        const textarea = document.querySelector(".composer textarea");
+        document.querySelector(".timeline").style.backgroundColor = "#ff00ff";
+        textarea.value = ${JSON.stringify(draft)};
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        for (let frame = 0; frame < 4; frame++) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        const page = document.querySelector(".chat-page").getBoundingClientRect();
+        const dock = document.querySelector(".chat-dock").getBoundingClientRect();
+        const composer = document.querySelector(".composer").getBoundingClientRect();
+        const arrow = document.querySelector(".surface-scrollbar-arrow.down .surface-scrollbar-arrow-glyph").getBoundingClientRect();
+        const x = page.left + 2;
+        return {
+          dockHeight: dock.height,
+          composerHeight: composer.height,
+          background: getComputedStyle(document.querySelector(".main-panel")).backgroundColor,
+          points: [
+            { name: "above", x, y: dock.top - 4 },
+            { name: "fade", x, y: dock.top + dock.height / 4 },
+            { name: "lowerSide", x, y: dock.top + dock.height * 3 / 4 },
+            { name: "scrollbar", x: arrow.left + arrow.width / 2, y: arrow.top + arrow.height / 2 },
+            ...[0.1, 0.5, 0.9].map((fraction) => ({
+              name: "footer",
+              x: page.left + page.width * fraction,
+              y: (composer.bottom + page.bottom) / 2,
+            })),
+          ],
+        };
+      })()`, true);
+      const screenshot = await client.send("Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: false,
+      });
+      const paint = await client.evaluate(`(async () => {
+        const geometry = ${JSON.stringify(geometry)};
+        const image = new Image();
+        image.src = ${JSON.stringify(`data:image/png;base64,${screenshot.data}`)};
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        context.fillStyle = geometry.background;
+        context.fillRect(0, 0, 1, 1);
+        const background = [...context.getImageData(0, 0, 1, 1).data];
+        context.drawImage(image, 0, 0);
+        const points = geometry.points.map(({ name, x, y }) => ({
+          name,
+          color: [...context.getImageData(
+            Math.floor(x * image.width / innerWidth),
+            Math.floor(y * image.height / innerHeight), 1, 1,
+          ).data],
+        }));
+        return { background, points };
+      })()`, true);
+      samples.push({ name, dockHeight: geometry.dockHeight, composerHeight: geometry.composerHeight, ...paint });
+    }
+    await client.evaluate(`window.__previewComposerPopoverLayeringMetrics.footerOcclusion = ${JSON.stringify(samples)}`, false);
+  } finally {
+    await client.evaluate(`(async () => {
+      document.querySelector(".timeline").style.backgroundColor = ${JSON.stringify(initial.background)};
+      const textarea = document.querySelector(".composer textarea");
+      textarea.value = ${JSON.stringify(initial.draft)};
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      for (let frame = 0; frame < 4; frame++) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    })()`, true);
+  }
+}
+
 function composerPopoverLayeringVisualAuditExpression() {
   return `(() => {
     if (window.__previewComposerPopoverLayeringError !== undefined) {
@@ -6208,7 +6293,9 @@ function chatReferenceVisualAuditExpression() {
     const finalAnswer = rectangle(finalAnswerElement, "final answer");
     return {
       viewport: { width: innerWidth, height: innerHeight },
+      chatPage: rectangle(document.querySelector(".chat-page"), ".chat-page"),
       timelineInner: rectangle(timelineInnerElement, ".timeline-inner"),
+      composer: rectangle(document.querySelector(".composer"), ".composer"),
       userBubble,
       userBubbleStyle: styles(userBubbleElement, ".user-message-bubble"),
       duration,
@@ -6218,6 +6305,10 @@ function chatReferenceVisualAuditExpression() {
       firstCommentary,
       commentaryStyle: styles(firstCommentaryElement, "first commentary"),
       firstCommand,
+      firstCommandCard: rectangle(
+        firstCommandElement?.closest(".command-activity-card"),
+        "command card",
+      ),
       firstCommandText: firstCommandElement?.textContent?.trim() ?? null,
       activityStyle: styles(firstCommandElement, "first command"),
       terminalRead,
@@ -6888,7 +6979,7 @@ function automationEditorVisualAuditExpression() {
 
 function validateChatReferenceMetrics(metrics, viewport) {
   const tolerance = 1;
-  const minimumResponsiveWidth = Math.min(560, viewport.width - 360 - 8 - 1);
+  const expectedContentWidth = Math.min(768, metrics.chatPage.width - 32);
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
     `unexpected chat viewport at ${viewport.width}x${viewport.height}`,
@@ -6908,9 +6999,25 @@ function validateChatReferenceMetrics(metrics, viewport) {
     "the canonical physical width equivalent to 48rem changed",
   );
   assert(
-    metrics.timelineInner.width <= 768 + tolerance &&
-      metrics.timelineInner.width >= minimumResponsiveWidth - tolerance,
+    Math.abs(metrics.timelineInner.width - expectedContentWidth) <= tolerance,
     "the conversation column left the canonical responsive width",
+  );
+  for (const [label, bounds] of [
+    ["conversation", metrics.timelineInner],
+    ["commentary", metrics.firstCommentary],
+    ["command card", metrics.firstCommandCard],
+    ["turn divider", metrics.divider],
+    ["final answer", metrics.finalAnswer],
+  ]) {
+    assert(
+      Math.abs(bounds.left - metrics.composer.left) <= tolerance &&
+        Math.abs(bounds.right - metrics.composer.right) <= tolerance,
+      `the ${label} edges do not align with the composer border`,
+    );
+  }
+  assert(
+    Math.abs(metrics.userBubble.right - metrics.composer.right) <= tolerance,
+    "the user message does not align with the composer right border",
   );
   assert(
     metrics.userBubbleStyle.backgroundColor === "rgb(34, 34, 34)",
@@ -8180,6 +8287,30 @@ function validateComposerPopoverLayeringMetrics(metrics, viewport) {
     `unexpected composer-layer viewport at ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.horizontalOverflow <= tolerance, "the panels created horizontal overflow");
+  assert(
+    metrics.footerOcclusion.length === 2 &&
+      metrics.footerOcclusion[1].composerHeight > metrics.footerOcclusion[0].composerHeight + 40,
+    "the footer audit did not exercise composer growth",
+  );
+  for (const sample of metrics.footerOcclusion) {
+    const sameColor = (left, right) => left.every((value, index) => value === right[index]);
+    const point = (name) => sample.points.find((candidate) => candidate.name === name).color;
+    const sentinel = [255, 0, 255, 255];
+    assert(sameColor(point("above"), sentinel), "the visible timeline paint probe is missing");
+    assert(
+      !sameColor(point("fade"), sentinel) && !sameColor(point("fade"), sample.background),
+      "the dock does not fade the conversation at its upper edge",
+    );
+    assert(
+      sample.points.filter(({ name }) => name === "lowerSide" || name === "footer")
+        .every(({ color }) => sameColor(color, sample.background)),
+      "timeline content is visible beside or below the lower composer",
+    );
+    assert(
+      !sameColor(point("scrollbar"), sentinel) && !sameColor(point("scrollbar"), sample.background),
+      "the footer backdrop hides the scrollbar's lower arrow",
+    );
+  }
   assert(
     metrics.chatPageDisplay === "block" &&
       metrics.timelinePosition === "absolute" &&

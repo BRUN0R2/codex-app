@@ -162,6 +162,16 @@ state. Expensive projections are memoized and large lists are virtualized.
 Markdown, syntax highlighting, diffs, and large outputs use incremental work to
 avoid blocking the main thread.
 
+The timeline and composer share one centered responsive column. Message content
+and activity cards align with the composer's outer borders; the column adds no
+inner horizontal inset.
+
+The timeline retains its full-height scroll viewport beneath the dock. Its
+non-interactive backdrop uses the measured dock height, fades to the chat surface
+at its midpoint, and remains opaque through the footer. Composer growth, notices,
+and progress controls resize that same layer without another measurement loop.
+The scrollbar and conversation navigation remain above the backdrop.
+
 Desktop notifications use the same ownership boundary. The main controller
 detects account and task transitions, resolves the per-event rule once, and
 places each bounded, deduplicated notification in its presentation lane. A
