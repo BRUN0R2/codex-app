@@ -12,12 +12,33 @@ mod engine;
 mod error;
 mod process;
 
-use desktop_integration::{ApplicationMenuState, ApplicationPreferencesState, restore_main_window};
+use desktop_integration::{
+    ApplicationMenuState, ApplicationPreferencesState, DesktopIntegrationLifecycle,
+    restore_main_window,
+};
 use engine::{EngineManager, RuntimeDiagnosticSubsystem};
 use tauri::{Builder, Emitter as _, Manager as _, Runtime};
 
-fn manage_pre_setup_menu_state<R: Runtime>(builder: Builder<R>) -> Builder<R> {
-    builder.manage(ApplicationMenuState::default())
+fn manage_pre_setup_desktop_states<R: Runtime>(builder: Builder<R>) -> Builder<R> {
+    builder
+        .manage(ApplicationMenuState::default())
+        .manage(ApplicationPreferencesState::default())
+        .manage(DesktopIntegrationLifecycle::default())
+}
+
+fn initialize_desktop_integration(app: &mut tauri::App) -> Result<(), crate::error::AppError> {
+    app.state::<browser::BrowserManager>()
+        .initialize(app.handle())?;
+    app.state::<ApplicationPreferencesState>()
+        .initialize(app.handle())?;
+    desktop_integration::setup_tray_icon(app.handle())?;
+    let main_window = app
+        .get_webview_window("main")
+        .ok_or_else(|| crate::error::AppError::State("main window is unavailable".to_string()))?;
+    desktop_integration::apply_initial_window_state(&main_window)?;
+    #[cfg(debug_assertions)]
+    browser::start_runtime_smoke_if_requested(app.handle());
+    Ok(())
 }
 
 fn focus_main_window(app: &tauri::AppHandle) -> Result<(), String> {
@@ -71,7 +92,7 @@ pub fn run() {
     let browser_smoke_requested = browser::runtime_smoke_requested();
     #[cfg(not(debug_assertions))]
     let browser_smoke_requested = false;
-    let mut builder = manage_pre_setup_menu_state(tauri::Builder::default());
+    let mut builder = manage_pre_setup_desktop_states(tauri::Builder::default());
     if !browser_smoke_requested {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Err(error) = focus_main_window(app) {
@@ -95,24 +116,10 @@ pub fn run() {
         .manage(EngineManager::default())
         .manage(browser::BrowserManager::default())
         .setup(|app| {
-            app.state::<browser::BrowserManager>()
-                .initialize(app.handle())?;
-            let preferences = ApplicationPreferencesState::load(app.handle())?;
-            if !app.manage(preferences) {
-                return Err(crate::error::AppError::State(
-                    "application preferences state is already managed".to_string(),
-                )
-                .into());
-            }
-
-            desktop_integration::setup_tray_icon(app.handle())?;
-            let main_window = app.get_webview_window("main").ok_or_else(|| {
-                crate::error::AppError::State("main window is unavailable".to_string())
-            })?;
-            desktop_integration::apply_initial_window_state(&main_window)?;
-            #[cfg(debug_assertions)]
-            browser::start_runtime_smoke_if_requested(app.handle());
-            Ok(())
+            let initialization = initialize_desktop_integration(app);
+            app.state::<DesktopIntegrationLifecycle>()
+                .finish(&initialization)?;
+            initialization.map_err(Into::into)
         })
         .invoke_handler(tauri::generate_handler![
             attachments::attachment_inspect,
@@ -190,15 +197,21 @@ pub fn run() {
 
 #[cfg(test)]
 mod startup_state_tests {
-    use super::{ApplicationMenuState, manage_pre_setup_menu_state};
+    use super::{
+        ApplicationMenuState, ApplicationPreferencesState, DesktopIntegrationLifecycle,
+        manage_pre_setup_desktop_states,
+    };
     use tauri::{Manager as _, test};
 
     #[test]
-    fn menu_command_state_exists_before_runtime_setup() -> Result<(), Box<dyn std::error::Error>> {
-        let app = manage_pre_setup_menu_state(test::mock_builder())
+    fn desktop_command_states_exist_before_runtime_setup() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let app = manage_pre_setup_desktop_states(test::mock_builder())
             .build(test::mock_context(test::noop_assets()))?;
 
         assert!(app.try_state::<ApplicationMenuState>().is_some());
+        assert!(app.try_state::<ApplicationPreferencesState>().is_some());
+        assert!(app.try_state::<DesktopIntegrationLifecycle>().is_some());
         Ok(())
     }
 }

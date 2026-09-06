@@ -38,6 +38,11 @@ directory. The WebView cannot open paths directly.
 application and tray menus. The application menu is rolled back if tray menu
 synchronization fails.
 
+Every state extracted by a command is registered on the Tauri builder before
+any WebView can invoke it. Commands that require desktop setup await one
+explicit lifecycle transition; setup publishes either readiness or its original
+structured failure after preferences, tray, and initial window state finish.
+
 ## Events
 
 | Channel | Content |

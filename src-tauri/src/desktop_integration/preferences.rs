@@ -10,7 +10,7 @@ use tauri::{AppHandle, Manager, State};
 use tempfile::NamedTempFile;
 
 use crate::{
-    desktop_integration::startup,
+    desktop_integration::{DesktopIntegrationLifecycle, startup},
     error::{AppError, CommandResult},
 };
 
@@ -142,31 +142,42 @@ impl Default for NotificationEventPreferences {
 
 #[derive(Debug)]
 pub struct ApplicationPreferencesState {
-    preferences: Mutex<ApplicationPreferences>,
+    preferences: Mutex<Option<ApplicationPreferences>>,
+}
+
+impl Default for ApplicationPreferencesState {
+    fn default() -> Self {
+        Self {
+            preferences: Mutex::new(None),
+        }
+    }
 }
 
 impl ApplicationPreferencesState {
-    pub fn load(app: &AppHandle) -> Result<Self, AppError> {
+    pub fn initialize(&self, app: &AppHandle) -> Result<(), AppError> {
+        let mut current = self.lock()?;
+        if current.is_some() {
+            return Err(AppError::State(
+                "application preferences were already initialized".to_string(),
+            ));
+        }
         let path = application_preferences_path(app)?;
         let decoded = read(&path)?;
         if decoded.migrated {
             PreparedPreferencesWrite::prepare(path, &decoded.preferences)?.commit()?;
         }
         startup::synchronize(app, decoded.preferences.start_with_windows)?;
-
-        Ok(Self {
-            preferences: Mutex::new(decoded.preferences),
-        })
+        *current = Some(decoded.preferences);
+        Ok(())
     }
 
     pub fn current(&self) -> Result<ApplicationPreferences, AppError> {
-        self.preferences
-            .lock()
-            .map(|preferences| *preferences)
-            .map_err(|_| AppError::State("application preferences are unavailable".to_string()))
+        self.lock()?.as_ref().copied().ok_or_else(|| {
+            AppError::State("application preferences are not initialized".to_string())
+        })
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, ApplicationPreferences>, AppError> {
+    fn lock(&self) -> Result<MutexGuard<'_, Option<ApplicationPreferences>>, AppError> {
         self.preferences
             .lock()
             .map_err(|_| AppError::State("application preferences are unavailable".to_string()))
@@ -174,21 +185,30 @@ impl ApplicationPreferencesState {
 }
 
 #[tauri::command]
-pub fn application_preferences_read(
-    state: State<'_, ApplicationPreferencesState>,
+pub async fn application_preferences_read(
+    lifecycle: State<'_, DesktopIntegrationLifecycle>,
+    preferences_state: State<'_, ApplicationPreferencesState>,
 ) -> CommandResult<ApplicationPreferences> {
-    Ok(state.current()?)
+    lifecycle.wait_until_ready().await?;
+    Ok(preferences_state.current()?)
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn application_preferences_update(
+pub async fn application_preferences_update(
     app: AppHandle,
-    state: State<'_, ApplicationPreferencesState>,
+    lifecycle: State<'_, DesktopIntegrationLifecycle>,
+    preferences_state: State<'_, ApplicationPreferencesState>,
     preferences: ApplicationPreferences,
 ) -> CommandResult<ApplicationPreferences> {
+    lifecycle.wait_until_ready().await?;
     let preferences = preferences.validate()?;
     let path = application_preferences_path(&app)?;
-    let mut current = state.lock()?;
+    let mut current = preferences_state.lock()?;
+    if current.is_none() {
+        return Err(
+            AppError::State("application preferences are not initialized".to_string()).into(),
+        );
+    }
     let prepared_write = PreparedPreferencesWrite::prepare(path, &preferences)?;
     let previous_startup_registration = startup::registration_enabled(&app)?;
 
@@ -203,7 +223,7 @@ pub fn application_preferences_update(
         return Err(persist_error.into());
     }
 
-    *current = preferences;
+    *current = Some(preferences);
     Ok(preferences)
 }
 
@@ -383,9 +403,35 @@ fn application_preferences_path(app: &AppHandle) -> Result<PathBuf, AppError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        APPLICATION_PREFERENCES_SCHEMA_VERSION, ApplicationPreferences, NotificationPreferences,
-        decode,
+        APPLICATION_PREFERENCES_SCHEMA_VERSION, ApplicationPreferences,
+        ApplicationPreferencesState, NotificationPreferences, application_preferences_read, decode,
     };
+    use crate::{desktop_integration::DesktopIntegrationLifecycle, error::AppError};
+    use tauri::{Manager as _, test};
+
+    #[tokio::test]
+    async fn early_read_receives_the_desktop_initialization_failure() {
+        let app = test::mock_builder()
+            .manage(ApplicationPreferencesState::default())
+            .manage(DesktopIntegrationLifecycle::default())
+            .build(test::mock_context(test::noop_assets()))
+            .expect("mock application should build");
+        app.state::<DesktopIntegrationLifecycle>()
+            .finish(&Err(AppError::State("tray initialization failed".into())))
+            .expect("initialization failure should be published");
+
+        let error = application_preferences_read(
+            app.state::<DesktopIntegrationLifecycle>(),
+            app.state::<ApplicationPreferencesState>(),
+        )
+        .await
+        .expect_err("preference read should preserve the initialization failure");
+
+        assert_eq!(
+            error.message,
+            "engine state is invalid: tray initialization failed"
+        );
+    }
 
     #[test]
     fn defaults_keep_background_behaviors_disabled_and_notifications_enabled() {

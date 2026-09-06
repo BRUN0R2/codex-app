@@ -1,3 +1,4 @@
+mod lifecycle;
 pub(crate) mod menu;
 pub(crate) mod preferences;
 mod startup;
@@ -8,6 +9,7 @@ use tauri::WebviewWindow;
 
 use crate::error::AppError;
 
+pub use lifecycle::DesktopIntegrationLifecycle;
 pub use menu::ApplicationMenuState;
 pub use preferences::ApplicationPreferencesState;
 pub use startup::MINIMIZED_STARTUP_ARGUMENT;
