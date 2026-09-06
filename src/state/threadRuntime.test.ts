@@ -227,7 +227,7 @@ describe("thread runtime reducer", () => {
     expect(readPersistedVisibleTurns(newTurnCache(), withPoll)[0]?.items).not.toContainEqual(poll);
   });
 
-  it("projects confirmed output tokens from persisted usage after turn completion and reload", () => {
+  it("keeps context telemetry out of visible turns after completion and reload", () => {
     const thread = threadFixture("completed");
     const withUsage: CodexThread = {
       ...thread,
@@ -245,9 +245,12 @@ describe("thread runtime reducer", () => {
     const firstProjection = readPersistedVisibleTurns(newTurnCache(), withUsage)[0];
     const reloadedProjection = readPersistedVisibleTurns(newTurnCache(), withUsage)[0];
 
-    expect(firstProjection?.confirmedOutputTokens).toBe(42);
+    expect(firstProjection).toEqual({
+      ...withUsage.turns[0],
+      items: [...(thread.turns[0]?.items ?? []), { type: "contextCompaction", id: "compaction-1" }],
+    });
     expect(firstProjection?.items.map((item) => item.type)).not.toContain("contextUsage");
-    expect(reloadedProjection?.confirmedOutputTokens).toBe(42);
+    expect(reloadedProjection).toEqual(firstProjection);
   });
 
   it("treats runtime ownership as active even when the persisted snapshot is stale", () => {
@@ -542,7 +545,6 @@ describe("thread runtime reducer", () => {
   it("projects an active overlay without cloning a long persisted turn array", () => {
     const persisted = Array.from({ length: 10_000 }, (_, index) => ({
       id: `turn-${index}`,
-      confirmedOutputTokens: 0,
       items: [],
       status: "completed" as const,
       error: null,

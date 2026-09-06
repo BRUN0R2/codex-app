@@ -9,7 +9,6 @@ import {
   commandHeadline as rawCommandHeadline,
   commandLiveOutputText as rawCommandLiveOutputText,
   commandPollActivityTitle as rawCommandPollActivityTitle,
-  confirmedOutputTokenLabel as rawConfirmedOutputTokenLabel,
   fileChangeActionLabel as rawFileChangeActionLabel,
   fileChangeGroupTitle as rawFileChangeGroupTitle,
   fileReadActivityTitle as rawFileReadActivityTitle,
@@ -31,8 +30,6 @@ if (messages === undefined) throw new Error("The Brazilian Portuguese catalog is
 
 const turnDurationLabel = (status: Parameters<typeof rawTurnDurationLabel>[0], duration: string) =>
   rawTurnDurationLabel(status, duration, messages);
-const confirmedOutputTokenLabel = (tokens: number) =>
-  rawConfirmedOutputTokenLabel(tokens, messages, "pt-BR");
 const runningCommandHeadline = (duration: string | null, fallback: string) =>
   rawRunningCommandHeadline(duration, fallback, messages);
 const reasoningTitle = (
@@ -82,12 +79,6 @@ describe("timeline presentation", () => {
   it("uses the official running and completed turn semantics", () => {
     expect(turnDurationLabel("inProgress", "18 min 15 s")).toBe("Processando há 18 min 15 s");
     expect(turnDurationLabel("completed", "18 min 15 s")).toBe("Trabalhou por 18 min 15 s");
-  });
-
-  it("formats only safe provider-confirmed output token counts", () => {
-    expect(confirmedOutputTokenLabel(1)).toBe("↑ 1 token");
-    expect(confirmedOutputTokenLabel(1_234)).toBe("↑ 1.234 tokens");
-    expect(() => confirmedOutputTokenLabel(-1)).toThrow(RangeError);
   });
 
   it("keeps second-level precision for minute and hour durations", () => {

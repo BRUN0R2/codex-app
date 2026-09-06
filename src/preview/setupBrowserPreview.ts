@@ -2058,12 +2058,15 @@ function schedulePreviewActivityReconciliation(): void {
   const newerCommentary = {
     type: "agentMessage" as const,
     id: PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_ID,
-    text: PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_TEXT,
+    text: `${PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_TEXT}\n\nTexto **parcial confirmado**.`,
     phase: "commentary" as const,
   };
   let warmupFrames = 6;
   let started = 0;
   let commentaryEmitted = false;
+  let commentaryStage = 0;
+  let commentaryFrames = 0;
+  let commentaryParagraph: Element | null = null;
   let completed = 0;
   let identityComparisons = 0;
   let identityChanges = 0;
@@ -2132,6 +2135,73 @@ function schedulePreviewActivityReconciliation(): void {
         continue;
       }
       if (!commentaryEmitted) {
+        if (commentaryFrames > 0) {
+          commentaryFrames -= 1;
+          requestAnimationFrame(publishFrame);
+          return;
+        }
+        if (commentaryStage === 0) {
+          if (
+            !emitBrowserPreviewRuntimeEvent("engine://notification", {
+              method: "item.started",
+              params: { threadId, turnId, item: { ...newerCommentary, text: "" } },
+            }) ||
+            !emitBrowserPreviewRuntimeEvent("engine://notification", {
+              method: "item.streamDeltas",
+              params: {
+                threadId,
+                turnId,
+                deltas: [
+                  {
+                    kind: "agentText",
+                    itemId: newerCommentary.id,
+                    delta: `${PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_TEXT}\n\nTexto **parcial`,
+                  },
+                ],
+              },
+            })
+          ) {
+            throw new Error("The preview could not start streaming commentary.");
+          }
+          commentaryStage = 1;
+          commentaryFrames = 4;
+          requestAnimationFrame(publishFrame);
+          return;
+        }
+        if (commentaryStage === 1) {
+          commentaryParagraph = document.querySelector(".commentary .markdown p");
+          if (
+            !emitBrowserPreviewRuntimeEvent("engine://notification", {
+              method: "item.streamDeltas",
+              params: {
+                threadId,
+                turnId,
+                deltas: [
+                  {
+                    kind: "agentText",
+                    itemId: newerCommentary.id,
+                    delta: " confirmado**.",
+                  },
+                ],
+              },
+            })
+          ) {
+            throw new Error("The preview could not continue streaming commentary.");
+          }
+          commentaryStage = 2;
+          commentaryFrames = 4;
+          requestAnimationFrame(publishFrame);
+          return;
+        }
+        setMetric(
+          "commentary-prefix-retained",
+          String(
+            commentaryParagraph !== null &&
+              commentaryParagraph === document.querySelector(".commentary .markdown p") &&
+              document.querySelector(".commentary .markdown strong")?.textContent ===
+                "parcial confirmado",
+          ),
+        );
         if (
           !emitBrowserPreviewRuntimeEvent("engine://notification", {
             method: "item.completed",

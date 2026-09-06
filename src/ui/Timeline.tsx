@@ -121,7 +121,6 @@ import {
   commandLiveOutputText,
   commandOutputText,
   commandPollActivityTitle,
-  confirmedOutputTokenLabel,
   fileChangeActionLabel,
   fileChangeGroupTitle,
   fileReadActivityTitle,
@@ -1991,7 +1990,6 @@ function ConversationTurn(props: {
             }
             blockIndex={index()}
             clock={props.clock}
-            confirmedOutputTokens={props.turn.confirmedOutputTokens}
             diffDisplay={props.diffDisplay}
             disclosure={disclosure}
             firstWorkBlockIndex={presentation().firstWorkBlockIndex}
@@ -2006,18 +2004,14 @@ function ConversationTurn(props: {
 
       <Show when={needsTrailingThinking()}>
         <Show when={presentation().firstWorkBlockIndex === null}>
-          <TurnHeader
-            confirmedOutputTokens={props.turn.confirmedOutputTokens}
-            disclosure={disclosure}
-            label={turnLabel()}
-            status={props.turn.status}
-          />
+          <TurnHeader disclosure={disclosure} label={turnLabel()} status={props.turn.status} />
         </Show>
         <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
           <TurnWorkBlock
             activeThinkingPresentation="standalone"
             clock={props.clock}
             diffDisplay={props.diffDisplay}
+            isItemStreaming={props.isItemStreaming}
             items={[]}
             reasoningHeading={latestReasoningHeading()}
           />
@@ -2048,7 +2042,6 @@ function TurnPresentationBlockView(props: {
   readonly block: () => TurnPresentationBlock;
   readonly blockIndex: number;
   readonly clock: number;
-  readonly confirmedOutputTokens: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly disclosure: TimelineDisclosureBinding;
   readonly firstWorkBlockIndex: number | null;
@@ -2084,7 +2077,6 @@ function TurnPresentationBlockView(props: {
           <>
             <Show when={props.firstWorkBlockIndex === props.blockIndex}>
               <TurnHeader
-                confirmedOutputTokens={props.confirmedOutputTokens}
                 disclosure={props.disclosure}
                 label={props.turnLabel}
                 status={props.status}
@@ -2096,6 +2088,7 @@ function TurnPresentationBlockView(props: {
                   activeThinkingPresentation={props.activeThinkingPresentation}
                   clock={props.clock}
                   diffDisplay={props.diffDisplay}
+                  isItemStreaming={props.isItemStreaming}
                   items={workBlock().items}
                   reasoningHeading={props.reasoningHeading}
                 />
@@ -2109,7 +2102,6 @@ function TurnPresentationBlockView(props: {
 }
 
 function TurnHeader(props: {
-  readonly confirmedOutputTokens: number;
   readonly disclosure: TimelineDisclosureBinding;
   readonly label: string;
   readonly status: VisibleThreadTurn["status"];
@@ -2132,14 +2124,12 @@ function TurnHeader(props: {
             type="button"
           >
             <span class="turn-duration-label">{props.label}</span>
-            <TurnTokenUsage tokens={props.confirmedOutputTokens} />
             <Icon name={props.disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
           </button>
         }
       >
         <div aria-atomic="true" aria-live="polite" class="turn-active-status" role="status">
           <span class="turn-duration-label">{props.label}</span>
-          <TurnTokenUsage tokens={props.confirmedOutputTokens} />
         </div>
       </Show>
       <div class="turn-header-line" />
@@ -2147,22 +2137,11 @@ function TurnHeader(props: {
   );
 }
 
-function TurnTokenUsage(props: { readonly tokens: number }) {
-  const i18n = useI18n();
-  const messages = () => i18n.messages().timeline;
-  return (
-    <Show when={props.tokens > 0}>
-      <span class="turn-token-usage" title={messages().confirmedOutputTokens}>
-        · {confirmedOutputTokenLabel(props.tokens, messages(), i18n.locale())}
-      </span>
-    </Show>
-  );
-}
-
 function TurnWorkBlock(props: {
   readonly activeThinkingPresentation: "activity" | "none" | "standalone";
   readonly clock: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly isItemStreaming: (itemId: string) => boolean;
   readonly items: readonly TurnWorkItem[];
   readonly reasoningHeading: string | null;
 }) {
@@ -2184,6 +2163,7 @@ function TurnWorkBlock(props: {
             <WorkTimelineUnit
               clock={props.clock}
               diffDisplay={props.diffDisplay}
+              isItemStreaming={props.isItemStreaming}
               isCurrent={
                 index() === workUnits().length - 1 &&
                 props.activeThinkingPresentation === "activity"
@@ -2217,6 +2197,7 @@ function WorkTimelineUnit(props: {
   readonly clock: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly isCurrent: boolean;
+  readonly isItemStreaming: (itemId: string) => boolean;
   readonly reasoningHeading: string | null;
   readonly unit: () => AgentActivityRenderUnit;
 }) {
@@ -2246,6 +2227,9 @@ function WorkTimelineUnit(props: {
             clock={props.clock}
             diffDisplay={props.diffDisplay}
             item={itemUnit().item}
+            streaming={
+              itemUnit().item.type === "agentMessage" && props.isItemStreaming(itemUnit().item.id)
+            }
           />
         )}
       </Match>

@@ -4723,6 +4723,7 @@ function activityReconciliationAuditExpression() {
       started: Number(root.dataset.activityReconciliationStarted ?? Number.NaN),
       completed: Number(root.dataset.activityReconciliationCompleted ?? Number.NaN),
       commentaryState: root.dataset.activityReconciliationCommentary ?? null,
+      commentaryPrefixRetained: root.dataset.activityReconciliationCommentaryPrefixRetained === "true",
       durationMs: Number(root.dataset.activityReconciliationDurationMs ?? Number.NaN),
       identityComparisons: Number(
         root.dataset.activityReconciliationIdentityComparisons ?? Number.NaN,
@@ -5030,12 +5031,11 @@ function activeActivityReflectionVisualAuditExpression() {
       runningGroupedChildCount: document.querySelectorAll(
         ".grouped-activity-item .activity-title.is-running",
       ).length,
-      completedTokenText:
-        document.querySelector('.conversation-turn[data-status="completed"] .turn-token-usage')
-          ?.textContent?.trim() ?? null,
-      activeTokenText:
-        document.querySelector('.conversation-turn[data-status="inProgress"] .turn-token-usage')
-          ?.textContent?.trim() ?? null,
+      turnHeadersContainOnlyDuration: [
+        ...document.querySelectorAll(".turn-header-button, .turn-active-status"),
+      ].every((header) =>
+        header.textContent?.trim() === header.querySelector(".turn-duration-label")?.textContent?.trim(),
+      ),
       reasoningHeadlineSequence: JSON.parse(
         document.documentElement.dataset.reasoningHeadlineSequence ?? "[]",
       ),
@@ -7256,12 +7256,8 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
   assert(metrics.baseText === metrics.highlightText, "the reflection does not replicate the active title");
   assert(metrics.baseText === "Executando comando", "the parent header duplicated command timing");
   assert(
-    metrics.completedTokenText?.includes("10.000 tokens") === true,
-    `persisted tokens disappeared from the completed turn (${JSON.stringify(metrics.completedTokenText)})`,
-  );
-  assert(
-    metrics.activeTokenText?.includes("62 tokens") === true,
-    `confirmed tokens disappeared from the active turn (${JSON.stringify(metrics.activeTokenText)})`,
+    metrics.turnHeadersContainOnlyDuration === true,
+    "turn headers must display elapsed time without a token-spend counter",
   );
   assert(
     metrics.sweepLayerCount === 1 && metrics.highlightLayerCount === 1,
@@ -9046,6 +9042,7 @@ function validateActivityReconciliationMetrics(metrics, viewport) {
   assert(metrics.started === 64, `only ${metrics.started} commands were started`);
   assert(metrics.completed === 64, `only ${metrics.completed} commands completed`);
   assert(metrics.commentaryState === "emitted", "the newest commentary was not emitted");
+  assert(metrics.commentaryPrefixRetained, "streamed commentary replaced its committed Markdown prefix");
   assert(metrics.commentaryCount === 1, "the newest commentary was lost or duplicated");
   assert(
     metrics.startedPresentation?.completedAtCapture === 0,

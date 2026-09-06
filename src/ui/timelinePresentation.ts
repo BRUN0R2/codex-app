@@ -44,18 +44,6 @@ export function turnDurationLabel(
   }
 }
 
-export function confirmedOutputTokenLabel(
-  tokens: number,
-  messages: TimelineMessages,
-  locale: string,
-): string {
-  if (!Number.isSafeInteger(tokens) || tokens < 0) {
-    throw new RangeError("The confirmed token count must be a non-negative safe integer.");
-  }
-  const count = new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(tokens);
-  return formatMessage(tokens === 1 ? messages.oneToken : messages.manyTokens, { count });
-}
-
 export function formatElapsedSeconds(seconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(seconds));
   if (totalSeconds < SECONDS_PER_MINUTE) {
