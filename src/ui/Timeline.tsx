@@ -116,6 +116,7 @@ import {
   useTimelineDisclosureStorageKey,
 } from "./timelineDisclosureContext";
 import { timelineFileChangeIdentity, timelineItemRenderIdentity } from "./timelineIdentity";
+import { TimelineLayoutMeasurement } from "./timelineLayoutMeasurement";
 import {
   commandHeadline,
   commandLiveOutputText,
@@ -320,11 +321,12 @@ export function Timeline(props: {
     thumbTop: 0,
   });
   const disclosures = createTimelineDisclosureStore();
+  const layoutMeasurement = new TimelineLayoutMeasurement(measureMountedVirtualTurns);
   const disclosureContext: TimelineDisclosureContextValue = {
     keyPrefix: () => timelineDisclosureNamespacePrefix(props.controller.currentThread()?.id ?? ""),
     onLayoutChange: () => {
       recordTimelineLayoutChange();
-      queueMicrotask(measureMountedVirtualTurns);
+      layoutMeasurement.request();
     },
     store: disclosures,
   };
@@ -777,6 +779,7 @@ export function Timeline(props: {
   }
 
   function cancelPendingTimelineWork(): number {
+    layoutMeasurement.cancel();
     timelineTransitionRevision += 1;
     cancelPendingUserMessageNavigation();
     if (animationFrame !== undefined) {
@@ -1602,6 +1605,7 @@ export function Timeline(props: {
 
   onCleanup(() => {
     saveActiveTimelineViewport();
+    layoutMeasurement.cancel();
     resizeObserver?.disconnect();
     cancelPendingUserMessageNavigation();
     if (animationFrame !== undefined) {

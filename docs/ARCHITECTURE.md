@@ -186,6 +186,8 @@ composer borders remain aligned. Logical message anchors map to physical scroll
 destinations with the leading and footer space preserved. Native smooth scrolling
 settles against the selected anchor, honors reduced motion, and yields to manual
 input or task changes.
+Disclosure layout reads are coalesced within a microtask and cancelled when
+the timeline changes or is disposed.
 
 Diff rows use the audited Desktop dark palette, mixed with the surface in Lab.
 Code and line-number backgrounds remain solid across consecutive changed rows.
