@@ -195,6 +195,10 @@ strict layout and size containment. Native horizontal scrollbars add their own
 space; large panels remain capped at 360 pixels.
 Browser checks retain native scrollbars and cover normal and fractional zoom.
 
+Diffs, file reads, and search matches preserve source whitespace and share the
+four-column tab stops used by width projection. Short file reads also declare
+their intrinsic content size so horizontal scrollbars cannot clip the first line.
+
 Desktop notifications use the same ownership boundary. The main controller
 detects account and task transitions, resolves the per-event rule once, and
 places each bounded, deduplicated notification in its presentation lane. A

@@ -494,6 +494,31 @@ const SCENARIOS = [
     validate: validateSyntaxHighlightedDiffMetrics,
   },
   {
+    id: "code-whitespace",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: 'document.querySelector(".chat-page") !== null',
+    prepareExpression: `void (async () => {
+      try { window.__codeWhitespace = await (await import("/src/tooling/codeWhitespaceAudit.tsx")).auditCodeWhitespace(); }
+      catch (error) { window.__codeWhitespaceError = String(error?.stack ?? error); }
+      finally { window.__codeWhitespaceReady = true; }
+    })()`,
+    readyExpression: "window.__codeWhitespaceReady === true",
+    auditExpression: () => `(() => {
+      if (window.__codeWhitespaceError !== undefined) throw new Error(window.__codeWhitespaceError);
+      return window.__codeWhitespace;
+    })()`,
+    validate: (samples) => {
+      assert(samples.length === 32, "the code whitespace matrix is incomplete");
+      for (const sample of samples) {
+        const detail = JSON.stringify(sample);
+        assert(sample.textMatches, `code text changed during presentation: ${detail}`);
+        assert(Math.abs(sample.actualPrefixWidth - sample.expectedPrefixWidth) <= 1,
+          `code indentation differs from its column projection: ${detail}`);
+        assert(sample.verticalOverflow <= 1, `a short code viewport clips its line: ${detail}`);
+      }
+    },
+  },
+  {
     id: "short-diff-sizing",
     url: HOME_PREVIEW_URL,
     initialReadyExpression: 'document.querySelector(".chat-page") !== null',

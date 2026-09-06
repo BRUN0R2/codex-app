@@ -10,6 +10,7 @@ import {
 } from "./diffViewport";
 import { readDiffVirtualRows } from "./diffVirtualRows";
 import { observeElementResize, readResizeObserverBorderBoxHeight } from "./elementResize";
+import { MONOSPACE_TAB_COLUMNS } from "./monospace";
 import {
   releaseVirtualRowsCanvas,
   type VirtualRowsCanvas,
@@ -143,6 +144,7 @@ export function DiffView(props: {
       onScroll={updateViewportScroll}
       ref={viewportElement}
       style={{
+        "tab-size": MONOSPACE_TAB_COLUMNS,
         "contain-intrinsic-block-size": usesContainerSizing
           ? undefined
           : `${intrinsicViewportHeight()}px`,
