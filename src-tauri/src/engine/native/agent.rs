@@ -1,10 +1,8 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::{Engine as _, prelude::BASE64_STANDARD};
-use futures_util::future::join_all;
 use serde_json::json;
 use tauri::AppHandle;
 use tokio::sync::watch;
@@ -22,17 +20,17 @@ use super::multi_agent::{
 use super::output::OutputSource;
 use super::prompt_context::compose_prompt_context;
 use super::provider::{
-    DEFAULT_FUNCTION_NAMESPACE, FunctionCallOutputPayload, ModelToolMode, ProviderResponseSession,
-    ResponseContent, ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseProtocol,
-    ResponseRequest, ResponseRequestSettings, ResponseStream, ResponseTransportConfig,
-    SelectedModel, WebSearchAction, normalize_provider_history,
+    DEFAULT_FUNCTION_NAMESPACE, ModelToolMode, ProviderResponseSession, ResponseContent,
+    ResponseEvent, ResponseItem, ResponseMessagePhase, ResponseProtocol, ResponseRequest,
+    ResponseRequestSettings, ResponseStream, ResponseTransportConfig, SelectedModel,
+    WebSearchAction, normalize_provider_history,
 };
 use super::storage::ProviderHistorySnapshot;
 use super::stream_notifications::StreamNotificationBatcher;
 use super::text::truncate_utf8;
 use super::tools::{
     CodeModeToolDelegate, CodeModeToolDelegateContext, MAX_PROVIDER_ITEM_BYTES, PreparedTool,
-    ReadToolCache, ReadToolCacheKey, ToolExecutionContext, ToolExecutionResult, ToolRegistry,
+    ReadToolCacheKey, ToolExecutionContext, ToolExecutionResult, ToolRegistry,
 };
 use super::turn_recovery;
 use super::{NativeEngineInner, ResolvedAgentSettings, TurnContinuation};
@@ -45,6 +43,12 @@ use crate::engine::{
     WebSearchMode,
 };
 use crate::error::AppError;
+
+mod scheduler;
+mod tool_execution;
+
+use scheduler::ToolScheduler;
+use tool_execution::{ToolReadSegment, TurnToolContext};
 
 pub(super) use super::turn_recovery::{
     DEFAULT_RETRY_AFTER_SECONDS, automatic_provider_retry_wait, automatic_rate_limit_wait,
@@ -63,7 +67,6 @@ const MAX_TURN_PREVIEW_BYTES: usize = 160;
 const MAX_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_NAME_BYTES: usize = 128;
 const MAX_REJECTED_TOOL_ERROR_BYTES: usize = 4_096;
-const MAX_PARALLEL_TOOLS: usize = 8;
 const MAX_PREWARM_CONTROL_EVENTS: usize = 32;
 const RESPONSE_PREWARM_COMPLETION_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONTEXT_RECOVERY_ATTEMPTS_WITHOUT_PROGRESS: u8 = 1;
@@ -499,6 +502,15 @@ pub(super) async fn run_turn(
         )) as Arc<dyn ToolDelegate>
     });
 
+    let tool_context = Arc::new(TurnToolContext::new(
+        Arc::clone(&inner),
+        app.clone(),
+        &run,
+        stream_deltas.clone(),
+        code_mode_session.clone(),
+        code_mode_delegate,
+        code_mode_tools,
+    ));
     let result = async {
         'sampling: loop {
             if *run.cancellation.borrow() {
@@ -624,246 +636,294 @@ pub(super) async fn run_turn(
                     return Err(error);
                 }
             };
-            let mut pending_tools = Vec::new();
-            let mut saw_completed = false;
-
-            loop {
-                let event = match stream.next_event(&mut run.cancellation).await {
-                    Ok(Some(event)) => event,
-                    Ok(None) => break,
-                    Err(error) => {
-                        if let Some(decision) =
-                            turn_recovery::classify(&error, &mut transient_failure_count)
-                        {
-                            stream_deltas.flush().await?;
-                            if turn_recovery::wait_for_retry(
-                                &inner, &app, &mut run, &error, decision,
-                            )
-                            .await
-                            {
-                                continue 'sampling;
-                            }
-                            return Ok(RunCompletion::Interrupted);
-                        }
-                        if matches!(&error, AppError::ContextWindowExceeded(_)) {
-                            stream_deltas.flush().await?;
-                            match recover_from_context_window(
-                                SamplingContext {
-                                    app: &app,
-                                    inner: &inner,
-                                    base_instructions: &base_instructions,
-                                    prompt_context: prompt_context.items(),
-                                    snapshot: &mut context_snapshot,
-                                    tools: &tools,
-                                },
-                                &mut run,
-                                &mut provider_state,
-                                &mut response_session,
-                                &mut history,
-                                &mut context_recovery_attempts,
-                            )
-                            .await?
-                            {
-                                ContextWindowRecovery::Retry => {
-                                    history_requires_refresh = false;
-                                    transient_failure_count = 0;
-                                    continue 'sampling;
-                                }
-                                ContextWindowRecovery::Interrupted => {
-                                    return Ok(RunCompletion::Interrupted);
-                                }
-                                ContextWindowRecovery::Exhausted => {
-                                    persist_full_context_usage(&inner, &app, &run).await?;
-                                }
-                            }
-                        }
-                        return Err(error);
-                    }
-                };
-                transient_failure_count = 0;
-                if !matches!(
-                    &event,
-                    ResponseEvent::OutputTextDelta { .. }
-                        | ResponseEvent::ReasoningSummaryDelta { .. }
-                        | ResponseEvent::ReasoningContentDelta { .. }
-                ) {
-                    stream_deltas.flush().await?;
-                }
-                let Some(event) =
-                    handle_provider_control_event(&inner, &app, &run, &mut provider_state, event)
+            let mut pending_tools = ToolScheduler::new();
+            let mut read_segment = ToolReadSegment::default();
+            let mut response_item_count = 0usize;
+            let response_result = async {
+                loop {
+                    let event = pending_tools
+                        .next_response_event(stream.next_event(&mut run.cancellation))
                         .await?
-                else {
-                    continue;
-                };
-                match event {
-                    ResponseEvent::OutputItemAdded(item) => {
-                        validate_response_item(&item)?;
-                        if matches!(
-                            &item,
-                            ResponseItem::Message { .. } | ResponseItem::Reasoning { .. }
-                        ) && let Some(thread_item) = visible_item(&item)?
-                        {
-                            emit_item_notification(
-                                &inner,
-                                &app,
-                                &run.thread_id,
-                                &run.turn_id,
-                                thread_item,
-                                true,
-                            )?;
-                        }
+                        .ok_or_else(|| {
+                            AppError::Provider(
+                                "response stream ended before response.completed".into(),
+                            )
+                        })?;
+                    if !matches!(
+                        &event,
+                        ResponseEvent::OutputTextDelta { .. }
+                            | ResponseEvent::ReasoningSummaryDelta { .. }
+                            | ResponseEvent::ReasoningContentDelta { .. }
+                    ) {
+                        stream_deltas.flush().await?;
                     }
-                    ResponseEvent::OutputTextDelta { item_id, delta } => {
-                        validate_delta(&item_id, &delta)?;
-                        stream_deltas
-                            .push(StreamDelta::AgentText { item_id, delta })
-                            .await?;
-                    }
-                    ResponseEvent::ReasoningSummaryDelta {
-                        item_id,
-                        summary_index,
-                        delta,
-                    } => {
-                        validate_delta(&item_id, &delta)?;
-                        stream_deltas
-                            .push(StreamDelta::ReasoningSummary {
-                                item_id,
-                                index: summary_index,
-                                delta,
-                            })
-                            .await?;
-                    }
-                    ResponseEvent::ReasoningContentDelta {
-                        item_id,
-                        content_index,
-                        delta,
-                    } => {
-                        validate_delta(&item_id, &delta)?;
-                        stream_deltas
-                            .push(StreamDelta::ReasoningText {
-                                item_id,
-                                index: content_index,
-                                delta,
-                            })
-                            .await?;
-                    }
-                    ResponseEvent::OutputItemDone(item) => {
-                        validate_response_item(&item)?;
-                        if let Some(thread_item) = visible_item(&item)? {
-                            let thread_item = inner
-                                .storage
-                                .append_provider_and_thread_item(
-                                    run.thread_id.clone(),
-                                    run.turn_id.clone(),
-                                    std::slice::from_ref(&item),
+                    let Some(event) = handle_provider_control_event(
+                        &inner,
+                        &app,
+                        &run,
+                        &mut provider_state,
+                        event,
+                    )
+                    .await?
+                    else {
+                        continue;
+                    };
+                    match event {
+                        ResponseEvent::OutputItemAdded(item) => {
+                            validate_response_item(&item)?;
+                            if matches!(
+                                &item,
+                                ResponseItem::Message { .. } | ResponseItem::Reasoning { .. }
+                            ) && let Some(thread_item) = visible_item(&item)?
+                            {
+                                emit_item_notification(
+                                    &inner,
+                                    &app,
+                                    &run.thread_id,
+                                    &run.turn_id,
                                     thread_item,
+                                    true,
+                                )?;
+                            }
+                        }
+                        ResponseEvent::OutputTextDelta { item_id, delta } => {
+                            validate_delta(&item_id, &delta)?;
+                            stream_deltas
+                                .push(StreamDelta::AgentText { item_id, delta })
+                                .await?;
+                        }
+                        ResponseEvent::ReasoningSummaryDelta {
+                            item_id,
+                            summary_index,
+                            delta,
+                        } => {
+                            validate_delta(&item_id, &delta)?;
+                            stream_deltas
+                                .push(StreamDelta::ReasoningSummary {
+                                    item_id,
+                                    index: summary_index,
+                                    delta,
+                                })
+                                .await?;
+                        }
+                        ResponseEvent::ReasoningContentDelta {
+                            item_id,
+                            content_index,
+                            delta,
+                        } => {
+                            validate_delta(&item_id, &delta)?;
+                            stream_deltas
+                                .push(StreamDelta::ReasoningText {
+                                    item_id,
+                                    index: content_index,
+                                    delta,
+                                })
+                                .await?;
+                        }
+                        ResponseEvent::OutputItemDone(item) => {
+                            validate_response_item(&item)?;
+                            if let Some(item_id) = item.id() {
+                                stream_deltas.finish_item(item_id).await?;
+                            }
+                            if let Some(thread_item) = visible_item(&item)? {
+                                let thread_item = inner
+                                    .storage
+                                    .append_provider_and_thread_item(
+                                        run.thread_id.clone(),
+                                        run.turn_id.clone(),
+                                        std::slice::from_ref(&item),
+                                        thread_item,
+                                        None,
+                                    )
+                                    .await?;
+                                emit_item_notification(
+                                    &inner,
+                                    &app,
+                                    &run.thread_id,
+                                    &run.turn_id,
+                                    thread_item,
+                                    false,
+                                )?;
+                            } else {
+                                inner
+                                    .storage
+                                    .append_provider_item(run.thread_id.clone(), &item)
+                                    .await?;
+                            }
+                            response_item_count += 1;
+                            match item {
+                                ResponseItem::FunctionCall {
+                                    id,
+                                    namespace,
+                                    name,
+                                    arguments,
+                                    call_id,
+                                } => {
+                                    let item_id = id.unwrap_or_else(|| call_id.clone());
+                                    tool_context.enqueue(
+                                        &mut pending_tools,
+                                        &mut read_segment,
+                                        PendingTool::function(
+                                            &inner.tools,
+                                            item_id,
+                                            namespace.as_deref(),
+                                            &name,
+                                            &arguments,
+                                            call_id,
+                                        ),
+                                    )?;
+                                }
+                                ResponseItem::CustomToolCall {
+                                    id,
+                                    namespace,
+                                    call_id,
+                                    name,
+                                    input,
+                                } => {
+                                    let item_id = id.unwrap_or_else(|| call_id.clone());
+                                    tool_context.enqueue(
+                                        &mut pending_tools,
+                                        &mut read_segment,
+                                        PendingTool::custom(
+                                            &inner.tools,
+                                            item_id,
+                                            namespace.as_deref(),
+                                            &name,
+                                            &input,
+                                            call_id,
+                                        ),
+                                    )?;
+                                }
+                                _ => {}
+                            }
+                        }
+                        ResponseEvent::Completed(completed) => {
+                            context_recovery_attempts = 0;
+                            if let Some(usage) = completed.usage {
+                                context_snapshot = Some(ContextUsageSnapshot {
+                                    model: run.model.id().into(),
+                                    usage: usage.clone(),
+                                    history_item_count: history.items.len() + response_item_count,
+                                });
+                                persist_and_emit_item(
+                                    &inner,
+                                    &app,
+                                    &run.thread_id,
+                                    &run.turn_id,
+                                    ThreadItem::ContextUsage {
+                                        id: Uuid::now_v7().to_string(),
+                                        model: run.model.id().into(),
+                                        usage,
+                                        context_window: run.model.context_window(),
+                                    },
                                     None,
+                                    false,
                                 )
                                 .await?;
-                            emit_item_notification(
-                                &inner,
-                                &app,
-                                &run.thread_id,
-                                &run.turn_id,
-                                thread_item,
-                                false,
-                            )?;
-                        } else {
-                            inner
-                                .storage
-                                .append_provider_item(run.thread_id.clone(), &item)
-                                .await?;
-                        }
-                        match item {
-                            ResponseItem::FunctionCall {
-                                id,
-                                namespace,
-                                name,
-                                arguments,
-                                call_id,
-                            } => {
-                                let item_id = id.unwrap_or_else(|| call_id.clone());
-                                pending_tools.push(PendingTool::function(
-                                    &inner.tools,
-                                    item_id,
-                                    namespace.as_deref(),
-                                    &name,
-                                    &arguments,
-                                    call_id,
-                                ));
                             }
-                            ResponseItem::CustomToolCall {
-                                id,
-                                namespace,
-                                call_id,
-                                name,
-                                input,
-                            } => {
-                                let item_id = id.unwrap_or_else(|| call_id.clone());
-                                pending_tools.push(PendingTool::custom(
-                                    &inner.tools,
-                                    item_id,
-                                    namespace.as_deref(),
-                                    &name,
-                                    &input,
-                                    call_id,
-                                ));
-                            }
-                            _ => {}
+                            return Ok::<_, AppError>(());
                         }
-                    }
-                    ResponseEvent::Completed(completed) => {
-                        context_recovery_attempts = 0;
-                        if let Some(usage) = completed.usage {
-                            context_snapshot = Some(ContextUsageSnapshot {
-                                model: run.model.id().into(),
-                                usage: usage.clone(),
-                            });
-                            persist_and_emit_item(
-                                &inner,
-                                &app,
-                                &run.thread_id,
-                                &run.turn_id,
-                                ThreadItem::ContextUsage {
-                                    id: Uuid::now_v7().to_string(),
-                                    model: run.model.id().into(),
-                                    usage,
-                                    context_window: run.model.context_window(),
-                                },
-                                None,
-                                false,
-                            )
-                            .await?;
+                        ResponseEvent::Interrupted => {
+                            return Err(AppError::Cancelled(
+                                "response stream was interrupted".into(),
+                            ));
                         }
-                        saw_completed = true;
-                        break;
-                    }
-                    ResponseEvent::Interrupted => return Ok(RunCompletion::Interrupted),
-                    ResponseEvent::ServerModel(_)
-                    | ResponseEvent::ModelsEtag(_)
-                    | ResponseEvent::TurnState(_)
-                    | ResponseEvent::ModelVerifications(_)
-                    | ResponseEvent::SafetyBuffering(_)
-                    | ResponseEvent::RateLimits(_)
-                    | ResponseEvent::TransportFallback(_) => {
-                        return Err(AppError::State(
-                            "provider control event escaped its handler".into(),
-                        ));
+                        ResponseEvent::ServerModel(_)
+                        | ResponseEvent::ModelsEtag(_)
+                        | ResponseEvent::TurnState(_)
+                        | ResponseEvent::ModelVerifications(_)
+                        | ResponseEvent::SafetyBuffering(_)
+                        | ResponseEvent::RateLimits(_)
+                        | ResponseEvent::TransportFallback(_) => {
+                            return Err(AppError::State(
+                                "provider control event escaped its handler".into(),
+                            ));
+                        }
                     }
                 }
             }
-            stream_deltas.flush().await?;
-            if !saw_completed {
-                return Err(AppError::Provider(
-                    "response stream ended before response.completed".into(),
-                ));
+            .await;
+            let had_tool_calls = pending_tools.has_calls();
+            let drained = pending_tools.drain().await;
+            let flush_result = stream_deltas.finish_response().await;
+            let mut settlement_failure = drained.failure;
+            for completed in drained.results {
+                if let Err(error) = tool_context.persist(completed).await {
+                    inner.emit_diagnostic(
+                        &app,
+                        DiagnosticStream::Runtime,
+                        format!("could not settle a dispatched tool: {error}"),
+                    );
+                    settlement_failure.get_or_insert(error);
+                }
+            }
+            if let Some(error) = settlement_failure {
+                return Err(error);
+            }
+            flush_result?;
+            match response_result {
+                Ok(()) => transient_failure_count = 0,
+                Err(AppError::Cancelled(_)) => return Ok(RunCompletion::Interrupted),
+                Err(error) => {
+                    // A partial response cannot move the confirmed usage boundary.
+                    // Its completed items and tool results remain part of the local delta.
+                    if let Some(decision) =
+                        turn_recovery::classify(&error, &mut transient_failure_count)
+                    {
+                        if turn_recovery::wait_for_retry(&inner, &app, &mut run, &error, decision)
+                            .await
+                        {
+                            continue 'sampling;
+                        }
+                        return Ok(RunCompletion::Interrupted);
+                    }
+                    if matches!(&error, AppError::ContextWindowExceeded(_)) {
+                        inner
+                            .storage
+                            .refresh_provider_history(run.thread_id.clone(), &mut history)
+                            .await?;
+                        match recover_from_context_window(
+                            SamplingContext {
+                                app: &app,
+                                inner: &inner,
+                                base_instructions: &base_instructions,
+                                prompt_context: prompt_context.items(),
+                                snapshot: &mut context_snapshot,
+                                tools: &tools,
+                            },
+                            &mut run,
+                            &mut provider_state,
+                            &mut response_session,
+                            &mut history,
+                            &mut context_recovery_attempts,
+                        )
+                        .await?
+                        {
+                            ContextWindowRecovery::Retry => {
+                                history_requires_refresh = false;
+                                transient_failure_count = 0;
+                                continue 'sampling;
+                            }
+                            ContextWindowRecovery::Interrupted => {
+                                return Ok(RunCompletion::Interrupted);
+                            }
+                            ContextWindowRecovery::Exhausted => {
+                                persist_full_context_usage(&inner, &app, &run).await?
+                            }
+                        }
+                    }
+                    return Err(error);
+                }
+            }
+            if *run.cancellation.borrow() {
+                return Ok(RunCompletion::Interrupted);
             }
             match inner
                 .turn_continuation(
                     &run.thread_id,
                     &run.turn_id,
                     sampled_through_steer_sequence,
-                    !pending_tools.is_empty(),
+                    had_tool_calls,
                 )
                 .await?
             {
@@ -872,190 +932,6 @@ pub(super) async fn run_turn(
                     pending_steer_sequence,
                 } => {
                     required_pending_steer_sequence = pending_steer_sequence;
-                }
-            }
-
-            let allow_safe_local_overlap = true;
-            let mut pending_tools = pending_tools.into_iter().peekable();
-            let mut read_cache = ReadToolCache::default();
-            let mut read_leaders = HashMap::<ReadToolCacheKey, String>::new();
-            while let Some(first) = pending_tools.next() {
-                let batch = collect_tool_batch(
-                    first,
-                    &mut pending_tools,
-                    allow_safe_local_overlap,
-                    run.config.permission_profile,
-                );
-                let (duplicate_reads, read_only_batch) = deduplicate_read_calls(
-                    &batch,
-                    &run.workspace,
-                    &run.thread_id,
-                    &mut read_leaders,
-                );
-
-                for pending in &batch {
-                    if *run.cancellation.borrow() {
-                        return Ok(RunCompletion::Interrupted);
-                    }
-                    if let Some(item) = pending.started_item(&run.workspace) {
-                        inner.emit_notification(
-                            &app,
-                            crate::engine::EngineNotification::ItemStarted(ItemNotification {
-                                thread_id: run.thread_id.clone(),
-                                turn_id: run.turn_id.clone(),
-                                item,
-                            }),
-                        )?;
-                    }
-                }
-
-                let workspace = run.workspace.as_path();
-                let thread_id = run.thread_id.as_str();
-                let turn_id = run.turn_id.as_str();
-                let executions =
-                    batch
-                        .iter()
-                        .zip(duplicate_reads)
-                        .map(|(pending, duplicate_of)| {
-                            let mut cancellation = run.cancellation.clone();
-                            let context = ToolExecutionContext {
-                                engine: Arc::downgrade(&inner),
-                                app: &app,
-                                workspace,
-                                permissions: run.config.permission_profile,
-                                thread_id,
-                                turn_id,
-                                provider_call_id: &pending.call_id,
-                                agent: &agent_invocation,
-                                approvals: &inner.approvals,
-                                storage: &inner.storage,
-                                ripgrep: &inner.ripgrep,
-                                command_sessions: &inner.command_sessions,
-                                stream_deltas: &stream_deltas,
-                                read_cache: &read_cache,
-                                supports_image_input: run.model.supports_image_input(),
-                                supports_original_image_detail: run
-                                    .model
-                                    .supports_image_detail_original(),
-                                provider_output_budget: run.model.provider_output_budget(),
-                                code_mode: code_mode_session.as_ref(),
-                                code_mode_delegate: code_mode_delegate.as_ref(),
-                                code_mode_tools: &code_mode_tools,
-                            };
-                            async move {
-                                match duplicate_of {
-                                    Some(original_call_id) => {
-                                        Ok(pending
-                                            .duplicate_read_result(workspace, &original_call_id))
-                                    }
-                                    None => pending.execute(context, &mut cancellation).await,
-                                }
-                            }
-                        });
-                let results = join_all(executions).await;
-                stream_deltas.flush().await?;
-                let mut interrupted = false;
-
-                // Provider outputs remain in call order even when execution overlaps.
-                for (pending, result) in batch.into_iter().zip(results) {
-                    let pending_name = pending.name().to_string();
-                    let mut result = match result {
-                        Ok(result) => result,
-                        Err(AppError::Cancelled(message)) => {
-                            let error = AppError::Cancelled(message);
-                            interrupted = true;
-                            pending.failed_result(&run.workspace, &error)
-                        }
-                        Err(error) => {
-                            inner.emit_diagnostic(
-                                &app,
-                                DiagnosticStream::Runtime,
-                                format!("tool `{pending_name}` failed: {error}"),
-                            );
-                            let mut failure = pending.failed_result(&run.workspace, &error);
-                            failure.provider_output = format!("Tool failed: {error}");
-                            failure
-                        }
-                    };
-                    let background_command = result.background_command.take();
-                    let visual_context = result.visual_context.take();
-                    let provider_content = result.provider_content.take();
-                    let output = match (pending.output_kind, visual_context, provider_content) {
-                        (ToolOutputKind::Function, Some(visual), None) => {
-                            ResponseItem::function_output_with_image(
-                                pending.call_id,
-                                visual.model_text,
-                                visual.image_url,
-                                Some(visual.detail),
-                            )
-                        }
-                        (ToolOutputKind::Function, None, None) => {
-                            ResponseItem::function_output(pending.call_id, result.provider_output)
-                        }
-                        (ToolOutputKind::Custom, None, None) => {
-                            ResponseItem::custom_output(pending.call_id, result.provider_output)
-                        }
-                        (ToolOutputKind::Function, None, Some(content)) => {
-                            ResponseItem::function_output_payload(
-                                pending.call_id,
-                                FunctionCallOutputPayload::Content(content),
-                            )
-                        }
-                        (ToolOutputKind::Custom, None, Some(content)) => {
-                            ResponseItem::custom_output_payload(
-                                pending.call_id,
-                                FunctionCallOutputPayload::Content(content),
-                            )
-                        }
-                        (_, Some(_), Some(_)) | (ToolOutputKind::Custom, Some(_), None) => {
-                            return Err(AppError::State(
-                                "tool produced conflicting provider output channels".into(),
-                            ));
-                        }
-                    };
-                    validate_local_response_item(&output)?;
-                    let completed_item = match inner
-                        .storage
-                        .append_provider_and_thread_item(
-                            run.thread_id.clone(),
-                            run.turn_id.clone(),
-                            std::slice::from_ref(&output),
-                            result.completed_item,
-                            result.display_output,
-                        )
-                        .await
-                    {
-                        Ok(item) => item,
-                        Err(error) => {
-                            if let Some(command) = background_command {
-                                command.discard();
-                            }
-                            return Err(error);
-                        }
-                    };
-                    if let Some(message) = tool_failure_diagnostic(&pending_name, &completed_item) {
-                        inner.emit_diagnostic(&app, DiagnosticStream::Runtime, message);
-                    }
-                    let remains_in_progress = item_remains_in_progress(&completed_item);
-                    let notification = emit_item_notification(
-                        &inner,
-                        &app,
-                        &run.thread_id,
-                        &run.turn_id,
-                        completed_item,
-                        remains_in_progress,
-                    );
-                    if let Some(command) = background_command {
-                        command.commit();
-                    }
-                    notification?;
-                }
-                if interrupted {
-                    return Ok(RunCompletion::Interrupted);
-                }
-                if !read_only_batch {
-                    read_cache = ReadToolCache::default();
-                    read_leaders.clear();
                 }
             }
         }
@@ -1283,8 +1159,12 @@ async fn load_initial_prompt_state(
         .storage
         .provider_prompt_snapshot(thread_id.into())
         .await?;
+    let original_sequence = snapshot.history.last_sequence();
     let history = normalize_prompt_history(inner, app, thread_id, snapshot.history).await?;
-    Ok((history, snapshot.context_usage))
+    let usage = (history.last_sequence() == original_sequence)
+        .then_some(snapshot.context_usage)
+        .flatten();
+    Ok((history, usage))
 }
 
 async fn normalize_prompt_history(
@@ -1685,53 +1565,6 @@ impl PendingTool {
     }
 }
 
-fn collect_tool_batch<I>(
-    first: PendingTool,
-    pending_tools: &mut std::iter::Peekable<I>,
-    allow_parallel_tools: bool,
-    permissions: PermissionProfile,
-) -> Vec<PendingTool>
-where
-    I: Iterator<Item = PendingTool>,
-{
-    let parallel_batch = allow_parallel_tools && first.supports_parallel_execution(permissions);
-    let mut batch = vec![first];
-    while parallel_batch
-        && batch.len() < MAX_PARALLEL_TOOLS
-        && pending_tools
-            .peek()
-            .is_some_and(|pending| pending.supports_parallel_execution(permissions))
-    {
-        if let Some(pending) = pending_tools.next() {
-            batch.push(pending);
-        }
-    }
-    batch
-}
-
-fn deduplicate_read_calls(
-    batch: &[PendingTool],
-    workspace: &Path,
-    thread_id: &str,
-    leaders: &mut HashMap<ReadToolCacheKey, String>,
-) -> (Vec<Option<String>>, bool) {
-    let mut all_reads = true;
-    let mut duplicates = Vec::with_capacity(batch.len());
-    for pending in batch {
-        let Some(key) = pending.read_dedup_key(workspace, thread_id) else {
-            all_reads = false;
-            duplicates.push(None);
-            continue;
-        };
-        let duplicate_of = leaders.get(&key).cloned();
-        if duplicate_of.is_none() {
-            leaders.insert(key, pending.call_id.clone());
-        }
-        duplicates.push(duplicate_of);
-    }
-    (duplicates, all_reads)
-}
-
 impl RejectedToolCall {
     fn new(item_id: String, name: &str, error: AppError) -> Self {
         Self {
@@ -2064,16 +1897,15 @@ fn tool_failure_diagnostic(tool_name: &str, item: &ThreadItem) -> Option<String>
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::path::Path;
 
     use super::{
         MAX_AUTOMATIC_PROVIDER_RETRY_DELAY_SECONDS, MAX_AUTOMATIC_RATE_LIMIT_WAIT_SECONDS,
-        PendingTool, add_input_bytes, automatic_provider_retry_wait, automatic_rate_limit_wait,
-        collect_tool_batch, deduplicate_read_calls, hosted_web_search_tool,
-        item_remains_in_progress, local_provider_tools, local_tool_name, local_tools_enabled,
-        prepare_user_input, record_turn_state, tool_failure_diagnostic,
-        validate_local_response_item, validate_response_item, web_search_activity_detail,
+        PendingTool, ToolReadSegment, add_input_bytes, automatic_provider_retry_wait,
+        automatic_rate_limit_wait, hosted_web_search_tool, item_remains_in_progress,
+        local_provider_tools, local_tool_name, local_tools_enabled, prepare_user_input,
+        record_turn_state, tool_failure_diagnostic, validate_local_response_item,
+        validate_response_item, web_search_activity_detail,
     };
     use crate::engine::native::provider::ModelToolMode;
     use crate::engine::native::provider::{ResponseItem, ResponseProtocol, WebSearchAction};
@@ -2283,12 +2115,15 @@ mod tests {
             "read-call-3".into(),
         );
         let batch = [first, duplicate, distinct];
-        let mut leaders = HashMap::new();
-
-        let (duplicates, all_reads) =
-            deduplicate_read_calls(&batch, Path::new(r"C:\workspace"), "thread-1", &mut leaders);
-
-        assert!(all_reads);
+        let mut reads = ToolReadSegment::default();
+        let duplicates = batch
+            .iter()
+            .map(|pending| {
+                reads
+                    .admit(pending, Path::new(r"C:\workspace"), "thread-1")
+                    .1
+            })
+            .collect::<Vec<_>>();
         assert_eq!(duplicates, [None, Some("read-call-1".into()), None]);
         let result = batch[1].duplicate_read_result(Path::new(r"C:\workspace"), "read-call-1");
         assert!(result.provider_output.contains("read-call-1"));
@@ -2313,18 +2148,11 @@ mod tests {
             r#"{"path":"src/lib.rs","old_text":"old","new_text":"new","expected_occurrences":1}"#,
             "edit-call".into(),
         );
-        let mut leaders = HashMap::new();
-
-        let (duplicates, all_reads) = deduplicate_read_calls(
-            &[mutation],
-            Path::new(r"C:\workspace"),
-            "thread-1",
-            &mut leaders,
-        );
-
-        assert!(!all_reads);
-        assert_eq!(duplicates, [None]);
-        assert!(leaders.is_empty());
+        let mut reads = ToolReadSegment::default();
+        let (before, _) = reads.admit(&mutation, Path::new(r"C:\workspace"), "thread-1");
+        let (after, duplicate) = reads.admit(&mutation, Path::new(r"C:\workspace"), "thread-1");
+        assert_eq!(duplicate, None);
+        assert!(!std::sync::Arc::ptr_eq(&before, &after));
     }
 
     #[test]
@@ -2391,104 +2219,6 @@ mod tests {
             hosted_web_search_tool(WebSearchMode::Disabled, ResponseProtocol::Standard, true),
             None
         );
-    }
-
-    #[test]
-    fn tool_batches_overlap_only_consecutive_explicitly_safe_operations() {
-        let registry = ToolRegistry;
-        let read = |item_id: &str| {
-            PendingTool::function(
-                &registry,
-                item_id.into(),
-                None,
-                "read_file",
-                r#"{"path":"source.rs","start_line":1,"end_line":1}"#,
-                format!("call-{item_id}"),
-            )
-        };
-        let command = |item_id: &str, parallel_safe: bool| {
-            PendingTool::function(
-                &registry,
-                item_id.into(),
-                None,
-                "exec_command",
-                &serde_json::json!({
-                    "command": "Get-Date",
-                    "cwd": ".",
-                    "reason": "test",
-                    "parallel_safe": parallel_safe,
-                    "yield_time_ms": null,
-                    "timeout_seconds": null
-                })
-                .to_string(),
-                format!("call-{item_id}"),
-            )
-        };
-
-        let mut tools = vec![
-            read("read-1"),
-            command("command-safe", true),
-            command("command-exclusive", false),
-            read("read-2"),
-        ]
-        .into_iter()
-        .peekable();
-        let parallel = collect_tool_batch(
-            tools.next().expect("the first tool should exist"),
-            &mut tools,
-            true,
-            PermissionProfile::full_access(),
-        );
-        assert_eq!(
-            parallel.iter().map(PendingTool::name).collect::<Vec<_>>(),
-            ["read_file", "exec_command"]
-        );
-
-        let exclusive = collect_tool_batch(
-            tools.next().expect("the exclusive command should remain"),
-            &mut tools,
-            true,
-            PermissionProfile::full_access(),
-        );
-        assert_eq!(exclusive.len(), 1);
-        assert_eq!(exclusive[0].name(), "exec_command");
-
-        let trailing = collect_tool_batch(
-            tools.next().expect("the trailing read should remain"),
-            &mut tools,
-            true,
-            PermissionProfile::full_access(),
-        );
-        assert_eq!(trailing.len(), 1);
-        assert_eq!(trailing[0].name(), "read_file");
-        assert!(tools.next().is_none());
-
-        let mut approval_tools = vec![command("approval-command", true), read("approval-read")]
-            .into_iter()
-            .peekable();
-        let approval_batch = collect_tool_batch(
-            approval_tools
-                .next()
-                .expect("the approval command should exist"),
-            &mut approval_tools,
-            true,
-            PermissionProfile::workspace_write(),
-        );
-        assert_eq!(approval_batch.len(), 1);
-        assert_eq!(approval_batch[0].name(), "exec_command");
-
-        let mut sequential_reads = vec![read("sequential-1"), read("sequential-2")]
-            .into_iter()
-            .peekable();
-        let sequential_batch = collect_tool_batch(
-            sequential_reads
-                .next()
-                .expect("the sequential read should exist"),
-            &mut sequential_reads,
-            false,
-            PermissionProfile::full_access(),
-        );
-        assert_eq!(sequential_batch.len(), 1);
     }
 
     #[test]

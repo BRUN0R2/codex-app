@@ -195,7 +195,7 @@ impl CommandSessionManager {
             }
             None => CommandOutputEmitter::without_notifications(transcript.clone()),
         };
-        let flush_emitter = emitter.clone();
+        let completion_emitter = emitter.clone();
         let (cancellation, mut cancellation_receiver) = watch::channel(false);
         let command = spawn_command(&workspace, &args, &ripgrep, emitter).await?;
         let session = Arc::new(CommandSession {
@@ -239,7 +239,7 @@ impl CommandSessionManager {
                 .await
                 .map_err(|error| AppError::Tool(format!("command task failed: {error}")))
                 .and_then(std::convert::identity);
-            let result = match flush_emitter.flush().await {
+            let result = match completion_emitter.finish().await {
                 Ok(()) => execution,
                 Err(error) if execution.is_ok() => Err(error),
                 Err(_) => execution,

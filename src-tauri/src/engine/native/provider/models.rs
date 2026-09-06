@@ -4,13 +4,11 @@ use serde::Deserialize;
 use serde::Deserializer;
 
 use crate::engine::CodexModel;
-use crate::engine::ConversationMode;
 use crate::engine::ModelContextWindow;
 use crate::engine::ModelContextWindowPreference;
 use crate::engine::ModelRuntimeCapability;
 use crate::engine::ModelServiceTier;
 use crate::engine::ModelVerbosity;
-use crate::engine::PermissionProfile;
 use crate::engine::Personality;
 use crate::engine::ReasoningEffort;
 use crate::engine::ReasoningEffortOption;
@@ -20,6 +18,8 @@ use super::super::output_compaction::ProviderOutputBudget;
 use super::responses::ReasoningSummarySetting;
 use super::responses::ResponseProtocol;
 use crate::engine::native::multi_agent::MultiAgentVersion;
+
+mod instructions;
 
 const MAX_MODEL_ID_BYTES: usize = 128;
 const MAX_MODEL_TEXT_BYTES: usize = 16_384;
@@ -312,55 +312,6 @@ impl SelectedModel {
             .then(|| variables.personality_message(personality))
             .flatten()
             .filter(|message| !message.trim().is_empty())
-    }
-
-    pub fn uses_legacy_instruction_contract(&self) -> bool {
-        self.model_messages.is_none()
-    }
-
-    pub fn collaboration_context(&self, mode: ConversationMode) -> Option<&str> {
-        matches!(mode, ConversationMode::Work | ConversationMode::Codex)
-            .then(|| {
-                self.model_messages
-                    .as_ref()?
-                    .collaboration_modes
-                    .as_ref()?
-                    .default
-                    .as_deref()
-            })
-            .flatten()
-            .filter(|message| !message.trim().is_empty())
-    }
-
-    pub fn permissions_context(&self, profile: PermissionProfile) -> Option<String> {
-        let messages = self.model_messages.as_ref()?;
-        let sandbox = messages.permissions.as_ref().and_then(|permissions| {
-            use crate::engine::SandboxMode;
-            match profile.sandbox {
-                SandboxMode::ReadOnly => permissions.read_only.as_deref(),
-                SandboxMode::WorkspaceWrite => permissions.workspace_write.as_deref(),
-                SandboxMode::DangerFullAccess => permissions.danger_full_access.as_deref(),
-            }
-        });
-        let approvals = messages.approvals.as_ref().and_then(|approvals| {
-            use crate::engine::ApprovalPolicy;
-            match profile.approvals {
-                ApprovalPolicy::Untrusted => approvals.unless_trusted.as_deref(),
-                ApprovalPolicy::OnRequest => approvals.on_request.as_deref(),
-                ApprovalPolicy::Never => approvals.never.as_deref(),
-            }
-        });
-        let mut sections = [sandbox, approvals]
-            .into_iter()
-            .flatten()
-            .filter(|section| !section.trim().is_empty());
-        let first = sections.next()?;
-        let mut text = first.replace("{{ network_access }}", "enabled");
-        for section in sections {
-            text.push_str("\n\n");
-            text.push_str(&section.replace("{{ network_access }}", "enabled"));
-        }
-        Some(text)
     }
 
     pub fn context_window(&self) -> Option<ModelContextWindow> {

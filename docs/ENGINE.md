@@ -119,6 +119,9 @@ Base instructions come from `model_messages.instructions_template`, with
 `base_instructions` reserved for legacy catalogs. The runtime adds separate,
 bounded repository, permission, collaboration, and environment items. It does
 not maintain a universal prompt that duplicates model protocol.
+Missing permission and collaboration sections select native runtime defaults;
+an explicit empty catalog section suppresses that section. Personality comes
+only from the model's template or typed variables, without a local substitute.
 
 Unknown `tool_mode` values fail at the boundary. A future unknown
 `multi_agent_version` remains decodable but disables MultiAgent and Ultra until
@@ -138,8 +141,9 @@ context metadata.
 
 Before compatible provider telemetry exists, the engine estimates the real
 request and applies a 12% margin. After `response.completed`, provider totals
-are authoritative and receive only the local cost of items added after the last
-model output. A full estimate never inflates that confirmed value again. The
+are authoritative and receive only the local cost of items added after that
+response's persisted history boundary. Later partial model output does not move
+the boundary. A full estimate never inflates that confirmed value again. The
 automatic trigger and hard boundary retain distinct catalog semantics: the
 former uses `autoCompactTokenLimit`, while the latter uses the effective
 `usableTokens` window. At the first reached boundary, Remote Compaction V2 sends
@@ -159,10 +163,9 @@ effective model and context metadata for that exact execution. The composer
 projects `totalTokens` against that item's `usableTokens`; it never combines an
 old measurement with the currently selected model or the catalog's raw window.
 This matches the Desktop protocol boundary and keeps a reroute or a selection
-for the next turn from relabeling active usage. During a turn, the UI also sums
-provider-confirmed `output_tokens` and shows the total next to elapsed time.
-Text deltas are not tokenized or extrapolated locally. Both projections derive
-from persisted items, so they survive completion and reload.
+for the next turn from relabeling active usage. Turn headers show elapsed time.
+Context telemetry remains persisted for the context indicator and compaction;
+the timeline does not calculate or display token spending.
 
 ## Agent loop
 
@@ -177,9 +180,10 @@ from persisted items, so they survive completion and reload.
    `codex.response.metadata` updates the effective model, model-catalog ETag,
    and response-local safety treatment; `codex.rate_limits` publishes validated
    sparse account telemetry.
-5. Persist complete items; deltas and `item.started` remain transient
-   projections.
-6. Execute tools, persist outputs in original call order, and continue.
+5. Persist complete model items and dispatch each completed tool call while
+   the response is still streaming; deltas and `item.started` remain transient.
+6. Drain every admitted tool, persist outputs in original call order after the
+   model items, and continue for tool results or pending user input.
 7. Complete, interrupt, or fail the turn transactionally.
 
 The WebSocket upgrade validates status, `Connection`, `Upgrade`, and
@@ -195,10 +199,22 @@ immediate cancellation. A lost incremental response resets the chain and
 retries from complete canonical input. Invalid protocol is terminal. Rate
 limiting follows the provider deadline without an arbitrary local retry
 counter.
+Only a completed response resets transient backoff. A failed stream drains
+admitted calls and commits their results before retrying, so a connection loss
+does not turn an executed operation into an orphan call or discard its result.
+Partial responses retain the last confirmed boundary and count subsequent items
+as local additions before the next request.
 
 Consecutive read-only calls may overlap. A mutation, approval, or exclusive
-command creates a barrier. A local batch contains at most eight calls, and
-results return to the provider in call order.
+command creates a FIFO barrier. At most eight tools run concurrently, and one
+response admits at most 128 calls. Servicing tool completions preserves the
+pending provider read and its semantic deadline.
+
+Streaming metadata belongs to active items: completion releases its channel
+keys, and a response boundary releases unfinished model keys while preserving
+live background-command channels. Admission is bounded to 128 active items and
+128 channels per item. Commentary and final answers both render incrementally;
+completed Markdown blocks retain their DOM identity until authoritative completion.
 
 ## Tools
 
@@ -362,8 +378,11 @@ Screenshots enter tool output as multimodal content. A new origin requires
 SQLite uses WAL and transactions for compound changes. Interrupted calls without
 outputs receive `aborted`; orphan outputs are removed. Active turns at startup
 recover to an explicit terminal state, and old commands are never reactivated.
-Schema 5 adds multi-agent identities and mailboxes with cumulative migration and
-exact table and column validation.
+Schema 6 persists the provider-history boundary of each confirmed usage sample
+atomically with its timeline item. Migration preserves older telemetry and leaves
+its unknown boundary unset until a new sample. Rewriting provider history
+invalidates the boundary; reopening and forking preserve valid boundaries.
+Cumulative migrations validate identity, tables, and columns before use.
 
 `engine_turn_steer` persists the message and causal input atomically. A queued
 message is promoted only after the response that could not observe it, preserving

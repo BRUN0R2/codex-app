@@ -41,16 +41,20 @@ use crate::engine::CodexThread;
 mod history;
 mod output_search;
 
+#[cfg(test)]
+mod context_usage_tests;
+
 use self::history::{StoredThreadPage, parse_history_cursor, read_thread_page as load_thread_page};
 use self::output_search::OutputSearcher;
 pub(super) use self::output_search::{MAX_OUTPUT_SEARCH_QUERY_BYTES, OutputSearchResponse};
 
 const DATABASE_FILE_NAME: &str = "native-state-profile-v2.sqlite3";
-const DATABASE_SCHEMA_VERSION: i64 = 5;
+const DATABASE_SCHEMA_VERSION: i64 = 6;
 const FIRST_SCHEMA_VERSION: i64 = 1;
 const SCHEMA_VERSION_WITH_OUTPUT_RESOURCES: i64 = 2;
 const SCHEMA_VERSION_WITH_AUTOMATIONS: i64 = 3;
 const SCHEMA_VERSION_WITH_PENDING_TURN_INPUTS: i64 = 4;
+const SCHEMA_VERSION_WITH_MULTI_AGENT: i64 = 5;
 const DATABASE_APPLICATION_ID: i64 = 1_128_552_527;
 const DATABASE_TABLES: &str = "agent_messages,agent_threads,app_config,automation_runs,automations,chat_conversations,output_chunks,output_resources,pending_turn_inputs,provider_items,thread_items,threads,turns";
 // Every lineage version below DATABASE_SCHEMA_VERSION must have a cumulative
@@ -111,7 +115,26 @@ const SCHEMA_BASELINE_TABLES: &[(i64, &[&str])] = &[
             "turns",
         ],
     ),
+    (
+        SCHEMA_VERSION_WITH_MULTI_AGENT,
+        &[
+            "agent_messages",
+            "agent_threads",
+            "app_config",
+            "automation_runs",
+            "automations",
+            "chat_conversations",
+            "output_chunks",
+            "output_resources",
+            "pending_turn_inputs",
+            "provider_items",
+            "thread_items",
+            "threads",
+            "turns",
+        ],
+    ),
 ];
+const THREAD_ITEM_COLUMNS: &str = "sequence,turn_id,item_id,payload,provider_item_count";
 const THREAD_COLUMNS: &str = "id,cwd,name,preview,archived,created_at,updated_at,project_path,mode";
 const TURN_COLUMNS: &str =
     "id,thread_id,owner_id,status,model,reasoning_effort,error,created_at,updated_at";
@@ -370,6 +393,10 @@ impl NativeStorage {
                 }
                 if current_version == SCHEMA_VERSION_WITH_PENDING_TURN_INPUTS {
                     migrate_database_v4_to_v5(&mut connection)?;
+                    current_version = SCHEMA_VERSION_WITH_MULTI_AGENT;
+                }
+                if current_version == SCHEMA_VERSION_WITH_MULTI_AGENT {
+                    migrate_database_v5_to_v6(&mut connection)?;
                 }
                 let migrated_version: i64 = connection
                     .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -1730,10 +1757,25 @@ impl NativeStorage {
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
             let transaction = begin_write_transaction(&mut connection)?;
+            let provider_item_count = if matches!(&item, ThreadItem::ContextUsage { .. }) {
+                Some(
+                    transaction
+                        .query_row(
+                            "SELECT COUNT(*) FROM provider_items
+                     WHERE thread_id = (SELECT thread_id FROM turns WHERE id = ?1)",
+                            [&turn_id],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(storage_error)?,
+                )
+            } else {
+                None
+            };
             transaction
                 .execute(
-                    "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
-                    params![&turn_id, &item_id, payload],
+                    "INSERT INTO thread_items (turn_id, item_id, payload, provider_item_count)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![&turn_id, &item_id, payload, provider_item_count],
                 )
                 .map_err(storage_error)?;
             if let Some(output) = output {
@@ -3512,6 +3554,18 @@ fn rewrite_provider_history_rows(
     };
     transaction
         .execute(
+            "UPDATE thread_items SET provider_item_count = NULL
+         WHERE sequence = (
+             SELECT items.sequence FROM thread_items AS items
+             JOIN turns ON turns.id = items.turn_id
+             WHERE turns.thread_id = ?1 AND items.provider_item_count IS NOT NULL
+             ORDER BY items.sequence DESC LIMIT 1
+         )",
+            [thread_id],
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
             "DELETE FROM provider_items WHERE thread_id = ?1",
             [thread_id],
         )
@@ -3550,7 +3604,7 @@ fn read_latest_context_usage(
 ) -> Result<Option<ContextUsageSnapshot>, AppError> {
     let payload = connection
         .query_row(
-            "SELECT thread_items.payload
+            "SELECT thread_items.payload, thread_items.provider_item_count
              FROM thread_items
              JOIN turns ON turns.id = thread_items.turn_id
              WHERE turns.thread_id = ?1
@@ -3561,17 +3615,28 @@ fn read_latest_context_usage(
              ORDER BY thread_items.sequence DESC
              LIMIT 1",
             [thread_id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
         )
         .optional()
         .map_err(storage_error)?;
-    let Some(payload) = payload else {
+    let Some((payload, history_item_count)) = payload else {
         return Ok(None);
     };
+    let history_item_count = history_item_count
+        .map(|count| {
+            usize::try_from(count).map_err(|error| {
+                AppError::Storage(format!("invalid context usage history boundary: {error}"))
+            })
+        })
+        .transpose()?;
     match decode_bounded::<ThreadItem>(&payload, MAX_ITEM_BYTES, "context usage")? {
-        ThreadItem::ContextUsage { model, usage, .. } => {
-            Ok(Some(ContextUsageSnapshot { model, usage }))
-        }
+        ThreadItem::ContextUsage { model, usage, .. } => Ok(history_item_count.map(
+            |history_item_count| ContextUsageSnapshot {
+                model,
+                usage,
+                history_item_count,
+            },
+        )),
         ThreadItem::ContextCompaction { .. } => Ok(None),
         _ => Err(AppError::Storage(
             "context-state query returned a different item type".into(),
@@ -3842,20 +3907,24 @@ fn copy_thread_items_for_fork(
     let rows = {
         let mut statement = transaction
             .prepare(
-                "SELECT item_id, payload FROM thread_items
+                "SELECT item_id, payload, provider_item_count FROM thread_items
                  WHERE turn_id = ?1 ORDER BY sequence",
             )
             .map_err(storage_error)?;
         statement
             .query_map([source_turn_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
             })
             .map_err(storage_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage_error)?
     };
 
-    for (item_id, payload) in rows {
+    for (item_id, payload, provider_item_count) in rows {
         let mut item: ThreadItem = decode_bounded(&payload, MAX_ITEM_BYTES, "forked thread item")?;
         let copied_output = thread_item_output_mut(&mut item)
             .and_then(Option::as_mut)
@@ -3867,8 +3936,9 @@ fn copy_thread_items_for_fork(
         let payload = encode_bounded(&item, MAX_ITEM_BYTES, "forked thread item")?;
         transaction
             .execute(
-                "INSERT INTO thread_items (turn_id, item_id, payload) VALUES (?1, ?2, ?3)",
-                params![fork_turn_id, item_id, payload],
+                "INSERT INTO thread_items (turn_id, item_id, payload, provider_item_count)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![fork_turn_id, item_id, payload, provider_item_count],
             )
             .map_err(storage_error)?;
 
@@ -4284,6 +4354,7 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
                  turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
                  item_id TEXT NOT NULL,
                  payload TEXT NOT NULL,
+                 provider_item_count INTEGER CHECK (provider_item_count >= 0),
                  UNIQUE(turn_id, item_id)
              );
              CREATE INDEX thread_items_turn_sequence ON thread_items(turn_id, sequence);
@@ -4476,6 +4547,26 @@ fn migrate_database_v4_to_v5(connection: &mut Connection) -> Result<(), AppError
         .execute_batch(MULTI_AGENT_SCHEMA_SQL)
         .map_err(storage_error)?;
     transaction
+        .pragma_update(None, "user_version", SCHEMA_VERSION_WITH_MULTI_AGENT)
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_database_v5_to_v6(connection: &mut Connection) -> Result<(), AppError> {
+    let transaction = begin_write_transaction(connection)?;
+    if database_tables(&transaction)? != DATABASE_TABLES
+        || table_columns(&transaction, "thread_items")? != "sequence,turn_id,item_id,payload"
+    {
+        return Err(AppError::Storage(
+            "schema 5 has invalid thread item columns".into(),
+        ));
+    }
+    transaction.execute_batch(
+        "ALTER TABLE thread_items ADD COLUMN provider_item_count INTEGER CHECK (provider_item_count >= 0);"
+    ).map_err(storage_error)?;
+    // Existing usage has no durable response boundary. Preserve the telemetry,
+    // but leave its boundary unknown until a new confirmed sample is recorded.
+    transaction
         .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
         .map_err(storage_error)?;
     transaction.commit().map_err(storage_error)
@@ -4543,6 +4634,12 @@ fn validate_database(
     if columns != TURN_COLUMNS {
         return Err(AppError::Storage(format!(
             "turn columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
+        )));
+    }
+    let columns = table_columns(connection, "thread_items")?;
+    if columns != THREAD_ITEM_COLUMNS {
+        return Err(AppError::Storage(format!(
+            "thread item columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
         )));
     }
     let columns = pending_turn_input_columns(connection)?;
@@ -5669,6 +5766,7 @@ mod tests {
                  DROP TABLE pending_turn_inputs;
                  DROP TABLE agent_messages;
                  DROP TABLE agent_threads;
+                 ALTER TABLE thread_items DROP COLUMN provider_item_count;
                  PRAGMA user_version = 2;",
             )
             .expect("fixture should become schema two");
@@ -5713,6 +5811,7 @@ mod tests {
                 "DROP TABLE pending_turn_inputs;
                  DROP TABLE agent_messages;
                  DROP TABLE agent_threads;
+                 ALTER TABLE thread_items DROP COLUMN provider_item_count;
                  PRAGMA user_version = 3;",
             )
             .expect("fixture should become schema three");
@@ -5752,6 +5851,7 @@ mod tests {
             .execute_batch(
                 "DROP TABLE agent_messages;
                  DROP TABLE agent_threads;
+                 ALTER TABLE thread_items DROP COLUMN provider_item_count;
                  PRAGMA user_version = 4;",
             )
             .expect("fixture should become schema four");
@@ -5870,6 +5970,7 @@ mod tests {
                  DROP TABLE agent_threads;
                  DROP TABLE output_chunks;
                  DROP TABLE output_resources;
+                 ALTER TABLE thread_items DROP COLUMN provider_item_count;
                  PRAGMA user_version = 1;",
             )
             .expect("fixture should become schema one");
@@ -6064,11 +6165,10 @@ mod tests {
                 .contains("replacement")
         );
         assert_eq!(prompt.history.items, history);
-        let usage = prompt
-            .context_usage
-            .expect("combined snapshot should contain usage");
-        assert_eq!(usage.model, "gpt-test");
-        assert_eq!(usage.usage.total_tokens, 100);
+        assert!(
+            prompt.context_usage.is_none(),
+            "rewriting history invalidates its usage boundary"
+        );
 
         storage
             .append_thread_item(

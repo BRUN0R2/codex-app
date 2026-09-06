@@ -19,6 +19,7 @@ use crate::engine::{ImageDetail, ModelContextWindow, TokenUsage};
 pub(super) struct ContextUsageSnapshot {
     pub model: String,
     pub usage: TokenUsage,
+    pub history_item_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,19 +66,15 @@ pub(super) fn evaluate_context_window(
 ) -> ContextWindowStatus {
     let active_tokens = evaluation
         .snapshot
-        .filter(|snapshot| snapshot.model == evaluation.model_id)
+        .filter(|snapshot| {
+            snapshot.model == evaluation.model_id
+                && snapshot.history_item_count <= evaluation.history.len()
+        })
         .map(|snapshot| {
-            let local_tokens = evaluation
-                .history
+            let local_tokens = evaluation.history[snapshot.history_item_count..]
                 .iter()
-                .rposition(is_model_generated_item)
-                .map(|last_model_item| {
-                    evaluation.history[last_model_item.saturating_add(1)..]
-                        .iter()
-                        .map(estimate_item_tokens)
-                        .fold(0, u64::saturating_add)
-                })
-                .unwrap_or_default();
+                .map(estimate_item_tokens)
+                .fold(0, u64::saturating_add);
             snapshot.usage.total_tokens.saturating_add(local_tokens)
         })
         .unwrap_or_else(|| {
@@ -504,20 +501,6 @@ fn decode_original_image_tokens(image_url: &str) -> Option<u64> {
     )
 }
 
-fn is_model_generated_item(item: &ResponseItem) -> bool {
-    match item {
-        ResponseItem::Message { role, .. } => role == "assistant",
-        ResponseItem::Reasoning { .. }
-        | ResponseItem::FunctionCall { .. }
-        | ResponseItem::CustomToolCall { .. }
-        | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::Compaction { .. } => true,
-        ResponseItem::FunctionCallOutput { .. }
-        | ResponseItem::CustomToolCallOutput { .. }
-        | ResponseItem::CompactionTrigger { .. } => false,
-    }
-}
-
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -550,6 +533,7 @@ mod tests {
     fn adds_local_items_after_the_last_model_item() {
         let history = vec![text("assistant", "done"), text("user", &"x".repeat(400))];
         let snapshot = ContextUsageSnapshot {
+            history_item_count: 1,
             model: "gpt-test".into(),
             usage: usage(900),
         };
@@ -572,6 +556,7 @@ mod tests {
     fn provider_measurement_remains_authoritative_after_a_completed_response() {
         let history = vec![text("assistant", "done")];
         let snapshot = ContextUsageSnapshot {
+            history_item_count: 1,
             model: "gpt-test".into(),
             usage: usage(10),
         };
@@ -591,9 +576,59 @@ mod tests {
     }
 
     #[test]
+    fn later_partial_model_items_are_counted_after_the_confirmed_boundary() {
+        let history = vec![
+            text("assistant", "confirmed"),
+            text("user", &"u".repeat(400)),
+            text("assistant", &"p".repeat(800)),
+        ];
+        let snapshot = ContextUsageSnapshot {
+            model: "gpt-test".into(),
+            usage: usage(900),
+            history_item_count: 1,
+        };
+        let status = evaluate_context_window(ContextWindowEvaluation {
+            model_id: "gpt-test",
+            base_instructions: "",
+            prompt_context: &[],
+            history: &history,
+            tools: &[],
+            snapshot: Some(&snapshot),
+            auto_compact_limit: Some(1_000),
+            context_window: None,
+        });
+        assert_eq!(
+            status.active_tokens,
+            900 + history[1..].iter().map(estimate_item_tokens).sum::<u64>()
+        );
+        assert!(status.should_compact);
+    }
+
+    #[test]
+    fn a_boundary_outside_the_current_history_is_not_a_valid_measurement() {
+        let snapshot = ContextUsageSnapshot {
+            model: "gpt-test".into(),
+            usage: usage(900_000),
+            history_item_count: 2,
+        };
+        let status = evaluate_context_window(ContextWindowEvaluation {
+            model_id: "gpt-test",
+            base_instructions: "",
+            prompt_context: &[],
+            history: &[text("user", "new context")],
+            tools: &[],
+            snapshot: Some(&snapshot),
+            auto_compact_limit: Some(1_000),
+            context_window: None,
+        });
+        assert!(!status.should_compact);
+    }
+
+    #[test]
     fn provider_measurement_prevents_premature_compaction_from_a_larger_request_estimate() {
         let history = vec![text("assistant", "done")];
         let snapshot = ContextUsageSnapshot {
+            history_item_count: 1,
             model: "gpt-5.6-sol".into(),
             usage: usage(200_340),
         };
@@ -615,6 +650,7 @@ mod tests {
     #[test]
     fn incompatible_model_uses_the_current_request_only() {
         let snapshot = ContextUsageSnapshot {
+            history_item_count: 1,
             model: "gpt-large".into(),
             usage: usage(900_000),
         };
@@ -667,6 +703,7 @@ mod tests {
             ResponseItem::function_output("call-1".into(), "x".repeat(400)),
         ];
         let snapshot = ContextUsageSnapshot {
+            history_item_count: 1,
             model: "gpt-test".into(),
             usage: usage(900),
         };
@@ -967,6 +1004,7 @@ mod tests {
         assert_eq!(usage.total_tokens, 272_000);
 
         let snapshot = ContextUsageSnapshot {
+            history_item_count: 1,
             model: "gpt-test".into(),
             usage,
         };
@@ -1002,6 +1040,7 @@ mod tests {
         history.push(text("assistant", "completed response"));
         history.push(text("user", "small local continuation"));
         let snapshot = ContextUsageSnapshot {
+            history_item_count: history.len() - 1,
             model: "gpt-benchmark".into(),
             usage: usage(180_000),
         };

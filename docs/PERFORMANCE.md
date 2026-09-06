@@ -15,6 +15,7 @@ pnpm measure:response-transport # full versus incremental Responses payload
 pnpm measure:multimodal-continuation # image-preserving continuation comparison
 pnpm measure:nested-polls     # independent Code Mode waits through the native gate
 pnpm measure:patch-preparation # bounded 128-file native patch preparation
+pnpm measure:tool-dispatch    # controlled response/tool overlap
 pnpm measure:release          # release startup and memory
 pnpm measure:browser          # Browser Use metrics
 ```
@@ -113,21 +114,21 @@ actual compiler invocations, and keep the warning enabled.
 
 ## Current baseline
 
-Measurements use Windows with 28 logical processors. Startup and compaction
-samples date from 2026-08-31; Code Mode and multimodal continuation were measured
-on 2026-09-05. These values describe local runs, not universal guarantees.
+Measurements use Windows with 28 logical processors. Credential and encoding
+baselines date from 2026-08-31; context boundaries, streamed dispatch, Code Mode,
+and the current gate were measured on 2026-09-05. These values describe local runs.
 
 ### Agent startup, continuation, and compaction
 
-Each range is two consecutive optimized runs after warm-up. The response case
-uses a 3 MiB history and five samples per run; context cases use the same history
-and 40 samples per run.
+Ranges represent two consecutive optimized runs after warm-up. The response
+case uses a 3 MiB history and five samples per run. Context rows are the latest
+40-sample optimized run over the same history after persisting usage boundaries.
 
 | Scenario | Previous work | Current work | Result |
 | --- | ---: | ---: | ---: |
 | credential load after the first vault read | 1,461.460-1,485.377 ms | 3.555-4.030 us | 368,580x-411,100x faster |
-| confirmed context preflight | 2.205-2.207 ms | 0.170-0.173 us | 12,781x-12,983x faster |
-| compaction preparation with no rewrite | 3.986-4.035 ms | 0.120-0.130 us | 31,037x-33,213x faster |
+| confirmed context preflight | 2.227 ms | 0.215 us | 10,358x faster |
+| compaction preparation with no rewrite | 4.146 ms | 0.425 us | 9,756x faster |
 | compaction request encoding | 3.618-3.707 ms | 0.621-0.631 ms | 5.74x-5.97x faster |
 | compaction wire payload | 3,146,213 B | 425 B | 99.98649% smaller |
 
@@ -183,7 +184,7 @@ dispatch, and exact retained bytes remove redundant hashing. These numbers
 measure preparation only, excluding persistence and provider latency. The
 release benchmark is reproducible with `pnpm measure:patch-preparation` and
 guards a 500 ms median limit in `pnpm verify:benchmarks`. The optimized full-gate
-run prepared the same 128 updates in 30.142 ms median; the debug speedup ratio
+run prepared the same 128 updates in 29.373 ms median; the debug speedup ratio
 does not claim an unmeasured release baseline.
 
 Focused tests cover nested directories, moves, append positions, original
@@ -191,6 +192,21 @@ context bytes and line endings, size limits, Windows aliases and attributes,
 failure at every commit position, cancellation, concurrent changes, and V8 Code
 Mode executing a batch followed by a dependent patch. The tool description
 includes the complete grouping contract for the nested freeform route.
+
+### Streamed tool dispatch and long turns
+
+`pnpm measure:tool-dispatch` runs five controlled rounds with a 100 ms response
+tail and 100 ms of tool work. Deferring execution until the response ended took
+1,100 ms total; eager bounded dispatch took 547 ms (2.01x). The gate requires at
+least 20% reduction. This measures local overlap, not authenticated provider
+latency or model quality.
+
+The stream-state soak completes 100,000 item identities over 10,000 responses.
+Only one deliberately live background-command identity remains after each
+response, and finishing that command empties the state. Interrupted responses,
+channel admission, cancellation, FIFO mutation barriers, and ordered tool-result
+recovery have focused native regressions. Live 72-hour qualification remains
+separate from these bounded simulations.
 
 ### Context and tools
 
@@ -213,14 +229,14 @@ includes the complete grouping contract for the nested freeform route.
 
 | Scenario | Result |
 | --- | ---: |
-| batched text streaming | 199x the sequential path |
-| framed command streaming | 71.129x the sequential path |
-| cold Code Mode runtime warm-up | 5.546 ms; one initialization |
-| 150,001-line diff | 45 mounted rows; 0.263 ms visible window |
-| incremental 64 MiB terminal | 1,360.816 ms; 47.0 MiB/s |
-| command after yield | response in 258 ms; independent work in 445 ms |
-| incremental polling | 146 B versus a 165,133 B snapshot |
-| four independent commands | 698.987 ms parallel versus 2,715.103 ms sequential |
+| batched text streaming | 202.817x the sequential path |
+| framed command streaming | 73.276x the sequential path |
+| cold Code Mode runtime warm-up | 5.761 ms; one initialization |
+| 150,001-line diff | 45 mounted rows; 0.256 ms visible window |
+| incremental 64 MiB terminal | 1,263.008 ms; 50.7 MiB/s |
+| command after yield | response in 260 ms; independent work in 449 ms |
+| incremental polling | 146 B versus a 16,513 B snapshot |
+| four independent commands | 696.079 ms parallel versus 2,707.635 ms sequential |
 
 Visual QA passed at 920x640, 1280x820, and 1920x1080 without horizontal
 overflow. Ultra rendered as `rgb(167, 139, 250)` (`#a78bfa`); appearance does
@@ -230,12 +246,12 @@ not alter the engine capability gate.
 
 | Check | Result |
 | --- | ---: |
-| encoding | 464 valid UTF-8 files |
-| frontend | 107 files; 551 passing tests |
-| main JavaScript bundle | 434.35 kB; 129.26 kB gzip |
-| CSS | 149.35 kB; 26.65 kB gzip |
+| encoding | 469 valid UTF-8 files |
+| frontend | 107 files; 549 passing tests |
+| main JavaScript bundle | 433.47 kB; 129.01 kB gzip |
+| CSS | 149.23 kB; 26.62 kB gzip |
 | visual QA | 153 passing scenario/viewport cases |
-| Rust | 507 passing; 16 ignored benchmarks; no failures |
+| Rust | 522 passing; 17 ignored checks; no failures |
 | Cargo, formatting, and Clippy | passed without warnings |
 
 ## Regression protection
@@ -247,6 +263,10 @@ not alter the engine capability gate.
 | output fills memory or IPC | spool, cursor, compaction, and a 64 MiB scenario |
 | diff mounts the whole document | virtual window and a 150,000-line corpus |
 | long commands block the agent | yield, incremental polling, and independent work |
+| tools wait for response completion | eager-dispatch regression and controlled overlap benchmark |
+| a stream failure loses executed tool results | drain before retry, ordered outputs, and cancellation regression |
+| one long turn retains every streamed item ID | 100,000-item lifecycle soak, response cleanup, and explicit admission limits |
+| commentary repeatedly rebuilds completed Markdown | browser regression preserves paragraph identity across live deltas |
 | multi-file edits require avoidable retries | batch preparation benchmark, transactional failures, and Code Mode integration |
 | first `exec` pays cold V8 cost | tracked prewarm, `OnceLock`, and release benchmark |
 | first response pays vault, catalog, and socket setup serially | credential cache, startup prewarm, and parallel preparation |
@@ -261,7 +281,8 @@ not alter the engine capability gate.
 | a large Code Mode result hides later results or errors | fair bounded output projection with UTF-8 and media regressions |
 | Lite image output changes canonical history or defeats continuation | message, function, and custom-output projection and identity tests |
 | tools consume unbounded context | catalog budget and `measure:tokens` |
-| local estimates compact early | provider-confirmed use plus post-model delta only |
+| local estimates compact early | provider-confirmed use plus additions after its durable boundary |
+| interrupted output shifts an older context measurement | durable response boundary, transactional migration, restart and fork tests |
 | browser degrades layout | viewport matrix, metrics, and WebView2 smoke test |
 | refresh rate distorts QA | controlled identity probe separate from fast scrolling |
 | fixed-height scrolling replaces retained file components | overlapping-scroll identity probe over 100,000 files and shared keyed slots |

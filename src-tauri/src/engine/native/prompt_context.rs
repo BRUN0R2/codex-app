@@ -5,7 +5,7 @@ use chrono::{FixedOffset, Utc};
 
 use super::multi_agent::MultiAgentPromptContext;
 use super::provider::{ResponseItem, SelectedModel};
-use crate::engine::{AppConfig, ApprovalPolicy, ConversationMode, Personality, SandboxMode};
+use crate::engine::{AppConfig, ApprovalPolicy, ConversationMode, SandboxMode};
 use crate::error::AppError;
 
 const PROJECT_INSTRUCTIONS_MAX_BYTES: u64 = 32 * 1_024;
@@ -46,17 +46,7 @@ pub(super) async fn compose_prompt_context(
             "generic.developer_instructions",
         )?;
     }
-    let personality = (!model.personality_is_baked())
-        .then(|| {
-            model.personality_context(config.personality).or_else(|| {
-                model
-                    .uses_legacy_instruction_contract()
-                    .then(|| personality_instruction(config.personality))
-                    .flatten()
-            })
-        })
-        .flatten();
-    if let Some(personality) = personality {
+    if let Some(personality) = model.personality_context(config.personality) {
         builder.push(
             "developer",
             format!(
@@ -248,16 +238,6 @@ fn file_error(operation: &str, path: &Path, error: std::io::Error) -> AppError {
         "could not {operation} project instructions at {}: {error}",
         path.display()
     ))
-}
-
-const fn personality_instruction(personality: Personality) -> Option<&'static str> {
-    match personality {
-        Personality::Friendly => Some(
-            "You optimize for team morale and being a supportive teammate as much as code quality.",
-        ),
-        Personality::Pragmatic => Some("You are a deeply pragmatic, effective software engineer."),
-        Personality::None => None,
-    }
 }
 
 fn environment_context(
@@ -507,8 +487,10 @@ mod tests {
         assert!(!encoded.contains("Work execution protocol"));
         assert!(!encoded.contains("built-in browser tools"));
         assert!(encoded.contains("environments.environment_context"));
-        assert!(encoded.contains("personality.spec_instructions"));
-        assert!(encoded.contains("deeply pragmatic"));
+        assert!(!encoded.contains("personality.spec_instructions"));
+        assert!(!encoded.contains("deeply pragmatic"));
+        assert!(encoded.contains("permissions.instructions"));
+        assert!(encoded.contains("collaboration_mode.instructions"));
     }
 
     #[tokio::test]

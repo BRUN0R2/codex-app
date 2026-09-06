@@ -9,15 +9,17 @@ local implementation remains independent.
 | --- | --- |
 | [`openai/codex`](https://github.com/openai/codex/tree/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a) | stable `rust-v0.153.4`, audited 2026-09-05 |
 | audited source commit | `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` |
-| Codex Desktop for Windows | installed package `26.901.5003.0`, inspected 2026-09-05 |
+| additional core inspection | `d4dc882998ddf7f3d2b40893ef2f77a5fdfa5715`, audited 2026-09-05 |
+| Codex Desktop for Windows | installed package `26.901.5280.0`, inspected 2026-09-05 |
 
 Study checkouts live outside the build, including `.references/openai-codex`.
 No referenced crate, package, executable, database, configuration, or credential
 enters the local build or runtime.
 
-Desktop conclusions cover the installed package, documented product behavior,
-and its public core and app-server contracts. The private Desktop interface
-source is outside this source audit.
+Desktop conclusions cover the installed JavaScript bundles, documented product
+behavior, and public core and app-server contracts. Bundle inspection includes
+developer-instruction composition and feature-specific app context; it does not
+constitute access to the private Desktop source repository.
 
 The local catalog's `client_version` remains `0.153.2`, its explicit protocol
 compatibility version. Auditing a newer release does not change that contract.
@@ -59,7 +61,7 @@ Official references:
 | cache | Short in-memory catalog cache with ETag invalidation | Five-minute TTL and no persistence |
 | context | Confirmed use plus local delta and stable Remote Compaction V2 | Dynamic budget, incremental trigger, and atomic checkpoint |
 | commands | Yield, registered sessions, polling, and incremental output | Independent manager with Windows Job Objects |
-| parallelism | Independent tools may overlap | Eight-call local batch with deterministic order |
+| parallelism | Dispatch starts when each tool call completes in the stream | Eight concurrent tools, FIFO mutation barriers, ordered durable outputs |
 | patch | Freeform tool with a dedicated parser | Local Lark grammar and transactional commit |
 | images | Multimodal inspection is a native tool activity | Local `view_image`, thumbnail, and viewer |
 | browser | Visible surface, closed actions, and origin approval | Engine-controlled child WebView2 |
@@ -68,8 +70,15 @@ Official references:
 
 Upstream has no single parallel-command maximum equivalent to the local limit;
 scheduling depends on handlers and barriers. Its Unified Exec manager accepts up
-to 64 processes. This project limits one round to eight tools and its registry
-to 32 sessions. Both limits are intentional and tested.
+to 64 processes. This project admits 128 tool calls per response, executes up to
+eight concurrently, and limits its process registry to 32 sessions. These limits
+are intentional and tested.
+
+The upstream `tools/parallel.rs` spawns dispatch eagerly when the call is
+decoded, even though its result is queued in `FuturesOrdered`. The sampling loop
+drains those futures before returning a stream error. Native execution follows
+that lifecycle, retaining canonical call/output order for incremental Responses
+and preserving completed effects across reconnects.
 
 ## Astra and multi-file patches
 
@@ -109,6 +118,18 @@ The core retains local text for roles, modes, tools, permissions, and runtime
 context that the server cannot know. Catalog data may replace or suppress some
 of it. Local instructions are necessary but must not duplicate personality or
 protocol already supplied by `instructions_template`.
+
+Inspected Astra and Sol templates already contain progress-message and
+persistence instructions. Desktop additionally composes context for supported
+app features; there is no evidence here for adding another universal agent
+prompt. The native defaults cover execution mode and actual permission behavior.
+Catalog sections override them individually, while explicit empty sections
+suppress them. A missing personality variable does not invent a local style.
+
+The native timeline carries the provider's commentary/final-answer distinction
+through both item lifecycle and incremental Markdown rendering. A completed
+response with no tool calls or pending input ends the turn; commentary alone
+does not trigger a fabricated user message or an extra sampling round.
 
 Responses Lite preserves semantics over a different wire shape:
 `additional_tools`, a `functions` namespace, and base instructions encoded as
@@ -204,11 +225,10 @@ context by reverse-scanning paginated rollouts. Its SQLite active-context
 prefix is already canonical, including empty `AgentMailbox` turns, and the
 combined transactional snapshot has direct regression coverage.
 
-SSE text deltas do not contain exact usage. `response.completed` supplies
-`output_tokens`, so the timeline accumulates only confirmed values per turn.
-The count updates after confirmed cycles, remains attached to completed turns,
-and survives history reload. The frontend never attempts to reproduce the
-tokenizer.
+SSE text deltas do not contain exact usage. `response.completed` supplies the
+confirmed usage retained for context management. The frontend never attempts to
+reproduce the tokenizer. Turn headers display elapsed time without a separate
+token-spend projection.
 
 ## Cache and integrity
 

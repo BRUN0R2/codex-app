@@ -228,7 +228,7 @@ pub(super) async fn run_turn(
                     Ok(Some(event)) => event,
                     Ok(None) => break,
                     Err(error) => {
-                        stream_deltas.flush().await?;
+                        stream_deltas.finish_response().await?;
                         match wait_for_recoverable_chat_error(
                             &inner,
                             &app,
@@ -244,7 +244,6 @@ pub(super) async fn run_turn(
                         }
                     }
                 };
-                transient_failure_count = 0;
                 match event {
                     ChatStreamEvent::ConversationId(id) => conversation_id = Some(id),
                     ChatStreamEvent::Message(snapshot) => {
