@@ -87,6 +87,14 @@ quota window and links to the official plan and credit pages. The reserve card i
 a separate panel above the profile menu. It remains hidden when only a historical
 bucket exists and never infers or silently switches the active model from
 percentages.
+
+Manual usage resets send a provider credit ID and a stable redemption request ID.
+After `reset` or `already_redeemed`, the controller invalidates earlier limit and
+credit reads and starts fresh reads before announcing success. Late responses
+cannot restore consumed credits or pre-reset limits; failed refreshes remain
+visible. Percentages always come from the provider. The browser preview models
+credit consumption and updated general/Spark windows for local integration tests.
+
 The sidebar width is a local layout preference, bounded so the main panel
 retains its minimum width and adjustable with the keyboard or pointer divider.
 

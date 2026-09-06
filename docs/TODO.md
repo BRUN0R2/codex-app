@@ -1,5 +1,10 @@
 # TODO
 
+- [ ] Diagnose the `timeline-expanded-100k` visual gate at 1920x1080: total frame
+  work reached 11.20 ms at P99 against the 10 ms budget, blocking `pnpm verify`.
+- [ ] Validate an authenticated usage-reset redemption with before/after provider
+  limits and remaining reset credits. Local reset simulation covers refresh races
+  and idempotency but does not establish a live provider-side reset.
 - [ ] Record paired authenticated agent runs with the same model, effort,
   service tier, task, and network; compare time to first delta, completed task
   duration, confirmed cached-input tokens, and tool retries, including a

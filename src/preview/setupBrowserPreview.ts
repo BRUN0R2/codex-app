@@ -18,10 +18,13 @@ import type {
   ModelListResponse,
   PermissionProfile,
   ProjectRecord,
+  RateLimitSnapshot,
+  RateLimitWindow,
   ThreadListResponse,
   ThreadOutput,
   ThreadSummary,
   UsageResetCreditsResponse,
+  UsageResetRedemptionResponse,
   VisibleThreadItem,
 } from "../contracts/types";
 import {
@@ -1374,13 +1377,13 @@ const PREVIEW_RATE_LIMITS = {
   lunaReserveAvailable: true,
 } as const satisfies AccountRateLimitsResponse;
 
-let previewUsageResets: UsageResetCreditsResponse = {
+const PREVIEW_USAGE_RESETS: UsageResetCreditsResponse = {
   credits: [
     {
       id: "preview-reset-credit",
       title: "Redefinição completa",
       status: "available",
-      expiresAt: Date.parse("2026-09-20T21:16:00-03:00"),
+      expiresAt: Date.now() + 14 * 24 * 60 * 60_000,
     },
   ],
   availableCount: 1,
@@ -1420,6 +1423,9 @@ let previewApplicationPreferences: ApplicationPreferences = {
 
 export function setupBrowserPreview(): void {
   const previewParameters = new URLSearchParams(window.location.search);
+  let previewRateLimits: AccountRateLimitsResponse = PREVIEW_RATE_LIMITS;
+  let previewUsageResets = PREVIEW_USAGE_RESETS;
+  const resetRedemptions = new Map<string, UsageResetRedemptionResponse>();
   if (previewParameters.get("usageResets") === "empty") {
     previewUsageResets = {
       credits: [],
@@ -1706,18 +1712,52 @@ export function setupBrowserPreview(): void {
         };
       }
       case "engine_account_rate_limits_read":
-        return PREVIEW_RATE_LIMITS;
+        return previewRateLimits;
       case "engine_account_usage_resets_read":
         return previewUsageResets;
       case "engine_account_usage_reset_redeem": {
-        const request = (args as { request?: { creditId?: string | null } }).request;
-        const redeemedId = request?.creditId ?? previewUsageResets.credits[0]?.id ?? null;
+        const requestId = readPreviewRequestString(args, "redeemRequestId");
+        const previous = resetRedemptions.get(requestId);
+        if (previous !== undefined) return { ...previous, code: "already_redeemed" };
+        const creditId = (args as { request?: { creditId?: unknown } }).request?.creditId;
+        if (creditId !== null && typeof creditId !== "string") {
+          throw new Error("The preview reset credit id is invalid.");
+        }
+        const credit = previewUsageResets.credits.find((entry) =>
+          creditId === null ? entry.status === "available" : entry.id === creditId,
+        );
+        if (credit === undefined) return { code: "no_credits_available", creditId };
+        if (credit.status !== "available") return { code: "already_redeemed", creditId: credit.id };
+        const now = Date.now();
+        if (credit.expiresAt !== null && credit.expiresAt <= now) {
+          return { code: "expired", creditId: credit.id };
+        }
         previewUsageResets = {
           ...previewUsageResets,
-          availableCount: Math.max(0, previewUsageResets.availableCount - 1),
-          credits: previewUsageResets.credits.filter((credit) => credit.id !== redeemedId),
+          availableCount: previewUsageResets.availableCount - 1,
+          credits: previewUsageResets.credits.map((entry) =>
+            entry.id === credit.id ? { ...entry, status: "redeemed" } : entry,
+          ),
         };
-        return { code: "reset", creditId: redeemedId };
+        previewRateLimits = {
+          ...previewRateLimits,
+          rateLimits: resetPreviewUsageSnapshot(previewRateLimits.rateLimits, now),
+          rateLimitsByLimitId: Object.fromEntries(
+            Object.entries(previewRateLimits.rateLimitsByLimitId).map(([id, snapshot]) => [
+              id,
+              id === "codex" || id === "codex_spark"
+                ? resetPreviewUsageSnapshot(snapshot, now)
+                : snapshot,
+            ]),
+          ),
+          lunaReserveAvailable: false,
+        };
+        const response = {
+          code: "reset",
+          creditId: credit.id,
+        } satisfies UsageResetRedemptionResponse;
+        resetRedemptions.set(requestId, response);
+        return response;
       }
       case "engine_account_auto_top_up_read":
         return previewAutoTopUpSettings;
@@ -2424,6 +2464,27 @@ interface PreviewBrowserViewportRecord {
   readonly height?: unknown;
   readonly scale?: unknown;
   readonly width?: unknown;
+}
+
+function resetPreviewUsageSnapshot(snapshot: RateLimitSnapshot, now: number): RateLimitSnapshot {
+  return {
+    ...snapshot,
+    primary: resetPreviewUsageWindow(snapshot.primary, now),
+    secondary: resetPreviewUsageWindow(snapshot.secondary, now),
+    rateLimitReachedType: null,
+  };
+}
+
+function resetPreviewUsageWindow(
+  window: RateLimitWindow | null,
+  now: number,
+): RateLimitWindow | null {
+  if (window === null) return null;
+  return {
+    ...window,
+    usedPercent: 0,
+    resetsAt: window.windowDurationMins === null ? null : now + window.windowDurationMins * 60_000,
+  };
 }
 
 function readPreviewRequestString(args: unknown, key: string): string {

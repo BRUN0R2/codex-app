@@ -342,6 +342,8 @@ export function createAppController(localization: AppControllerLocalization): Ap
   let pendingAccountProfileReads = 0;
   let pendingRateLimitReads = 0;
   let lastUsageResetReadAt = 0;
+  let usageResetReadRevision = 0;
+  let accountUsageSessionRevision = 0;
   let disposed = false;
   let unsubscribe: (() => void) | null = null;
   let unsubscribeFromMenu: (() => void) | null = null;
@@ -412,7 +414,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   });
   const hasOlderHistory = createMemo(() => historyCursor() !== null);
   const rateLimitRefresh = createRateLimitRefreshCoordinator({
-    getSessionKey: () => (signedIn() ? "chatgpt" : null),
+    getSessionKey: () => accountSessionKey(account()),
     read: readRateLimitsWithStatus,
     apply: applyRateLimits,
     reportError: (reason) => {
@@ -421,6 +423,19 @@ export function createAppController(localization: AppControllerLocalization): Ap
     },
     host: createBrowserRateLimitRefreshHost(),
   });
+
+  function invalidateAccountUsageSession(): void {
+    accountUsageSessionRevision += 1;
+    invalidateUsageResetReads();
+    rateLimitRefresh.invalidate();
+    setUsageResetRedeemingId(null);
+  }
+
+  function invalidateUsageResetReads(): void {
+    usageResetReadRevision += 1;
+    lastUsageResetReadAt = 0;
+    setUsageResetsLoading(false);
+  }
 
   function applyRateLimits(value: AccountRateLimitsResponse): void {
     const previous = rateLimits();
@@ -767,7 +782,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
         return;
       }
       invalidateAccountProfileSession();
-      rateLimitRefresh.invalidateSession();
+      invalidateAccountUsageSession();
       if (accountSessionKey(account()) !== accountSessionKey(currentAccount)) {
         invalidateAuthenticatedStateLoad();
         invalidateModelCatalogs();
@@ -787,7 +802,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       invalidateAuthenticatedStateLoad();
       invalidateModelCatalogs();
       invalidateAccountProfileSession();
-      rateLimitRefresh.invalidateSession();
+      invalidateAccountUsageSession();
       if (isRetryableInitializationFailure(reason, stage)) {
         const delay = initializationRetryDelay(attempt);
         batch(() => {
@@ -843,7 +858,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     invalidateModelCatalogs();
     batch(() => {
       invalidateAccountProfileSession();
-      rateLimitRefresh.invalidateSession();
+      invalidateAccountUsageSession();
       setEngine(null);
       setAccount(undefined);
       setConfig(null);
@@ -1492,7 +1507,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       .then(async () => {
         const currentAccount = await readAccount();
         invalidateAccountProfileSession();
-        rateLimitRefresh.invalidateSession();
+        invalidateAccountUsageSession();
         if (accountSessionKey(account()) !== accountSessionKey(currentAccount)) {
           invalidateAuthenticatedStateLoad();
           invalidateModelCatalogs();
@@ -1577,7 +1592,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     try {
       const response = await withPending(() => logoutCommand());
       invalidateAccountProfileSession();
-      rateLimitRefresh.invalidateSession();
+      invalidateAccountUsageSession();
       invalidateAuthenticatedStateLoad();
       invalidateModelCatalogs();
       try {
@@ -2504,7 +2519,12 @@ export function createAppController(localization: AppControllerLocalization): Ap
   }
 
   function refreshUsageResets(): Promise<boolean> {
-    return singleFlightOperations.run("account:usage-resets", refreshUsageResetsOnce);
+    const revision = usageResetReadRevision;
+    const sessionKey = accountSessionKey(account());
+    if (sessionKey === null || disposed) return Promise.resolve(false);
+    return singleFlightOperations.run(`account:usage-resets:${revision}:${sessionKey}`, () =>
+      refreshUsageResetsOnce(revision, sessionKey),
+    );
   }
 
   function refreshUsageResetsIfStale(): Promise<boolean> {
@@ -2514,22 +2534,33 @@ export function createAppController(localization: AppControllerLocalization): Ap
     return refreshUsageResets();
   }
 
-  async function refreshUsageResetsOnce(): Promise<boolean> {
-    if (!signedIn()) {
+  function isCurrentUsageResetRead(revision: number, sessionKey: string): boolean {
+    return (
+      !disposed &&
+      revision === usageResetReadRevision &&
+      sessionKey === accountSessionKey(account())
+    );
+  }
+
+  async function refreshUsageResetsOnce(revision: number, sessionKey: string): Promise<boolean> {
+    if (!isCurrentUsageResetRead(revision, sessionKey)) {
       return false;
     }
     setUsageResetsLoading(true);
     setUsageResetsError(null);
     try {
-      applyUsageResets(await readUsageResets());
+      const value = await readUsageResets();
+      if (!isCurrentUsageResetRead(revision, sessionKey)) return false;
+      applyUsageResets(value);
       return true;
     } catch (reason) {
+      if (!isCurrentUsageResetRead(revision, sessionKey)) return false;
       const message = describeError(reason);
       setUsageResetsError(message);
       addDiagnostic({ stream: "runtime", message });
       return false;
     } finally {
-      setUsageResetsLoading(false);
+      if (isCurrentUsageResetRead(revision, sessionKey)) setUsageResetsLoading(false);
     }
   }
 
@@ -2568,26 +2599,37 @@ export function createAppController(localization: AppControllerLocalization): Ap
     creditId: string | null,
     redeemRequestId: string,
   ): Promise<UsageResetRedemptionResponse | null> {
-    if (!signedIn() || usageResetRedeemingId() !== null) {
+    const sessionRevision = accountUsageSessionRevision;
+    const sessionKey = accountSessionKey(account());
+    const isCurrentSession = () =>
+      !disposed &&
+      sessionRevision === accountUsageSessionRevision &&
+      sessionKey === accountSessionKey(account());
+    if (disposed || sessionKey === null || usageResetRedeemingId() !== null) {
       return null;
     }
     setUsageResetRedeemingId(creditId ?? "automatic");
     setUsageResetsError(null);
     try {
       const response = await redeemUsageResetCommand(creditId, redeemRequestId);
+      if (!isCurrentSession()) return null;
       if (response.code === "reset" || response.code === "already_redeemed") {
-        await Promise.all([refreshUsageResets(), rateLimitRefresh.refresh()]);
+        invalidateUsageResetReads();
+        rateLimitRefresh.invalidate();
+        const refreshed = await Promise.all([refreshUsageResets(), rateLimitRefresh.refresh()]);
+        if (!isCurrentSession() || refreshed.some((succeeded) => !succeeded)) return null;
       } else {
         setUsageResetsError(usageResetRedemptionError(response.code));
       }
       return response;
     } catch (reason) {
+      if (!isCurrentSession()) return null;
       const message = describeError(reason);
       setUsageResetsError(message);
       addDiagnostic({ stream: "runtime", message });
       return null;
     } finally {
-      setUsageResetRedeemingId(null);
+      if (isCurrentSession()) setUsageResetRedeemingId(null);
     }
   }
 

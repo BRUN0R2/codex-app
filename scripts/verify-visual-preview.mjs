@@ -890,6 +890,9 @@ const SCENARIOS = [
       document.querySelector(".usage-switch")?.getAttribute("aria-checked") === "false"`,
     prepareExpression: `(() => {
       const resetButton = document.querySelector(".usage-reset-button");
+      window.__usageLimitsBeforeReset = [...document.querySelectorAll(".usage-limit-meter")].map(
+        (meter) => meter.value,
+      );
       resetButton?.click();
       requestAnimationFrame(() => {
         if (resetButton?.textContent?.trim() === "Confirmar") {
@@ -6862,6 +6865,8 @@ function emptyUsageResetsVisualAuditExpression() {
 
 function usageSettingsInteractionVisualAuditExpression() {
   return `(() => ({
+    limitsBeforeReset: window.__usageLimitsBeforeReset,
+    limitsAfterReset: [...document.querySelectorAll(".usage-limit-meter")].map((meter) => meter.value),
     resetRows: document.querySelectorAll(".usage-reset-row").length,
     successText: document.querySelector(".usage-inline-success")?.textContent?.trim() ?? null,
     switchAriaChecked: document.querySelector(".usage-switch")?.getAttribute("aria-checked") ?? null,
@@ -8854,6 +8859,14 @@ function validateEmptyUsageResetsMetrics(metrics) {
 
 function validateUsageSettingsInteractionMetrics(metrics) {
   const tolerance = 1;
+  assert(
+    JSON.stringify(metrics.limitsBeforeReset) === JSON.stringify([57, 7, 100, 0, 86]),
+    "the simulation did not start with the expected general, Spark, and reserve limits",
+  );
+  assert(
+    JSON.stringify(metrics.limitsAfterReset) === JSON.stringify([100, 100, 100, 100, 86]),
+    "the confirmed reset did not refresh the general and Spark limits",
+  );
   assert(
     metrics.horizontalOverflow <= tolerance,
     "Usage and billing interaction created horizontal overflow",
