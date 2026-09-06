@@ -119,7 +119,8 @@ function resolveDisclosurePath(
   const path: DisclosureNode[] = [root];
   let node = root;
   for (const prefix of timelineIdentityPrefixes(key)) {
-    const children = (node.children ??= new Map());
+    node.children ??= new Map();
+    const children = node.children;
     let child = children.get(prefix);
     if (child === undefined) {
       child = createDisclosureNode(node);
