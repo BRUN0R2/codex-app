@@ -196,6 +196,8 @@ right edge. Intrinsic diff panels declare their content block size while retaini
 strict layout and size containment. Native horizontal scrollbars add their own
 space; large panels remain capped at 360 pixels.
 Browser checks retain native scrollbars and cover normal and fractional zoom.
+Unified code cells divide the precomputed canvas width from a zero flex basis,
+avoiding a second intrinsic text-width measurement for each mounted line.
 
 Diffs, file reads, and search matches preserve source whitespace and share the
 four-column tab stops used by width projection. Short file reads also declare

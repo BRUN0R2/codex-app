@@ -8609,7 +8609,7 @@ pre {
 }
 
 .diff-viewport.is-unified .unified-diff-code {
-  flex: 1 1 auto;
+  flex: 1 1 0;
 }
 
 .diff-viewport.is-split .diff-line-number.left {
