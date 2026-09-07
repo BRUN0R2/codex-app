@@ -93,6 +93,7 @@
       "taskFailedMessage": "{task} stopped with an error. Open it to review the diagnostic.",
       "usageLimitResetTitle": "Your usage limit reset",
       "usageLimitResetMessage": "The account is ready again with {percent}% of this limit available.",
+      "usageResetRedeemedMessage": "The reset was confirmed. The latest provider limits are being synchronized.",
       "usageResetAvailableTitle": "A manual usage reset is available",
       "usageResetAvailableMessage": "You have {count} reset credit available to use before it expires.",
       "usageResetsAvailableMessage": "You have {count} reset credits available to use before they expire.",

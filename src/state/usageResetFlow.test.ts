@@ -98,6 +98,7 @@ describe("usage reset flow", () => {
       code: "reset",
       creditId: "preview-reset-credit",
     });
+    await vi.waitFor(() => expect(controller.usageResetRedeemingId()).toBeNull());
     const after = controller.rateLimits();
     if (before === null || after === null) throw new Error("Missing account usage.");
     expect(after?.rateLimits.primary).toEqual({
@@ -127,12 +128,43 @@ describe("usage reset flow", () => {
     });
     expect(controller.rateLimits()).toEqual(after);
     expect(controller.usageResets()?.availableCount).toBe(0);
+    await vi.waitFor(() => expect(controller.usageResetRedeemingId()).toBeNull());
     await expect(controller.redeemUsageReset(null, "another-request")).resolves.toEqual({
       code: "no_credits_available",
       creditId: null,
     });
     expect(controller.usageResetsError()).toBe("No reset is available to use.");
     expect(controller.rateLimits()).toEqual(after);
+  });
+
+  it("returns the authoritative success while post-reset reads are still pending", async () => {
+    const controller = await startController();
+    const beforeLimits = controller.rateLimits();
+    const beforeCredits = controller.usageResets();
+    if (beforeLimits === null || beforeCredits === null) throw new Error("Missing account usage.");
+    const pendingLimits = Promise.withResolvers<AccountRateLimitsResponse>();
+    const pendingCredits = Promise.withResolvers<UsageResetCreditsResponse>();
+    const readLimits = vi
+      .spyOn(client, "readRateLimits")
+      .mockImplementationOnce(() => pendingLimits.promise);
+    const readCredits = vi
+      .spyOn(client, "readUsageResets")
+      .mockImplementationOnce(() => pendingCredits.promise);
+    vi.spyOn(client, "redeemUsageReset").mockResolvedValue({
+      code: "reset",
+      creditId: "preview-reset-credit",
+    });
+
+    await expect(
+      controller.redeemUsageReset("preview-reset-credit", "reset-request"),
+    ).resolves.toEqual({ code: "reset", creditId: "preview-reset-credit" });
+    expect(readLimits).toHaveBeenCalledTimes(1);
+    expect(readCredits).toHaveBeenCalledTimes(1);
+    expect(controller.usageResetRedeemingId()).toBe("preview-reset-credit");
+
+    pendingLimits.resolve(resetLimits(beforeLimits));
+    pendingCredits.resolve({ ...beforeCredits, credits: [], availableCount: 0 });
+    await vi.waitFor(() => expect(controller.usageResetRedeemingId()).toBeNull());
   });
 
   it.each(["before", "after"])(
@@ -173,28 +205,32 @@ describe("usage reset flow", () => {
       pendingCredits.resolve(beforeCredits);
       await Promise.all([olderLimits, olderCredits, redemption]);
 
-      expect(readLimits).toHaveBeenCalledTimes(2);
-      expect(readCredits).toHaveBeenCalledTimes(2);
-      expect(controller.rateLimits()).toEqual(afterLimits);
-      expect(controller.usageResets()).toEqual(afterCredits);
+      await vi.waitFor(() => {
+        expect(readLimits).toHaveBeenCalledTimes(2);
+        expect(readCredits).toHaveBeenCalledTimes(2);
+        expect(controller.rateLimits()).toEqual(afterLimits);
+        expect(controller.usageResets()).toEqual(afterCredits);
+      });
     },
   );
 
   it.each(["readRateLimits", "readUsageResets"] as const)(
-    "does not report success when %s fails after redemption",
+    "preserves the authoritative redemption when %s fails during synchronization",
     async (operation) => {
       const controller = await startController();
       vi.spyOn(client, operation).mockRejectedValue(new Error("Post-reset read failed."));
 
       await expect(
         controller.redeemUsageReset("preview-reset-credit", "reset-request"),
-      ).resolves.toBeNull();
-      expect(
-        operation === "readRateLimits"
-          ? controller.rateLimitsError()
-          : controller.usageResetsError(),
-      ).toContain("Post-reset read failed.");
-      expect(controller.usageResetRedeemingId()).toBeNull();
+      ).resolves.toEqual({ code: "reset", creditId: "preview-reset-credit" });
+      await vi.waitFor(() => {
+        expect(
+          operation === "readRateLimits"
+            ? controller.rateLimitsError()
+            : controller.usageResetsError(),
+        ).toContain("Post-reset read failed.");
+        expect(controller.usageResetRedeemingId()).toBeNull();
+      });
     },
   );
 
@@ -230,7 +266,7 @@ describe("usage reset flow", () => {
 
     await controller.redeemUsageReset("preview-reset-credit", "reset-request");
     expect(redeem).toHaveBeenNthCalledWith(2, "preview-reset-credit", "reset-request");
-    expect(controller.usageResets()?.availableCount).toBe(0);
+    await vi.waitFor(() => expect(controller.usageResets()?.availableCount).toBe(0));
   });
 
   it("ignores old read failures after a successful reset", async () => {

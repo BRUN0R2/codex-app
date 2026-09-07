@@ -344,6 +344,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   let lastUsageResetReadAt = 0;
   let usageResetReadRevision = 0;
   let accountUsageSessionRevision = 0;
+  let manualUsageResetNotificationPending = false;
   let disposed = false;
   let unsubscribe: (() => void) | null = null;
   let unsubscribeFromMenu: (() => void) | null = null;
@@ -426,6 +427,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
 
   function invalidateAccountUsageSession(): void {
     accountUsageSessionRevision += 1;
+    manualUsageResetNotificationPending = false;
     invalidateUsageResetReads();
     rateLimitRefresh.invalidate();
     setUsageResetRedeemingId(null);
@@ -441,17 +443,20 @@ export function createAppController(localization: AppControllerLocalization): Ap
     const previous = rateLimits();
     const reset = previous === null ? null : findUsageLimitReset(previous, value);
     if (reset !== null) {
-      enqueueNotification({
-        approval: null,
-        id: `usage-limit-reset:${reset.limitId}:${reset.resetsAt}`,
-        event: "usageLimitReset",
-        tone: "success",
-        title: localization.notifications().usageLimitResetTitle,
-        message: formatMessage(localization.notifications().usageLimitResetMessage, {
-          percent: reset.availablePercent,
-        }),
-        target: { type: "settings", page: "usage" },
-      });
+      if (!manualUsageResetNotificationPending) {
+        enqueueNotification({
+          approval: null,
+          id: `usage-limit-reset:${reset.limitId}:${reset.resetsAt}`,
+          event: "usageLimitReset",
+          tone: "success",
+          title: localization.notifications().usageLimitResetTitle,
+          message: formatMessage(localization.notifications().usageLimitResetMessage, {
+            percent: reset.availablePercent,
+          }),
+          target: { type: "settings", page: "usage" },
+        });
+      }
+      manualUsageResetNotificationPending = false;
     }
     if (previous?.lunaReserveAvailable !== true && value.lunaReserveAvailable) {
       enqueueNotification({
@@ -1442,8 +1447,8 @@ export function createAppController(localization: AppControllerLocalization): Ap
     });
   }
 
-  function enqueueNotification(input: AppNotificationInput): void {
-    if (applicationPreferencesLoaded()) notificationCenter.enqueue(input);
+  function enqueueNotification(input: AppNotificationInput): boolean {
+    return applicationPreferencesLoaded() && notificationCenter.enqueue(input);
   }
 
   function previewNotification(event: ConfigurableNotificationEventKind): boolean {
@@ -2608,16 +2613,36 @@ export function createAppController(localization: AppControllerLocalization): Ap
     if (disposed || sessionKey === null || usageResetRedeemingId() !== null) {
       return null;
     }
+    let synchronizationContinues = false;
     setUsageResetRedeemingId(creditId ?? "automatic");
     setUsageResetsError(null);
     try {
       const response = await redeemUsageResetCommand(creditId, redeemRequestId);
       if (!isCurrentSession()) return null;
       if (response.code === "reset" || response.code === "already_redeemed") {
+        manualUsageResetNotificationPending = enqueueNotification({
+          approval: null,
+          id: `usage-limit-reset:manual:${redeemRequestId}`,
+          event: "usageLimitReset",
+          tone: "success",
+          title: localization.notifications().usageLimitResetTitle,
+          message: localization.notifications().usageResetRedeemedMessage,
+          target: { type: "settings", page: "usage" },
+        });
         invalidateUsageResetReads();
         rateLimitRefresh.invalidate();
-        const refreshed = await Promise.all([refreshUsageResets(), rateLimitRefresh.refresh()]);
-        if (!isCurrentSession() || refreshed.some((succeeded) => !succeeded)) return null;
+        const synchronization = Promise.all([refreshUsageResets(), rateLimitRefresh.refresh()]);
+        synchronizationContinues = true;
+        void synchronization.then(
+          () => {
+            if (isCurrentSession()) setUsageResetRedeemingId(null);
+          },
+          (reason: unknown) => {
+            if (!isCurrentSession()) return;
+            setUsageResetRedeemingId(null);
+            reportError(reason);
+          },
+        );
       } else {
         setUsageResetsError(usageResetRedemptionError(response.code));
       }
@@ -2629,7 +2654,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       addDiagnostic({ stream: "runtime", message });
       return null;
     } finally {
-      if (isCurrentSession()) setUsageResetRedeemingId(null);
+      if (!synchronizationContinues && isCurrentSession()) setUsageResetRedeemingId(null);
     }
   }
 

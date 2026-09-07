@@ -93,6 +93,7 @@
       "taskFailedMessage": "{task} parou com um erro. Abra-a para revisar o diagnóstico.",
       "usageLimitResetTitle": "Seu limite de uso foi redefinido",
       "usageLimitResetMessage": "A conta está pronta novamente com {percent}% deste limite disponível.",
+      "usageResetRedeemedMessage": "A redefinição foi confirmada. Os limites mais recentes do provider estão sendo sincronizados.",
       "usageResetAvailableTitle": "Uma redefinição manual está disponível",
       "usageResetAvailableMessage": "Você tem {count} crédito de redefinição disponível para usar antes de expirar.",
       "usageResetsAvailableMessage": "Você tem {count} créditos de redefinição disponíveis para usar antes de expirarem.",
