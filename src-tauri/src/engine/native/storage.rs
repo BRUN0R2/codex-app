@@ -7217,7 +7217,7 @@ mod tests {
             .delete_owned_active_thread(thread.id.clone(), turn.id)
             .await
             .expect("the owning active turn should authorize deletion");
-        assert_eq!(response.thread_ids, [thread.id.clone()]);
+        assert_eq!(response.thread_ids, std::slice::from_ref(&thread.id));
         assert!(storage.read_thread(thread.id.clone()).await.is_err());
     }
 
