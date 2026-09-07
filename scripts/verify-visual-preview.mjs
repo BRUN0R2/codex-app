@@ -234,7 +234,7 @@ const SCENARIOS = [
     id: "composer-runtime-restrictions",
     url: RUNTIME_RESTRICTIONS_PREVIEW_URL,
     initialReadyExpression: `document.querySelector(".model-button") instanceof HTMLButtonElement &&
-      document.querySelector(".model-button-name")?.textContent?.includes("5.6 Luna") === true`,
+      document.querySelector(".model-button-name")?.textContent?.includes("GPT-5.6 Luna") === true`,
     prepareExpression: `(() => {
       const modelButton = document.querySelector(".model-button");
       if (!(modelButton instanceof HTMLButtonElement)) {
@@ -4870,6 +4870,7 @@ function composerFastModeVisualAuditExpression() {
       indicator,
       button,
       name,
+      modelName: nameElement?.textContent?.trim() ?? null,
       indicatorCount: document.querySelectorAll(".model-speed-indicator").length,
       accessibleLabel: buttonElement?.textContent?.includes("Modo rápido ativo") === true,
       fullAccessColor:
@@ -7286,6 +7287,7 @@ function validateComposerFastModeMetrics(metrics, viewport) {
   validateChromeMetrics(metrics, viewport);
   assert(metrics.horizontalOverflow <= tolerance, "the composer created horizontal overflow");
   assert(metrics.buttonHorizontalOverflow <= tolerance, "the model selector clips its content");
+  assert(metrics.modelName === "GPT-5.6 Luna", "the model selector changed the canonical model name");
   assert(metrics.indicatorCount === 1, "fast mode does not display exactly one indicator");
   assert(metrics.accessibleLabel === true, "the fast indicator has no accessible description");
   assert(
@@ -7329,6 +7331,7 @@ function validateComposerContextWindowMetrics(metrics, viewport) {
       JSON.stringify(["Modelo", "Esforço", "Janela de contexto", "Velocidade"]),
     `the model-control order changed: ${JSON.stringify(metrics.rowLabels)}`,
   );
+  assert(metrics.rowValues[0] === "GPT-5.6 Luna", "the model row changed the canonical model name");
   assert(metrics.rowValues[2] === "272 mil", "the persisted catalog window is not visible");
   assert(metrics.rowValues[3] === "Rápido", "the active speed tier is not localized");
   assert(
@@ -7390,6 +7393,7 @@ function validateComposerServiceTierMetrics(metrics, viewport) {
       JSON.stringify(["Modelo", "Esforço", "Janela de contexto", "Velocidade"]),
     `the model-control order changed: ${JSON.stringify(metrics.rowLabels)}`,
   );
+  assert(metrics.rowValues[0] === "GPT-5.6 Luna", "the model row changed the canonical model name");
   assert(metrics.rowValues[3] === "Rápido", "the active speed tier is not localized");
   assert(
     JSON.stringify(metrics.options) ===
@@ -7448,7 +7452,7 @@ function validateComposerUltraEffortMetrics(metrics) {
 
 function validateComposerRuntimeRestrictionsMetrics(metrics) {
   assert(metrics.horizontalOverflow <= 1, "the contextual notice created horizontal overflow");
-  assert(metrics.selectedModel === "5.6 Luna", "the configured Code Mode model was replaced");
+  assert(metrics.selectedModel === "GPT-5.6 Luna", "the configured Code Mode model was replaced");
   assert(
     metrics.persistentCompatibilityNoticeCount === 0,
     "the runtime requirement remained visible outside the selector",

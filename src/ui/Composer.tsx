@@ -160,6 +160,7 @@ export function Composer(props: ComposerProps) {
     resolveChatIntelligence(props.controller.chatModels(), chatSelection()),
   );
   const selectedModel = configuredModel;
+  const selectedModelLabel = createMemo(() => selectedModel()?.displayName ?? messages().loading);
   const selectedContextWindowPreference = createMemo(() => {
     const selected = selectedModel();
     if (selected === undefined) {
@@ -913,11 +914,7 @@ export function Composer(props: ComposerProps) {
                       <span class="visually-hidden">{messages().fastModeActive}</span>
                     </span>
                   </Show>
-                  <span class="model-button-name">
-                    {selectedModel() === undefined
-                      ? messages().loading
-                      : compactModelName(selectedModel()?.displayName ?? "")}
-                  </span>
+                  <span class="model-button-name">{selectedModelLabel()}</span>
                   <Show when={effort()}>
                     {(selectedEffort) => (
                       <span
@@ -940,11 +937,7 @@ export function Composer(props: ComposerProps) {
                       active={modelMenuSection() === "model"}
                       label={messages().model}
                       onActivate={() => setModelMenuSection("model")}
-                      value={
-                        selectedModel() === undefined
-                          ? messages().loading
-                          : compactModelName(selectedModel()?.displayName ?? "")
-                      }
+                      value={selectedModelLabel()}
                     />
                     <ModelMenuRow
                       active={modelMenuSection() === "effort"}
@@ -1448,10 +1441,6 @@ function samePermission(left: PermissionProfile, right: PermissionProfile | unde
   return (
     right !== undefined && left.sandbox === right.sandbox && left.approvals === right.approvals
   );
-}
-
-function compactModelName(displayName: string): string {
-  return displayName.replace(/^gpt[- ]?/iu, "").replaceAll("-", " ");
 }
 
 function formatBytes(bytes: number): string {
