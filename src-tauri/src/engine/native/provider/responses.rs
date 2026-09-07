@@ -123,6 +123,9 @@ impl<'a> ResponseRequest<'a> {
         tools: &'a [Value],
         settings: ResponseRequestSettings<'a>,
     ) -> Result<Self, AppError> {
+        validate_request_items(context)?;
+        validate_request_items(input)?;
+        validate_request_items(tail)?;
         let lite_prefix = match settings.protocol {
             ResponseProtocol::Standard => None,
             ResponseProtocol::Lite => Some(LitePrefix::new(
@@ -347,6 +350,12 @@ impl<'a> ResponseRequest<'a> {
             input: self.input.clone_owned_range(0)?,
         })
     }
+}
+
+fn validate_request_items(items: &[ResponseItem]) -> Result<(), AppError> {
+    items
+        .iter()
+        .try_for_each(ResponseItem::validate_for_request)
 }
 
 #[derive(Debug, Clone)]
@@ -999,14 +1008,11 @@ impl ResponseItem {
         }
     }
 
-    pub fn context_text(role: impl Into<String>, text: String, content_kind: &str) -> Self {
-        let role = role.into();
+    pub fn context_text(role: ResponseInputRole, text: String, content_kind: &str) -> Self {
+        let role = role.as_str();
         Self::Message {
-            id: Some(stable_item_id(
-                "msg",
-                [role.as_str(), content_kind, text.as_str()],
-            )),
-            role,
+            id: Some(stable_item_id("msg", [role, content_kind, text.as_str()])),
+            role: role.into(),
             content: vec![ResponseContent::InputText { text }],
             phase: None,
             internal_chat_message_metadata_passthrough: Some(
@@ -1018,20 +1024,18 @@ impl ResponseItem {
         }
     }
 
-    pub fn context_text_with_seed(
-        role: impl Into<String>,
+    pub fn assistant_context_text_with_seed(
         text: String,
         content_kind: &str,
         stable_seed: &str,
     ) -> Self {
-        let role = role.into();
         Self::Message {
             id: Some(stable_item_id(
                 "msg",
-                [role.as_str(), content_kind, stable_seed, text.as_str()],
+                ["assistant", content_kind, stable_seed, text.as_str()],
             )),
-            role,
-            content: vec![ResponseContent::InputText { text }],
+            role: "assistant".into(),
+            content: vec![ResponseContent::OutputText { text }],
             phase: None,
             internal_chat_message_metadata_passthrough: Some(
                 InternalChatMessageMetadataPassthrough {
@@ -1039,6 +1043,53 @@ impl ResponseItem {
                     content_item_kinds: Some(vec![content_kind.into()]),
                 },
             ),
+        }
+    }
+
+    pub(crate) fn migrate_legacy_assistant_input_text(&mut self) -> bool {
+        let Self::Message { role, content, .. } = self else {
+            return false;
+        };
+        if role != "assistant" {
+            return false;
+        }
+        let mut migrated = false;
+        for item in content {
+            if let ResponseContent::InputText { text } = item {
+                *item = ResponseContent::OutputText {
+                    text: std::mem::take(text),
+                };
+                migrated = true;
+            }
+        }
+        migrated
+    }
+
+    fn validate_for_request(&self) -> Result<(), AppError> {
+        let Self::Message { role, content, .. } = self else {
+            return Ok(());
+        };
+        let valid = match role.as_str() {
+            "assistant" => content.iter().all(|item| {
+                matches!(
+                    item,
+                    ResponseContent::OutputText { .. } | ResponseContent::Refusal { .. }
+                )
+            }),
+            "developer" | "system" | "user" => content.iter().all(|item| {
+                matches!(
+                    item,
+                    ResponseContent::InputText { .. } | ResponseContent::InputImage { .. }
+                )
+            }),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(AppError::Protocol(format!(
+                "response message role `{role}` contains an incompatible content type"
+            )))
         }
     }
 
@@ -1162,6 +1213,21 @@ impl ResponseItem {
                 .as_ref()
                 .and_then(|metadata| metadata.turn_id.as_deref()),
         ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseInputRole {
+    Developer,
+    User,
+}
+
+impl ResponseInputRole {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Developer => "developer",
+            Self::User => "user",
+        }
     }
 }
 
@@ -2167,6 +2233,7 @@ mod tests {
     use super::ReasoningSummarySetting;
     use super::ResponseContent;
     use super::ResponseEvent;
+    use super::ResponseInputRole;
     use super::ResponseItem;
     use super::ResponseMessagePhase;
     use super::ResponseMetadataState;
@@ -2697,9 +2764,16 @@ mod tests {
                 text: "hello".into(),
             }],
         );
-        let context = ResponseItem::context_text("developer", "context".into(), "context.kind");
-        let rebuilt_context =
-            ResponseItem::context_text("developer", "context".into(), "context.kind");
+        let context = ResponseItem::context_text(
+            ResponseInputRole::Developer,
+            "context".into(),
+            "context.kind",
+        );
+        let rebuilt_context = ResponseItem::context_text(
+            ResponseInputRole::Developer,
+            "context".into(),
+            "context.kind",
+        );
 
         assert_eq!(first.id(), retried.id());
         assert_ne!(first.id(), other.id());
@@ -2707,6 +2781,53 @@ mod tests {
         for id in [first.id(), other.id(), context.id()] {
             assert!(id.is_some_and(|id| id.starts_with("msg_")));
         }
+    }
+
+    #[test]
+    fn assistant_context_uses_provider_output_content() {
+        let item = ResponseItem::assistant_context_text_with_seed(
+            "completed by worker".into(),
+            "multi_agent.inter_agent_completion_message",
+            "message-1",
+        );
+        let encoded = serde_json::to_value(&item).expect("assistant context should serialize");
+
+        assert_eq!(encoded["role"], "assistant");
+        assert_eq!(encoded["content"][0]["type"], "output_text");
+        ResponseRequest::new(
+            "gpt-5.6-sol",
+            "Be useful.",
+            &[],
+            &[item],
+            &[],
+            ResponseRequestSettings::default(),
+        )
+        .expect("typed assistant context should satisfy the provider contract");
+    }
+
+    #[test]
+    fn rejects_incompatible_message_content_before_transport() {
+        let malformed = ResponseItem::Message {
+            id: Some("message-1".into()),
+            role: "assistant".into(),
+            content: vec![ResponseContent::InputText {
+                text: "legacy malformed context".into(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        let error = ResponseRequest::new(
+            "gpt-5.6-sol",
+            "Be useful.",
+            &[],
+            &[malformed],
+            &[],
+            ResponseRequestSettings::default(),
+        )
+        .expect_err("invalid role/content pairs must not reach the provider");
+
+        assert!(error.to_string().contains("incompatible content type"));
     }
 
     #[test]
@@ -3214,7 +3335,7 @@ mod tests {
             "parameters": {"type": "object"}
         })];
         let context = [ResponseItem::context_text(
-            "user",
+            ResponseInputRole::User,
             "<environment_context />".into(),
             "environments.environment_context",
         )];

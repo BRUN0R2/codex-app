@@ -49,12 +49,13 @@ use self::output_search::OutputSearcher;
 pub(super) use self::output_search::{MAX_OUTPUT_SEARCH_QUERY_BYTES, OutputSearchResponse};
 
 const DATABASE_FILE_NAME: &str = "native-state-profile-v2.sqlite3";
-const DATABASE_SCHEMA_VERSION: i64 = 6;
+const DATABASE_SCHEMA_VERSION: i64 = 7;
 const FIRST_SCHEMA_VERSION: i64 = 1;
 const SCHEMA_VERSION_WITH_OUTPUT_RESOURCES: i64 = 2;
 const SCHEMA_VERSION_WITH_AUTOMATIONS: i64 = 3;
 const SCHEMA_VERSION_WITH_PENDING_TURN_INPUTS: i64 = 4;
 const SCHEMA_VERSION_WITH_MULTI_AGENT: i64 = 5;
+const SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES: i64 = 6;
 const DATABASE_APPLICATION_ID: i64 = 1_128_552_527;
 const DATABASE_TABLES: &str = "agent_messages,agent_threads,app_config,automation_runs,automations,chat_conversations,output_chunks,output_resources,pending_turn_inputs,provider_items,thread_items,threads,turns";
 // Every lineage version below DATABASE_SCHEMA_VERSION must have a cumulative
@@ -117,6 +118,24 @@ const SCHEMA_BASELINE_TABLES: &[(i64, &[&str])] = &[
     ),
     (
         SCHEMA_VERSION_WITH_MULTI_AGENT,
+        &[
+            "agent_messages",
+            "agent_threads",
+            "app_config",
+            "automation_runs",
+            "automations",
+            "chat_conversations",
+            "output_chunks",
+            "output_resources",
+            "pending_turn_inputs",
+            "provider_items",
+            "thread_items",
+            "threads",
+            "turns",
+        ],
+    ),
+    (
+        SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES,
         &[
             "agent_messages",
             "agent_threads",
@@ -397,6 +416,10 @@ impl NativeStorage {
                 }
                 if current_version == SCHEMA_VERSION_WITH_MULTI_AGENT {
                     migrate_database_v5_to_v6(&mut connection)?;
+                    current_version = SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES;
+                }
+                if current_version == SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES {
+                    migrate_database_v6_to_v7(&mut connection)?;
                 }
                 let migrated_version: i64 = connection
                     .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -4419,6 +4442,40 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
     transaction.commit().map_err(storage_error)
 }
 
+fn migrate_database_v6_to_v7(connection: &mut Connection) -> Result<(), AppError> {
+    let transaction = begin_write_transaction(connection)?;
+    let rows = {
+        let mut statement = transaction
+            .prepare("SELECT sequence, payload FROM provider_items ORDER BY sequence")
+            .map_err(storage_error)?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_error)?
+    };
+    for (sequence, payload) in rows {
+        let mut item = decode_provider_item(&payload, "schema 6 provider item")?;
+        if !item.migrate_legacy_assistant_input_text() {
+            continue;
+        }
+        let payload = encode_provider_item(&item, "migrated provider item")?;
+        let changed = transaction
+            .execute(
+                "UPDATE provider_items SET payload = ?1 WHERE sequence = ?2",
+                params![payload, sequence],
+            )
+            .map_err(storage_error)?;
+        require_changed(changed, "migrated provider item")?;
+    }
+    transaction
+        .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
 fn migrate_database_v1_to_v2(connection: &mut Connection) -> Result<(), AppError> {
     let transaction = begin_write_transaction(connection)?;
     transaction
@@ -4567,7 +4624,11 @@ fn migrate_database_v5_to_v6(connection: &mut Connection) -> Result<(), AppError
     // Existing usage has no durable response boundary. Preserve the telemetry,
     // but leave its boundary unknown until a new confirmed sample is recorded.
     transaction
-        .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+        .pragma_update(
+            None,
+            "user_version",
+            SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES,
+        )
         .map_err(storage_error)?;
     transaction.commit().map_err(storage_error)
 }
@@ -4820,8 +4881,8 @@ mod tests {
 
     use super::{
         DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, MAX_ITEM_BYTES, NativeStorage,
-        begin_write_transaction, encode_bounded, encode_provider_item, initialize_database,
-        open_database_connection,
+        SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES, begin_write_transaction, encode_bounded,
+        encode_provider_item, initialize_database, open_database_connection,
     };
     use crate::engine::native::automation::{AutomationDraft, AutomationUpdate};
     use crate::engine::native::multi_agent::{
@@ -4971,6 +5032,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn migrates_legacy_assistant_input_text_before_resuming_a_thread() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("legacy-assistant-content.sqlite3");
+        let mut connection = open_database_connection(&database_path)
+            .expect("legacy database connection should open");
+        initialize_database(&mut connection).expect("baseline schema should initialize");
+        connection
+            .execute(
+                "INSERT INTO threads
+                     (id, cwd, project_path, mode, name, preview, archived, created_at, updated_at)
+                 VALUES ('thread-1', '.', NULL, 'codex', NULL, '', 0, 1, 1)",
+                [],
+            )
+            .expect("legacy thread should persist");
+        let malformed = ResponseItem::Message {
+            id: Some("message-1".into()),
+            role: "assistant".into(),
+            content: vec![ResponseContent::InputText {
+                text: "legacy agent message".into(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let payload = encode_provider_item(&malformed, "legacy provider item")
+            .expect("legacy provider item should encode");
+        connection
+            .execute(
+                "INSERT INTO provider_items (thread_id, payload) VALUES ('thread-1', ?1)",
+                [payload],
+            )
+            .expect("legacy provider item should persist");
+        connection
+            .pragma_update(
+                None,
+                "user_version",
+                SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES,
+            )
+            .expect("legacy schema version should persist");
+        drop(connection);
+
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(database_path.clone())
+            .await
+            .expect("legacy assistant content should migrate");
+        let history = storage
+            .provider_history("thread-1".into())
+            .await
+            .expect("migrated history should load");
+        assert!(matches!(
+            history.as_slice(),
+            [ResponseItem::Message { role, content, .. }]
+                if role == "assistant"
+                    && matches!(content.as_slice(), [ResponseContent::OutputText { text }] if text == "legacy agent message")
+        ));
+
+        let connection = Connection::open(database_path).expect("database should reopen");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version should load");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn starts_spawned_agent_turns_from_typed_persistent_mailbox_messages() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let storage = NativeStorage::default();
@@ -4987,8 +5112,7 @@ mod tests {
             )
             .await
             .expect("root thread should persist");
-        let message = ResponseItem::context_text_with_seed(
-            "assistant",
+        let message = ResponseItem::assistant_context_text_with_seed(
             "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\ncontinue"
                 .into(),
             "multi_agent.inter_agent_message",
@@ -5095,8 +5219,7 @@ mod tests {
                         .join(&task_name)
                         .expect("generated agent path should be valid"),
                     task_name,
-                    initial_message: ResponseItem::context_text_with_seed(
-                        "assistant",
+                    initial_message: ResponseItem::assistant_context_text_with_seed(
                         "bounded task".into(),
                         "multi_agent.inter_agent_message",
                         &format!("initial-task-{index}"),
@@ -5120,8 +5243,7 @@ mod tests {
                     .join("one_too_many")
                     .expect("generated agent path should be valid"),
                 task_name: "one_too_many".into(),
-                initial_message: ResponseItem::context_text_with_seed(
-                    "assistant",
+                initial_message: ResponseItem::assistant_context_text_with_seed(
                     "must fail".into(),
                     "multi_agent.inter_agent_message",
                     "rejected-initial-task",

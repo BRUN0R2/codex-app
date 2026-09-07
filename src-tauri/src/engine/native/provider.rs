@@ -42,6 +42,7 @@ pub(crate) use self::responses::FunctionCallOutputContent;
 pub(crate) use self::responses::FunctionCallOutputPayload;
 pub(crate) use self::responses::ResponseContent;
 pub(crate) use self::responses::ResponseEvent;
+pub(crate) use self::responses::ResponseInputRole;
 pub(crate) use self::responses::ResponseItem;
 pub(crate) use self::responses::ResponseMessagePhase;
 pub(crate) use self::responses::ResponseProtocol;
