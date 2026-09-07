@@ -943,6 +943,18 @@ pub enum ThreadActiveFlag {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadAgentSummary {
+    pub root_thread_id: String,
+    pub parent_thread_id: String,
+    pub path: String,
+    pub task_name: String,
+    pub model: String,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub service_tier: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadSummary {
     pub id: String,
     pub mode: ConversationMode,
@@ -954,6 +966,7 @@ pub struct ThreadSummary {
     pub updated_at: i64,
     pub recency_at: Option<i64>,
     pub status: ThreadStatus,
+    pub agent: Option<ThreadAgentSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1005,6 +1018,7 @@ pub struct ThreadListResponse {
 pub struct ThreadReadResponse {
     pub thread: CodexThread,
     pub next_cursor: Option<String>,
+    pub agent_threads: Vec<ThreadSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1013,6 +1027,7 @@ pub struct ThreadResumeResponse {
     pub thread: CodexThread,
     pub cwd: String,
     pub next_cursor: Option<String>,
+    pub agent_threads: Vec<ThreadSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -14,7 +14,7 @@ import { formatMessage } from "../i18n/messages";
 import { isBrowserPreview } from "../platform/desktopRuntime";
 import type { AppController } from "../state/appController";
 import { createBrowserController } from "../state/browserController";
-
+import { AgentTabs } from "./AgentTabs";
 import { ApprovalCard } from "./ApprovalCard";
 import { applyDesktopAppearance } from "./appearance";
 import { Composer, type ComposerDraftRequest } from "./Composer";
@@ -51,6 +51,7 @@ import {
   reconcileBrowserWorkspaceTabs,
   removeReviewWorkspaceTab,
   showBrowserWorkspaceTab,
+  showEmptyWorkspace,
   showReviewWorkspaceTab,
   showWorkspaceTab,
   type WorkspaceTab,
@@ -171,7 +172,7 @@ export function AppShell(props: { readonly controller: AppController }) {
   });
 
   createEffect(() => {
-    const conversationId = props.controller.currentThread()?.id ?? null;
+    const conversationId = props.controller.activeTaskRootId();
     const tabs = conversationId === null ? [] : browserController.tabs(conversationId);
     const activeBrowserTabId =
       conversationId === null
@@ -190,7 +191,7 @@ export function AppShell(props: { readonly controller: AppController }) {
     if (!previewBrowserPending) {
       return;
     }
-    const conversationId = props.controller.currentThread()?.id;
+    const conversationId = props.controller.activeTaskRootId() ?? undefined;
     if (conversationId === undefined) {
       return;
     }
@@ -211,7 +212,7 @@ export function AppShell(props: { readonly controller: AppController }) {
       return;
     }
     observedBrowserAgentActivity = activity;
-    if (props.controller.currentThread()?.id !== activity.conversationId) {
+    if (props.controller.activeTaskRootId() !== activity.conversationId) {
       return;
     }
     if (activity.panel === "close") {
@@ -246,6 +247,9 @@ export function AppShell(props: { readonly controller: AppController }) {
     if (!(await browserController.ensureConversation(conversationId))) {
       return;
     }
+    if (browserController.activeTab(conversationId) === null) {
+      if (!(await browserController.newTab(conversationId))) return;
+    }
     const browserTabId =
       requestedBrowserTabId ?? browserController.activeTab(conversationId)?.browserTabId;
     if (browserTabId === undefined) {
@@ -274,9 +278,9 @@ export function AppShell(props: { readonly controller: AppController }) {
       setWorkspaceTabs((current) => showWorkspaceTab(current, activeTab.id));
       return;
     }
-    const conversationId = props.controller.currentThread()?.id;
+    const conversationId = props.controller.activeTaskRootId() ?? undefined;
     if (conversationId !== undefined) {
-      void openBrowserWorkspace(conversationId);
+      setWorkspaceTabs((current) => showEmptyWorkspace(current, conversationId));
     }
   }
 
@@ -285,7 +289,7 @@ export function AppShell(props: { readonly controller: AppController }) {
       setWorkspaceTabs((current) => showWorkspaceTab(current, tab.id));
       return;
     }
-    const conversationId = props.controller.currentThread()?.id;
+    const conversationId = props.controller.activeTaskRootId() ?? undefined;
     if (conversationId === undefined) {
       return;
     }
@@ -301,7 +305,7 @@ export function AppShell(props: { readonly controller: AppController }) {
       setWorkspaceTabs((current) => closeWorkspaceTab(current, tab.id));
       return;
     }
-    const conversationId = props.controller.currentThread()?.id;
+    const conversationId = props.controller.activeTaskRootId() ?? undefined;
     if (conversationId === undefined) {
       return;
     }
@@ -324,7 +328,7 @@ export function AppShell(props: { readonly controller: AppController }) {
   }
 
   function openNewBrowserTab(): void {
-    const conversationId = props.controller.currentThread()?.id;
+    const conversationId = props.controller.activeTaskRootId() ?? undefined;
     if (conversationId === undefined) {
       return;
     }
@@ -714,6 +718,7 @@ export function AppShell(props: { readonly controller: AppController }) {
             hidden={activeSurface() !== "chat"}
             ref={chatPageElement}
           >
+            <AgentTabs controller={props.controller} />
             <Timeline
               bottomOcclusion={chatDockHeight()}
               controller={props.controller}
@@ -781,7 +786,7 @@ export function AppShell(props: { readonly controller: AppController }) {
             keyed
             when={
               activeSurface() === "chat" && workspaceTabs().visible
-                ? props.controller.currentThread()?.id
+                ? props.controller.activeTaskRootId()
                 : null
             }
           >

@@ -260,7 +260,9 @@
       "modelRerouted": "Model rerouted by the server",
       "modelReroutedDescription": "This turn was moved from {fromModel} to {toModel} by a safety check.",
       "additionalVerification": "Additional verification available",
-      "additionalVerificationDescription": "The server recommends requesting trusted access for cybersecurity activities."
+      "additionalVerificationDescription": "The server recommends requesting trusted access for cybersecurity activities.",
+      "agentTabs": "Task agents",
+      "mainTask": "Main"
     },
     "homeMode": {
       "legend": "Composer mode",

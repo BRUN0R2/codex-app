@@ -24,6 +24,7 @@ import {
 type SidebarController = Pick<
   AppController,
   | "account"
+  | "activeTaskRootId"
   | "archiveThread"
   | "chooseWorkspace"
   | "currentThread"
@@ -974,7 +975,7 @@ function ThreadButton(props: ThreadButtonProps) {
   return (
     <div
       class="thread-row"
-      classList={{ active: props.controller.currentThread()?.id === props.thread.id }}
+      classList={{ active: props.controller.activeTaskRootId() === props.thread.id }}
     >
       <Show
         when={!props.renaming}
@@ -991,7 +992,7 @@ function ThreadButton(props: ThreadButtonProps) {
       >
         <button
           aria-current={
-            props.controller.currentThread()?.id === props.thread.id ? "page" : undefined
+            props.controller.activeTaskRootId() === props.thread.id ? "page" : undefined
           }
           class="thread-main"
           onClick={() => {

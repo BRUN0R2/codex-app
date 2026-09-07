@@ -390,7 +390,7 @@ describe("decodificação dos contratos nativos", () => {
           "scheduledAutomations",
         ],
       },
-      schemaVersion: 21,
+      schemaVersion: 22,
       config: configFixture(),
       diagnosticLogPath: "C:\\Users\\Developer\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
@@ -417,7 +417,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 21,
+        schemaVersion: 22,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",
@@ -653,9 +653,11 @@ describe("decodificação dos contratos nativos", () => {
 
   it("mantém saídas grandes fora do contrato do turno e valida cada bloco paginado", () => {
     const response = (output: unknown) => ({
+      agentThreads: [],
       nextCursor: null,
       thread: {
         id: "thread-output-limit",
+        agent: null,
         mode: "codex",
         preview: "Teste de limite",
         name: null,
@@ -1017,9 +1019,11 @@ describe("decodificação dos contratos nativos", () => {
 
   it("preserva falhas de turno e rejeita estados incoerentes", () => {
     const response = {
+      agentThreads: [],
       nextCursor: null,
       thread: {
         id: "thread-1",
+        agent: null,
         mode: "codex",
         preview: "Teste",
         name: null,
@@ -1058,6 +1062,7 @@ describe("decodificação dos contratos nativos", () => {
     );
     expect(
       decodeThreadReadResponse({
+        agentThreads: [],
         nextCursor: null,
         thread: {
           ...response.thread,
@@ -1068,6 +1073,7 @@ describe("decodificação dos contratos nativos", () => {
     ).toBeNull();
     expect(() =>
       decodeThreadReadResponse({
+        agentThreads: [],
         nextCursor: null,
         thread: {
           ...response.thread,
@@ -1077,6 +1083,7 @@ describe("decodificação dos contratos nativos", () => {
     ).toThrow("failed turns require an error");
     expect(() =>
       decodeThreadReadResponse({
+        agentThreads: [],
         nextCursor: null,
         thread: {
           ...response.thread,

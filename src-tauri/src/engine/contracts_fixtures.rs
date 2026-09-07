@@ -94,6 +94,7 @@ fn thread_summary_fixture() -> ThreadSummary {
         status: ThreadStatus::Active {
             active_flags: vec![ThreadActiveFlag::WaitingOnApproval],
         },
+        agent: None,
     }
 }
 

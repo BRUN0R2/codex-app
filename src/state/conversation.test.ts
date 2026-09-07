@@ -28,6 +28,7 @@ describe("conversation reducer", () => {
     expect(
       readLatestTurnFailure({
         id: "thread-1",
+        agent: null,
         mode: "codex",
         preview: "Teste",
         name: null,
@@ -164,6 +165,7 @@ describe("conversation reducer", () => {
   it("routes background command deltas to their persisted turn", () => {
     const thread = {
       id: "thread-a",
+      agent: null,
       mode: "codex" as const,
       preview: "Build",
       name: null,

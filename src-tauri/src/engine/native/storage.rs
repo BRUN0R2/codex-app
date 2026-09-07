@@ -30,8 +30,9 @@ use crate::engine::{
     ActivityStatus, AppConfig, Automation, AutomationListResponse, AutomationRun,
     AutomationRunStatus, AutomationRunTrigger, CompletedTurn, ConfigReadResponse, ConfigUpdate,
     ConfigUpdateResponse, ConversationMode, DesktopPreferences, ModelContextWindowPreference,
-    OperationAck, OutputReadResponse, ReasoningEffort, ThreadActiveFlag, ThreadItem,
-    ThreadListResponse, ThreadOutput, ThreadStatus, ThreadSummary, TurnStatus, TurnSummary,
+    OperationAck, OutputReadResponse, ReasoningEffort, ThreadActiveFlag, ThreadAgentSummary,
+    ThreadItem, ThreadListResponse, ThreadOutput, ThreadStatus, ThreadSummary, TurnStatus,
+    TurnSummary,
 };
 use crate::error::AppError;
 
@@ -310,6 +311,11 @@ pub(super) struct TurnSettlement {
     pub automation_run: Option<AutomationRun>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ThreadDeletion {
+    pub thread_ids: Vec<String>,
+}
+
 impl ProviderHistorySnapshot {
     pub(super) fn last_sequence(&self) -> i64 {
         self.last_sequence
@@ -537,6 +543,7 @@ impl NativeStorage {
                         created_at: row.get(6)?,
                         updated_at: row.get(7)?,
                         active: row.get(8)?,
+                        agent: None,
                     })
                 })
                 .map_err(storage_error)?;
@@ -545,7 +552,10 @@ impl NativeStorage {
                 .map_err(storage_error)?;
             let has_more = data.len() > THREAD_PAGE_SIZE;
             data.truncate(THREAD_PAGE_SIZE);
-            let data = data.into_iter().map(ThreadHeader::into_summary).collect();
+            let data = data
+                .into_iter()
+                .map(ThreadHeader::into_summary)
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(ThreadListResponse {
                 data,
                 next_cursor: has_more.then(|| (offset + THREAD_PAGE_SIZE).to_string()),
@@ -725,7 +735,62 @@ impl NativeStorage {
         let pool = self.pool().await?;
         run_blocking(move || {
             let connection = pool.get().map_err(pool_error)?;
-            read_thread_header(&connection, &thread_id).map(ThreadHeader::into_summary)
+            read_thread_header(&connection, &thread_id)?.into_summary()
+        })
+        .await
+    }
+
+    pub async fn list_agent_thread_summaries(
+        &self,
+        thread_id: String,
+    ) -> Result<Vec<ThreadSummary>, AppError> {
+        let pool = self.pool().await?;
+        run_blocking(move || {
+            let connection = pool.get().map_err(pool_error)?;
+            let transaction = connection.unchecked_transaction().map_err(storage_error)?;
+            let root_thread_id = transaction
+                .query_row(
+                    "SELECT COALESCE(
+                         (SELECT root_thread_id FROM agent_threads WHERE thread_id = threads.id),
+                         threads.id
+                     )
+                     FROM threads
+                     WHERE id = ?1 AND archived = 0",
+                    [&thread_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(storage_error)?
+                .ok_or_else(|| AppError::State("thread does not exist or is archived".into()))?;
+            let summaries = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT threads.id, threads.cwd, threads.project_path, threads.mode,
+                                threads.name, threads.preview, threads.created_at,
+                                threads.updated_at,
+                                EXISTS(
+                                    SELECT 1 FROM turns
+                                    WHERE thread_id = threads.id AND status = 'inProgress'
+                                ),
+                                agent_threads.root_thread_id, agent_threads.parent_thread_id,
+                                agent_threads.agent_path, agent_threads.task_name,
+                                agent_threads.model, agent_threads.reasoning_effort,
+                                agent_threads.service_tier
+                         FROM threads
+                         JOIN agent_threads ON agent_threads.thread_id = threads.id
+                         WHERE agent_threads.root_thread_id = ?1
+                           AND threads.archived = 0
+                         ORDER BY agent_threads.agent_path",
+                    )
+                    .map_err(storage_error)?;
+                statement
+                    .query_map([root_thread_id], thread_header_from_row)
+                    .map_err(storage_error)?
+                    .map(|header| header.map_err(storage_error)?.into_summary())
+                    .collect::<Result<Vec<_>, AppError>>()?
+            };
+            transaction.commit().map_err(storage_error)?;
+            Ok(summaries)
         })
         .await
     }
@@ -747,7 +812,7 @@ impl NativeStorage {
                 )
                 .map_err(storage_error)?;
             require_changed(changed, "thread")?;
-            read_thread_header(&connection, &thread_id).map(ThreadHeader::into_summary)
+            read_thread_header(&connection, &thread_id)?.into_summary()
         })
         .await
     }
@@ -802,7 +867,7 @@ impl NativeStorage {
         .await
     }
 
-    pub async fn delete_thread(&self, thread_id: String) -> Result<OperationAck, AppError> {
+    pub async fn delete_thread(&self, thread_id: String) -> Result<ThreadDeletion, AppError> {
         self.delete_thread_with_active_owner(thread_id, None).await
     }
 
@@ -810,7 +875,7 @@ impl NativeStorage {
         &self,
         thread_id: String,
         turn_id: String,
-    ) -> Result<OperationAck, AppError> {
+    ) -> Result<ThreadDeletion, AppError> {
         self.delete_thread_with_active_owner(thread_id, Some(turn_id))
             .await
     }
@@ -819,77 +884,39 @@ impl NativeStorage {
         &self,
         thread_id: String,
         active_turn_id: Option<String>,
-    ) -> Result<OperationAck, AppError> {
+    ) -> Result<ThreadDeletion, AppError> {
         let pool = self.pool().await?;
         run_blocking(move || {
             let mut connection = pool.get().map_err(pool_error)?;
             let transaction = begin_write_transaction(&mut connection)?;
-            if let Some(active_turn_id) = active_turn_id {
-                let owned: bool = transaction
-                    .query_row(
-                        "SELECT EXISTS(
-                             SELECT 1 FROM turns
-                             WHERE thread_id = ?1 AND id = ?2 AND status = 'inProgress'
-                         )",
-                        params![thread_id, active_turn_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(storage_error)?;
-                if !owned {
+            let thread_ids = deletion_thread_ids(&transaction, &thread_id)?;
+            let active_turns = active_turns_for_threads(&transaction, &thread_ids)?;
+            match active_turn_id {
+                Some(active_turn_id)
+                    if active_turns.as_slice() == [(thread_id.clone(), active_turn_id.clone())] => {
+                }
+                Some(_) => {
                     return Err(AppError::State(
-                        "active-turn ownership does not match the thread deletion request".into(),
+                        "active-turn ownership does not match the complete thread deletion subtree"
+                            .into(),
                     ));
                 }
-            } else {
-                let active: bool = transaction
-                    .query_row(
-                        "SELECT EXISTS(
-                             SELECT 1 FROM turns
-                             WHERE thread_id = ?1 AND status = 'inProgress'
-                         )",
-                        [&thread_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(storage_error)?;
-                if active {
+                None if !active_turns.is_empty() => {
                     return Err(AppError::State(
-                        "an active thread cannot be deleted by an idle-thread operation".into(),
+                        "an active thread subtree cannot be deleted by an idle-thread operation"
+                            .into(),
                     ));
                 }
+                None => {}
             }
-            let active_descendants: bool = transaction
-                .query_row(
-                    "SELECT EXISTS(
-                         SELECT 1
-                         FROM agent_threads
-                         JOIN turns ON turns.thread_id = agent_threads.thread_id
-                         WHERE agent_threads.root_thread_id = ?1
-                           AND turns.status = 'inProgress'
-                     )",
-                    [&thread_id],
-                    |row| row.get(0),
-                )
-                .map_err(storage_error)?;
-            if active_descendants {
-                return Err(AppError::State(
-                    "an agent tree cannot be deleted while a sub-agent is active".into(),
-                ));
+            for deleted_thread_id in &thread_ids {
+                let changed = transaction
+                    .execute("DELETE FROM threads WHERE id = ?1", [deleted_thread_id])
+                    .map_err(storage_error)?;
+                require_changed(changed, "thread in deletion subtree")?;
             }
-            transaction
-                .execute(
-                    "DELETE FROM threads
-                     WHERE id IN (
-                         SELECT thread_id FROM agent_threads WHERE root_thread_id = ?1
-                     )",
-                    [&thread_id],
-                )
-                .map_err(storage_error)?;
-            let changed = transaction
-                .execute("DELETE FROM threads WHERE id = ?1", [&thread_id])
-                .map_err(storage_error)?;
-            require_changed(changed, "thread")?;
             transaction.commit().map_err(storage_error)?;
-            Ok(OperationAck { applied: true })
+            Ok(ThreadDeletion { thread_ids })
         })
         .await
     }
@@ -1218,22 +1245,13 @@ impl NativeStorage {
     }
 
     pub(super) async fn delete_agent_thread(&self, thread_id: String) -> Result<(), AppError> {
-        let pool = self.pool().await?;
-        run_blocking(move || {
-            let connection = pool.get().map_err(pool_error)?;
-            let changed = connection
-                .execute(
-                    "DELETE FROM threads
-                     WHERE id = ?1
-                       AND EXISTS(
-                           SELECT 1 FROM agent_threads WHERE agent_threads.thread_id = threads.id
-                       )",
-                    [thread_id],
-                )
-                .map_err(storage_error)?;
-            require_changed(changed, "agent thread")
-        })
-        .await
+        let identity = self.read_agent_identity(thread_id.clone()).await?;
+        if identity.is_none() {
+            return Err(AppError::State(
+                "agent thread does not exist in the expected state".into(),
+            ));
+        }
+        self.delete_thread(thread_id).await.map(|_| ())
     }
 
     pub(super) async fn queue_agent_message(
@@ -3740,11 +3758,48 @@ struct ThreadHeader {
     created_at: i64,
     updated_at: i64,
     active: bool,
+    agent: Option<ThreadAgentHeader>,
+}
+
+#[derive(Debug)]
+struct ThreadAgentHeader {
+    root_thread_id: String,
+    parent_thread_id: String,
+    path: String,
+    task_name: String,
+    model: String,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
 }
 
 impl ThreadHeader {
-    fn into_summary(self) -> ThreadSummary {
-        ThreadSummary {
+    fn into_summary(self) -> Result<ThreadSummary, AppError> {
+        let agent = self
+            .agent
+            .map(|agent| {
+                let reasoning_effort = agent
+                    .reasoning_effort
+                    .as_deref()
+                    .map(|value| {
+                        ReasoningEffort::from_wire_name(value).ok_or_else(|| {
+                            AppError::Storage(format!(
+                                "stored agent has unsupported reasoning effort `{value}`"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                Ok::<ThreadAgentSummary, AppError>(ThreadAgentSummary {
+                    root_thread_id: agent.root_thread_id,
+                    parent_thread_id: agent.parent_thread_id,
+                    path: agent.path,
+                    task_name: agent.task_name,
+                    model: agent.model,
+                    reasoning_effort,
+                    service_tier: agent.service_tier,
+                })
+            })
+            .transpose()?;
+        Ok(ThreadSummary {
             id: self.id,
             mode: self.mode,
             preview: self.preview,
@@ -3761,34 +3816,114 @@ impl ThreadHeader {
             } else {
                 ThreadStatus::Idle
             },
-        }
+            agent,
+        })
     }
 }
 
 fn read_thread_header(connection: &Connection, thread_id: &str) -> Result<ThreadHeader, AppError> {
     connection
         .query_row(
-            "SELECT id, cwd, project_path, mode, name, preview, created_at, updated_at,
-                    EXISTS(SELECT 1 FROM turns WHERE thread_id = threads.id AND status = 'inProgress')
-             FROM threads WHERE id = ?1 AND archived = 0",
+            "SELECT threads.id, threads.cwd, threads.project_path, threads.mode, threads.name,
+                    threads.preview, threads.created_at, threads.updated_at,
+                    EXISTS(
+                        SELECT 1 FROM turns
+                        WHERE thread_id = threads.id AND status = 'inProgress'
+                    ),
+                    agent_threads.root_thread_id, agent_threads.parent_thread_id,
+                    agent_threads.agent_path, agent_threads.task_name, agent_threads.model,
+                    agent_threads.reasoning_effort, agent_threads.service_tier
+             FROM threads
+             LEFT JOIN agent_threads ON agent_threads.thread_id = threads.id
+             WHERE threads.id = ?1 AND threads.archived = 0",
             [thread_id],
-            |row| {
-                Ok(ThreadHeader {
-                    id: row.get(0)?,
-                    cwd: row.get(1)?,
-                    project_path: row.get(2)?,
-                    mode: parse_conversation_mode(&row.get::<_, String>(3)?)?,
-                    name: row.get(4)?,
-                    preview: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                    active: row.get(8)?,
-                })
-            },
+            thread_header_from_row,
         )
         .optional()
         .map_err(storage_error)?
         .ok_or_else(|| AppError::State("thread does not exist or is archived".into()))
+}
+
+fn thread_header_from_row(row: &Row<'_>) -> rusqlite::Result<ThreadHeader> {
+    let agent = match row.get::<_, Option<String>>(9)? {
+        Some(root_thread_id) => Some(ThreadAgentHeader {
+            root_thread_id,
+            parent_thread_id: row.get(10)?,
+            path: row.get(11)?,
+            task_name: row.get(12)?,
+            model: row.get(13)?,
+            reasoning_effort: row.get(14)?,
+            service_tier: row.get(15)?,
+        }),
+        None => None,
+    };
+    Ok(ThreadHeader {
+        id: row.get(0)?,
+        cwd: row.get(1)?,
+        project_path: row.get(2)?,
+        mode: parse_conversation_mode(&row.get::<_, String>(3)?)?,
+        name: row.get(4)?,
+        preview: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+        active: row.get(8)?,
+        agent,
+    })
+}
+
+fn deletion_thread_ids(
+    transaction: &Transaction<'_>,
+    thread_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let mut statement = transaction
+        .prepare(
+            "WITH RECURSIVE deletion_subtree(thread_id, depth) AS (
+                 SELECT id, 0 FROM threads WHERE id = ?1
+                 UNION ALL
+                 SELECT agent_threads.thread_id, deletion_subtree.depth + 1
+                 FROM agent_threads
+                 JOIN deletion_subtree
+                   ON agent_threads.parent_thread_id = deletion_subtree.thread_id
+             )
+             SELECT thread_id FROM deletion_subtree
+             ORDER BY depth DESC, thread_id",
+        )
+        .map_err(storage_error)?;
+    let thread_ids = statement
+        .query_map([thread_id], |row| row.get::<_, String>(0))
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    if thread_ids.is_empty() {
+        Err(AppError::State(
+            "thread does not exist in the expected state".into(),
+        ))
+    } else {
+        Ok(thread_ids)
+    }
+}
+
+fn active_turns_for_threads(
+    transaction: &Transaction<'_>,
+    thread_ids: &[String],
+) -> Result<Vec<(String, String)>, AppError> {
+    let mut active_turns = Vec::new();
+    let mut statement = transaction
+        .prepare(
+            "SELECT id FROM turns
+             WHERE thread_id = ?1 AND status = 'inProgress'",
+        )
+        .map_err(storage_error)?;
+    for thread_id in thread_ids {
+        let active_turn_id = statement
+            .query_row([thread_id], |row| row.get::<_, String>(0))
+            .optional()
+            .map_err(storage_error)?;
+        if let Some(active_turn_id) = active_turn_id {
+            active_turns.push((thread_id.clone(), active_turn_id));
+        }
+    }
+    Ok(active_turns)
 }
 
 fn apply_config_update(config: &mut AppConfig, update: ConfigUpdate) -> Result<(), AppError> {
@@ -4975,6 +5110,35 @@ mod tests {
         }
     }
 
+    async fn create_test_agent(
+        storage: &NativeStorage,
+        parent: AgentIdentity,
+        task_name: &str,
+    ) -> AgentIdentity {
+        storage
+            .create_agent_thread(AgentThreadDraft {
+                path: parent
+                    .path
+                    .join(task_name)
+                    .expect("test agent path should be valid"),
+                parent,
+                task_name: task_name.into(),
+                initial_message: ResponseItem::assistant_context_text_with_seed(
+                    format!("complete {task_name}"),
+                    "multi_agent.inter_agent_message",
+                    task_name,
+                ),
+                model: "gpt-test".into(),
+                reasoning_effort: Some(ReasoningEffort::High),
+                service_tier: None,
+                fork_turns: ForkTurns::None,
+                parent_spawn_call_id: format!("spawn-{task_name}"),
+                preview: format!("complete {task_name}"),
+            })
+            .await
+            .expect("test agent should persist")
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn initializes_the_native_schema_directly() {
         let directory = TempDir::new().expect("temporary directory should be created");
@@ -5267,6 +5431,90 @@ mod tests {
                 .len(),
             MAX_AGENT_THREADS_PER_TREE
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deletes_exact_agent_subtrees_in_child_first_order() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(directory.path().join("agent-subtree-deletion.sqlite3"))
+            .await
+            .expect("storage should initialize");
+        let root = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                None,
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("root thread should persist");
+        let root_identity = AgentIdentity::root(root.id.clone());
+        let child = create_test_agent(&storage, root_identity.clone(), "child").await;
+        let grandchild = create_test_agent(&storage, child.clone(), "grandchild").await;
+        let sibling = create_test_agent(&storage, root_identity, "sibling").await;
+
+        let summaries = storage
+            .list_agent_thread_summaries(root.id.clone())
+            .await
+            .expect("agent tab summaries should load");
+        assert_eq!(summaries.len(), 3);
+        assert!(summaries.iter().all(|summary| {
+            summary
+                .agent
+                .as_ref()
+                .is_some_and(|agent| agent.root_thread_id == root.id)
+        }));
+        assert_eq!(
+            summaries
+                .iter()
+                .filter_map(|summary| summary.agent.as_ref().map(|agent| agent.path.as_str()))
+                .collect::<Vec<_>>(),
+            ["/root/child", "/root/child/grandchild", "/root/sibling"]
+        );
+
+        storage
+            .archive_thread(sibling.thread_id.clone())
+            .await
+            .expect("archived agents should remain part of the task lifecycle");
+        let visible_summaries = storage
+            .list_agent_thread_summaries(root.id.clone())
+            .await
+            .expect("visible agent tabs should still load");
+        assert_eq!(visible_summaries.len(), 2);
+        assert!(
+            visible_summaries
+                .iter()
+                .all(|summary| summary.id != sibling.thread_id)
+        );
+        storage
+            .unarchive_thread(sibling.thread_id.clone())
+            .await
+            .expect("test agent should be restored before subtree deletion");
+
+        let child_deletion = storage
+            .delete_thread(child.thread_id.clone())
+            .await
+            .expect("child subtree should delete");
+        assert_eq!(
+            child_deletion.thread_ids,
+            [grandchild.thread_id.clone(), child.thread_id.clone()]
+        );
+        assert!(storage.read_thread(root.id.clone()).await.is_ok());
+        assert!(storage.read_thread(sibling.thread_id.clone()).await.is_ok());
+        assert!(storage.read_thread(child.thread_id).await.is_err());
+        assert!(storage.read_thread(grandchild.thread_id).await.is_err());
+
+        let root_deletion = storage
+            .delete_thread(root.id.clone())
+            .await
+            .expect("remaining task tree should delete");
+        assert_eq!(
+            root_deletion.thread_ids,
+            [sibling.thread_id.clone(), root.id.clone()]
+        );
+        assert!(storage.read_thread(root.id.clone()).await.is_err());
+        assert!(storage.read_thread(sibling.thread_id).await.is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6969,7 +7217,7 @@ mod tests {
             .delete_owned_active_thread(thread.id.clone(), turn.id)
             .await
             .expect("the owning active turn should authorize deletion");
-        assert!(response.applied);
+        assert_eq!(response.thread_ids, [thread.id.clone()]);
         assert!(storage.read_thread(thread.id.clone()).await.is_err());
     }
 

@@ -219,7 +219,7 @@ const PREVIEW_ENGINE = {
       "scheduledAutomations",
     ],
   },
-  schemaVersion: 21,
+  schemaVersion: 22,
   config: PREVIEW_CONFIG,
   diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
   permissionProfiles: [
@@ -358,6 +358,7 @@ const PREVIEW_SCROLL_ITEMS: readonly VisibleThreadItem[] = [
 
 const PREVIEW_CONTEXT_THREAD = {
   id: "preview-context-thread",
+  agent: null,
   mode: "codex",
   preview: "Inspecionar janela de contexto",
   name: "Inspecionar janela de contexto",
@@ -813,6 +814,7 @@ const PREVIEW_CONTEXT_THREAD = {
 
 const PREVIEW_CHAT_REFERENCE_THREAD = {
   id: "preview-chat-reference-thread",
+  agent: null,
   mode: "codex",
   preview: "Audit project against RULES.md",
   name: "Audit project against RULES.md",
@@ -1079,6 +1081,7 @@ function previewTimelineFileStressActivities(fileCount: number): readonly Visibl
 
 const PREVIEW_TIMELINE_STRESS_THREAD = {
   id: "preview-timeline-stress-thread",
+  agent: null,
   mode: "codex",
   preview: "Estresse de timeline expandida",
   name: "Estresse de timeline expandida",
@@ -1171,6 +1174,7 @@ function previewTimelineStressThread(fileCount: number): CodexThread {
 
 const PREVIEW_TIMELINE_LIGHT_THREAD = {
   id: "preview-timeline-light-thread",
+  agent: null,
   mode: "codex",
   preview: "Chat leve de controle",
   name: "Chat leve de controle",
@@ -1206,6 +1210,7 @@ const PREVIEW_TIMELINE_LIGHT_THREAD = {
 
 const PREVIEW_ACTIVITY_RECONCILIATION_THREAD = {
   id: "preview-activity-reconciliation-thread",
+  agent: null,
   mode: "codex",
   preview: "Reconciliação de comandos paralelos",
   name: "Reconciliação de comandos paralelos",
@@ -1314,6 +1319,7 @@ function previewThreadSummary(thread: CodexThread): ThreadSummary {
     updatedAt: thread.updatedAt,
     recencyAt: thread.recencyAt,
     status: thread.status,
+    agent: thread.agent,
   };
 }
 
@@ -1709,6 +1715,7 @@ export function setupBrowserPreview(): void {
           thread: resumedThread,
           cwd: resumedThread.cwd,
           nextCursor: null,
+          agentThreads: [],
         };
       }
       case "engine_account_rate_limits_read":

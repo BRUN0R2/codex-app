@@ -71,7 +71,7 @@ export function reconcileBrowserWorkspaceTabs(
     activeTabId,
     conversationId: input.conversationId,
     tabs,
-    visible: conversationChanged ? false : current.visible && activeTabId !== null,
+    visible: conversationChanged ? false : current.visible,
   };
   return sameWorkspaceTabsState(current, next) ? current : next;
 }
@@ -113,6 +113,16 @@ export function hideWorkspaceTabs(current: WorkspaceTabsState): WorkspaceTabsSta
   return current.visible ? { ...current, visible: false } : current;
 }
 
+export function showEmptyWorkspace(
+  current: WorkspaceTabsState,
+  conversationId: string,
+): WorkspaceTabsState {
+  if (current.conversationId !== conversationId) {
+    return { activeTabId: null, conversationId, tabs: [], visible: true };
+  }
+  return current.visible ? current : { ...current, visible: true };
+}
+
 export function closeWorkspaceTab(
   current: WorkspaceTabsState,
   tabId: WorkspaceTabId,
@@ -130,7 +140,7 @@ export function closeWorkspaceTab(
     ...current,
     activeTabId: successor?.id ?? null,
     tabs,
-    visible: current.visible && successor !== null,
+    visible: current.visible,
   };
 }
 

@@ -44,7 +44,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 21;
+  readonly schemaVersion: 22;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -366,6 +366,16 @@ export type ThreadStatus =
   | { readonly type: "active"; readonly activeFlags: readonly "waitingOnApproval"[] }
   | { readonly type: "idle" | "systemError" };
 
+export interface ThreadAgentSummary {
+  readonly rootThreadId: string;
+  readonly parentThreadId: string;
+  readonly path: string;
+  readonly taskName: string;
+  readonly model: string;
+  readonly reasoningEffort: ReasoningEffort | null;
+  readonly serviceTier: string | null;
+}
+
 export interface ThreadSummary {
   readonly id: string;
   readonly mode: ConversationMode;
@@ -377,6 +387,7 @@ export interface ThreadSummary {
   readonly updatedAt: number;
   readonly recencyAt: number | null;
   readonly status: ThreadStatus;
+  readonly agent: ThreadAgentSummary | null;
 }
 
 export interface CodexThread extends ThreadSummary {
@@ -406,12 +417,14 @@ export interface ThreadListResponse {
 export interface ThreadReadResponse {
   readonly thread: CodexThread;
   readonly nextCursor: string | null;
+  readonly agentThreads: readonly ThreadSummary[];
 }
 
 export interface ThreadResumeResponse {
   readonly thread: CodexThread;
   readonly cwd: string;
   readonly nextCursor: string | null;
+  readonly agentThreads: readonly ThreadSummary[];
 }
 
 export interface TurnSummary {

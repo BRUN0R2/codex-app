@@ -74,6 +74,7 @@ import type {
   RuntimeStatus,
   SandboxMode,
   SpendControlLimitSnapshot,
+  ThreadAgentSummary,
   ThreadForkResponse,
   ThreadItem,
   ThreadListResponse,
@@ -212,7 +213,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [21] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [22] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -534,23 +535,27 @@ export function decodeThreadListResponse(value: unknown): ThreadListResponse {
 }
 
 export function decodeThreadReadResponse(value: unknown): ThreadReadResponse {
-  const object = exactRecord(value, "$", ["nextCursor", "thread"]);
-  return decodeThreadPage(object);
+  const object = exactRecord(value, "$", ["agentThreads", "nextCursor", "thread"]);
+  return {
+    ...decodeThreadPage(object),
+    agentThreads: array(object.agentThreads, "$.agentThreads", decodeThreadSummary),
+  };
 }
 
 export function decodeThreadResumeResponse(value: unknown): ThreadResumeResponse {
-  const object = exactRecord(value, "$", ["cwd", "nextCursor", "thread"]);
+  const object = exactRecord(value, "$", ["agentThreads", "cwd", "nextCursor", "thread"]);
   return {
     thread: decodeThread(object.thread, "$.thread"),
     cwd: text(object.cwd, "$.cwd"),
     nextCursor: nullableThreadHistoryCursor(object.nextCursor, "$.nextCursor"),
+    agentThreads: array(object.agentThreads, "$.agentThreads", decodeThreadSummary),
   };
 }
 
 function decodeThreadPage(value: {
   readonly nextCursor: unknown;
   readonly thread: unknown;
-}): ThreadReadResponse {
+}): ThreadStartResponse {
   return {
     thread: decodeThread(value.thread, "$.thread"),
     nextCursor: nullableThreadHistoryCursor(value.nextCursor, "$.nextCursor"),
@@ -1717,6 +1722,7 @@ function decodeAutomationRunAt(value: unknown, path: string): AutomationRun {
 }
 
 const THREAD_SUMMARY_KEYS = [
+  "agent",
   "createdAt",
   "cwd",
   "id",
@@ -1768,6 +1774,31 @@ function decodeThreadSummaryRecord(
     updatedAt,
     recencyAt,
     status: decodeThreadStatus(object.status, `${path}.status`),
+    agent: object.agent === null ? null : decodeThreadAgentSummary(object.agent, `${path}.agent`),
+  };
+}
+
+function decodeThreadAgentSummary(value: unknown, path: string): ThreadAgentSummary {
+  const object = exactRecord(value, path, [
+    "model",
+    "parentThreadId",
+    "path",
+    "reasoningEffort",
+    "rootThreadId",
+    "serviceTier",
+    "taskName",
+  ]);
+  return {
+    rootThreadId: identifier(object.rootThreadId, `${path}.rootThreadId`),
+    parentThreadId: identifier(object.parentThreadId, `${path}.parentThreadId`),
+    path: text(object.path, `${path}.path`, 4_096),
+    taskName: text(object.taskName, `${path}.taskName`, 256),
+    model: text(object.model, `${path}.model`, 256),
+    reasoningEffort:
+      object.reasoningEffort === null
+        ? null
+        : literal(object.reasoningEffort, `${path}.reasoningEffort`, REASONING_EFFORTS),
+    serviceTier: nullableText(object.serviceTier, `${path}.serviceTier`),
   };
 }
 

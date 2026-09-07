@@ -69,6 +69,8 @@ export interface AppController {
   readonly accountProfileError: Accessor<string | null>;
   readonly accountProfileLoading: Accessor<boolean>;
   readonly activeTurnId: Accessor<string | null>;
+  readonly activeTaskRootId: Accessor<string | null>;
+  readonly agentThreads: Accessor<readonly ThreadSummary[]>;
   readonly activePlan: Accessor<PlanItem | null>;
   readonly approvals: Accessor<readonly EngineServerRequest[]>;
   readonly applicationPreferences: Accessor<ApplicationPreferences>;

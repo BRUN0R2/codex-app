@@ -77,19 +77,12 @@ impl MultiAgentManager {
             .insert(identity.thread_id.clone(), identity);
     }
 
-    pub async fn forget_tree(&self, root_thread_id: &str) {
-        let forgotten_thread_ids = {
-            let mut identities = self.identities.write().await;
-            let forgotten = identities
-                .iter()
-                .filter(|(_, identity)| identity.root_thread_id == root_thread_id)
-                .map(|(thread_id, _)| thread_id.clone())
-                .collect::<Vec<_>>();
-            identities.retain(|_, identity| identity.root_thread_id != root_thread_id);
-            forgotten
-        };
-        let mut forgotten_thread_ids = forgotten_thread_ids.into_iter().collect::<HashSet<_>>();
-        forgotten_thread_ids.insert(root_thread_id.to_string());
+    pub async fn forget_threads(&self, thread_ids: &[String]) {
+        let forgotten_thread_ids = thread_ids.iter().cloned().collect::<HashSet<_>>();
+        self.identities
+            .write()
+            .await
+            .retain(|thread_id, _| !forgotten_thread_ids.contains(thread_id));
         self.mailboxes
             .lock()
             .await
@@ -98,7 +91,10 @@ impl MultiAgentManager {
             .lock()
             .await
             .retain(|thread_id, _| !forgotten_thread_ids.contains(thread_id));
-        self.spawn_gates.lock().await.remove(root_thread_id);
+        self.spawn_gates
+            .lock()
+            .await
+            .retain(|root_thread_id, _| !forgotten_thread_ids.contains(root_thread_id));
     }
 
     pub async fn subscribe_turn_settlement(&self, thread_id: &str) -> watch::Receiver<u64> {
@@ -298,5 +294,45 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &same_tree));
         assert!(!Arc::ptr_eq(&first, &other_tree));
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_subtree_preserves_unrelated_agent_runtime_state() {
+        let manager = MultiAgentManager::default();
+        for (thread_id, path) in [
+            ("worker-a", "/root/worker_a"),
+            ("worker-b", "/root/worker_b"),
+        ] {
+            manager
+                .register(AgentIdentity {
+                    thread_id: thread_id.into(),
+                    root_thread_id: "root".into(),
+                    parent_thread_id: Some("root".into()),
+                    path: AgentPath::try_from(path).expect("test agent path should be valid"),
+                    model: Some("gpt-test".into()),
+                    reasoning_effort: None,
+                    service_tier: None,
+                })
+                .await;
+            manager.notify_steer(thread_id).await;
+            manager.subscribe_turn_settlement(thread_id).await;
+        }
+        manager.spawn_gate("root").await;
+
+        manager.forget_threads(&["worker-a".into()]).await;
+
+        let identities = manager.identities.read().await;
+        assert!(!identities.contains_key("worker-a"));
+        assert!(identities.contains_key("worker-b"));
+        drop(identities);
+        let mailboxes = manager.mailboxes.lock().await;
+        assert!(!mailboxes.contains_key("worker-a"));
+        assert!(mailboxes.contains_key("worker-b"));
+        drop(mailboxes);
+        let settlements = manager.turn_settlements.lock().await;
+        assert!(!settlements.contains_key("worker-a"));
+        assert!(settlements.contains_key("worker-b"));
+        drop(settlements);
+        assert!(manager.spawn_gates.lock().await.contains_key("root"));
     }
 }

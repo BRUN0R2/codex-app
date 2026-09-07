@@ -260,7 +260,9 @@
       "modelRerouted": "Modelo redirecionado pelo servidor",
       "modelReroutedDescription": "Este turno foi movido de {fromModel} para {toModel} por uma verificação de segurança.",
       "additionalVerification": "Verificação adicional disponível",
-      "additionalVerificationDescription": "O servidor recomenda solicitar acesso confiável para atividades de cibersegurança."
+      "additionalVerificationDescription": "O servidor recomenda solicitar acesso confiável para atividades de cibersegurança.",
+      "agentTabs": "Agentes da tarefa",
+      "mainTask": "Principal"
     },
     "homeMode": {
       "legend": "Modo do compositor",

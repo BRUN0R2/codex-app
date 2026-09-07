@@ -193,6 +193,7 @@ import {
   createStreamDeltaBatcher,
   type StreamDelta,
 } from "./streamDeltas";
+import { replaceTaskAgentFamily, updateTaskThread, upsertTaskThread } from "./taskThreads";
 import { applyThreadSummary, prependThreadHistory } from "./threadHistory";
 import { cachedThreadMatchesSummary, ThreadPageCache } from "./threadPageCache";
 import {
@@ -292,6 +293,16 @@ export function createAppController(localization: AppControllerLocalization): Ap
   const [automationRuns, setAutomationRuns] = createSignal<readonly AutomationRun[]>([]);
   const [automationsLoading, setAutomationsLoading] = createSignal(false);
   const [currentThread, setCurrentThread] = createSignal<CodexThread | null>(null);
+  const [allAgentThreads, setAllAgentThreads] = createSignal<readonly ThreadSummary[]>([]);
+  const activeTaskRootId = createMemo(
+    () => currentThread()?.agent?.rootThreadId ?? currentThread()?.id ?? null,
+  );
+  const agentThreads = createMemo(() => {
+    const rootThreadId = activeTaskRootId();
+    return rootThreadId === null
+      ? []
+      : allAgentThreads().filter((thread) => thread.agent?.rootThreadId === rootThreadId);
+  });
   const [historyCursor, setHistoryCursor] = createSignal<string | null>(null);
   const [historyLoading, setHistoryLoading] = createSignal(false);
   const threadPages = new ThreadPageCache(THREAD_PAGE_CACHE_CAPACITY);
@@ -1257,12 +1268,8 @@ export function createAppController(localization: AppControllerLocalization): Ap
         updateCachedThread(notification.params.threadId, (thread) =>
           applyTurnStarted(thread, notification.params.turn),
         );
-        setThreads((current) =>
-          current.map((thread) =>
-            thread.id === notification.params.threadId
-              ? applySummaryTurnStarted(thread, notification.params.turn)
-              : thread,
-          ),
+        updateThreadSummary(notification.params.threadId, (thread) =>
+          applySummaryTurnStarted(thread, notification.params.turn),
         );
         setCurrentThread((current) =>
           current?.id === notification.params.threadId
@@ -1287,12 +1294,8 @@ export function createAppController(localization: AppControllerLocalization): Ap
             updateCachedThread(notification.params.threadId, (thread) =>
               applyTurnCompletion(thread, notification.params.turn),
             );
-            setThreads((current) =>
-              current.map((thread) =>
-                thread.id === notification.params.threadId
-                  ? applySummaryTurnCompletion(thread, notification.params.turn)
-                  : thread,
-              ),
+            updateThreadSummary(notification.params.threadId, (thread) =>
+              applySummaryTurnCompletion(thread, notification.params.turn),
             );
             setCurrentThread((current) =>
               current?.id === notification.params.threadId
@@ -1433,7 +1436,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     });
     const task = notificationTaskLabel(
       request.params.threadId,
-      threads(),
+      [...threads(), ...allAgentThreads()],
       localization.notifications().untitledTask,
     );
     enqueueNotification({
@@ -1478,7 +1481,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     if (notification.params.turn.status === "interrupted") return;
     const task = notificationTaskLabel(
       notification.params.threadId,
-      threads(),
+      [...threads(), ...allAgentThreads()],
       localization.notifications().untitledTask,
     );
     const failed =
@@ -1614,6 +1617,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
         setRateLimits(null);
         setRateLimitsError(null);
         setThreads([]);
+        setAllAgentThreads([]);
         setThreadsNextCursor(null);
         setArchivedThreads([]);
         setArchivedThreadsLoaded(false);
@@ -1761,6 +1765,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
         return false;
       }
       activateThreadPage(response.thread, response.nextCursor);
+      replaceAgentThreadFamily(response.thread, response.agentThreads);
       mergeThread(response.thread);
       rememberDestination(mode, response.thread.id, response.thread.projectPath);
       return true;
@@ -2042,6 +2047,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
         return false;
       }
       activateThreadPage(response.thread, response.nextCursor);
+      replaceAgentThreadFamily(response.thread, response.agentThreads);
       mergeThread(response.thread);
       rememberDestination(response.thread.mode, response.thread.id, response.thread.projectPath);
       return true;
@@ -2111,7 +2117,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
   }
 
   function isThreadActive(threadId: string): boolean {
-    const thread = [...threads(), ...archivedThreads()].find((entry) => entry.id === threadId);
+    const thread = [...threads(), ...archivedThreads(), ...allAgentThreads()].find(
+      (entry) => entry.id === threadId,
+    );
     return thread !== undefined && readThreadActive(thread, threadRuntime().get(threadId));
   }
 
@@ -2126,7 +2134,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
   }
 
   async function deleteThreadOnce(threadId: string): Promise<boolean> {
-    const thread = [...threads(), ...archivedThreads()].find((entry) => entry.id === threadId);
+    const thread = [...threads(), ...archivedThreads(), ...allAgentThreads()].find(
+      (entry) => entry.id === threadId,
+    );
     if (thread === undefined) {
       setError("The task to delete is no longer available.");
       return false;
@@ -2235,6 +2245,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       if (currentThread()?.id !== thread.id) {
         return false;
       }
+      replaceAgentThreadFamily(page.thread, page.agentThreads);
       batch(() => {
         setCurrentThread((current) =>
           current?.id === thread.id ? prependThreadHistory(current, page.thread) : current,
@@ -2767,6 +2778,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     batch(() => {
       setThreads((current) => current.filter((thread) => thread.id !== threadId));
       setArchivedThreads((current) => current.filter((thread) => thread.id !== threadId));
+      setAllAgentThreads((current) => current.filter((thread) => thread.id !== threadId));
       if (currentThread()?.id === threadId) {
         clearCurrentThread();
       }
@@ -2841,6 +2853,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
         return;
       }
       synchronizeThreadRuntime(page.thread);
+      replaceAgentThreadFamily(page.thread, page.agentThreads);
       if (page.thread.status.type !== "active") {
         void scheduleQueuedMessage(threadId);
       }
@@ -2850,12 +2863,32 @@ export function createAppController(localization: AppControllerLocalization): Ap
   }
 
   function mergeThread(thread: ThreadSummary): void {
-    setThreads((current) => {
-      const index = current.findIndex((entry) => entry.id === thread.id);
-      if (index === -1) {
-        return [thread, ...current];
-      }
-      return current.map((entry, entryIndex) => (entryIndex === index ? thread : entry));
+    batch(() => {
+      const next = upsertTaskThread(
+        { rootThreads: threads(), agentThreads: allAgentThreads() },
+        thread,
+      );
+      setThreads(next.rootThreads);
+      setAllAgentThreads(next.agentThreads);
+    });
+  }
+
+  function replaceAgentThreadFamily(thread: ThreadSummary, family: readonly ThreadSummary[]): void {
+    setAllAgentThreads((current) => replaceTaskAgentFamily(current, thread, family));
+  }
+
+  function updateThreadSummary(
+    threadId: string,
+    update: (thread: ThreadSummary) => ThreadSummary,
+  ): void {
+    batch(() => {
+      const next = updateTaskThread(
+        { rootThreads: threads(), agentThreads: allAgentThreads() },
+        threadId,
+        update,
+      );
+      setThreads(next.rootThreads);
+      setAllAgentThreads(next.agentThreads);
     });
   }
 
@@ -2873,7 +2906,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
     if (cached === null) {
       return null;
     }
-    const summary = [...threads(), ...archivedThreads()].find((thread) => thread.id === threadId);
+    const summary = [...threads(), ...archivedThreads(), ...allAgentThreads()].find(
+      (thread) => thread.id === threadId,
+    );
     return summary !== undefined && cachedThreadMatchesSummary(cached, summary) ? cached : null;
   }
 
@@ -3013,7 +3048,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
     accountProfileError,
     accountProfileLoading,
     activePlan,
+    activeTaskRootId,
     activeTurnId,
+    agentThreads,
     approvals,
     applicationPreferences,
     applicationPreferencesError,

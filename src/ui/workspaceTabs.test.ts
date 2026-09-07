@@ -9,6 +9,7 @@ import {
   reconcileBrowserWorkspaceTabs,
   removeReviewWorkspaceTab,
   showBrowserWorkspaceTab,
+  showEmptyWorkspace,
   showReviewWorkspaceTab,
 } from "./workspaceTabs";
 
@@ -99,5 +100,21 @@ describe("workspace tabs", () => {
 
     expect(showBrowserWorkspaceTab(state, "missing")).toBe(state);
     expect(closeWorkspaceTab(state, browserWorkspaceTabId("missing"))).toBe(state);
+  });
+
+  it("opens and preserves a clean workspace without creating a browser tab", () => {
+    const opened = showEmptyWorkspace(emptyWorkspaceTabsState(), "thread-1");
+    const reconciled = reconcileBrowserWorkspaceTabs(opened, {
+      activeBrowserTabId: null,
+      browserTabIds: [],
+      conversationId: "thread-1",
+    });
+
+    expect(reconciled).toEqual({
+      activeTabId: null,
+      conversationId: "thread-1",
+      tabs: [],
+      visible: true,
+    });
   });
 });

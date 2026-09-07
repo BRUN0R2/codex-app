@@ -666,6 +666,7 @@ function contextUsage(id: string, outputTokens: number) {
 function threadFixture(status: "completed" | "inProgress"): CodexThread {
   return {
     id: "thread-a",
+    agent: null,
     mode: "codex",
     preview: "Teste",
     name: null,

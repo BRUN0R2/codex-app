@@ -224,7 +224,7 @@ pub(super) fn read_thread_page(
 
     Ok(StoredThreadPage {
         thread: CodexThread {
-            summary: header.into_summary(),
+            summary: header.into_summary()?,
             turns,
         },
         next_cursor,

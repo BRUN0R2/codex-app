@@ -2860,6 +2860,79 @@ pre {
   pointer-events: auto;
 }
 
+.agent-tabs {
+  position: absolute;
+  z-index: 18;
+  top: 8px;
+  right: 62px;
+  left: 20px;
+  display: flex;
+  width: max-content;
+  max-width: calc(100% - 82px);
+  gap: 4px;
+  padding: 3px;
+  overflow-x: auto;
+  border: 1px solid var(--color-token-border);
+  border-radius: 10px;
+  background: rgb(28 28 28 / 94%);
+  scrollbar-width: none;
+}
+
+.agent-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.agent-tab {
+  display: flex;
+  min-width: 0;
+  max-width: 220px;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-token-text-secondary);
+  white-space: nowrap;
+}
+
+.agent-tab > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-tab:hover,
+.agent-tab:focus-visible {
+  background: var(--gray-750);
+  color: var(--color-token-text-primary);
+}
+
+.agent-tab.active {
+  background: var(--gray-700);
+  color: var(--color-token-text-primary);
+}
+
+.agent-tab-status {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--color-token-text-tertiary);
+}
+
+.agent-tab-status[data-status="active"] {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.agent-tab-status[data-status="systemError"] {
+  background: var(--red-400);
+}
+
+.chat-page:has(.agent-tabs) .timeline-inner {
+  padding-top: 64px;
+}
+
 .timeline-inner,
 .composer-wrap {
   width: min(var(--thread-content-max-width), calc(100% - 2 * var(--thread-inline-gutter)));
