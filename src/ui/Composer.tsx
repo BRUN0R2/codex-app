@@ -69,6 +69,7 @@ import {
   saveQueueingEnabled,
 } from "../state/messageQueue";
 import { ContextWindowIndicator } from "./ContextWindowIndicator";
+import { composerControlAvailability } from "./composerControlAvailability";
 import { canSubmitComposerMessage, shouldWarmComposerModelCatalog } from "./composerSubmission";
 import { Icon } from "./Icon";
 import { ImagePreview } from "./ImagePreview";
@@ -137,6 +138,9 @@ export function Composer(props: ComposerProps) {
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [modelMenuSection, setModelMenuSection] = createSignal<ModelMenuSection | null>(null);
   const [permissionMenuOpen, setPermissionMenuOpen] = createSignal(false);
+  const controlAvailability = createMemo(() =>
+    composerControlAvailability(props.controller.config() !== null),
+  );
   const [addMenuOpen, setAddMenuOpen] = createSignal(false);
   const draftStore = new ComposerDraftStore();
   let activeDraftKey = currentDraftKey();
@@ -682,7 +686,7 @@ export function Composer(props: ComposerProps) {
                 aria-label={messages().addFilesOrProject}
                 class="add-button"
                 classList={{ active: addMenuOpen() }}
-                disabled={props.controller.turnBusy()}
+                disabled={!controlAvailability().attachments}
                 onClick={() => {
                   setAddMenuOpen((value) => !value);
                   setPermissionMenuOpen(false);
@@ -752,7 +756,7 @@ export function Composer(props: ComposerProps) {
                       props.controller.config()?.config.permissionProfile.sandbox ===
                       "danger-full-access",
                   }}
-                  disabled={props.controller.turnBusy() || props.controller.config() === null}
+                  disabled={!controlAvailability().permissions}
                   onClick={() => {
                     setPermissionMenuOpen((value) => !value);
                     setAddMenuOpen(false);
