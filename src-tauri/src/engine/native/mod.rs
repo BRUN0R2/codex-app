@@ -428,9 +428,7 @@ impl NativeEngine {
                 engine.inner.emit_diagnostic(
                     &app_handle,
                     DiagnosticStream::Runtime,
-                    format!(
-                        "could not prewarm Responses transport for thread `{thread_id}`: {error}"
-                    ),
+                    response_prewarm_diagnostic(&thread_id, &error),
                 );
             }
         });
@@ -2200,6 +2198,12 @@ fn current_unix_timestamp() -> Result<i64, AppError> {
     i64::try_from(seconds).map_err(|error| AppError::State(error.to_string()))
 }
 
+fn response_prewarm_diagnostic(thread_id: &str, error: &AppError) -> String {
+    format!(
+        "optional Responses transport prewarm was unavailable for thread `{thread_id}`; no model generation was requested: {error}"
+    )
+}
+
 fn descriptor() -> EngineDescriptor {
     EngineDescriptor {
         id: "native-engine",
@@ -2224,8 +2228,9 @@ fn descriptor() -> EngineDescriptor {
 mod tests {
     use tokio::sync::watch;
 
-    use super::{ActiveTurn, NativeEngine, TurnContinuation};
+    use super::{ActiveTurn, NativeEngine, TurnContinuation, response_prewarm_diagnostic};
     use crate::engine::OperationAck;
+    use crate::error::AppError;
 
     fn active_turn() -> ActiveTurn {
         let (cancellation, _receiver) = watch::channel(false);
@@ -2242,6 +2247,19 @@ mod tests {
     #[test]
     fn a_fresh_engine_does_not_block_normal_window_close() {
         assert!(!NativeEngine::default().has_active_turns());
+    }
+
+    #[test]
+    fn response_prewarm_failures_state_that_generation_was_not_requested() {
+        let diagnostic = response_prewarm_diagnostic(
+            "thread-1",
+            &AppError::Provider("usage limit reached".into()),
+        );
+
+        assert_eq!(
+            diagnostic,
+            "optional Responses transport prewarm was unavailable for thread `thread-1`; no model generation was requested: provider request failed: usage limit reached"
+        );
     }
 
     #[test]
