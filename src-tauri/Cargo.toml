@@ -1,6 +1,6 @@
 [package]
 name = "codex-desktop-next"
-version = "0.0.2-alpha.1"
+version = "0.0.3-alpha.1"
 description = "An independent native desktop coding agent for Windows"
 authors = ["Codex App contributors"]
 license = "MIT"

@@ -121,6 +121,10 @@ export function applyCommandStreamDeltasToThread(
     if (item.type !== "commandExecution") {
       throw new Error(`O delta de comando persistido aponta para um item ${item.type}.`);
     }
+    if (item.liveOutput === null) {
+      // The command already closed; late stream output is discarded.
+      continue;
+    }
     const updated = applyStreamDelta(item, delta);
     const items = [...turn.items];
     items[itemIndex] = updated;
@@ -158,8 +162,12 @@ function applyStreamDelta(current: VisibleThreadItem, delta: StreamDelta): Visib
       }
       return { ...current, text: current.text + delta.delta };
     case "commandOutput": {
-      if (current.type !== "commandExecution" || current.liveOutput === null) {
+      if (current.type !== "commandExecution") {
         throw new Error(`The command delta points to an inactive ${current.type} item.`);
+      }
+      if (current.liveOutput === null) {
+        // Command finished (or was settled) before this delta flushed.
+        return current;
       }
       const output = applyCommandOutputOperation(
         current.liveOutput[delta.stream],
