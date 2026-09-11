@@ -1857,7 +1857,7 @@ fn decode_rate_limit_event(
     });
     let limit_id = metered_limit_name
         .or(legacy_limit_name)
-        .unwrap_or_else(|| "codex".into())
+        .unwrap_or_else(|| super::GENERAL_RATE_LIMIT_ID.into())
         .trim()
         .to_ascii_lowercase()
         .replace('-', "_");

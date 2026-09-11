@@ -25,6 +25,7 @@ Rust NativeEngine
 | --- | --- | --- |
 | `src/ui` | Rendering and interaction | Access IPC or decide domain policy |
 | `src/state` | Reactive ownership and transitions | Accept undecoded external payloads |
+| `src/state` domain sessions | Account usage, automations, preferences, and model catalogs | Own engine lifecycle or thread orchestration |
 | `src/infrastructure` | Commands, events, and Tauri adaptation | Retain business rules |
 | `src/contracts` | Boundary types and strict decoders | Infer or repair invalid payloads |
 | `src/i18n` | Catalog discovery, validation, locale resolution, and formatting | Translate operational diagnostics or accept incomplete catalogs |
@@ -123,6 +124,12 @@ model capabilities. Tools never choose or elevate their own permissions.
 - long-running processes yield and are read incrementally by cursor;
 - large results are compacted or stored for targeted reads.
 
+Before a compaction request exceeds its budget, oversized tool text is
+soft-trimmed to a bounded head and tail. Full truncation remains the final
+fallback. After compaction, the retained history includes a files-touched
+manifest of at most eight unique file paths found in JSON tool arguments, so the
+model can re-read relevant files before editing.
+
 See [ENGINE.md](ENGINE.md) for the complete contract.
 
 ## Images and browser
@@ -140,6 +147,13 @@ images, never arbitrary access to the application DOM. One permanent shell
 control opens or closes the active right-hand workspace surface; individual
 tabs own only selection and disposal, so browser and review surfaces never
 introduce competing panel toggles.
+Closing the last review or browser tab also hides the workspace panel and its
+splitter. Native removal of the final browser tab follows the same transition;
+the shell control can still explicitly open an empty workspace.
+
+Main-window restoration performs unminimize, show, and focus on the runtime
+event loop. Tray and application-menu callbacks schedule the operation without
+blocking that loop; failures become window diagnostics.
 
 ## Persistence and secrets
 
@@ -166,11 +180,22 @@ The timeline and composer share one centered responsive column. Message content
 and activity cards align with the composer's outer borders; the column adds no
 inner horizontal inset.
 
+The composer uses native content sizing with a stable minimum writing area.
+Wrapped text and pasted lines grow within the mode's bounded viewport height,
+and overflow scrolls inside the editor. Content, width, and font
+changes reflow together without stored inline heights or imperative measurements.
+
 The timeline retains its full-height scroll viewport beneath the dock. Its
 non-interactive backdrop uses the measured dock height, fades to the chat surface
 at its midpoint, and remains opaque through the footer. Composer growth, notices,
 and progress controls resize that same layer without another measurement loop.
 The scrollbar and conversation navigation remain above the backdrop.
+Timeline geometry observes the content border box, including the measured dock
+padding, so editor growth and contraction update the physical end and scrollbar
+range together. Following the latest message stays pinned across these changes;
+reading older messages preserves the user's position.
+End navigation cancels any previous message destination before moving to the
+current physical end.
 
 Scroll events publish one measured viewport snapshot in a batch. Nested activity
 lists measure their origin against the same live DOM scroll position and account

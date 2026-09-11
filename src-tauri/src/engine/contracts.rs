@@ -1265,8 +1265,8 @@ pub struct RateLimitSnapshot {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountRateLimitsResponse {
-    pub rate_limits: RateLimitSnapshot,
-    pub rate_limits_by_limit_id: BTreeMap<String, RateLimitSnapshot>,
+    pub general_rate_limit: RateLimitSnapshot,
+    pub additional_rate_limits_by_limit_id: BTreeMap<String, RateLimitSnapshot>,
     pub plan_price: Option<PlanPriceSnapshot>,
     pub luna_reserve_available: bool,
 }

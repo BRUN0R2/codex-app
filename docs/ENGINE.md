@@ -6,8 +6,8 @@ data.
 
 | Contract | Current value |
 | --- | --- |
-| IPC schema | `21` |
-| SQLite schema | `5` |
+| IPC schema | `23` |
+| SQLite schema | `7` |
 | Codex provider | ChatGPT Codex Responses |
 | Transport | persistent Responses WebSocket; HTTPS/SSE on explicit 426 |
 | Sidecar | hash-validated `rg.exe` 15.2.0 |
@@ -80,8 +80,12 @@ Regenerate them only intentionally:
 cargo test --locked --manifest-path src-tauri/Cargo.toml engine::contracts_fixtures::tests::regenerate_golden_contract_fixtures -- --ignored
 ```
 
-Account usage preserves the provider's additional limit buckets. When the
-server supplies the `gpt-reserve` bucket while Luna Reserve is explicitly active,
+Account usage preserves the provider's additional limit buckets. The
+`generalRateLimit` field is exclusively the canonical `codex` bucket;
+`additionalRateLimitsByLimitId` contains only additional buckets such as
+`gpt-reserve`. Their identities are validated at the Rust and TypeScript
+boundaries, so an additional bucket can never replace the general limit.
+When the server supplies `gpt-reserve` while Luna Reserve is explicitly active,
 the sidebar account popover presents its balance using the longest available
 quota window and links to the official plan and credit pages. The reserve card is
 a separate panel above the profile menu. It remains hidden when only a historical
@@ -179,6 +183,8 @@ This matches the Desktop protocol boundary and keeps a reroute or a selection
 for the next turn from relabeling active usage. Turn headers show elapsed time.
 Context telemetry remains persisted for the context indicator and compaction;
 the timeline does not calculate or display token spending.
+When cached input tokens are present, the context popover shows their confirmed
+count and share of input tokens from the same provider sample.
 
 ## Agent loop
 

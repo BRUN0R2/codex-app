@@ -90,7 +90,6 @@ import { presentServiceTier, selectedServiceTierLabel } from "./serviceTierPrese
 
 const COMPOSER_MESSAGE_MAXIMUM_CHARACTERS: number = 1_048_576;
 const COMPOSER_ATTACHMENT_MAXIMUM_COUNT: number = 12;
-const COMPOSER_TEXTAREA_MAXIMUM_HEIGHT_PX: number = 220;
 
 export interface ComposerProps {
   readonly controller: ComposerController;
@@ -257,7 +256,6 @@ export function Composer(props: ComposerProps) {
         setText(nextDraft.text);
         setAttachments(nextDraft.attachments);
         setAttachmentError(null);
-        queueMicrotask(() => resizeTextArea(textArea));
       },
       { defer: true },
     ),
@@ -270,7 +268,6 @@ export function Composer(props: ComposerProps) {
     }
     setText(request.text);
     queueMicrotask(() => {
-      resizeTextArea(textArea);
       textArea?.focus();
       textArea?.setSelectionRange(request.text.length, request.text.length);
       props.onDraftConsumed(request.id);
@@ -499,7 +496,6 @@ export function Composer(props: ComposerProps) {
     setText("");
     setAttachments([]);
     setAttachmentError(null);
-    resizeTextArea(textArea);
   }
 
   function currentDraft(): ComposerDraftState {
@@ -537,7 +533,6 @@ export function Composer(props: ComposerProps) {
     }
     setAttachmentError(null);
     queueMicrotask(() => {
-      resizeTextArea(textArea);
       textArea?.focus();
       textArea?.setSelectionRange(message.text.length, message.text.length);
     });
@@ -661,10 +656,7 @@ export function Composer(props: ComposerProps) {
         <textarea
           aria-label={composerPlaceholder(mode(), messages())}
           maxlength={COMPOSER_MESSAGE_MAXIMUM_CHARACTERS}
-          onInput={(event) => {
-            setText(event.currentTarget.value);
-            resizeTextArea(event.currentTarget);
-          }}
+          onInput={(event) => setText(event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
               event.preventDefault();
@@ -1367,14 +1359,6 @@ function mergeAttachments(
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : "The attachments could not be processed.";
-}
-
-function resizeTextArea(element: HTMLTextAreaElement | undefined): void {
-  if (element === undefined) {
-    return;
-  }
-  element.style.height = "auto";
-  element.style.height = `${Math.min(element.scrollHeight, COMPOSER_TEXTAREA_MAXIMUM_HEIGHT_PX)}px`;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {

@@ -71,7 +71,8 @@ export function reconcileBrowserWorkspaceTabs(
     activeTabId,
     conversationId: input.conversationId,
     tabs,
-    visible: conversationChanged ? false : current.visible,
+    visible:
+      !conversationChanged && current.visible && (tabs.length > 0 || current.tabs.length === 0),
   };
   return sameWorkspaceTabsState(current, next) ? current : next;
 }
@@ -140,7 +141,7 @@ export function closeWorkspaceTab(
     ...current,
     activeTabId: successor?.id ?? null,
     tabs,
-    visible: current.visible,
+    visible: current.visible && tabs.length > 0,
   };
 }
 

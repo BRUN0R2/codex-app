@@ -1303,6 +1303,7 @@ export function Timeline(props: {
     if (scrollElement === undefined) {
       return;
     }
+    claimTimelineScrollOwnership();
     setActiveTimelineFollowing(true);
     scrollTimelineTo(scrollElement.scrollHeight, behavior);
     if (behavior === "auto") {
@@ -1584,7 +1585,7 @@ export function Timeline(props: {
     scrollElement.addEventListener("scrollend", handleScrollEnd);
     resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(scrollElement);
-    resizeObserver.observe(contentElement);
+    resizeObserver.observe(contentElement, { box: "border-box" });
     if (scrollbarTrackElement !== undefined) {
       resizeObserver.observe(scrollbarTrackElement);
     }

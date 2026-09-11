@@ -14,7 +14,7 @@ mod process;
 
 use desktop_integration::{
     ApplicationMenuState, ApplicationPreferencesState, DesktopIntegrationLifecycle,
-    restore_main_window,
+    schedule_main_window_restore,
 };
 use engine::{EngineManager, RuntimeDiagnosticSubsystem};
 use tauri::{Builder, Emitter as _, Manager as _, Runtime};
@@ -42,11 +42,8 @@ fn initialize_desktop_integration(app: &mut tauri::App) -> Result<(), crate::err
 }
 
 fn focus_main_window(app: &tauri::AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window is unavailable".to_string())?;
-    restore_main_window(&window)
-        .map_err(|error| format!("could not restore the main window: {error}"))
+    schedule_main_window_restore(app)
+        .map_err(|error| format!("could not schedule main window restore: {error}"))
 }
 
 fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) -> Result<(), String> {

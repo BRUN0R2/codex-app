@@ -23,17 +23,12 @@ function response(
   lunaReserveAvailable = true,
 ): AccountRateLimitsResponse {
   return {
-    rateLimits: {
+    generalRateLimit: {
       ...snapshot(),
       limitId: "codex",
       limitName: null,
     },
-    rateLimitsByLimitId: {
-      codex: {
-        ...snapshot(),
-        limitId: "codex",
-        limitName: null,
-      },
+    additionalRateLimitsByLimitId: {
       base_model_inference: reserve,
     },
     planPrice: null,

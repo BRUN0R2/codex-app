@@ -219,7 +219,7 @@ const PREVIEW_ENGINE = {
       "scheduledAutomations",
     ],
   },
-  schemaVersion: 22,
+  schemaVersion: 23,
   config: PREVIEW_CONFIG,
   diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
   permissionProfiles: [
@@ -1323,27 +1323,29 @@ function previewThreadSummary(thread: CodexThread): ThreadSummary {
   };
 }
 
-const PREVIEW_RATE_LIMITS = {
-  rateLimits: {
-    limitId: "codex",
-    limitName: null,
-    primary: {
-      usedPercent: 43,
-      windowDurationMins: 300,
-      resetsAt: Date.parse("2026-08-22T11:45:00-03:00"),
-    },
-    secondary: {
-      usedPercent: 93,
-      windowDurationMins: 10_080,
-      resetsAt: Date.parse("2026-08-27T05:38:00-03:00"),
-    },
-    credits: { hasCredits: true, unlimited: false, balance: "R$ 0" },
-    individualLimit: null,
-    spendControlReached: null,
-    planType: "pro",
-    rateLimitReachedType: null,
+const PREVIEW_GENERAL_RATE_LIMIT = {
+  limitId: "codex",
+  limitName: null,
+  primary: {
+    usedPercent: 43,
+    windowDurationMins: 300,
+    resetsAt: Date.parse("2026-08-22T11:45:00-03:00"),
   },
-  rateLimitsByLimitId: {
+  secondary: {
+    usedPercent: 93,
+    windowDurationMins: 10_080,
+    resetsAt: Date.parse("2026-08-27T05:38:00-03:00"),
+  },
+  credits: { hasCredits: true, unlimited: false, balance: "R$ 0" },
+  individualLimit: null,
+  spendControlReached: null,
+  planType: "pro",
+  rateLimitReachedType: null,
+} as const satisfies RateLimitSnapshot;
+
+const PREVIEW_RATE_LIMITS = {
+  generalRateLimit: PREVIEW_GENERAL_RATE_LIMIT,
+  additionalRateLimitsByLimitId: {
     codex_spark: {
       limitId: "codex_spark",
       limitName: "GPT-5.3-Codex-Spark",
@@ -1748,14 +1750,14 @@ export function setupBrowserPreview(): void {
         };
         previewRateLimits = {
           ...previewRateLimits,
-          rateLimits: resetPreviewUsageSnapshot(previewRateLimits.rateLimits, now),
-          rateLimitsByLimitId: Object.fromEntries(
-            Object.entries(previewRateLimits.rateLimitsByLimitId).map(([id, snapshot]) => [
-              id,
-              id === "codex" || id === "codex_spark"
-                ? resetPreviewUsageSnapshot(snapshot, now)
-                : snapshot,
-            ]),
+          generalRateLimit: resetPreviewUsageSnapshot(previewRateLimits.generalRateLimit, now),
+          additionalRateLimitsByLimitId: Object.fromEntries(
+            Object.entries(previewRateLimits.additionalRateLimitsByLimitId).map(
+              ([id, snapshot]) => [
+                id,
+                id === "codex_spark" ? resetPreviewUsageSnapshot(snapshot, now) : snapshot,
+              ],
+            ),
           ),
           lunaReserveAvailable: false,
         };

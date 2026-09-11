@@ -1,4 +1,9 @@
-import type { AccountRateLimitsResponse, RateLimitWindow } from "../contracts/types";
+import type {
+  AccountRateLimitsResponse,
+  RateLimitSnapshot,
+  RateLimitWindow,
+} from "../contracts/types";
+import { GENERAL_RATE_LIMIT_ID } from "./rateLimits";
 
 export interface UsageLimitResetTransition {
   readonly limitId: string;
@@ -11,15 +16,30 @@ export function findUsageLimitReset(
   next: AccountRateLimitsResponse,
 ): UsageLimitResetTransition | null {
   const transitions: UsageLimitResetTransition[] = [];
-  for (const [limitId, nextSnapshot] of Object.entries(next.rateLimitsByLimitId)) {
-    const previousSnapshot = previous.rateLimitsByLimitId[limitId];
+  collectSnapshotResets(
+    transitions,
+    GENERAL_RATE_LIMIT_ID,
+    previous.generalRateLimit,
+    next.generalRateLimit,
+  );
+  for (const [limitId, nextSnapshot] of Object.entries(next.additionalRateLimitsByLimitId)) {
+    const previousSnapshot = previous.additionalRateLimitsByLimitId[limitId];
     if (previousSnapshot === undefined) continue;
-    collectWindowReset(transitions, limitId, previousSnapshot.primary, nextSnapshot.primary);
-    collectWindowReset(transitions, limitId, previousSnapshot.secondary, nextSnapshot.secondary);
+    collectSnapshotResets(transitions, limitId, previousSnapshot, nextSnapshot);
   }
   return (
     transitions.toSorted((left, right) => right.availablePercent - left.availablePercent)[0] ?? null
   );
+}
+
+function collectSnapshotResets(
+  output: UsageLimitResetTransition[],
+  limitId: string,
+  previous: RateLimitSnapshot,
+  next: RateLimitSnapshot,
+): void {
+  collectWindowReset(output, limitId, previous.primary, next.primary);
+  collectWindowReset(output, limitId, previous.secondary, next.secondary);
 }
 
 function collectWindowReset(

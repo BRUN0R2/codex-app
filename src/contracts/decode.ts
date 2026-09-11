@@ -213,7 +213,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [22] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [23] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -1006,22 +1006,36 @@ export function decodeConfigUpdate(value: unknown): ConfigUpdate {
 
 export function decodeAccountRateLimitsResponse(value: unknown): AccountRateLimitsResponse {
   const object = exactRecord(value, "$", [
+    "additionalRateLimitsByLimitId",
+    "generalRateLimit",
     "lunaReserveAvailable",
     "planPrice",
-    "rateLimits",
-    "rateLimitsByLimitId",
   ]);
-  const byId = record(object.rateLimitsByLimitId, "$.rateLimitsByLimitId");
-  const decodedById: Record<string, RateLimitSnapshot> = {};
+  const byId = record(object.additionalRateLimitsByLimitId, "$.additionalRateLimitsByLimitId");
+  const additionalRateLimitsByLimitId: Record<string, RateLimitSnapshot> = {};
   for (const [key, entry] of Object.entries(byId)) {
     if (key.length === 0 || key.length > 128) {
-      throw new ContractError("$.rateLimitsByLimitId", "contains an invalid bucket id");
+      throw new ContractError("$.additionalRateLimitsByLimitId", "contains an invalid bucket id");
     }
-    decodedById[key] = decodeRateLimitSnapshot(entry, `$.rateLimitsByLimitId.${key}`);
+    const snapshot = decodeRateLimitSnapshot(entry, `$.additionalRateLimitsByLimitId.${key}`);
+    if (key === "codex" || snapshot.limitId !== key) {
+      throw new ContractError(
+        `$.additionalRateLimitsByLimitId.${key}.limitId`,
+        "must identify its additional bucket",
+      );
+    }
+    additionalRateLimitsByLimitId[key] = snapshot;
+  }
+  const generalRateLimit = decodeRateLimitSnapshot(object.generalRateLimit, "$.generalRateLimit");
+  if (generalRateLimit.limitId !== "codex") {
+    throw new ContractError(
+      "$.generalRateLimit.limitId",
+      "must identify the canonical codex bucket",
+    );
   }
   return {
-    rateLimits: decodeRateLimitSnapshot(object.rateLimits, "$.rateLimits"),
-    rateLimitsByLimitId: decodedById,
+    generalRateLimit,
+    additionalRateLimitsByLimitId,
     lunaReserveAvailable: booleanValue(object.lunaReserveAvailable, "$.lunaReserveAvailable"),
     planPrice:
       object.planPrice === null ? null : decodePlanPriceSnapshot(object.planPrice, "$.planPrice"),

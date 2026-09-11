@@ -44,7 +44,7 @@ export interface PermissionProfile {
 
 export interface EngineStartResponse {
   readonly engine: EngineDescriptor;
-  readonly schemaVersion: 22;
+  readonly schemaVersion: 23;
   readonly diagnosticLogPath: string;
   readonly config: ConfigReadResponse;
   readonly permissionProfiles: readonly PermissionProfile[];
@@ -726,8 +726,8 @@ export interface PlanPriceSnapshot {
 }
 
 export interface AccountRateLimitsResponse {
-  readonly rateLimits: RateLimitSnapshot;
-  readonly rateLimitsByLimitId: Readonly<Record<string, RateLimitSnapshot>>;
+  readonly generalRateLimit: RateLimitSnapshot;
+  readonly additionalRateLimitsByLimitId: Readonly<Record<string, RateLimitSnapshot>>;
   readonly planPrice: PlanPriceSnapshot | null;
   readonly lunaReserveAvailable: boolean;
 }

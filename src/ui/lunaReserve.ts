@@ -19,7 +19,7 @@ export function presentLunaReserveUsage(
     return null;
   }
 
-  const snapshot = Object.values(response.rateLimitsByLimitId).find(
+  const snapshot = Object.values(response.additionalRateLimitsByLimitId).find(
     (candidate) => candidate.limitName === LUNA_RESERVE_LIMIT_NAME,
   );
   if (snapshot === undefined) {

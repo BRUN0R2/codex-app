@@ -68,6 +68,47 @@ const REQUESTED_SCENARIOS = new Set(
 );
 const SCENARIOS = [
   {
+    id: "workspace-last-tab-close",
+    url: TIMELINE_STRESS_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de timeline expandida"))`,
+    prepareExpression: `void (async () => {
+      try { window.__previewWorkspaceClosureMetrics = await (await import("/src/tooling/workspaceClosureAudit.ts")).auditWorkspaceClosure(); }
+      catch (error) { window.__previewWorkspaceClosureError = String(error?.stack ?? error); }
+      finally { window.__previewWorkspaceClosureReady = true; }
+    })()`,
+    readyExpression: "window.__previewWorkspaceClosureReady === true",
+    auditExpression: () => `(() => {
+      if (window.__previewWorkspaceClosureError !== undefined) throw new Error(window.__previewWorkspaceClosureError);
+      return window.__previewWorkspaceClosureMetrics;
+    })()`,
+    validate: (metrics) => {
+      assert(metrics.tabCount === 1 && metrics.openedWidth < metrics.initialWidth, "the final-tab audit did not open a review panel");
+      assert(!metrics.panelPresent && !metrics.splitterPresent && metrics.expanded === "false", "closing the final tab left an empty workspace open");
+      assert(Math.abs(metrics.closedWidth - metrics.initialWidth) <= 1, "closing the workspace did not restore the conversation width");
+    },
+  },
+  ...["composer-sizing", "timeline-dock-resize"].map((id) => ({
+    id,
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"))`,
+    prepareExpression: `void (async () => {
+      try {
+        const audit = await import("/src/tooling/chatLayoutAudit.ts");
+        window.__previewChatLayoutMetrics = await audit.${id === "composer-sizing" ? "auditComposerSizing" : "auditTimelineDockResize"}();
+      } catch (error) { window.__previewChatLayoutError = String(error?.stack ?? error); }
+      finally { window.__previewChatLayoutReady = true; }
+    })()`,
+    readyExpression: "window.__previewChatLayoutReady === true",
+    interact: id === "timeline-dock-resize" ? exerciseTimelineEndInputs : exerciseComposerFocusLoss,
+    auditExpression: () => `(() => {
+      if (window.__previewChatLayoutError !== undefined) throw new Error(window.__previewChatLayoutError);
+      return window.__previewChatLayoutMetrics;
+    })()`,
+    validate: id === "composer-sizing" ? validateComposerSizing : validateTimelineDockResize,
+  })),
+  {
     id: "composer-fast-mode",
     url: HOME_PREVIEW_URL,
     readyExpression: `document.querySelector(".model-speed-indicator") !== null &&
@@ -1282,6 +1323,51 @@ async function main() {
 function rebasePreviewUrl(url, previewOrigin) {
   const parsed = new URL(url);
   return `${previewOrigin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+async function exerciseComposerFocusLoss(client) {
+  await client.send("Page.bringToFront");
+  const expandedHeight = await client.evaluate(`(async () => (await import("/src/tooling/chatLayoutAudit.ts")).prepareComposerFocusLoss())()`, true);
+  const background = await withAuditTarget(client.client, async (targetId) => {
+    const otherWindow = await client.client.attachToTarget(targetId);
+    await otherWindow.send("Page.bringToFront");
+    return client.evaluate(`(async () => (await import("/src/tooling/chatLayoutAudit.ts")).submitComposerWhileUnfocused())()`, true);
+  });
+  await client.send("Page.bringToFront");
+  await client.evaluate(`window.__previewChatLayoutMetrics.focusLoss = {
+    expandedHeight: ${expandedHeight},
+    background: ${JSON.stringify(background)},
+    restoredHeight: document.querySelector(".composer textarea").getBoundingClientRect().height,
+    focused: document.hasFocus(),
+  }`, false);
+}
+
+async function exerciseTimelineEndInputs(client) {
+  for (const input of ["wheel", "thumb", "arrow"]) {
+    const geometry = await client.evaluate(`(async () => (await import("/src/tooling/chatLayoutAudit.ts")).prepareTimelineEndInput(${input === "arrow"}))()`, true);
+    const point = geometry[input];
+    await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
+    if (input === "wheel") {
+      await client.send("Input.dispatchMouseEvent", {
+        type: "mouseWheel", ...point, deltaX: 0, deltaY: geometry.scrollDistance,
+      });
+    } else {
+      await client.send("Input.dispatchMouseEvent", {
+        type: "mousePressed", ...point, button: "left", buttons: 1, clickCount: 1,
+      });
+      if (input === "thumb") {
+        await client.send("Input.dispatchMouseEvent", {
+          type: "mouseMoved", x: point.x, y: geometry.trackBottom, button: "left", buttons: 1,
+        });
+      }
+      await client.send("Input.dispatchMouseEvent", {
+        type: "mouseReleased", x: point.x, y: input === "thumb" ? geometry.trackBottom : point.y,
+        button: "left", buttons: 0, clickCount: 1,
+      });
+    }
+    await client.evaluate(`new Promise((resolve) => setTimeout(resolve, 500))`, true);
+    await client.evaluate(`(async () => { window.__previewChatLayoutMetrics.${input} = (await import("/src/tooling/chatLayoutAudit.ts")).measureTimelineEnd(); })()`, true);
+  }
 }
 
 async function hoverComposerContextUsage(client) {
@@ -8474,6 +8560,38 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
     "the expanded file-read chevron does not remain pointed downward",
   );
   validateIntrinsicActivityInteraction(metrics.readInteraction, "file read", tolerance);
+}
+
+function validateComposerSizing(metrics) {
+  const defaultHeight = 64;
+  for (const sample of [metrics.empty, metrics.singleLine, metrics.cleared, metrics.switched, metrics.submitted]) {
+    assert(Math.abs(sample.height - defaultHeight) <= 1, "an empty or single-line draft is not compact");
+    assert(!sample.overflowing, "a compact draft has an unnecessary scrollbar");
+  }
+  assert(metrics.multiline.height > metrics.singleLine.height + 30, "line breaks do not grow the editor");
+  assert(metrics.narrow.height > metrics.wide.height, "the editor does not reflow after narrowing");
+  assert(Math.abs(metrics.widened.height - metrics.wide.height) <= 1, "the editor retains stale height after widening");
+  assert(Math.abs(metrics.largePaste.height - metrics.maximumHeight) <= 1 && metrics.largePaste.overflowing,
+    "a large paste does not use the bounded, internally scrollable editor");
+  assert(metrics.restoredDraftMatches && metrics.restored.height === metrics.saved.height,
+    "switching tasks does not restore the draft and its natural height");
+  assert(metrics.submitted.characters === 0, "submission did not clear the draft");
+  assert(metrics.focusLoss.expandedHeight > defaultHeight + 40 && metrics.focusLoss.background.unfocused && metrics.focusLoss.focused,
+    "the composer audit did not exercise an expanded draft across focus loss and return");
+  assert(Math.abs(metrics.focusLoss.background.height - defaultHeight) <= 1 && Math.abs(metrics.focusLoss.restoredHeight - defaultHeight) <= 1,
+    "a draft cleared in the background retained an expanded empty editor");
+}
+
+function validateTimelineDockResize(metrics) {
+  assert(metrics.expanded.maximum > metrics.initial.maximum + 40, "the dock audit did not exercise editor growth");
+  assert(metrics.detachedDrift <= 1, "editor growth moved the history being read");
+  for (const [name, sample] of Object.entries(metrics)) {
+    if (name === "detachedDrift") continue;
+    assert(Math.abs(sample.bottomGap) <= 1, `${name}: the timeline did not reach its physical end`);
+    assert(Math.abs(sample.scrollbarMaximum - sample.maximum) <= 1, `${name}: scrollbar geometry is stale`);
+    assert(Math.abs(sample.thumbGap) <= 1, `${name}: the scrollbar thumb cannot reach the bottom`);
+    assert(!sample.endButtonVisible && sample.downDisabled, `${name}: end controls disagree with the viewport`);
+  }
 }
 
 function validateComposerPopoverLayeringMetrics(metrics, viewport) {

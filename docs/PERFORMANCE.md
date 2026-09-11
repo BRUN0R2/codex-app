@@ -8,6 +8,7 @@ method and latest reproducible gate snapshot; it does not accumulate history.
 ```powershell
 pnpm verify:benchmarks         # UI, stream, and command regressions
 pnpm measure:code-mode-warmup # cold V8 runtime cost
+pnpm measure:code-mode-execution # eight concurrent sandboxed cells
 pnpm measure:tokens           # catalog, context, and compaction
 pnpm measure:credentials      # cold vault versus process-local session cache
 pnpm measure:context-window   # confirmed-use preflight and compaction preparation
@@ -101,6 +102,15 @@ Navigation probes cover existing and live user messages, both motion
 preferences, manual cancellation, and one-pixel target accuracy. Fractional
 and compressed coordinates also have 100,000-position numerical regressions.
 
+Chat layout regressions exercise empty, wrapped, pasted, restored, and submitted
+drafts across the standard viewports, including clearing an expanded draft while
+another browser target owns focus and then returning. Dock growth and contraction
+must keep the real scroll end, scrollbar range, thumb, and end controls
+consistent, including native wheel input, thumb dragging, arrow clicks, and
+smooth end navigation.
+Closing the final workspace tab must remove the panel and splitter and restore
+the conversation width.
+
 ## Solid transform analysis
 
 The reported message
@@ -145,9 +155,9 @@ actual compiler invocations, and keep the warning enabled.
 ## Current baseline
 
 Measurements use Windows with 28 logical processors. Credential and encoding
-baselines date from 2026-08-31; context boundaries, streamed dispatch, Code Mode,
-were measured on 2026-09-05; the current gate and tool catalog were measured on
-2026-09-06. These values describe local runs.
+baselines date from 2026-08-31; context boundaries and streamed dispatch were
+measured on 2026-09-05; the current gate, tool catalog, and Code Mode were
+measured on 2026-09-07. These values describe local runs.
 
 ### Agent startup, continuation, and compaction
 
@@ -262,12 +272,20 @@ separate from these bounded simulations.
 | --- | ---: |
 | batched text streaming | 212.958x the sequential path |
 | framed command streaming | 76.848x the sequential path |
-| cold Code Mode runtime warm-up | 6.378 ms; one initialization |
+| cold Code Mode runtime warm-up, nine fresh processes | 4.012-4.606 ms; 4.299 ms median |
+| eight concurrent Code Mode cells, nine fresh processes | 6.159-10.237 ms; 7.804 ms median |
 | 150,001-line diff | 45 mounted rows; 0.151 ms visible window |
 | incremental 64 MiB terminal | 1,586.538 ms; 40.3 MiB/s |
 | command after yield | response in 262 ms; independent work in 532 ms |
 | incremental polling | 146 B versus a 16,513 B snapshot |
 | four independent commands | 790.152 ms parallel versus 2,989.990 ms sequential |
+
+The Code Mode comparison uses the same release artifact and representative
+10,000-iteration modules. An explicit eight-worker V8 pool was rejected: it
+raised warm-up from 4.299 to 4.497 ms median and parallel execution from 7.804
+to 8.187 ms median. V8's automatic pool remains authoritative; the cold gate is
+now 25 ms, and the eight-cell gate is 250 ms so regressions fail verification
+without tuning the runtime to this workstation.
 
 Visual QA passed at 920x640, 1280x820, and 1920x1080 without horizontal
 overflow. Ultra rendered as `rgb(167, 139, 250)` (`#a78bfa`); appearance does

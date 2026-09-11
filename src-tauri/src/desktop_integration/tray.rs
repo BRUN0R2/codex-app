@@ -7,7 +7,6 @@ use tauri::{
 use crate::engine::{EngineManager, RuntimeDiagnosticSubsystem};
 use crate::error::AppError;
 
-const MAIN_WINDOW_LABEL: &str = "main";
 const MAIN_TRAY_ID: &str = "main-tray";
 const SHOW_MENU_ITEM_ID: &str = "show-main-window";
 const QUIT_MENU_ITEM_ID: &str = "quit-codex-app";
@@ -68,16 +67,8 @@ fn is_restore_click(event: &TrayIconEvent) -> bool {
 }
 
 fn restore_main_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
-        report_runtime_error(
-            app,
-            "Tray restore failed: main window is unavailable.".into(),
-        );
-        return;
-    };
-
-    if let Err(error) = super::restore_main_window(&window) {
-        report_runtime_error(app, format!("Tray restore failed: {error}"));
+    if let Err(error) = super::schedule_main_window_restore(app) {
+        report_runtime_error(app, format!("Tray restore could not be scheduled: {error}"));
     }
 }
 

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ContractError,
   decodeAccountProfileResponse,
+  decodeAccountRateLimitsResponse,
   decodeAccountReadResponse,
   decodeApplicationPreferences,
   decodeAttachmentImageResponse,
@@ -390,7 +391,7 @@ describe("decodificação dos contratos nativos", () => {
           "scheduledAutomations",
         ],
       },
-      schemaVersion: 22,
+      schemaVersion: 23,
       config: configFixture(),
       diagnosticLogPath: "C:\\Users\\Developer\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
@@ -417,7 +418,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 22,
+        schemaVersion: 23,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",
@@ -945,6 +946,68 @@ describe("decodificação dos contratos nativos", () => {
         params: { rateLimits: { ...rateLimits, limitId: null } },
       }),
     ).toThrow("rolling updates require a bucket id");
+  });
+
+  it("rejeita um limite geral que não identifica o bucket codex", () => {
+    const general = {
+      limitId: "codex",
+      limitName: null,
+      primary: null,
+      secondary: { usedPercent: 12, windowDurationMins: 10_080, resetsAt: 1_800_000_000_000 },
+      credits: null,
+      individualLimit: null,
+      spendControlReached: null,
+      planType: "pro",
+      rateLimitReachedType: null,
+    };
+    const reserve = {
+      ...general,
+      limitId: "base_model_inference",
+      limitName: "gpt-reserve",
+      secondary: { usedPercent: 1, windowDurationMins: 10_080, resetsAt: 1_800_000_000_000 },
+    };
+    const payload = {
+      lunaReserveAvailable: true,
+      planPrice: null,
+      generalRateLimit: reserve,
+      additionalRateLimitsByLimitId: { base_model_inference: reserve },
+    };
+
+    expect(() => decodeAccountRateLimitsResponse(payload)).toThrow(
+      "must identify the canonical codex bucket",
+    );
+  });
+
+  it("decodifica o limite geral e mantém buckets adicionais por identidade", () => {
+    const general = {
+      limitId: "codex",
+      limitName: null,
+      primary: { usedPercent: 62, windowDurationMins: 300, resetsAt: 1_800_000_000_000 },
+      secondary: null,
+      credits: null,
+      individualLimit: null,
+      spendControlReached: null,
+      planType: "pro",
+      rateLimitReachedType: null,
+    };
+    const reserve = {
+      ...general,
+      limitId: "base_model_inference",
+      limitName: "gpt-reserve",
+      primary: null,
+      secondary: { usedPercent: 1, windowDurationMins: 10_080, resetsAt: 1_800_000_000_000 },
+    };
+
+    const decoded = decodeAccountRateLimitsResponse({
+      generalRateLimit: general,
+      additionalRateLimitsByLimitId: { base_model_inference: reserve },
+      lunaReserveAvailable: true,
+      planPrice: null,
+    });
+
+    expect(decoded.generalRateLimit.primary?.usedPercent).toBe(62);
+    const reserveLimitId = "base_model_inference";
+    expect(decoded.additionalRateLimitsByLimitId[reserveLimitId]?.limitName).toBe("gpt-reserve");
   });
 
   it("decodifica somente projeções terminais completas", () => {

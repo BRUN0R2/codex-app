@@ -13,14 +13,15 @@ import { setupBrowserPreview } from "../preview/setupBrowserPreview";
 import { createAppController } from "./createAppController";
 
 function resetLimits(before: AccountRateLimitsResponse): AccountRateLimitsResponse {
-  const snapshot = before.rateLimits;
+  const snapshot = before.generalRateLimit;
+  const resetSnapshot = {
+    ...snapshot,
+    primary: snapshot.primary === null ? null : { ...snapshot.primary, usedPercent: 0 },
+    secondary: snapshot.secondary === null ? null : { ...snapshot.secondary, usedPercent: 0 },
+  };
   return {
     ...before,
-    rateLimits: {
-      ...snapshot,
-      primary: snapshot.primary === null ? null : { ...snapshot.primary, usedPercent: 0 },
-      secondary: snapshot.secondary === null ? null : { ...snapshot.secondary, usedPercent: 0 },
-    },
+    generalRateLimit: resetSnapshot,
     lunaReserveAvailable: false,
   };
 }
@@ -88,8 +89,8 @@ describe("usage reset flow", () => {
   it("consumes one reset, updates the provider windows, and preserves the idempotent result", async () => {
     const controller = await startController();
     const before = controller.rateLimits();
-    expect(before?.rateLimits.primary?.usedPercent).toBe(43);
-    expect(before?.rateLimits.secondary?.usedPercent).toBe(93);
+    expect(before?.generalRateLimit.primary?.usedPercent).toBe(43);
+    expect(before?.generalRateLimit.secondary?.usedPercent).toBe(93);
     expect(controller.usageResets()?.availableCount).toBe(1);
 
     await expect(
@@ -101,21 +102,22 @@ describe("usage reset flow", () => {
     await vi.waitFor(() => expect(controller.usageResetRedeemingId()).toBeNull());
     const after = controller.rateLimits();
     if (before === null || after === null) throw new Error("Missing account usage.");
-    expect(after?.rateLimits.primary).toEqual({
+    expect(after?.generalRateLimit.primary).toEqual({
       usedPercent: 0,
       windowDurationMins: 300,
       resetsAt: Date.now() + 300 * 60_000,
     });
-    expect(after?.rateLimits.secondary).toEqual({
+    expect(after?.generalRateLimit.secondary).toEqual({
       usedPercent: 0,
       windowDurationMins: 10_080,
       resetsAt: Date.now() + 10_080 * 60_000,
     });
-    const { codex_spark: spark, base_model_inference: reserve } = after.rateLimitsByLimitId;
-    const { base_model_inference: previousReserve } = before.rateLimitsByLimitId;
+    const { codex_spark: spark, base_model_inference: reserve } =
+      after.additionalRateLimitsByLimitId;
+    const { base_model_inference: previousReserve } = before.additionalRateLimitsByLimitId;
     expect(spark?.secondary?.usedPercent).toBe(0);
     expect(reserve).toEqual(previousReserve);
-    expect(after?.rateLimits.credits).toEqual(before?.rateLimits.credits);
+    expect(after?.generalRateLimit.credits).toEqual(before?.generalRateLimit.credits);
     expect(after?.lunaReserveAvailable).toBe(false);
     expect(controller.usageResets()?.availableCount).toBe(0);
     expect(controller.usageResetRedeemingId()).toBeNull();
@@ -287,7 +289,7 @@ describe("usage reset flow", () => {
 
     expect(controller.rateLimitsError()).toBeNull();
     expect(controller.usageResetsError()).toBeNull();
-    expect(controller.rateLimits()?.rateLimits.primary?.usedPercent).toBe(0);
+    expect(controller.rateLimits()?.generalRateLimit.primary?.usedPercent).toBe(0);
     expect(controller.usageResets()?.availableCount).toBe(0);
   });
 

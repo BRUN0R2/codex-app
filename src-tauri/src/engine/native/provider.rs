@@ -52,6 +52,7 @@ pub(crate) use self::responses::ResponseStream;
 pub(crate) use self::responses::WebSearchAction;
 
 const MAX_MODELS: usize = 100;
+const GENERAL_RATE_LIMIT_ID: &str = "codex";
 const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_RATE_LIMIT_BUCKET_ID_BYTES: usize = 128;
 const MAX_RATE_LIMIT_BUCKETS: usize = 32;
@@ -583,8 +584,8 @@ impl UsagePayload {
         let reached = self
             .rate_limit_reached_type
             .map(|value| value.value.into_domain());
-        let primary = RateLimitSnapshot {
-            limit_id: Some("codex".into()),
+        let general_rate_limit = RateLimitSnapshot {
+            limit_id: Some(GENERAL_RATE_LIMIT_ID.into()),
             limit_name: None,
             primary: self
                 .rate_limit
@@ -606,21 +607,23 @@ impl UsagePayload {
             plan_type,
             rate_limit_reached_type: reached,
         };
-        validate_snapshot(&primary)?;
+        validate_snapshot(&general_rate_limit)?;
 
-        let mut by_id = std::collections::BTreeMap::new();
-        by_id.insert("codex".into(), primary.clone());
+        let mut additional_rate_limits_by_limit_id = std::collections::BTreeMap::new();
         for additional in self.additional_rate_limits.unwrap_or_default() {
-            if additional.metered_feature.trim().is_empty()
-                || additional.metered_feature.len() > MAX_RATE_LIMIT_BUCKET_ID_BYTES
-                || by_id.len() >= MAX_RATE_LIMIT_BUCKETS
-            {
+            if additional_rate_limits_by_limit_id.len() >= MAX_RATE_LIMIT_BUCKETS - 1 {
                 return Err(AppError::Provider(
                     "the rate-limit response contains an invalid bucket".into(),
                 ));
             }
+            let limit_id = normalize_rate_limit_bucket_id(&additional.metered_feature)?;
+            if limit_id == GENERAL_RATE_LIMIT_ID {
+                return Err(AppError::Provider(
+                    "the rate-limit response contains a duplicate general bucket".into(),
+                ));
+            }
             let snapshot = RateLimitSnapshot {
-                limit_id: Some(additional.metered_feature.clone()),
+                limit_id: Some(limit_id.clone()),
                 limit_name: Some(additional.limit_name),
                 primary: additional
                     .rate_limit
@@ -639,19 +642,32 @@ impl UsagePayload {
                 rate_limit_reached_type: None,
             };
             validate_snapshot(&snapshot)?;
-            if by_id.insert(additional.metered_feature, snapshot).is_some() {
+            if additional_rate_limits_by_limit_id
+                .insert(limit_id, snapshot)
+                .is_some()
+            {
                 return Err(AppError::Provider(
                     "the rate-limit response contains duplicate bucket ids".into(),
                 ));
             }
         }
         Ok(AccountRateLimitsResponse {
-            rate_limits: primary,
-            rate_limits_by_limit_id: by_id,
+            general_rate_limit,
+            additional_rate_limits_by_limit_id,
             plan_price: None,
             luna_reserve_available,
         })
     }
+}
+
+fn normalize_rate_limit_bucket_id(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    if normalized.is_empty() || normalized.len() > MAX_RATE_LIMIT_BUCKET_ID_BYTES {
+        return Err(AppError::Provider(
+            "the rate-limit response contains an invalid bucket id".into(),
+        ));
+    }
+    Ok(normalized)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1300,7 +1316,7 @@ mod tests {
             .expect("the decoded usage payload should be valid");
 
         assert!(matches!(
-            response.rate_limits.rate_limit_reached_type,
+            response.general_rate_limit.rate_limit_reached_type,
             Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached)
         ));
     }
@@ -1329,7 +1345,7 @@ mod tests {
             .into_domain(false)
             .expect("the decoded usage payload should be valid");
         let reserve = response
-            .rate_limits_by_limit_id
+            .additional_rate_limits_by_limit_id
             .get("base_model_inference")
             .expect("the Luna Reserve bucket must be preserved");
 
@@ -1342,6 +1358,73 @@ mod tests {
                 .used_percent,
             14.0
         );
+    }
+
+    #[test]
+    fn keeps_the_general_rate_limit_separate_when_reserve_is_present() {
+        let payload = serde_json::from_str::<UsagePayload>(
+            r#"{
+                "plan_type": "pro",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 62,
+                        "limit_window_seconds": 300,
+                        "reset_at": 1788735840
+                    }
+                },
+                "additional_rate_limits": [{
+                    "limit_name": "gpt-reserve",
+                    "metered_feature": "base_model_inference",
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": 1,
+                            "limit_window_seconds": 604800,
+                            "reset_at": 1788735840
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .expect("the usage payload should decode");
+
+        let response = payload
+            .into_domain(false)
+            .expect("the decoded usage payload should be valid");
+        let general = &response.general_rate_limit;
+        let reserve = response
+            .additional_rate_limits_by_limit_id
+            .get("base_model_inference")
+            .expect("the reserve bucket must be present");
+
+        assert_eq!(general.limit_id.as_deref(), Some("codex"));
+        assert_eq!(
+            general.primary.as_ref().map(|window| window.used_percent),
+            Some(62.0)
+        );
+        assert_eq!(
+            reserve.primary.as_ref().map(|window| window.used_percent),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn rejects_an_additional_bucket_that_collides_with_the_general_bucket() {
+        let payload = serde_json::from_str::<UsagePayload>(
+            r#"{
+                "plan_type": "pro",
+                "additional_rate_limits": [{
+                    "limit_name": "gpt-reserve",
+                    "metered_feature": "Codex"
+                }]
+            }"#,
+        )
+        .expect("the usage payload should decode");
+
+        let error = payload
+            .into_domain(false)
+            .expect_err("an additional codex bucket must be rejected");
+
+        assert!(error.to_string().contains("duplicate general bucket"));
     }
 
     #[test]
@@ -1426,15 +1509,15 @@ mod tests {
             .into_domain(false)
             .expect("the decoded usage payload should be valid");
         let primary = response
-            .rate_limits
+            .general_rate_limit
             .primary
             .expect("a primary window must be present");
         let secondary = response
-            .rate_limits
+            .general_rate_limit
             .secondary
             .expect("a secondary window must be present");
         let individual_limit = response
-            .rate_limits
+            .general_rate_limit
             .individual_limit
             .expect("an individual spend limit must be present");
 
