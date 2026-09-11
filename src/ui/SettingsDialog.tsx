@@ -23,6 +23,7 @@ import { useI18n } from "../i18n/context";
 import { formatMessage, type TranslationMessages } from "../i18n/messages";
 import { isBrowserPreview, isDesktopRuntime } from "../platform/desktopRuntime";
 import type { AppController } from "../state/appController";
+import { generalRateLimitSnapshot } from "../state/rateLimits";
 
 type SettingsDialogController = Pick<
   AppController,
@@ -154,7 +155,6 @@ export function SettingsDialog(props: {
   let dialogElement: HTMLElement | undefined;
   let settingsMainContentElement: HTMLDivElement | undefined;
   let settingsMainElement: HTMLElement | undefined;
-  let searchInput: HTMLInputElement | undefined;
   let previouslyFocusedElement: HTMLElement | null = null;
   const visibleNavigation = createMemo(() => {
     const normalizedQuery = normalizeSearch(query(), i18n.locale());
@@ -178,7 +178,8 @@ export function SettingsDialog(props: {
   onMount(() => {
     previouslyFocusedElement =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    queueMicrotask(() => searchInput?.focus());
+    // Focus the dialog surface so the modal is announced without landing in search.
+    queueMicrotask(() => dialogElement?.focus());
   });
 
   onCleanup(() => previouslyFocusedElement?.focus());
@@ -219,19 +220,21 @@ export function SettingsDialog(props: {
         onKeyDown={handleDialogKeyDown}
         ref={dialogElement}
         role="dialog"
+        tabIndex={-1}
       >
         <aside class="settings-nav">
-          <button class="settings-back" onClick={props.onClose} type="button">
-            <Icon name="arrowLeft" size={15} />
-            <span>{messages().back}</span>
-          </button>
+          <div class="settings-titlebar-slot">
+            <button class="settings-back" onClick={props.onClose} type="button">
+              <Icon name="arrowLeft" size={15} />
+              <span>{messages().back}</span>
+            </button>
+          </div>
           <label class="settings-search">
             <Icon name="search" size={14} />
             <input
               aria-label={messages().search}
               onInput={(event) => setQuery(event.currentTarget.value)}
               placeholder={messages().searchPlaceholder}
-              ref={searchInput}
               type="search"
               value={query()}
             />
@@ -650,7 +653,7 @@ function UsageSettings(props: { readonly controller: SettingsDialogController })
   const openExternalUrl = useExternalNavigation();
   const messages = () => i18n.messages().settings;
   const rateLimits = () => props.controller.rateLimits();
-  const snapshot = () => rateLimits()?.rateLimits;
+  const snapshot = () => generalRateLimitSnapshot(rateLimits());
   const autoTopUp = () => props.controller.autoTopUpSettings();
   const [autoTopUpEditing, setAutoTopUpEditing] = createSignal(false);
   const [rechargeThreshold, setRechargeThreshold] = createSignal(

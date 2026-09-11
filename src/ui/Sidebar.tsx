@@ -63,6 +63,7 @@ type SidebarController = Pick<
 
 import { partitionProjectsByPinnedPaths } from "../state/projectPins";
 import { pathsEqual } from "../state/projects";
+import { generalRateLimitSnapshot } from "../state/rateLimits";
 import { threadsWithoutConfiguredProject } from "../state/sidebarThreads";
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { CodexGlyph } from "./CodexGlyph";
@@ -85,6 +86,7 @@ interface SidebarProjectGroup {
 
 export interface SidebarProps {
   readonly automationsActive: boolean;
+  readonly chromeOwnsBrand: boolean;
   readonly collapsed: boolean;
   readonly controller: SidebarController;
   readonly inert: boolean;
@@ -274,8 +276,8 @@ export function Sidebar(props: SidebarProps) {
       inert={props.inert}
       ref={sidebarElement}
     >
-      <header class="sidebar-titlebar">
-        <Show when={!props.collapsed}>
+      <header class="sidebar-titlebar" classList={{ "chrome-owns-brand": props.chromeOwnsBrand }}>
+        <Show when={!props.collapsed && !props.chromeOwnsBrand}>
           <div class="brand-menu-anchor">
             <button
               aria-expanded={brandMenuOpen()}
@@ -1184,7 +1186,7 @@ function accountLabel(controller: SidebarController): string {
 }
 
 function remainingUsageLabel(controller: SidebarController): string {
-  const usedPercent = controller.rateLimits()?.rateLimits.primary?.usedPercent;
+  const usedPercent = generalRateLimitSnapshot(controller.rateLimits())?.primary?.usedPercent;
   if (usedPercent === undefined) {
     return "—";
   }

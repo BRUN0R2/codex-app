@@ -14,6 +14,7 @@ import { formatMessage } from "../i18n/messages";
 import { isBrowserPreview } from "../platform/desktopRuntime";
 import type { AppController } from "../state/appController";
 import { createBrowserController } from "../state/browserController";
+import { generalRateLimitSnapshot } from "../state/rateLimits";
 import { AgentTabs } from "./AgentTabs";
 import { ApprovalCard } from "./ApprovalCard";
 import { applyDesktopAppearance } from "./appearance";
@@ -22,6 +23,7 @@ import { formatShortDate } from "./dateFormat";
 import { useExternalNavigation } from "./ExternalNavigation";
 import { HomeComposerModeToggle } from "./HomeComposerModeToggle";
 import { Icon } from "./Icon";
+import { ProductBrand } from "./ProductBrand";
 import { LatestTurnFileChangeStore } from "./reviewChanges";
 import type { SettingsPage } from "./SettingsDialog";
 import { Sidebar } from "./Sidebar";
@@ -636,8 +638,21 @@ export function AppShell(props: { readonly controller: AppController }) {
       }}
       ref={appShellElement}
     >
+      <Show when={!settingsOpen()}>
+        <div class="shell-brand-slot">
+          <ProductBrand
+            product={props.controller.product}
+            selectProduct={props.controller.selectProduct}
+            onProductSelected={() => {
+              setWorkspaceTabs(hideWorkspaceTabs);
+              setActiveSurface("chat");
+            }}
+          />
+        </div>
+      </Show>
       <Sidebar
         automationsActive={activeSurface() === "automations"}
+        chromeOwnsBrand
         collapsed={sidebarCollapsed()}
         controller={props.controller}
         inert={settingsOpen()}
@@ -887,10 +902,10 @@ function UsageLimitBanner(props: { readonly controller: AppController }) {
   const i18n = useI18n();
   const openExternalUrl = useExternalNavigation();
   const messages = () => i18n.messages().shell;
-  const snapshot = () => props.controller.rateLimits()?.rateLimits;
+  const snapshot = () => generalRateLimitSnapshot(props.controller.rateLimits());
   const exhausted = () => {
     const current = snapshot();
-    if (current === undefined) {
+    if (current === null) {
       return false;
     }
     return (

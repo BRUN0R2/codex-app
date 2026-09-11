@@ -115,6 +115,7 @@
   --height-toolbar-pane: 40px;
   --height-window-chrome: 34px;
   --app-titlebar-height: 0px;
+  --titlebar-content-gap: 14px;
   --height-token-row: 30px;
   --padding-row-y: calc(var(--spacing) * 1);
   --padding-row-x: calc(var(--spacing) * 2);
@@ -127,8 +128,9 @@
   --settings-nav-width: clamp(240px, 275px, min(520px, calc(100vw - 320px)));
   --spacing-token-sidebar: clamp(240px, 275px, min(520px, calc(100vw - 320px)));
   --layer-window-chrome: 20000;
+  --layer-app-brand: 19500;
   --layer-modal: 10000;
-  --layer-settings: 200;
+  --layer-settings: 19600;
   --layer-toast: 300;
   --layer-chat-backdrop: 5;
   --layer-chat-dock: 9;
@@ -746,12 +748,12 @@ pre {
 .sidebar-splitter::before {
   position: absolute;
   top: 0;
+  right: 0;
   bottom: 0;
-  left: 50%;
+  left: auto;
   width: 1px;
   background: var(--color-token-border);
   content: "";
-  transform: translateX(-50%);
   transition: width 120ms ease, background-color 120ms ease;
 }
 
@@ -784,6 +786,16 @@ pre {
   flex: 0 0 calc(var(--app-titlebar-height) + var(--height-toolbar));
   align-items: flex-start;
   padding: calc(var(--app-titlebar-height) + 4px) var(--padding-row-x) 0;
+}
+
+.sidebar-titlebar.chrome-owns-brand {
+  height: var(--app-titlebar-height);
+  flex: 0 0 var(--app-titlebar-height);
+  padding: 0;
+}
+
+.sidebar-titlebar.chrome-owns-brand + .sidebar-primary-nav {
+  padding-top: var(--titlebar-content-gap);
 }
 
 .sidebar-brand {
@@ -1057,7 +1069,7 @@ pre {
   justify-content: space-between;
   gap: 4px;
   margin-top: 16px;
-  padding: 0 2px;
+  padding: 0 4px;
   color: var(--muted);
   font-size: var(--font-control);
   font-weight: 500;
@@ -2759,7 +2771,7 @@ pre {
 
 .window-chrome-drag-region {
   position: absolute;
-  inset: 0 138px 0 0;
+  inset: 0 138px 0 132px;
   margin: 0;
   padding: 0;
   border: 0;
@@ -2768,6 +2780,37 @@ pre {
   color: inherit;
   cursor: default;
   pointer-events: auto;
+}
+
+.shell-brand-slot {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: var(--layer-app-brand);
+  display: flex;
+  height: var(--app-titlebar-height);
+  max-width: 160px;
+  align-items: center;
+  padding-left: var(--padding-row-x);
+  pointer-events: auto;
+}
+
+.shell-brand-slot .sidebar-brand {
+  height: 30px;
+  padding: 0 var(--padding-row-x);
+  color: var(--text-soft);
+  font-size: 13px;
+  gap: 8px;
+}
+
+.shell-brand-slot .sidebar-brand strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.shell-brand-slot .brand-menu {
+  top: calc(100% + 2px);
+  left: 4px;
 }
 
 .window-chrome-controls {
@@ -6191,7 +6234,8 @@ pre {
   display: block;
   width: 100%;
   min-height: 64px;
-  max-height: 25dvh;
+  max-height: min(220px, 25dvh);
+  field-sizing: content;
   resize: none;
   overflow-y: auto;
   padding: 12px 14px 4px;
@@ -6213,7 +6257,7 @@ pre {
 
 .composer[data-mode="chat"] textarea {
   min-height: 46px;
-  max-height: 160px;
+  max-height: min(160px, 25dvh);
   padding: 13px 116px 9px 42px;
   line-height: 20px;
 }
@@ -6231,10 +6275,6 @@ pre {
 .composer[data-mode="chat"] .composer-menu-anchor,
 .composer[data-mode="chat"] .composer-toolbar button {
   pointer-events: auto;
-}
-
-.composer[data-mode="work"] textarea {
-  min-height: 82px;
 }
 
 .image-viewer-backdrop {
@@ -6831,10 +6871,12 @@ pre {
   position: absolute;
   bottom: calc(100% + 4px);
   left: 50%;
-  transform: translateX(-50%);
   z-index: 40;
-  width: 168px;
-  padding: 8px 9px;
+  box-sizing: border-box;
+  min-width: 168px;
+  max-width: 220px;
+  width: max-content;
+  padding: 8px 10px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   background: var(--gray-750);
@@ -6842,7 +6884,8 @@ pre {
   text-align: center;
   user-select: none;
   pointer-events: none;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
   opacity: 0;
   visibility: hidden;
   transition: opacity 100ms ease, transform 100ms ease, visibility 100ms ease;
@@ -6872,6 +6915,14 @@ pre {
 
 .context-window-popover-tokens {
   color: var(--color-token-text-tertiary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+}
+
+.context-window-popover-cache {
+  margin-top: 2px;
+  color: var(--color-token-text-secondary);
   font-size: 12px;
   font-weight: 400;
   line-height: 16px;
@@ -6991,23 +7042,39 @@ pre {
   grid-template-columns: var(--settings-nav-width) minmax(0, 1fr);
   overflow: hidden;
   background: var(--color-background-surface-under);
+  outline: none;
 }
 
 .settings-nav {
+  position: relative;
   display: flex;
   min-height: 0;
   flex-direction: column;
-  padding: calc(var(--app-titlebar-height) + 8px) var(--padding-row-x) 16px;
+  padding: var(--app-titlebar-height) var(--padding-row-x) 12px;
   border-right: 1px solid var(--border-heavy);
   background: var(--sidebar-bg);
 }
 
+.settings-titlebar-slot {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  display: flex;
+  height: var(--app-titlebar-height);
+  max-width: calc(var(--settings-nav-width) - 8px);
+  align-items: center;
+  padding-left: 0;
+  pointer-events: auto;
+}
+
 .settings-back {
   display: flex;
-  min-height: var(--height-token-row);
+  height: 26px;
   align-items: center;
   gap: 9px;
-  padding: 5px var(--padding-row-x);
+  margin-top: 0;
+  padding: 0 var(--padding-row-x);
   border-radius: 10px;
   background: transparent;
   color: var(--text-soft);
@@ -7026,10 +7093,11 @@ pre {
 
 .settings-search {
   display: flex;
-  height: 34px;
+  height: var(--height-token-row);
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  margin: 8px 0 16px;
+  margin: var(--titlebar-content-gap) 0 var(--interactive-list-gap);
   padding: 0 9px;
   border: 1px solid var(--border-heavy);
   border-radius: 10px;
@@ -7054,10 +7122,12 @@ pre {
   background: transparent;
   color: var(--text);
   font-size: 0.79rem;
+  text-align: center;
 }
 
 .settings-search input::placeholder {
   color: rgb(255 255 255 / 44%);
+  text-align: center;
 }
 
 .settings-search input::-webkit-search-cancel-button {
@@ -7068,8 +7138,9 @@ pre {
   display: flex;
   min-height: 0;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--interactive-list-gap);
   overflow-y: auto;
+  padding-top: 0;
   padding-right: 2px;
 }
 
@@ -7080,7 +7151,7 @@ pre {
 }
 
 .settings-nav-section h2 {
-  margin: 6px 10px 2px;
+  margin: var(--spacing) 10px calc(var(--spacing) / 2);
   color: rgb(255 255 255 / 42%);
   font-size: 0.67rem;
   font-weight: 680;
@@ -7088,14 +7159,19 @@ pre {
   text-transform: uppercase;
 }
 
+.settings-nav nav > .settings-nav-section:first-child h2 {
+  margin-top: 0;
+}
+
 .settings-nav nav button {
   position: relative;
   display: flex;
   width: 100%;
+  height: var(--height-token-row);
   min-height: var(--height-token-row);
   align-items: center;
   gap: 10px;
-  padding: 5px var(--padding-row-x);
+  padding: 0 var(--padding-row-x);
   border: 0;
   border-radius: 10px;
   background: transparent;
@@ -8554,7 +8630,7 @@ pre {
   .main-panel { border-radius: 0; }
   .permission-button span { display: none; }
   .settings-dialog { grid-template-columns: 62px minmax(0, 1fr); }
-  .settings-nav { padding: calc(var(--app-titlebar-height) + 12px) 8px 12px; }
+  .settings-nav { padding: var(--app-titlebar-height) 8px 12px; }
   .settings-back span,
   .settings-search,
   .settings-nav-section h2 { display: none; }
