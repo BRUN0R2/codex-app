@@ -220,7 +220,7 @@ async fn servicing_tools_does_not_restart_the_pending_stream_read() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "synthetic response/tool overlap benchmark"]
 async fn benchmark_streamed_tool_dispatch() {
     let response_tail = Duration::from_millis(100);
