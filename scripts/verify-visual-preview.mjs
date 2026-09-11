@@ -6694,9 +6694,11 @@ function settingsVisualAuditExpression() {
     const chrome = rectangle(".window-chrome");
     const content = rectangle(".application-frame-content");
     const controls = rectangle(".window-chrome-controls");
+    const dragRegion = rectangle(".window-chrome-drag-region");
     const overlay = rectangle(".settings-overlay");
     const navigation = rectangle(".settings-nav");
     const back = rectangle(".settings-back");
+    const backSlot = rectangle(".settings-titlebar-slot");
     const main = rectangle(".settings-main");
     const scrollbar = rectangle(".settings-scrollbar");
     const scrollbarThumb = rectangle(".settings-scrollbar .surface-scrollbar-thumb");
@@ -6741,9 +6743,11 @@ function settingsVisualAuditExpression() {
       chrome,
       content,
       controls,
+      dragRegion,
       overlay,
       navigation,
       back,
+      backSlot,
       main,
       scrollbar,
       scrollbarThumb,
@@ -8769,7 +8773,27 @@ function validateSettingsMetrics(metrics, viewport) {
     Math.abs(metrics.main.top - metrics.content.top) <= tolerance,
     "the main settings surface does not reach the top",
   );
-  assert(metrics.back.top >= metrics.chrome.bottom, "the back action intrudes into the drag region");
+  assert(
+    metrics.back.top >= -tolerance && metrics.back.bottom <= metrics.chrome.bottom + tolerance,
+    "the back action is not confined to the window-chrome strip",
+  );
+  assert(
+    metrics.back.right <= metrics.navigation.right + tolerance,
+    "the back action exceeds the settings navigation column",
+  );
+  assert(
+    metrics.back.right <= metrics.controls.left + tolerance,
+    "the back action collides with window controls",
+  );
+  assert(
+    metrics.backSlot.top >= -tolerance &&
+      metrics.backSlot.bottom <= metrics.chrome.bottom + tolerance,
+    "the settings titlebar slot left the window-chrome strip",
+  );
+  assert(
+    metrics.dragRegion.left >= metrics.back.right - tolerance,
+    "the window drag region still covers the settings back action",
+  );
   assert(metrics.heading.top >= metrics.chrome.bottom, "the settings title intrudes into window chrome");
   assert(
     Math.abs(metrics.scrollbar.top - metrics.chrome.bottom) <= tolerance,

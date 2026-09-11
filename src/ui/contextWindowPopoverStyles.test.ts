@@ -33,19 +33,20 @@ describe("context window popover layout", () => {
 });
 
 describe("settings navigation layout", () => {
-  it("keeps the back control flush under the window chrome reserve", () => {
+  it("keeps the back control in the titlebar strip clear of drag", () => {
     const navStart = styles.indexOf(".settings-nav {");
     const navEnd = styles.indexOf("}", navStart);
     const slotStart = styles.indexOf(".settings-titlebar-slot {");
     const slotEnd = styles.indexOf("}", slotStart);
     const backStart = styles.indexOf(".settings-back {");
     const backEnd = styles.indexOf("}", backStart);
-    expect(styles.slice(navStart, navEnd)).toMatch(/padding:\s*var\(--app-titlebar-height\)/u);
+    const dragStart = styles.indexOf(".window-chrome-drag-region {");
+    const dragEnd = styles.indexOf("}", dragStart);
     expect(styles.slice(navStart, navEnd)).toMatch(/position:\s*relative/u);
     expect(styles.slice(slotStart, slotEnd)).toMatch(/position:\s*absolute/u);
     expect(styles.slice(slotStart, slotEnd)).toMatch(/height:\s*var\(--app-titlebar-height\)/u);
     expect(styles.slice(backStart, backEnd)).toMatch(/height:\s*26px/u);
-    expect(styles.slice(backStart, backEnd)).toMatch(/margin-top:\s*0/u);
+    expect(styles.slice(dragStart, dragEnd)).toMatch(/inset:\s*0 138px 0 168px/u);
   });
 
   it("keeps a clear gap between search and the section list", () => {
