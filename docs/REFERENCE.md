@@ -7,17 +7,23 @@ local implementation remains independent.
 
 | Source | Version |
 | --- | --- |
-| [`openai/codex`](https://github.com/openai/codex) | commit `9a4b78579a7f672d5c71aa442bb95072915cc5cd`, 2026-08-31 |
-| stable release | `rust-v0.151.0`, commit `78c290807ce710180111df227df3b7a4fe845452` |
-| latest prerelease reviewed | `rust-v0.152.0-alpha.7`, commit `a43ad35f9a273e3890593c54a157d286c7de9c4b` |
-| Codex Desktop for Windows | build `26.825.5331.0`, validated 2026-08-29 |
+| [`openai/codex`](https://github.com/openai/codex/tree/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a) | stable `rust-v0.153.4`, audited 2026-09-05 |
+| audited source commit | `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` |
+| additional core inspection | `d4dc882998ddf7f3d2b40893ef2f77a5fdfa5715`, audited 2026-09-05 |
+| Codex Desktop for Windows | installed package `26.901.5280.0`, inspected 2026-09-05 |
+| Desktop conversation and diff presentation | installed package `26.901.6511.0`, inspected 2026-09-06 |
 
-The ignored study clone lives in `.references/openai-codex`. No referenced
-crate, package, executable, database, configuration, or credential enters the
-local build or runtime.
+Study checkouts live outside the build, including `.references/openai-codex`.
+No referenced crate, package, executable, database, configuration, or credential
+enters the local build or runtime.
 
-The local catalog's `client_version` is `0.151.0`, the latest stable
-release whose protocol was audited.
+Desktop conclusions cover the installed JavaScript bundles, documented product
+behavior, and public core and app-server contracts. Bundle inspection includes
+developer-instruction composition and feature-specific app context; it does not
+constitute access to the private Desktop source repository.
+
+The local catalog's `client_version` remains `0.153.2`, its explicit protocol
+compatibility version. Auditing a newer release does not change that contract.
 
 ## Upstream topology
 
@@ -56,7 +62,7 @@ Official references:
 | cache | Short in-memory catalog cache with ETag invalidation | Five-minute TTL and no persistence |
 | context | Confirmed use plus local delta and stable Remote Compaction V2 | Dynamic budget, incremental trigger, and atomic checkpoint |
 | commands | Yield, registered sessions, polling, and incremental output | Independent manager with Windows Job Objects |
-| parallelism | Independent tools may overlap | Eight-call local batch with deterministic order |
+| parallelism | Dispatch starts when each tool call completes in the stream | Eight concurrent tools, FIFO mutation barriers, ordered durable outputs |
 | patch | Freeform tool with a dedicated parser | Local Lark grammar and transactional commit |
 | images | Multimodal inspection is a native tool activity | Local `view_image`, thumbnail, and viewer |
 | browser | Visible surface, closed actions, and origin approval | Engine-controlled child WebView2 |
@@ -65,8 +71,40 @@ Official references:
 
 Upstream has no single parallel-command maximum equivalent to the local limit;
 scheduling depends on handlers and barriers. Its Unified Exec manager accepts up
-to 64 processes. This project limits one round to eight tools and its registry
-to 32 sessions. Both limits are intentional and tested.
+to 64 processes. This project admits 128 tool calls per response, executes up to
+eight concurrently, and limits its process registry to 32 sessions. These limits
+are intentional and tested.
+
+The upstream `tools/parallel.rs` spawns dispatch eagerly when the call is
+decoded, even though its result is queued in `FuturesOrdered`. The sampling loop
+drains those futures before returning a stream error. Native execution follows
+that lifecycle, retaining canonical call/output order for incremental Responses
+and preserving completed effects across reconnects.
+
+## Astra and multi-file patches
+
+The audited [`apply_patch` grammar](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/assets/tools/apply_patch.lark)
+already accepts multiple file hunks in one envelope. The
+[`handler`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/src/tools/handlers/apply_patch.rs)
+retains the executor's default exclusive scheduling. Multi-file editing does
+not require concurrent, unordered mutations or a model-name switch.
+
+The native tool and its Code Mode declaration share one description that
+explains grouping files, creating parent directories, moving files, appending,
+and awaiting dependent edits. A V8 integration test runs a multi-file patch and
+a dependent patch in one cell. Preparation validates the whole batch before
+commit; failure reverses only recorded effects and removes directories created
+by that transaction. Rollback reports integrity conflicts and preserves newer
+concurrent content instead of replacing it with a stale snapshot.
+
+[GPT-6 Astra's async tool calling](https://developers.openai.com/api/docs/guides/async-tool-calling)
+is a distinct Responses capability for direct function/custom calls, with
+pending call IDs and later outputs. The documented compatibility explicitly
+excludes programmatic tool calling. The catalog-selected Code Mode/Lite route
+therefore keeps its existing `exec`/`wait` lifecycle; it does not attach an
+unsupported `async` flag to nested patches. The public API's built-in
+[`apply_patch_call`](https://developers.openai.com/api/docs/guides/tools-apply-patch)
+format is separate from the freeform tool used by the audited Codex harness.
 
 ## Instructions, transport, and context
 
@@ -82,10 +120,31 @@ context that the server cannot know. Catalog data may replace or suppress some
 of it. Local instructions are necessary but must not duplicate personality or
 protocol already supplied by `instructions_template`.
 
+Inspected Astra and Sol templates already contain progress-message and
+persistence instructions. Desktop additionally composes context for supported
+app features; there is no evidence here for adding another universal agent
+prompt. The native defaults cover execution mode and actual permission behavior.
+Catalog sections override them individually, while explicit empty sections
+suppress them. A missing personality variable does not invent a local style.
+
+The native timeline carries the provider's commentary/final-answer distinction
+through both item lifecycle and incremental Markdown rendering. A completed
+response with no tool calls or pending input ends the turn; commentary alone
+does not trigger a fabricated user message or an extra sampling round.
+
 Responses Lite preserves semantics over a different wire shape:
 `additional_tools`, a `functions` namespace, and base instructions encoded as
 a developer message with stable IDs. Model capability selects the contract
 before the request; a failed request never triggers a protocol fallback.
+
+The [upstream request projection](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/src/client_common.rs)
+removes image `detail` from messages and both function and custom tool outputs
+for Lite. The native projection follows all three paths, including Code Mode
+screenshots, while preserving canonical image bytes and detail. Continuation
+compares the same wire semantics by borrowing those bytes instead of cloning
+each image for every round. Changed text, audio, images, call identity, or
+request policy still invalidates reuse.
+
 The audited Desktop resolves an absent `model_reasoning_summary` preference to
 `auto`, even though current model metadata commonly publishes `none` as the Core
 default. The local native client applies that same explicit product preference
@@ -140,6 +199,18 @@ of that total and a fresh full estimate with margin inflated 200,340 tokens to
 uses the same authoritative boundary. Full estimation is restricted to the
 phase before compatible telemetry.
 
+Upstream keeps raw, usable, and automatic-compaction limits semantically
+distinct. For a 272,000-token catalog window at 95% usability, Core publishes
+258,400 as `model_context_window` and defaults automatic compaction to 244,800.
+The audited Desktop renders `last.totalTokens / modelContextWindow` directly;
+the CLI TUI alone subtracts a 12,000-token presentation baseline. This product
+is a desktop surface and follows the Desktop projection. The former frontend
+instead preferred the currently selected catalog model and its raw 272,000
+tokens over the usage item's execution metadata. It therefore showed 10%
+remaining when compaction legitimately began. The composer now consumes only
+the usage-associated usable window, which renders that boundary as 95% used and
+5% remaining and cannot drift when the next-turn model selection changes.
+
 With compatible confirmed usage, preflight no longer serializes and scans the
 complete request. Compaction history stays borrowed unless a bounded tool output
 actually needs rewriting. The WebSocket compaction request extends the verified
@@ -155,11 +226,61 @@ context by reverse-scanning paginated rollouts. Its SQLite active-context
 prefix is already canonical, including empty `AgentMailbox` turns, and the
 combined transactional snapshot has direct regression coverage.
 
-SSE text deltas do not contain exact usage. `response.completed` supplies
-`output_tokens`, so the timeline accumulates only confirmed values per turn.
-The count updates after confirmed cycles, remains attached to completed turns,
-and survives history reload. The frontend never attempts to reproduce the
-tokenizer.
+SSE text deltas do not contain exact usage. `response.completed` supplies the
+confirmed usage retained for context management. The frontend never attempts to
+reproduce the tokenizer. Turn headers display elapsed time without a separate
+token-spend projection.
+
+## Conversation footer
+
+Desktop's `thread-scroll-layout-99b3ea3429c1.js` keeps the normal conversation
+viewport beneath an absolutely positioned, measured footer. The shared backdrop
+in `app-primary-428a0a65766f.js` transitions from transparent to the chat surface
+at its midpoint and stays opaque below it. Compact presentation uses a separate
+scroll mask; it is not the normal conversation layout.
+
+The native timeline uses the measured dock height for the same surface-gradient
+behavior. Bottom spacing is covered along with the composer; the scrollbar stays
+above that layer and final-item scroll padding retains its full-height contract.
+Pixel regressions verify the fade, opaque footer, and visible lower scroll arrow
+with both normal and expanded drafts at three viewports.
+
+The diff renderer in `app-initial-f87238153a19.js` uses dark change bases
+`#5ecc71` and `#ff6762`, mixed with 80% of the surface in Lab. The presentation
+rules in `app-primary-428a0a65766f.js` use an automatic scrollbar gutter and
+explicit line fills. Native diff rows use those colors with continuous solid
+fills, including the number column; patterned deletion decorations are excluded
+as requested. The regression checks the right edge and consecutive changed rows
+at 100% and 112.5% zoom.
+
+## Windows command environment and outcomes
+
+The installed Desktop's `src-VqXTPopo.js` prepares executable directories before
+starting its local backend. Its Windows workspace runtime contributes Git,
+PowerShell, Node, and validated native executables to the child `PATH`. The
+public core's `shell.rs` adds `-NoProfile` only when login-shell loading is
+disabled; the unified-exec handler resolves the model's `login` preference.
+
+NativeEngine prepares its own child environment. It merges the inherited launch
+path with a fresh registered Windows user/system path for every command and
+preserves that result when adding its bundled ripgrep. It does not inspect or
+depend on Desktop's runtime directories. PowerShell profile loading is available
+through the explicit `login` argument, enabled by default.
+
+The reported `Get-Process cargo,rustc,link -ErrorAction SilentlyContinue` failures
+were recorded as exit code 1. An isolated PowerShell reproduction confirms that
+requesting an absent process can return existing processes and still fail.
+`SilentlyContinue` hides the diagnostic, not the exit status. The same issue can
+affect file queries. This matches [PowerShell's command exit semantics](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_pwsh?view=powershell-7.6).
+The runtime keeps those outcomes intact; its command contract explains optional
+matching, inspecting failures, and polling existing sessions before any retry.
+
+Focused Windows coverage exercises an inherited path missing system tools, a new
+executable directory, bounded path composition, process/file queries with partial
+output, stderr on success, explicit failure codes, and single execution of a
+failed command. Registered paths come from the native
+[CreateEnvironmentBlock API](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-createenvironmentblock),
+with owned token lifetime and explicit environment-block release.
 
 ## Cache and integrity
 
@@ -168,11 +289,29 @@ invalidates immediately, and a missing header does not destroy a valid entry.
 The stable task ID is the prompt-cache key, avoiding fragmentation across rounds
 and polls.
 
-The local audit validated `PRAGMA integrity_check`, persisted JSON, and table
-references without finding database, catalog-cache, or prompt-cache corruption.
-It did find a nested Code Mode read-cache defect: a mutation could leave an old
-read reusable. Every mutation now advances the cache generation, with write and
-patch regressions.
+The [official caching contract](https://developers.openai.com/api/docs/guides/prompt-caching)
+reuses matching prefixes without changing answer generation. A smaller wire
+payload alone cannot prove a cache hit or lower billable usage. Only confirmed
+provider usage establishes those results. The native transport preserves
+reasoning effort, encrypted context, tools, and output verbosity.
+
+The stable source contains an experimental `concurrent_reasoning_summaries`
+flag, disabled by default and marked `UnderDevelopment`. Its
+`sequential_cutoff` delivery changes summary event handling. This audit does
+not treat that experimental flag as a supported latency setting.
+
+A read-only `PRAGMA quick_check` returned `ok`. The inspected thread-item table
+contained no persisted runs, so it could not establish a live latency or usage
+baseline. Code Mode advances the read-cache generation around mutations, with
+write and patch regressions preventing reuse of an earlier observation.
+
+Read-cache admission is bounded before an operation starts. Failed and
+oversized results are delivered to their callers without being retained;
+concurrent callers already sharing an operation still observe its typed result.
+Entry identity prevents an evicted operation from accounting or removing a newer
+read. Polling independent processes shares the normal execution gate; cache
+invalidation runs on entry and scope exit, including cancellation, without
+serializing those waits. Mutations still own the exclusive gate.
 
 Upstream does not impose the former local 2,000-line read window and treats EOF
 as normal completion. The local tool keeps its 2 MiB per-file bound, accepts

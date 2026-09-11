@@ -1,5 +1,3 @@
-import { readAttachmentImage } from "../infrastructure/codexClient";
-
 export const SAFE_IMAGE_DATA_MIME_PATTERN: string =
   "^data:image\\/(?:avif|gif|jpeg|png|svg\\+xml|webp)";
 
@@ -18,7 +16,10 @@ export function isDirectImageSource(source: string): boolean {
   }
 }
 
-export function resolveImageSource(source: string): Promise<string> {
+export function resolveImageSource(
+  source: string,
+  readAttachmentImage: (path: string) => Promise<string>,
+): Promise<string> {
   const value = source.trim();
   if (isDirectImageSource(value)) {
     return Promise.resolve(value);
@@ -27,5 +28,5 @@ export function resolveImageSource(source: string): Promise<string> {
     return Promise.reject(new Error("The image has no valid source."));
   }
 
-  return readAttachmentImage(value).then((response) => response.dataUrl);
+  return readAttachmentImage(value);
 }

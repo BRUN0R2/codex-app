@@ -128,6 +128,29 @@ describe("timeline disclosure state", () => {
     });
   });
 
+  it("rebuilds descendants after a leaf becomes a parent and its subtree is cleared", () => {
+    createRoot((dispose) => {
+      const disclosures = createTimelineDisclosureStore();
+      const parent = timelineDisclosureStorageKey("thread:rebuilt", "activity:1");
+      const child = timelineDisclosureChildKey(parent, "change:1");
+      const grandchild = timelineDisclosureChildKey(child, "detail:1");
+      disclosures.setOpen(child, true);
+      expect(disclosures.countOpenDescendants(child)).toBe(0);
+      disclosures.setOpen(grandchild, true);
+      expect(disclosures.countOpenDescendants(parent)).toBe(2);
+      disclosures.setOpen(child, false);
+      expect(disclosures.countOpenDescendants(parent)).toBe(0);
+      expect(disclosures.countOpenDescendants(child)).toBe(0);
+      disclosures.setOpen(grandchild, true);
+      expect(disclosures.countOpenDescendants(parent)).toBe(1);
+      expect(disclosures.read(child, true)).toBe(false);
+      expect(disclosures.read(grandchild)).toBe(true);
+      disclosures.setOpen(parent, false);
+      expect(disclosures.read(grandchild)).toBe(false);
+      dispose();
+    });
+  });
+
   it("isolates identical disclosure keys between timeline conversations", () => {
     createRoot((dispose) => {
       const disclosures = createTimelineDisclosureStore();

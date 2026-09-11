@@ -55,7 +55,8 @@
           "activeFlags": [
             "waitingOnApproval"
           ]
-        }
+        },
+        "agent": null
       }
     }
   },
@@ -74,7 +75,8 @@
         "recencyAt": 1755000900,
         "status": {
           "type": "idle"
-        }
+        },
+        "agent": null
       }
     }
   },

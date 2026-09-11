@@ -119,7 +119,6 @@ describe("review changes", () => {
 function turn(id: string, items: VisibleThreadTurn["items"]): VisibleThreadTurn {
   return {
     id,
-    confirmedOutputTokens: 0,
     items,
     status: "completed",
     error: null,

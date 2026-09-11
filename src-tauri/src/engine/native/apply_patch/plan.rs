@@ -1,9 +1,7 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fs::Permissions;
-use std::io::ErrorKind;
-use std::path::{Component, Path, PathBuf};
-
-use sha2::{Digest as _, Sha256};
+use std::io::{ErrorKind, Read as _};
+use std::path::{Path, PathBuf};
 
 use crate::engine::{FileChange, FileChangeKind, FileChangeLineStats};
 use crate::error::AppError;
@@ -12,6 +10,8 @@ use super::super::file_diff::{
     line_stats, render_replacement_diff, text_line_count, truncate_diff,
 };
 use super::parser::{ParsedPatch, PatchHunk, UpdateChunk, UpdateLine};
+use super::paths::{canonical_workspace, is_link, resolve_patch_path, validate_relative_path};
+use super::text::apply_chunks;
 
 pub(in crate::engine::native) fn preview_changes(parsed: &ParsedPatch) -> Vec<FileChange> {
     parsed
@@ -62,6 +62,7 @@ pub(in crate::engine::native) fn preview_changes(parsed: &ParsedPatch) -> Vec<Fi
 
 #[derive(Debug)]
 pub(in crate::engine::native) struct PreparedPatch {
+    pub workspace: PathBuf,
     pub changes: Vec<PreparedChange>,
     pub thread_changes: Vec<FileChange>,
 }
@@ -88,22 +89,32 @@ pub(in crate::engine::native) struct FileSnapshot {
     pub exists: bool,
     pub bytes: Vec<u8>,
     pub permissions: Option<Permissions>,
-    pub digest: [u8; 32],
 }
 
 pub(in crate::engine::native) async fn prepare_patch(
     workspace: &Path,
     parsed: ParsedPatch,
 ) -> Result<PreparedPatch, AppError> {
-    let workspace = canonical_workspace(workspace).await?;
+    let workspace = workspace.to_path_buf();
+    tokio::task::spawn_blocking(move || prepare_patch_blocking(&workspace, parsed))
+        .await
+        .map_err(|error| AppError::FileSystem(format!("patch preparation task failed: {error}")))?
+}
+
+fn prepare_patch_blocking(
+    workspace: &Path,
+    parsed: ParsedPatch,
+) -> Result<PreparedPatch, AppError> {
+    let workspace = canonical_workspace(workspace)?;
     let mut resolved = Vec::with_capacity(parsed.hunks.len());
     for hunk in parsed.hunks {
-        resolved.push(resolve_hunk(&workspace, hunk).await?);
+        resolved.push(resolve_hunk(&workspace, hunk)?);
     }
     validate_claims(&resolved)?;
 
     let mut changes = Vec::with_capacity(resolved.len());
     let mut thread_changes = Vec::with_capacity(resolved.len());
+    let mut remaining_bytes = super::MAX_PATCH_TOTAL_BYTES;
     for hunk in resolved {
         match hunk {
             ResolvedHunk::Add {
@@ -111,12 +122,13 @@ pub(in crate::engine::native) async fn prepare_patch(
                 path,
                 contents,
             } => {
-                let original = snapshot(path).await?;
+                let original = snapshot(path, &mut remaining_bytes)?;
                 if original.exists {
                     return Err(AppError::Tool(format!(
                         "cannot add existing file `{relative}`"
                     )));
                 }
+                reserve_content(contents.len(), &mut remaining_bytes)?;
                 thread_changes.push(FileChange {
                     path: relative.clone(),
                     kind: FileChangeKind::Add,
@@ -129,7 +141,7 @@ pub(in crate::engine::native) async fn prepare_patch(
                 });
             }
             ResolvedHunk::Delete { relative, path } => {
-                let original = snapshot(path).await?;
+                let original = snapshot(path, &mut remaining_bytes)?;
                 require_existing_file(&original, &relative, "delete")?;
                 let (diff, line_stats) = render_delete_diff(&relative, &original.bytes);
                 thread_changes.push(FileChange {
@@ -147,13 +159,14 @@ pub(in crate::engine::native) async fn prepare_patch(
                 move_path,
                 chunks,
             } => {
-                let source_original = snapshot(path).await?;
+                let source_original = snapshot(path, &mut remaining_bytes)?;
                 require_existing_file(&source_original, &relative, "update")?;
                 let final_bytes = if chunks.is_empty() {
                     source_original.bytes.clone()
                 } else {
                     apply_chunks(&relative, &source_original.bytes, &chunks)?
                 };
+                reserve_content(final_bytes.len(), &mut remaining_bytes)?;
                 let diff = truncate_diff(&render_update_diff(
                     &relative,
                     move_relative.as_deref(),
@@ -170,7 +183,7 @@ pub(in crate::engine::native) async fn prepare_patch(
                 });
 
                 if let Some(destination) = move_path {
-                    let destination_original = snapshot(destination).await?;
+                    let destination_original = snapshot(destination, &mut remaining_bytes)?;
                     if destination_original.exists {
                         return Err(AppError::Tool(format!(
                             "move destination `{}` already exists",
@@ -192,6 +205,7 @@ pub(in crate::engine::native) async fn prepare_patch(
         }
     }
     Ok(PreparedPatch {
+        workspace,
         changes,
         thread_changes,
     })
@@ -246,11 +260,11 @@ impl ResolvedHunk {
     }
 }
 
-async fn resolve_hunk(workspace: &Path, hunk: PatchHunk) -> Result<ResolvedHunk, AppError> {
+fn resolve_hunk(workspace: &Path, hunk: PatchHunk) -> Result<ResolvedHunk, AppError> {
     match hunk {
         PatchHunk::Add { path, contents } => {
             let relative = display_relative(&path)?;
-            let path = resolve_patch_path(workspace, &path).await?;
+            let path = resolve_patch_path(workspace, &path)?;
             Ok(ResolvedHunk::Add {
                 relative,
                 path,
@@ -259,7 +273,7 @@ async fn resolve_hunk(workspace: &Path, hunk: PatchHunk) -> Result<ResolvedHunk,
         }
         PatchHunk::Delete { path } => {
             let relative = display_relative(&path)?;
-            let path = resolve_patch_path(workspace, &path).await?;
+            let path = resolve_patch_path(workspace, &path)?;
             Ok(ResolvedHunk::Delete { relative, path })
         }
         PatchHunk::Update {
@@ -268,11 +282,11 @@ async fn resolve_hunk(workspace: &Path, hunk: PatchHunk) -> Result<ResolvedHunk,
             chunks,
         } => {
             let relative = display_relative(&path)?;
-            let path = resolve_patch_path(workspace, &path).await?;
+            let path = resolve_patch_path(workspace, &path)?;
             let (move_relative, move_path) = match move_path {
                 Some(destination) => (
                     Some(display_relative(&destination)?),
-                    Some(resolve_patch_path(workspace, &destination).await?),
+                    Some(resolve_patch_path(workspace, &destination)?),
                 ),
                 None => (None, None),
             };
@@ -318,92 +332,30 @@ fn validate_claims(hunks: &[ResolvedHunk]) -> Result<(), AppError> {
             ));
         }
     }
-    Ok(())
-}
-
-async fn canonical_workspace(workspace: &Path) -> Result<PathBuf, AppError> {
-    let workspace = tokio::fs::canonicalize(workspace)
-        .await
-        .map_err(|error| AppError::FileSystem(error.to_string()))?;
-    let metadata = tokio::fs::metadata(&workspace)
-        .await
-        .map_err(|error| AppError::FileSystem(error.to_string()))?;
-    if !metadata.is_dir() {
-        return Err(AppError::FileSystem("workspace is not a directory".into()));
-    }
-    Ok(workspace)
-}
-
-async fn resolve_patch_path(workspace: &Path, relative: &Path) -> Result<PathBuf, AppError> {
-    validate_relative_path(relative)?;
-    let parent = relative
-        .parent()
-        .ok_or_else(|| AppError::Permission("patch path has no parent".into()))?;
-    let canonical_parent = tokio::fs::canonicalize(workspace.join(parent))
-        .await
-        .map_err(|error| AppError::FileSystem(format!("patch parent is invalid: {error}")))?;
-    if !canonical_parent.starts_with(workspace) {
-        return Err(AppError::Permission(
-            "patch path escapes the workspace".into(),
-        ));
-    }
-    reject_existing_symlinks(workspace, relative).await?;
-    let file_name = relative
-        .file_name()
-        .ok_or_else(|| AppError::Permission("patch path has no file name".into()))?;
-    Ok(canonical_parent.join(file_name))
-}
-
-fn validate_relative_path(path: &Path) -> Result<(), AppError> {
-    if path.as_os_str().is_empty() || path.is_absolute() {
-        return Err(AppError::Permission(
-            "patch paths must be non-empty and relative".into(),
-        ));
-    }
-    let mut saw_component = false;
-    for component in path.components() {
-        match component {
-            Component::Normal(_) => saw_component = true,
-            Component::Prefix(_)
-            | Component::RootDir
-            | Component::CurDir
-            | Component::ParentDir => {
-                return Err(AppError::Permission(
-                    "patch paths may contain only normal relative components".into(),
-                ));
-            }
-        }
-    }
-    if !saw_component {
-        return Err(AppError::Permission("patch path is empty".into()));
-    }
-    Ok(())
-}
-
-async fn reject_existing_symlinks(workspace: &Path, relative: &Path) -> Result<(), AppError> {
-    let mut current = workspace.to_path_buf();
-    for component in relative.components() {
-        let Component::Normal(component) = component else {
-            return Err(AppError::Permission("patch path is invalid".into()));
-        };
-        current.push(component);
-        match tokio::fs::symlink_metadata(&current).await {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(AppError::Permission(format!(
-                    "patch path contains a symbolic link: {}",
-                    current.display()
-                )));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => break,
-            Err(error) => return Err(AppError::FileSystem(error.to_string())),
+    let paths = hunks
+        .iter()
+        .flat_map(|hunk| hunk.source().into_iter().chain(hunk.destination()))
+        .map(path_identity)
+        .collect::<std::collections::HashSet<_>>();
+    for path in hunks
+        .iter()
+        .flat_map(|hunk| hunk.source().into_iter().chain(hunk.destination()))
+    {
+        if path
+            .ancestors()
+            .skip(1)
+            .any(|parent| paths.contains(&path_identity(parent)))
+        {
+            return Err(AppError::Tool(
+                "patch file and parent directory paths overlap".into(),
+            ));
         }
     }
     Ok(())
 }
 
-async fn snapshot(path: PathBuf) -> Result<FileSnapshot, AppError> {
-    let metadata = match tokio::fs::symlink_metadata(&path).await {
+fn snapshot(path: PathBuf, remaining_bytes: &mut usize) -> Result<FileSnapshot, AppError> {
+    let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Ok(FileSnapshot {
@@ -411,12 +363,11 @@ async fn snapshot(path: PathBuf) -> Result<FileSnapshot, AppError> {
                 exists: false,
                 bytes: Vec::new(),
                 permissions: None,
-                digest: Sha256::digest([]).into(),
             });
         }
         Err(error) => return Err(AppError::FileSystem(error.to_string())),
     };
-    if metadata.file_type().is_symlink() {
+    if is_link(&metadata) {
         return Err(AppError::Permission(format!(
             "patch path is a symbolic link: {}",
             path.display()
@@ -428,26 +379,50 @@ async fn snapshot(path: PathBuf) -> Result<FileSnapshot, AppError> {
             path.display()
         )));
     }
-    let bytes = tokio::fs::read(&path)
-        .await
+    let maximum_bytes = super::MAX_PATCH_FILE_BYTES.min(*remaining_bytes);
+    if metadata.len() > maximum_bytes as u64 {
+        return Err(AppError::Tool(format!(
+            "patch source exceeds the remaining {maximum_bytes}-byte content limit: {}",
+            path.display()
+        )));
+    }
+    let file =
+        std::fs::File::open(&path).map_err(|error| AppError::FileSystem(error.to_string()))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(maximum_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|error| AppError::FileSystem(error.to_string()))?;
-    let metadata_after = tokio::fs::symlink_metadata(&path)
-        .await
+    reserve_content(bytes.len(), remaining_bytes)?;
+    let metadata_after = std::fs::symlink_metadata(&path)
         .map_err(|error| AppError::FileSystem(error.to_string()))?;
-    if metadata_after.file_type().is_symlink() || !metadata_after.is_file() {
+    if is_link(&metadata_after) || !metadata_after.is_file() {
         return Err(AppError::Tool(format!(
             "file changed while patch was being prepared: {}",
             path.display()
         )));
     }
-    let digest = Sha256::digest(&bytes).into();
     Ok(FileSnapshot {
         path,
         exists: true,
         bytes,
         permissions: Some(metadata_after.permissions()),
-        digest,
     })
+}
+
+fn reserve_content(bytes: usize, remaining: &mut usize) -> Result<(), AppError> {
+    if bytes > super::MAX_PATCH_FILE_BYTES {
+        return Err(AppError::Tool(format!(
+            "patch file content exceeds {} bytes",
+            super::MAX_PATCH_FILE_BYTES
+        )));
+    }
+    *remaining = remaining.checked_sub(bytes).ok_or_else(|| {
+        AppError::Tool(format!(
+            "patch original and final content exceeds {} bytes",
+            super::MAX_PATCH_TOTAL_BYTES
+        ))
+    })?;
+    Ok(())
 }
 
 fn require_existing_file(
@@ -461,165 +436,6 @@ fn require_existing_file(
         Err(AppError::Tool(format!(
             "cannot {action} missing file `{relative}`"
         )))
-    }
-}
-
-fn apply_chunks(relative: &str, bytes: &[u8], chunks: &[UpdateChunk]) -> Result<Vec<u8>, AppError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| {
-        AppError::Tool(format!(
-            "cannot update non-UTF-8 file `{relative}` with text chunks"
-        ))
-    })?;
-    let mut document = TextDocument::parse(text);
-    let mut cursor = 0usize;
-    for chunk in chunks {
-        let old_lines = chunk.old_lines().collect::<Vec<_>>();
-        let new_lines = chunk.new_lines().map(str::to_string).collect::<Vec<_>>();
-        let new_len = new_lines.len();
-        let position =
-            locate_chunk(&document.lines, chunk, &old_lines, cursor).ok_or_else(|| {
-                AppError::Tool(format!("context not found while updating `{relative}`"))
-            })??;
-        let old_len = old_lines.len();
-        document
-            .lines
-            .splice(position..position + old_len, new_lines);
-        cursor = position + new_len;
-    }
-    Ok(document.render().into_bytes())
-}
-
-fn locate_chunk(
-    lines: &[String],
-    chunk: &UpdateChunk,
-    old_lines: &[&str],
-    start: usize,
-) -> Option<Result<usize, AppError>> {
-    let candidates = if let Some(context) = &chunk.context {
-        let anchors = best_matches(lines, &[context.as_str()], start, false);
-        let mut positions = BTreeSet::new();
-        for anchor in anchors {
-            if old_lines.is_empty() {
-                positions.insert(if chunk.end_of_file {
-                    lines.len()
-                } else {
-                    anchor + 1
-                });
-            } else if let Some(position) =
-                best_matches(lines, old_lines, anchor + 1, chunk.end_of_file)
-                    .into_iter()
-                    .next()
-            {
-                positions.insert(position);
-            }
-        }
-        positions
-    } else if old_lines.is_empty() {
-        BTreeSet::from([if chunk.end_of_file {
-            lines.len()
-        } else {
-            start.min(lines.len())
-        }])
-    } else {
-        best_matches(lines, old_lines, start, chunk.end_of_file)
-            .into_iter()
-            .collect()
-    };
-
-    match candidates.len() {
-        0 => None,
-        1 => candidates.into_iter().next().map(Ok),
-        _ => Some(Err(AppError::Tool("ambiguous context in patch".into()))),
-    }
-}
-
-fn best_matches(lines: &[String], pattern: &[&str], start: usize, eof: bool) -> Vec<usize> {
-    if pattern.is_empty() || pattern.len() > lines.len() || start > lines.len() {
-        return Vec::new();
-    }
-    let last = lines.len() - pattern.len();
-    let range_start = if eof { last } else { start };
-    if range_start > last {
-        return Vec::new();
-    }
-    for mode in 0..4 {
-        let matches = (range_start..=last)
-            .filter(|position| sequence_matches(lines, pattern, *position, mode))
-            .collect::<Vec<_>>();
-        if !matches.is_empty() {
-            return matches;
-        }
-    }
-    Vec::new()
-}
-
-fn sequence_matches(lines: &[String], pattern: &[&str], position: usize, mode: u8) -> bool {
-    lines[position..position + pattern.len()]
-        .iter()
-        .zip(pattern)
-        .all(|(line, pattern)| match mode {
-            0 => line == pattern,
-            1 => line.trim_end() == pattern.trim_end(),
-            2 => line.trim() == pattern.trim(),
-            _ => normalize_punctuation(line) == normalize_punctuation(pattern),
-        })
-}
-
-fn normalize_punctuation(value: &str) -> String {
-    value
-        .trim()
-        .chars()
-        .map(|character| match character {
-            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
-            | '\u{2212}' => '-',
-            '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' => '\'',
-            '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}' => '"',
-            '\u{00a0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
-            | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200a}' | '\u{202f}' | '\u{205f}'
-            | '\u{3000}' => ' ',
-            other => other,
-        })
-        .collect()
-}
-
-struct TextDocument {
-    lines: Vec<String>,
-    trailing_newline: bool,
-    line_ending: &'static str,
-}
-
-impl TextDocument {
-    fn parse(text: &str) -> Self {
-        let line_ending = if text.as_bytes().windows(2).any(|pair| pair == b"\r\n") {
-            "\r\n"
-        } else {
-            "\n"
-        };
-        let normalized = text.replace("\r\n", "\n");
-        let trailing_newline = normalized.ends_with('\n');
-        let mut lines = normalized
-            .split('\n')
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        if trailing_newline {
-            lines.pop();
-        }
-        if normalized.is_empty() {
-            lines.clear();
-        }
-        Self {
-            lines,
-            trailing_newline,
-            line_ending,
-        }
-    }
-
-    fn render(self) -> String {
-        let mut output = self.lines.join(self.line_ending);
-        if self.trailing_newline {
-            output.push_str(self.line_ending);
-        }
-        output
     }
 }
 
@@ -683,7 +499,7 @@ fn update_line_stats(chunks: &[UpdateChunk]) -> FileChangeLineStats {
 
 fn display_relative(path: &Path) -> Result<String, AppError> {
     validate_relative_path(path)?;
-    Ok(display_unchecked(path))
+    Ok(display_unchecked(&path.components().collect::<PathBuf>()))
 }
 
 fn display_unchecked(path: &Path) -> String {

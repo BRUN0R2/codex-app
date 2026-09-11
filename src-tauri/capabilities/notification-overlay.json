@@ -1,0 +1,22 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "notification-overlay-capability",
+  "description": "Minimal permissions for the isolated notification overlay windows",
+  "webviews": ["notification-priority-overlay", "notification-transient-overlay"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-get-all-windows",
+    "core:window:allow-hide",
+    "core:window:allow-is-minimized",
+    "core:window:allow-monitor-from-point",
+    "core:window:allow-outer-position",
+    "core:window:allow-outer-size",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-show",
+    "core:window:allow-start-dragging",
+    "core:window:allow-unminimize"
+  ]
+}

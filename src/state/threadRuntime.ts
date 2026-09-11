@@ -11,13 +11,7 @@ import type {
   ThreadTurn,
   VisibleThreadItem,
 } from "../contracts/types";
-import {
-  applyStreamDeltas,
-  readLatestContextUsage,
-  readTurnOutputTokens,
-  removeItem,
-  upsertItem,
-} from "./conversation";
+import { applyStreamDeltas, readLatestContextUsage, removeItem, upsertItem } from "./conversation";
 import type { StreamDelta } from "./streamDeltas";
 import {
   findVisibleTurn,
@@ -307,7 +301,6 @@ export function readPersistedVisibleTurns(
   }
   const projected = thread.turns.map((turn) => ({
     ...turn,
-    confirmedOutputTokens: readTurnOutputTokens(turn),
     items: turn.items
       .filter((item): item is VisibleThreadItem => item.type !== "contextUsage")
       .filter(isTimelineVisibleItem),
@@ -343,7 +336,6 @@ export function mergeRuntimeThreadItems(
       targetIndex = persistedTurns.length;
       overlayTurns.set(targetIndex, {
         id: turnId,
-        confirmedOutputTokens: 0,
         items: mergeTurnItems([], itemOverlays, itemOrderByTurn.get(turnId) ?? []),
         status: "inProgress",
         error: null,

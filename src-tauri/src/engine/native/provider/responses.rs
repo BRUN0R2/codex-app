@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -12,6 +11,12 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use uuid::Uuid;
+
+mod request_item;
+use request_item::RequestResponseItem;
+
+#[cfg(test)]
+mod continuation_tests;
 
 use super::AccountPlanTypeWire;
 use super::CreditsWire;
@@ -118,6 +123,9 @@ impl<'a> ResponseRequest<'a> {
         tools: &'a [Value],
         settings: ResponseRequestSettings<'a>,
     ) -> Result<Self, AppError> {
+        validate_request_items(context)?;
+        validate_request_items(input)?;
+        validate_request_items(tail)?;
         let lite_prefix = match settings.protocol {
             ResponseProtocol::Standard => None,
             ResponseProtocol::Lite => Some(LitePrefix::new(
@@ -344,6 +352,12 @@ impl<'a> ResponseRequest<'a> {
     }
 }
 
+fn validate_request_items(items: &[ResponseItem]) -> Result<(), AppError> {
+    items
+        .iter()
+        .try_for_each(ResponseItem::validate_for_request)
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct ResponseRequestBaseline {
     properties: OwnedResponseRequestProperties,
@@ -563,9 +577,7 @@ impl ResponseRequestInput<'_> {
         let Some(current) = self.response_item(index) else {
             return false;
         };
-        current
-            .for_request(self.strip_image_detail)
-            .equivalent_for_continuation(previous)
+        current.equivalent_for_continuation(previous, self.strip_image_detail)
     }
 
     fn clone_owned(&self, index: usize) -> Option<OwnedResponseRequestInput> {
@@ -836,22 +848,6 @@ impl<'a> ContentItemKinds<'a> {
     }
 }
 
-struct RequestResponseItem<'a> {
-    item: &'a ResponseItem,
-    strip_image_detail: bool,
-}
-
-impl Serialize for RequestResponseItem<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.item
-            .for_request(self.strip_image_detail)
-            .serialize(serializer)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseItem {
@@ -1012,14 +1008,11 @@ impl ResponseItem {
         }
     }
 
-    pub fn context_text(role: impl Into<String>, text: String, content_kind: &str) -> Self {
-        let role = role.into();
+    pub fn context_text(role: ResponseInputRole, text: String, content_kind: &str) -> Self {
+        let role = role.as_str();
         Self::Message {
-            id: Some(stable_item_id(
-                "msg",
-                [role.as_str(), content_kind, text.as_str()],
-            )),
-            role,
+            id: Some(stable_item_id("msg", [role, content_kind, text.as_str()])),
+            role: role.into(),
             content: vec![ResponseContent::InputText { text }],
             phase: None,
             internal_chat_message_metadata_passthrough: Some(
@@ -1031,20 +1024,18 @@ impl ResponseItem {
         }
     }
 
-    pub fn context_text_with_seed(
-        role: impl Into<String>,
+    pub fn assistant_context_text_with_seed(
         text: String,
         content_kind: &str,
         stable_seed: &str,
     ) -> Self {
-        let role = role.into();
         Self::Message {
             id: Some(stable_item_id(
                 "msg",
-                [role.as_str(), content_kind, stable_seed, text.as_str()],
+                ["assistant", content_kind, stable_seed, text.as_str()],
             )),
-            role,
-            content: vec![ResponseContent::InputText { text }],
+            role: "assistant".into(),
+            content: vec![ResponseContent::OutputText { text }],
             phase: None,
             internal_chat_message_metadata_passthrough: Some(
                 InternalChatMessageMetadataPassthrough {
@@ -1052,6 +1043,53 @@ impl ResponseItem {
                     content_item_kinds: Some(vec![content_kind.into()]),
                 },
             ),
+        }
+    }
+
+    pub(crate) fn migrate_legacy_assistant_input_text(&mut self) -> bool {
+        let Self::Message { role, content, .. } = self else {
+            return false;
+        };
+        if role != "assistant" {
+            return false;
+        }
+        let mut migrated = false;
+        for item in content {
+            if let ResponseContent::InputText { text } = item {
+                *item = ResponseContent::OutputText {
+                    text: std::mem::take(text),
+                };
+                migrated = true;
+            }
+        }
+        migrated
+    }
+
+    fn validate_for_request(&self) -> Result<(), AppError> {
+        let Self::Message { role, content, .. } = self else {
+            return Ok(());
+        };
+        let valid = match role.as_str() {
+            "assistant" => content.iter().all(|item| {
+                matches!(
+                    item,
+                    ResponseContent::OutputText { .. } | ResponseContent::Refusal { .. }
+                )
+            }),
+            "developer" | "system" | "user" => content.iter().all(|item| {
+                matches!(
+                    item,
+                    ResponseContent::InputText { .. } | ResponseContent::InputImage { .. }
+                )
+            }),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(AppError::Protocol(format!(
+                "response message role `{role}` contains an incompatible content type"
+            )))
         }
     }
 
@@ -1176,97 +1214,19 @@ impl ResponseItem {
                 .and_then(|metadata| metadata.turn_id.as_deref()),
         ))
     }
+}
 
-    fn for_request(&self, strip_image_detail: bool) -> Cow<'_, Self> {
-        if !strip_image_detail || !self.has_image_detail() {
-            return Cow::Borrowed(self);
-        }
-        let mut item = self.clone();
-        match &mut item {
-            Self::Message { content, .. } => {
-                for part in content {
-                    if let ResponseContent::InputImage { detail, .. } = part {
-                        *detail = None;
-                    }
-                }
-            }
-            Self::FunctionCallOutput {
-                output: FunctionCallOutputPayload::Content(content),
-                ..
-            } => {
-                for part in content {
-                    if let FunctionCallOutputContent::InputImage { detail, .. } = part {
-                        *detail = None;
-                    }
-                }
-            }
-            _ => {}
-        }
-        Cow::Owned(item)
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseInputRole {
+    Developer,
+    User,
+}
 
-    fn equivalent_for_continuation(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                Self::Message {
-                    id: left_id,
-                    role: left_role,
-                    content: left_content,
-                    phase: left_phase,
-                    ..
-                },
-                Self::Message {
-                    id: right_id,
-                    role: right_role,
-                    content: right_content,
-                    phase: right_phase,
-                    ..
-                },
-            ) => {
-                left_id == right_id
-                    && left_role == right_role
-                    && left_content == right_content
-                    && left_phase == right_phase
-            }
-            (
-                Self::Compaction {
-                    id: left_id,
-                    encrypted_content: left_content,
-                    ..
-                },
-                Self::Compaction {
-                    id: right_id,
-                    encrypted_content: right_content,
-                    ..
-                },
-            ) => left_id == right_id && left_content == right_content,
-            _ => self == other,
-        }
-    }
-
-    fn has_image_detail(&self) -> bool {
+impl ResponseInputRole {
+    const fn as_str(self) -> &'static str {
         match self {
-            Self::Message { content, .. } => content.iter().any(|part| {
-                matches!(
-                    part,
-                    ResponseContent::InputImage {
-                        detail: Some(_),
-                        ..
-                    }
-                )
-            }),
-            Self::FunctionCallOutput { output, .. } => output.content().is_some_and(|content| {
-                content.iter().any(|part| {
-                    matches!(
-                        part,
-                        FunctionCallOutputContent::InputImage {
-                            detail: Some(_),
-                            ..
-                        }
-                    )
-                })
-            }),
-            _ => false,
+            Self::Developer => "developer",
+            Self::User => "user",
         }
     }
 }
@@ -1897,7 +1857,7 @@ fn decode_rate_limit_event(
     });
     let limit_id = metered_limit_name
         .or(legacy_limit_name)
-        .unwrap_or_else(|| "codex".into())
+        .unwrap_or_else(|| super::GENERAL_RATE_LIMIT_ID.into())
         .trim()
         .to_ascii_lowercase()
         .replace('-', "_");
@@ -2273,6 +2233,7 @@ mod tests {
     use super::ReasoningSummarySetting;
     use super::ResponseContent;
     use super::ResponseEvent;
+    use super::ResponseInputRole;
     use super::ResponseItem;
     use super::ResponseMessagePhase;
     use super::ResponseMetadataState;
@@ -2803,9 +2764,16 @@ mod tests {
                 text: "hello".into(),
             }],
         );
-        let context = ResponseItem::context_text("developer", "context".into(), "context.kind");
-        let rebuilt_context =
-            ResponseItem::context_text("developer", "context".into(), "context.kind");
+        let context = ResponseItem::context_text(
+            ResponseInputRole::Developer,
+            "context".into(),
+            "context.kind",
+        );
+        let rebuilt_context = ResponseItem::context_text(
+            ResponseInputRole::Developer,
+            "context".into(),
+            "context.kind",
+        );
 
         assert_eq!(first.id(), retried.id());
         assert_ne!(first.id(), other.id());
@@ -2813,6 +2781,53 @@ mod tests {
         for id in [first.id(), other.id(), context.id()] {
             assert!(id.is_some_and(|id| id.starts_with("msg_")));
         }
+    }
+
+    #[test]
+    fn assistant_context_uses_provider_output_content() {
+        let item = ResponseItem::assistant_context_text_with_seed(
+            "completed by worker".into(),
+            "multi_agent.inter_agent_completion_message",
+            "message-1",
+        );
+        let encoded = serde_json::to_value(&item).expect("assistant context should serialize");
+
+        assert_eq!(encoded["role"], "assistant");
+        assert_eq!(encoded["content"][0]["type"], "output_text");
+        ResponseRequest::new(
+            "gpt-5.6-sol",
+            "Be useful.",
+            &[],
+            &[item],
+            &[],
+            ResponseRequestSettings::default(),
+        )
+        .expect("typed assistant context should satisfy the provider contract");
+    }
+
+    #[test]
+    fn rejects_incompatible_message_content_before_transport() {
+        let malformed = ResponseItem::Message {
+            id: Some("message-1".into()),
+            role: "assistant".into(),
+            content: vec![ResponseContent::InputText {
+                text: "legacy malformed context".into(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        let error = ResponseRequest::new(
+            "gpt-5.6-sol",
+            "Be useful.",
+            &[],
+            &[malformed],
+            &[],
+            ResponseRequestSettings::default(),
+        )
+        .expect_err("invalid role/content pairs must not reach the provider");
+
+        assert!(error.to_string().contains("incompatible content type"));
     }
 
     #[test]
@@ -3320,7 +3335,7 @@ mod tests {
             "parameters": {"type": "object"}
         })];
         let context = [ResponseItem::context_text(
-            "user",
+            ResponseInputRole::User,
             "<environment_context />".into(),
             "environments.environment_context",
         )];

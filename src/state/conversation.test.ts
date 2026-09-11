@@ -4,24 +4,11 @@ import {
   applyCommandStreamDeltasToThread,
   applyStreamDeltas,
   readLatestTurnFailure,
-  readTurnOutputTokens,
   removeItem,
   upsertItem,
 } from "./conversation";
 
 describe("conversation reducer", () => {
-  it("sums only provider-confirmed output usage across one turn", () => {
-    expect(
-      readTurnOutputTokens({
-        items: [
-          contextUsage("usage-1", 17),
-          { type: "contextCompaction", id: "compaction-1" },
-          contextUsage("usage-2", 25),
-        ],
-      }),
-    ).toBe(42);
-  });
-
   it("rejects an id that changes semantic type", () => {
     const current = [{ type: "agentMessage", id: "same", text: "x", phase: null }] as const;
     expect(() =>
@@ -41,6 +28,7 @@ describe("conversation reducer", () => {
     expect(
       readLatestTurnFailure({
         id: "thread-1",
+        agent: null,
         mode: "codex",
         preview: "Teste",
         name: null,
@@ -177,6 +165,7 @@ describe("conversation reducer", () => {
   it("routes background command deltas to their persisted turn", () => {
     const thread = {
       id: "thread-a",
+      agent: null,
       mode: "codex" as const,
       preview: "Build",
       name: null,
@@ -227,22 +216,6 @@ describe("conversation reducer", () => {
     ).toBe(thread);
   });
 });
-
-function contextUsage(id: string, outputTokens: number) {
-  return {
-    type: "contextUsage" as const,
-    id,
-    model: "gpt-test",
-    usage: {
-      inputTokens: 100,
-      cachedInputTokens: 80,
-      outputTokens,
-      reasoningOutputTokens: outputTokens,
-      totalTokens: 100 + outputTokens,
-    },
-    contextWindow: null,
-  };
-}
 
 function commandDelta(
   stream: "stderr" | "stdout",

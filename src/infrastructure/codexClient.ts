@@ -83,7 +83,7 @@ import {
   listenRuntime as listen,
 } from "./runtimeBridge";
 
-export { describeDiagnosticError, describeError } from "./errorDescription";
+export { describeDiagnosticError, describeError } from "../errorDescription";
 
 const NOTIFICATION_EVENT = "engine://notification";
 const SERVER_REQUEST_EVENT = "engine://server-request";

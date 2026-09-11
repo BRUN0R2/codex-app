@@ -4,6 +4,7 @@ import type {
   RateLimitWindow,
 } from "../contracts/types";
 import { formatMessage, type TranslationMessages } from "../i18n/messages";
+import { GENERAL_RATE_LIMIT_ID, generalRateLimitSnapshot } from "../state/rateLimits";
 
 type UsagePresentationMessages = Pick<
   TranslationMessages["settings"],
@@ -55,9 +56,8 @@ export function presentUsageLimits(
   }
 
   const groups = [
-    presentSnapshot("codex", response.rateLimits, messages),
-    ...Object.entries(response.rateLimitsByLimitId)
-      .filter(([limitId]) => limitId !== "codex")
+    presentSnapshot(GENERAL_RATE_LIMIT_ID, generalRateLimitSnapshot(response), messages),
+    ...Object.entries(response.additionalRateLimitsByLimitId)
       .sort(([leftId, left], [rightId, right]) =>
         displayLimitName(leftId, left).localeCompare(displayLimitName(rightId, right), locale),
       )
@@ -118,9 +118,12 @@ export function usagePercentLabel(percent: number): string {
 
 function presentSnapshot(
   limitId: string,
-  snapshot: RateLimitSnapshot,
+  snapshot: RateLimitSnapshot | null,
   messages: UsagePresentationMessages,
 ): UsageLimitGroup | null {
+  if (snapshot === null) {
+    return null;
+  }
   const limits = [
     snapshot.primary === null
       ? null
@@ -135,7 +138,7 @@ function presentSnapshot(
   }
   return {
     id: limitId,
-    label: limitId === "codex" ? null : displayLimitName(limitId, snapshot),
+    label: limitId === GENERAL_RATE_LIMIT_ID ? null : displayLimitName(limitId, snapshot),
     limits,
   };
 }

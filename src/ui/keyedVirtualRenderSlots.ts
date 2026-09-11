@@ -232,6 +232,21 @@ export function createKeyedVirtualRenderSlotStore<TSource>(): KeyedVirtualRender
         renderedSequence = nextRendered;
         setSlots(nextRendered);
       }
+      // Keep one spare window for reuse, not the largest window ever rendered.
+      const spareLimit = itemCount;
+      if (renderPool.length > presentSlotIds.size + spareLimit) {
+        let spareCount = 0;
+        let retainedCount = 0;
+        for (const slot of renderPool) {
+          if (presentSlotIds.has(slot.slotId) || spareCount++ < spareLimit) {
+            renderPool[retainedCount++] = slot;
+          }
+        }
+        renderPool.length = retainedCount;
+        slotsByKey.clear();
+        for (const queue of reusableSlotsByGroup.values()) queue.length = 0;
+        renderPoolChanged = true;
+      }
       if (renderPoolChanged) {
         setRenderSlots(renderPool.slice());
       }
@@ -241,6 +256,12 @@ export function createKeyedVirtualRenderSlotStore<TSource>(): KeyedVirtualRender
       hasPositionSnapshot = true;
       positionSource = source;
       positionStartIndex = startIndex;
+      (activeSequence === firstActiveBuffer ? secondActiveBuffer : firstActiveBuffer).length = 0;
+      (retainedSequence === firstRetainedBuffer
+        ? secondRetainedBuffer
+        : firstRetainedBuffer).length = 0;
+      if (firstRenderedBuffer !== renderedSequence) firstRenderedBuffer.length = 0;
+      if (secondRenderedBuffer !== renderedSequence) secondRenderedBuffer.length = 0;
     });
   }
 

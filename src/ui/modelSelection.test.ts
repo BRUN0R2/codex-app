@@ -35,6 +35,16 @@ describe("model selection", () => {
     expect(selectRuntimeCompatibleReasoningEffort(codeMode, "ultra")).toBe("max");
   });
 
+  it("does not select hidden provider models", () => {
+    const reserve = modelFixture({ id: "gpt-reserve", hidden: true });
+    const luna = modelFixture({ id: "gpt-5.6-luna", isDefault: true });
+
+    expect(selectRuntimeCompatibleModel([reserve, luna], reserve.id, null)).toBe(luna);
+    expect(
+      resolveRuntimeCompatibleModelSelection([reserve, luna], reserve.id, null, null).model,
+    ).toBe(luna.id);
+  });
+
   it("falls back from Ultra without affecting supported reasoning efforts", () => {
     const model = modelFixture({
       defaultReasoningEffort: "max",

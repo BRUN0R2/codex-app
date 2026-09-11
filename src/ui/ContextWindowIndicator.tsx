@@ -1,40 +1,39 @@
 import { createMemo, type JSX, Show } from "solid-js";
 
-import type { ContextUsageItem, ModelContextWindow } from "../contracts/types";
+import type { ContextUsageItem } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
 import { calculateContextWindowMetrics, formatContextTokens } from "./contextWindowMetrics";
 
 interface ContextWindowIndicatorProps {
-  readonly modelWindow: ModelContextWindow | null;
   readonly usage: ContextUsageItem | null;
 }
 
 export function ContextWindowIndicator(props: ContextWindowIndicatorProps): JSX.Element {
   const i18n = useI18n();
   const messages = () => i18n.messages().contextWindow;
-  const metrics = createMemo(() => calculateContextWindowMetrics(props.usage, props.modelWindow));
-  const percent = () => metrics()?.percent ?? 0;
+  const metrics = createMemo(() => calculateContextWindowMetrics(props.usage));
+  const usedPercent = () => metrics()?.usedPercent ?? 0;
   const remainingPercent = () => metrics()?.remainingPercent ?? 0;
   const radius: number = 5;
   const circumference: number = 2 * Math.PI * radius;
-  const strokeDashoffset = () => (circumference * remainingPercent()) / 100;
-  const roundedPercent = () => Math.round(percent());
+  const strokeDashoffset = () => (circumference * (100 - usedPercent())) / 100;
+  const roundedUsedPercent = () => Math.round(usedPercent());
   const statusLabel = () =>
-    roundedPercent() >= 50
-      ? formatMessage(messages().fullStatus, { percent: roundedPercent() })
+    roundedUsedPercent() >= 50
+      ? formatMessage(messages().fullStatus, { percent: roundedUsedPercent() })
       : formatMessage(messages().usedStatus, {
-          percent: roundedPercent(),
-          remaining: Math.round(remainingPercent()),
+          percent: roundedUsedPercent(),
+          remaining: remainingPercent(),
         });
 
   return (
     <Show when={metrics()} fallback={null}>
       {(current) => (
         <div
-          aria-label={formatMessage(messages().usage, { percent: roundedPercent() })}
+          aria-label={formatMessage(messages().usage, { percent: roundedUsedPercent() })}
           class="composer-context-ring-anchor"
-          classList={{ full: roundedPercent() >= 100 }}
+          classList={{ full: roundedUsedPercent() >= 100 }}
           role="img"
         >
           <span aria-hidden="true" class="composer-context-ring-icon">
@@ -70,9 +69,17 @@ export function ContextWindowIndicator(props: ContextWindowIndicatorProps): JSX.
             <div class="context-window-popover-tokens">
               {formatMessage(messages().tokensUsed, {
                 used: formatContextTokens(current().usedTokens),
-                total: formatContextTokens(current().contextWindow),
+                total: formatContextTokens(current().usableContextWindow),
               })}
             </div>
+            <Show when={current().cachedInputTokens > 0}>
+              <div class="context-window-popover-cache">
+                {formatMessage(messages().cacheHit, {
+                  percent: Math.round(current().cachedPercent),
+                  cached: formatContextTokens(current().cachedInputTokens),
+                })}
+              </div>
+            </Show>
           </div>
         </div>
       )}

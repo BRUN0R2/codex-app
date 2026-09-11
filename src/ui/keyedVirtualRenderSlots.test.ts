@@ -225,7 +225,7 @@ describe("keyed virtual render slots", () => {
     });
   });
 
-  it("keeps an append-only render pool while active windows change order", () => {
+  it("keeps render slot order stable while active windows change order", () => {
     createRoot((dispose) => {
       const source = {
         revision: 1,
@@ -254,6 +254,35 @@ describe("keyed virtual render slots", () => {
         forwardRenderSlots.map((slot) => slot.slotId),
       );
       expect(store.renderSlots().filter((slot) => slot.position().active)).toHaveLength(4);
+      dispose();
+    });
+  });
+
+  it("releases excess render slots after expansion or viewport contraction across 100,000 items", () => {
+    createRoot((dispose) => {
+      const source = {
+        revision: 1,
+        startIndex: 0,
+        entries: Array.from({ length: 100_000 }, (_, index) => ({
+          key: `command-${index}`,
+          value: String(index),
+        })),
+      } satisfies TestSource;
+      const store = createKeyedVirtualRenderSlotStore<TestSource>();
+      store.reconcileRange(source, 0, 300, readKey, readReuseGroup, 3);
+      const retained = store.renderSlots().filter((slot) => slot.position().index < 8);
+      store.reconcileRange(source, 0, 8, readKey, readReuseGroup, 3);
+      expect(store.renderSlots().length).toBeLessThanOrEqual(19);
+      for (const slot of retained) expect(store.renderSlots()).toContain(slot);
+
+      for (let start = 8; start < 100_000 - 8; start += 8) {
+        store.reconcileRange(source, start, start + 8, readKey, readReuseGroup, 3);
+        expect(store.renderSlots().length).toBeLessThanOrEqual(19);
+        expect(store.slots().filter((slot) => slot.position().active)).toHaveLength(8);
+      }
+      store.reconcileRange(source, 0, 0, readKey, readReuseGroup, 3);
+      expect(store.renderSlots()).toEqual([]);
+      expect(store.slots()).toEqual([]);
       dispose();
     });
   });

@@ -20,7 +20,6 @@ import type {
 } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage, type TranslationMessages } from "../i18n/messages";
-import { openDesktopDialog as open } from "../infrastructure/codexClient";
 import type { AppController } from "../state/appController";
 import {
   type ComposerDraftState,
@@ -32,6 +31,7 @@ import {
 type ComposerController = Pick<
   AppController,
   | "chatModels"
+  | "chooseAttachments"
   | "chooseWorkspace"
   | "config"
   | "contextUsage"
@@ -41,7 +41,6 @@ type ComposerController = Pick<
   | "engine"
   | "enqueueMessage"
   | "ensureModelsForMode"
-  | "inspectFiles"
   | "interrupt"
   | "models"
   | "pendingOperations"
@@ -70,6 +69,7 @@ import {
   saveQueueingEnabled,
 } from "../state/messageQueue";
 import { ContextWindowIndicator } from "./ContextWindowIndicator";
+import { composerControlAvailability } from "./composerControlAvailability";
 import { canSubmitComposerMessage, shouldWarmComposerModelCatalog } from "./composerSubmission";
 import { Icon } from "./Icon";
 import { ImagePreview } from "./ImagePreview";
@@ -90,7 +90,6 @@ import { presentServiceTier, selectedServiceTierLabel } from "./serviceTierPrese
 
 const COMPOSER_MESSAGE_MAXIMUM_CHARACTERS: number = 1_048_576;
 const COMPOSER_ATTACHMENT_MAXIMUM_COUNT: number = 12;
-const COMPOSER_TEXTAREA_MAXIMUM_HEIGHT_PX: number = 220;
 
 export interface ComposerProps {
   readonly controller: ComposerController;
@@ -138,6 +137,9 @@ export function Composer(props: ComposerProps) {
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [modelMenuSection, setModelMenuSection] = createSignal<ModelMenuSection | null>(null);
   const [permissionMenuOpen, setPermissionMenuOpen] = createSignal(false);
+  const controlAvailability = createMemo(() =>
+    composerControlAvailability(props.controller.config() !== null),
+  );
   const [addMenuOpen, setAddMenuOpen] = createSignal(false);
   const draftStore = new ComposerDraftStore();
   let activeDraftKey = currentDraftKey();
@@ -157,6 +159,7 @@ export function Composer(props: ComposerProps) {
     resolveChatIntelligence(props.controller.chatModels(), chatSelection()),
   );
   const selectedModel = configuredModel;
+  const selectedModelLabel = createMemo(() => selectedModel()?.displayName ?? messages().loading);
   const selectedContextWindowPreference = createMemo(() => {
     const selected = selectedModel();
     if (selected === undefined) {
@@ -253,7 +256,6 @@ export function Composer(props: ComposerProps) {
         setText(nextDraft.text);
         setAttachments(nextDraft.attachments);
         setAttachmentError(null);
-        queueMicrotask(() => resizeTextArea(textArea));
       },
       { defer: true },
     ),
@@ -266,7 +268,6 @@ export function Composer(props: ComposerProps) {
     }
     setText(request.text);
     queueMicrotask(() => {
-      resizeTextArea(textArea);
       textArea?.focus();
       textArea?.setSelectionRange(request.text.length, request.text.length);
       props.onDraftConsumed(request.id);
@@ -419,18 +420,14 @@ export function Composer(props: ComposerProps) {
   }
 
   async function attachFiles(): Promise<void> {
-    try {
-      const selected = await open({ directory: false, multiple: true });
-      if (selected === null) {
-        return;
-      }
-      const paths = Array.isArray(selected) ? selected : [selected];
-      const inspected = await props.controller.inspectFiles(paths);
-      setAttachments(mergeAttachments(attachments(), inspected));
-      setAttachmentError(null);
-    } catch (reason) {
-      setAttachmentError(errorMessage(reason));
+    const result = await props.controller.chooseAttachments();
+    if (result.type === "cancelled") return;
+    if (result.type === "failed") {
+      setAttachmentError(result.message);
+      return;
     }
+    setAttachments(mergeAttachments(attachments(), result.attachments));
+    setAttachmentError(null);
   }
 
   async function send(): Promise<void> {
@@ -499,7 +496,6 @@ export function Composer(props: ComposerProps) {
     setText("");
     setAttachments([]);
     setAttachmentError(null);
-    resizeTextArea(textArea);
   }
 
   function currentDraft(): ComposerDraftState {
@@ -537,7 +533,6 @@ export function Composer(props: ComposerProps) {
     }
     setAttachmentError(null);
     queueMicrotask(() => {
-      resizeTextArea(textArea);
       textArea?.focus();
       textArea?.setSelectionRange(message.text.length, message.text.length);
     });
@@ -661,10 +656,7 @@ export function Composer(props: ComposerProps) {
         <textarea
           aria-label={composerPlaceholder(mode(), messages())}
           maxlength={COMPOSER_MESSAGE_MAXIMUM_CHARACTERS}
-          onInput={(event) => {
-            setText(event.currentTarget.value);
-            resizeTextArea(event.currentTarget);
-          }}
+          onInput={(event) => setText(event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
               event.preventDefault();
@@ -687,7 +679,7 @@ export function Composer(props: ComposerProps) {
                 aria-label={messages().addFilesOrProject}
                 class="add-button"
                 classList={{ active: addMenuOpen() }}
-                disabled={props.controller.turnBusy()}
+                disabled={!controlAvailability().attachments}
                 onClick={() => {
                   setAddMenuOpen((value) => !value);
                   setPermissionMenuOpen(false);
@@ -757,7 +749,7 @@ export function Composer(props: ComposerProps) {
                       props.controller.config()?.config.permissionProfile.sandbox ===
                       "danger-full-access",
                   }}
-                  disabled={props.controller.turnBusy() || props.controller.config() === null}
+                  disabled={!controlAvailability().permissions}
                   onClick={() => {
                     setPermissionMenuOpen((value) => !value);
                     setAddMenuOpen(false);
@@ -891,10 +883,7 @@ export function Composer(props: ComposerProps) {
               </div>
             </Show>
             <Show when={mode() !== "chat"}>
-              <ContextWindowIndicator
-                modelWindow={selectedModelWindow()}
-                usage={props.controller.contextUsage()}
-              />
+              <ContextWindowIndicator usage={props.controller.contextUsage()} />
               <div class="composer-menu-anchor model-menu-anchor">
                 <button
                   aria-expanded={modelMenuOpen()}
@@ -917,11 +906,7 @@ export function Composer(props: ComposerProps) {
                       <span class="visually-hidden">{messages().fastModeActive}</span>
                     </span>
                   </Show>
-                  <span class="model-button-name">
-                    {selectedModel() === undefined
-                      ? messages().loading
-                      : compactModelName(selectedModel()?.displayName ?? "")}
-                  </span>
+                  <span class="model-button-name">{selectedModelLabel()}</span>
                   <Show when={effort()}>
                     {(selectedEffort) => (
                       <span
@@ -944,11 +929,7 @@ export function Composer(props: ComposerProps) {
                       active={modelMenuSection() === "model"}
                       label={messages().model}
                       onActivate={() => setModelMenuSection("model")}
-                      value={
-                        selectedModel() === undefined
-                          ? messages().loading
-                          : compactModelName(selectedModel()?.displayName ?? "")
-                      }
+                      value={selectedModelLabel()}
                     />
                     <ModelMenuRow
                       active={modelMenuSection() === "effort"}
@@ -1206,7 +1187,7 @@ function ModelMenuOptions(props: {
     >
       <div class="model-menu-options">
         <Show when={props.section === "model"}>
-          <For each={props.models}>
+          <For each={props.models.filter((entry) => !entry.hidden)}>
             {(entry) => {
               return (
                 <button
@@ -1380,14 +1361,6 @@ function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : "The attachments could not be processed.";
 }
 
-function resizeTextArea(element: HTMLTextAreaElement | undefined): void {
-  if (element === undefined) {
-    return;
-  }
-  element.style.height = "auto";
-  element.style.height = `${Math.min(element.scrollHeight, COMPOSER_TEXTAREA_MAXIMUM_HEIGHT_PX)}px`;
-}
-
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   const chunks: string[] = [];
@@ -1452,10 +1425,6 @@ function samePermission(left: PermissionProfile, right: PermissionProfile | unde
   return (
     right !== undefined && left.sandbox === right.sandbox && left.approvals === right.approvals
   );
-}
-
-function compactModelName(displayName: string): string {
-  return displayName.replace(/^gpt[- ]?/iu, "").replaceAll("-", " ");
 }
 
 function formatBytes(bytes: number): string {

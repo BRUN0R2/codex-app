@@ -17,6 +17,8 @@ const MAX_STREAM_BATCH_ENTRIES: usize = 128;
 const MAX_STREAM_BATCH_BYTES: usize = 512 * 1_024;
 const MAX_STREAM_DELTA_BYTES: usize = 64 * 1_024;
 const MAX_COMMAND_OUTPUT_DELTA_BYTES: usize = 8 * 1_024;
+const MAX_ACTIVE_STREAM_ITEMS: usize = 128;
+const MAX_STREAM_CHANNELS_PER_ITEM: usize = 128;
 
 #[derive(Clone)]
 pub(super) struct StreamNotificationBatcher {
@@ -81,7 +83,7 @@ impl StreamNotificationBatcher {
         let mut schedule = None;
         {
             let mut state = self.inner.state.lock().await;
-            if state.is_leading_delta(&delta) {
+            if state.is_leading_delta(&delta)? {
                 state.cancel_schedule();
                 let pending = state.take_pending();
                 self.inner.emit(pending)?;
@@ -120,6 +122,22 @@ impl StreamNotificationBatcher {
         self.inner.emit(pending)
     }
 
+    pub async fn finish_item(&self, item_id: &str) -> Result<(), AppError> {
+        let mut state = self.inner.state.lock().await;
+        state.cancel_schedule();
+        let pending = state.take_pending();
+        state.leading_keys.remove(item_id);
+        self.inner.emit(pending)
+    }
+
+    pub async fn finish_response(&self) -> Result<(), AppError> {
+        let mut state = self.inner.state.lock().await;
+        state.cancel_schedule();
+        let pending = state.take_pending();
+        state.retain_command_channels();
+        self.inner.emit(pending)
+    }
+
     async fn flush_scheduled(&self, generation: u64) {
         let mut state = self.inner.state.lock().await;
         if state.scheduled_generation != Some(generation) {
@@ -154,17 +172,48 @@ impl BatcherInner {
 }
 
 impl BatchState {
-    fn is_leading_delta(&mut self, delta: &StreamDelta) -> bool {
+    fn is_leading_delta(&mut self, delta: &StreamDelta) -> Result<bool, AppError> {
         let channel = delta_channel(delta);
+        if matches!(channel, DeltaChannel::ReasoningSummary(index) | DeltaChannel::ReasoningText(index) if index >= MAX_STREAM_CHANNELS_PER_ITEM)
+        {
+            return Err(AppError::Protocol(format!(
+                "reasoning stream index must be below {MAX_STREAM_CHANNELS_PER_ITEM}"
+            )));
+        }
         let item_id = delta_item_id(delta);
         match self.leading_keys.get_mut(item_id) {
-            Some(channels) => channels.insert(channel),
+            Some(channels) => {
+                if channels.contains(&channel) {
+                    return Ok(false);
+                }
+                if channels.len() >= MAX_STREAM_CHANNELS_PER_ITEM {
+                    return Err(AppError::Protocol(format!(
+                        "a streaming item cannot exceed {MAX_STREAM_CHANNELS_PER_ITEM} channels"
+                    )));
+                }
+                channels.insert(channel);
+                Ok(true)
+            }
             None => {
+                if self.leading_keys.len() >= MAX_ACTIVE_STREAM_ITEMS {
+                    return Err(AppError::Protocol(format!(
+                        "streaming cannot exceed {MAX_ACTIVE_STREAM_ITEMS} active items"
+                    )));
+                }
                 self.leading_keys
                     .insert(item_id.to_string(), HashSet::from([channel]));
-                true
+                Ok(true)
             }
         }
+    }
+
+    fn retain_command_channels(&mut self) {
+        // Commands may outlive their response. Unfinished model items may not:
+        // a retry starts a new response with new item identities.
+        self.leading_keys.retain(|_, channels| {
+            channels.retain(|channel| matches!(channel, DeltaChannel::CommandOutput(_)));
+            !channels.is_empty()
+        });
     }
 
     fn cancel_schedule(&mut self) {
@@ -293,8 +342,105 @@ fn split_text(text: String, maximum_bytes: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_COMMAND_OUTPUT_DELTA_BYTES, MAX_STREAM_DELTA_BYTES, split_stream_delta};
+    use super::{
+        BatchState, MAX_ACTIVE_STREAM_ITEMS, MAX_COMMAND_OUTPUT_DELTA_BYTES,
+        MAX_STREAM_CHANNELS_PER_ITEM, MAX_STREAM_DELTA_BYTES, split_stream_delta,
+    };
     use crate::engine::{CommandOutputOperation, CommandOutputStream, StreamDelta};
+
+    #[test]
+    fn completed_items_and_failed_responses_do_not_accumulate_stream_state() {
+        let mut state = BatchState::default();
+        let command = StreamDelta::CommandOutput {
+            item_id: "background-command".into(),
+            stream: CommandOutputStream::Stdout,
+            operation: CommandOutputOperation::Append {
+                delta: "output".into(),
+            },
+        };
+        assert!(
+            state
+                .is_leading_delta(&command)
+                .expect("command should start")
+        );
+        for response in 0..10_000 {
+            for item in 0..10 {
+                let item_id = format!("{response}-{item}");
+                let delta = StreamDelta::AgentText {
+                    item_id: item_id.clone(),
+                    delta: "progress".into(),
+                };
+                assert!(state.is_leading_delta(&delta).expect("item should start"));
+                assert!(
+                    !state
+                        .is_leading_delta(&delta)
+                        .expect("item should continue")
+                );
+                if item % 2 == 0 {
+                    state.leading_keys.remove(&item_id);
+                }
+            }
+            state.retain_command_channels();
+            assert_eq!(state.leading_keys.len(), 1);
+            assert!(
+                !state
+                    .is_leading_delta(&command)
+                    .expect("command should continue")
+            );
+        }
+        state.leading_keys.remove("background-command");
+        assert!(state.leading_keys.is_empty());
+    }
+
+    #[test]
+    fn unfinished_items_and_channels_have_explicit_admission_limits() {
+        let mut state = BatchState::default();
+        assert!(
+            state
+                .is_leading_delta(&StreamDelta::ReasoningSummary {
+                    item_id: "invalid-index".into(),
+                    index: usize::MAX,
+                    delta: "text".into(),
+                })
+                .is_err()
+        );
+        assert!(state.leading_keys.is_empty());
+        for item in 0..MAX_ACTIVE_STREAM_ITEMS {
+            state
+                .is_leading_delta(&StreamDelta::AgentText {
+                    item_id: item.to_string(),
+                    delta: "text".into(),
+                })
+                .expect("bounded items should fit");
+        }
+        assert!(
+            state
+                .is_leading_delta(&StreamDelta::AgentText {
+                    item_id: "overflow".into(),
+                    delta: "text".into(),
+                })
+                .is_err()
+        );
+        state.retain_command_channels();
+        for index in 0..MAX_STREAM_CHANNELS_PER_ITEM {
+            state
+                .is_leading_delta(&StreamDelta::ReasoningSummary {
+                    item_id: "reasoning".into(),
+                    index,
+                    delta: "text".into(),
+                })
+                .expect("bounded channels should fit");
+        }
+        assert!(
+            state
+                .is_leading_delta(&StreamDelta::ReasoningSummary {
+                    item_id: "reasoning".into(),
+                    index: MAX_STREAM_CHANNELS_PER_ITEM,
+                    delta: "text".into(),
+                })
+                .is_err()
+        );
+    }
 
     #[test]
     fn splits_large_unicode_deltas_without_changing_content() {

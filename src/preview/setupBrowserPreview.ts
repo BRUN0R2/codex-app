@@ -18,10 +18,13 @@ import type {
   ModelListResponse,
   PermissionProfile,
   ProjectRecord,
+  RateLimitSnapshot,
+  RateLimitWindow,
   ThreadListResponse,
   ThreadOutput,
   ThreadSummary,
   UsageResetCreditsResponse,
+  UsageResetRedemptionResponse,
   VisibleThreadItem,
 } from "../contracts/types";
 import {
@@ -216,7 +219,7 @@ const PREVIEW_ENGINE = {
       "scheduledAutomations",
     ],
   },
-  schemaVersion: 21,
+  schemaVersion: 23,
   config: PREVIEW_CONFIG,
   diagnosticLogPath: "D:\\Codex App Preview\\logs\\runtime.jsonl",
   permissionProfiles: [
@@ -227,9 +230,9 @@ const PREVIEW_ENGINE = {
 } as const satisfies EngineStartResponse;
 
 const PREVIEW_MODEL_DEFINITIONS = [
-  ["gpt-5.6-sol", "5.6 Sol"],
-  ["gpt-5.6-terra", "5.6 Terra"],
-  ["gpt-5.6-luna", "5.6 Luna"],
+  ["gpt-5.6-sol", "GPT-5.6 Sol"],
+  ["gpt-5.6-terra", "GPT-5.6 Terra"],
+  ["gpt-5.6-luna", "GPT-5.6 Luna"],
   ["gpt-5.5", "GPT-5.5"],
   ["gpt-5.4", "GPT-5.4"],
   ["gpt-5.4-mini", "GPT-5.4-Mini"],
@@ -355,6 +358,7 @@ const PREVIEW_SCROLL_ITEMS: readonly VisibleThreadItem[] = [
 
 const PREVIEW_CONTEXT_THREAD = {
   id: "preview-context-thread",
+  agent: null,
   mode: "codex",
   preview: "Inspecionar janela de contexto",
   name: "Inspecionar janela de contexto",
@@ -810,6 +814,7 @@ const PREVIEW_CONTEXT_THREAD = {
 
 const PREVIEW_CHAT_REFERENCE_THREAD = {
   id: "preview-chat-reference-thread",
+  agent: null,
   mode: "codex",
   preview: "Audit project against RULES.md",
   name: "Audit project against RULES.md",
@@ -1076,6 +1081,7 @@ function previewTimelineFileStressActivities(fileCount: number): readonly Visibl
 
 const PREVIEW_TIMELINE_STRESS_THREAD = {
   id: "preview-timeline-stress-thread",
+  agent: null,
   mode: "codex",
   preview: "Estresse de timeline expandida",
   name: "Estresse de timeline expandida",
@@ -1168,6 +1174,7 @@ function previewTimelineStressThread(fileCount: number): CodexThread {
 
 const PREVIEW_TIMELINE_LIGHT_THREAD = {
   id: "preview-timeline-light-thread",
+  agent: null,
   mode: "codex",
   preview: "Chat leve de controle",
   name: "Chat leve de controle",
@@ -1203,6 +1210,7 @@ const PREVIEW_TIMELINE_LIGHT_THREAD = {
 
 const PREVIEW_ACTIVITY_RECONCILIATION_THREAD = {
   id: "preview-activity-reconciliation-thread",
+  agent: null,
   mode: "codex",
   preview: "Reconciliação de comandos paralelos",
   name: "Reconciliação de comandos paralelos",
@@ -1234,6 +1242,29 @@ const PREVIEW_ACTIVITY_RECONCILIATION_THREAD = {
     },
   ],
 } as const satisfies CodexThread;
+
+const PREVIEW_PRE_COMPACTION_THREAD = withActiveContextUsage(PREVIEW_CONTEXT_THREAD, 244_800);
+
+function withActiveContextUsage(thread: CodexThread, totalTokens: number): CodexThread {
+  return {
+    ...thread,
+    turns: thread.turns.map((turn) => ({
+      ...turn,
+      items: turn.items.map((item) =>
+        item.type === "contextUsage" && item.id === "context-preview-active-turn-0"
+          ? {
+              ...item,
+              usage: {
+                ...item.usage,
+                inputTokens: Math.max(0, totalTokens - item.usage.outputTokens),
+                totalTokens,
+              },
+            }
+          : item,
+      ),
+    })),
+  };
+}
 
 const PREVIEW_THREADS = {
   data: [previewThreadSummary(PREVIEW_CONTEXT_THREAD)],
@@ -1288,30 +1319,33 @@ function previewThreadSummary(thread: CodexThread): ThreadSummary {
     updatedAt: thread.updatedAt,
     recencyAt: thread.recencyAt,
     status: thread.status,
+    agent: thread.agent,
   };
 }
 
-const PREVIEW_RATE_LIMITS = {
-  rateLimits: {
-    limitId: "codex",
-    limitName: null,
-    primary: {
-      usedPercent: 43,
-      windowDurationMins: 300,
-      resetsAt: Date.parse("2026-08-22T11:45:00-03:00"),
-    },
-    secondary: {
-      usedPercent: 93,
-      windowDurationMins: 10_080,
-      resetsAt: Date.parse("2026-08-27T05:38:00-03:00"),
-    },
-    credits: { hasCredits: true, unlimited: false, balance: "R$ 0" },
-    individualLimit: null,
-    spendControlReached: null,
-    planType: "pro",
-    rateLimitReachedType: null,
+const PREVIEW_GENERAL_RATE_LIMIT = {
+  limitId: "codex",
+  limitName: null,
+  primary: {
+    usedPercent: 43,
+    windowDurationMins: 300,
+    resetsAt: Date.parse("2026-08-22T11:45:00-03:00"),
   },
-  rateLimitsByLimitId: {
+  secondary: {
+    usedPercent: 93,
+    windowDurationMins: 10_080,
+    resetsAt: Date.parse("2026-08-27T05:38:00-03:00"),
+  },
+  credits: { hasCredits: true, unlimited: false, balance: "R$ 0" },
+  individualLimit: null,
+  spendControlReached: null,
+  planType: "pro",
+  rateLimitReachedType: null,
+} as const satisfies RateLimitSnapshot;
+
+const PREVIEW_RATE_LIMITS = {
+  generalRateLimit: PREVIEW_GENERAL_RATE_LIMIT,
+  additionalRateLimitsByLimitId: {
     codex_spark: {
       limitId: "codex_spark",
       limitName: "GPT-5.3-Codex-Spark",
@@ -1331,17 +1365,33 @@ const PREVIEW_RATE_LIMITS = {
       planType: "pro",
       rateLimitReachedType: null,
     },
+    base_model_inference: {
+      limitId: "base_model_inference",
+      limitName: "gpt-reserve",
+      primary: null,
+      secondary: {
+        usedPercent: 14,
+        windowDurationMins: 10_080,
+        resetsAt: Date.parse("2026-09-07T00:04:00-03:00"),
+      },
+      credits: null,
+      individualLimit: null,
+      spendControlReached: null,
+      planType: "pro",
+      rateLimitReachedType: null,
+    },
   },
   planPrice: { amount: 52_500, currency: "BRL", minorUnitExponent: 2 },
+  lunaReserveAvailable: true,
 } as const satisfies AccountRateLimitsResponse;
 
-let previewUsageResets: UsageResetCreditsResponse = {
+const PREVIEW_USAGE_RESETS: UsageResetCreditsResponse = {
   credits: [
     {
       id: "preview-reset-credit",
       title: "Redefinição completa",
       status: "available",
-      expiresAt: Date.parse("2026-09-20T21:16:00-03:00"),
+      expiresAt: Date.now() + 14 * 24 * 60 * 60_000,
     },
   ],
   availableCount: 1,
@@ -1360,14 +1410,37 @@ let previewAutoTopUpSettings: AutoTopUpSettingsSnapshot = {
 };
 
 let previewApplicationPreferences: ApplicationPreferences = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   startWithWindows: true,
   startMinimized: false,
   closeToTray: true,
+  notifications: {
+    enabled: true,
+    transientPosition: "bottomRight",
+    transientDurationSeconds: 8,
+    events: {
+      approvalRequired: { enabled: true, priority: true },
+      taskCompleted: { enabled: true, priority: false },
+      taskFailed: { enabled: true, priority: true },
+      usageLimitReset: { enabled: true, priority: false },
+      usageResetAvailable: { enabled: true, priority: true },
+      lunaReserveAvailable: { enabled: true, priority: true },
+    },
+  },
 } satisfies ApplicationPreferences;
 
 export function setupBrowserPreview(): void {
   const previewParameters = new URLSearchParams(window.location.search);
+  let previewRateLimits: AccountRateLimitsResponse = PREVIEW_RATE_LIMITS;
+  let previewUsageResets = PREVIEW_USAGE_RESETS;
+  const resetRedemptions = new Map<string, UsageResetRedemptionResponse>();
+  if (previewParameters.get("usageResets") === "empty") {
+    previewUsageResets = {
+      credits: [],
+      availableCount: 0,
+      immediateResetPurchaseEligible: false,
+    };
+  }
   const previewModelCatalog =
     previewParameters.get("runtimeRestrictions") === "1"
       ? PREVIEW_RUNTIME_RESTRICTED_MODEL_CATALOG
@@ -1399,7 +1472,9 @@ export function setupBrowserPreview(): void {
     ? timelineStressThread
     : previewParameters.get("chatReference") === "1"
       ? PREVIEW_CHAT_REFERENCE_THREAD
-      : PREVIEW_CONTEXT_THREAD;
+      : previewParameters.get("contextUsage") === "preCompact"
+        ? PREVIEW_PRE_COMPACTION_THREAD
+        : PREVIEW_CONTEXT_THREAD;
   const previewThreads = timelineStressPreview
     ? timelineStressThreads
     : previewThread === PREVIEW_CONTEXT_THREAD
@@ -1642,21 +1717,56 @@ export function setupBrowserPreview(): void {
           thread: resumedThread,
           cwd: resumedThread.cwd,
           nextCursor: null,
+          agentThreads: [],
         };
       }
       case "engine_account_rate_limits_read":
-        return PREVIEW_RATE_LIMITS;
+        return previewRateLimits;
       case "engine_account_usage_resets_read":
         return previewUsageResets;
       case "engine_account_usage_reset_redeem": {
-        const request = (args as { request?: { creditId?: string | null } }).request;
-        const redeemedId = request?.creditId ?? previewUsageResets.credits[0]?.id ?? null;
+        const requestId = readPreviewRequestString(args, "redeemRequestId");
+        const previous = resetRedemptions.get(requestId);
+        if (previous !== undefined) return { ...previous, code: "already_redeemed" };
+        const creditId = (args as { request?: { creditId?: unknown } }).request?.creditId;
+        if (creditId !== null && typeof creditId !== "string") {
+          throw new Error("The preview reset credit id is invalid.");
+        }
+        const credit = previewUsageResets.credits.find((entry) =>
+          creditId === null ? entry.status === "available" : entry.id === creditId,
+        );
+        if (credit === undefined) return { code: "no_credits_available", creditId };
+        if (credit.status !== "available") return { code: "already_redeemed", creditId: credit.id };
+        const now = Date.now();
+        if (credit.expiresAt !== null && credit.expiresAt <= now) {
+          return { code: "expired", creditId: credit.id };
+        }
         previewUsageResets = {
           ...previewUsageResets,
-          availableCount: Math.max(0, previewUsageResets.availableCount - 1),
-          credits: previewUsageResets.credits.filter((credit) => credit.id !== redeemedId),
+          availableCount: previewUsageResets.availableCount - 1,
+          credits: previewUsageResets.credits.map((entry) =>
+            entry.id === credit.id ? { ...entry, status: "redeemed" } : entry,
+          ),
         };
-        return { code: "reset", creditId: redeemedId };
+        previewRateLimits = {
+          ...previewRateLimits,
+          generalRateLimit: resetPreviewUsageSnapshot(previewRateLimits.generalRateLimit, now),
+          additionalRateLimitsByLimitId: Object.fromEntries(
+            Object.entries(previewRateLimits.additionalRateLimitsByLimitId).map(
+              ([id, snapshot]) => [
+                id,
+                id === "codex_spark" ? resetPreviewUsageSnapshot(snapshot, now) : snapshot,
+              ],
+            ),
+          ),
+          lunaReserveAvailable: false,
+        };
+        const response = {
+          code: "reset",
+          creditId: credit.id,
+        } satisfies UsageResetRedemptionResponse;
+        resetRedemptions.set(requestId, response);
+        return response;
       }
       case "engine_account_auto_top_up_read":
         return previewAutoTopUpSettings;
@@ -1997,12 +2107,15 @@ function schedulePreviewActivityReconciliation(): void {
   const newerCommentary = {
     type: "agentMessage" as const,
     id: PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_ID,
-    text: PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_TEXT,
+    text: `${PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_TEXT}\n\nTexto **parcial confirmado**.`,
     phase: "commentary" as const,
   };
   let warmupFrames = 6;
   let started = 0;
   let commentaryEmitted = false;
+  let commentaryStage = 0;
+  let commentaryFrames = 0;
+  let commentaryParagraph: Element | null = null;
   let completed = 0;
   let identityComparisons = 0;
   let identityChanges = 0;
@@ -2071,6 +2184,73 @@ function schedulePreviewActivityReconciliation(): void {
         continue;
       }
       if (!commentaryEmitted) {
+        if (commentaryFrames > 0) {
+          commentaryFrames -= 1;
+          requestAnimationFrame(publishFrame);
+          return;
+        }
+        if (commentaryStage === 0) {
+          if (
+            !emitBrowserPreviewRuntimeEvent("engine://notification", {
+              method: "item.started",
+              params: { threadId, turnId, item: { ...newerCommentary, text: "" } },
+            }) ||
+            !emitBrowserPreviewRuntimeEvent("engine://notification", {
+              method: "item.streamDeltas",
+              params: {
+                threadId,
+                turnId,
+                deltas: [
+                  {
+                    kind: "agentText",
+                    itemId: newerCommentary.id,
+                    delta: `${PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_TEXT}\n\nTexto **parcial`,
+                  },
+                ],
+              },
+            })
+          ) {
+            throw new Error("The preview could not start streaming commentary.");
+          }
+          commentaryStage = 1;
+          commentaryFrames = 4;
+          requestAnimationFrame(publishFrame);
+          return;
+        }
+        if (commentaryStage === 1) {
+          commentaryParagraph = document.querySelector(".commentary .markdown p");
+          if (
+            !emitBrowserPreviewRuntimeEvent("engine://notification", {
+              method: "item.streamDeltas",
+              params: {
+                threadId,
+                turnId,
+                deltas: [
+                  {
+                    kind: "agentText",
+                    itemId: newerCommentary.id,
+                    delta: " confirmado**.",
+                  },
+                ],
+              },
+            })
+          ) {
+            throw new Error("The preview could not continue streaming commentary.");
+          }
+          commentaryStage = 2;
+          commentaryFrames = 4;
+          requestAnimationFrame(publishFrame);
+          return;
+        }
+        setMetric(
+          "commentary-prefix-retained",
+          String(
+            commentaryParagraph !== null &&
+              commentaryParagraph === document.querySelector(".commentary .markdown p") &&
+              document.querySelector(".commentary .markdown strong")?.textContent ===
+                "parcial confirmado",
+          ),
+        );
         if (
           !emitBrowserPreviewRuntimeEvent("engine://notification", {
             method: "item.completed",
@@ -2293,6 +2473,27 @@ interface PreviewBrowserViewportRecord {
   readonly height?: unknown;
   readonly scale?: unknown;
   readonly width?: unknown;
+}
+
+function resetPreviewUsageSnapshot(snapshot: RateLimitSnapshot, now: number): RateLimitSnapshot {
+  return {
+    ...snapshot,
+    primary: resetPreviewUsageWindow(snapshot.primary, now),
+    secondary: resetPreviewUsageWindow(snapshot.secondary, now),
+    rateLimitReachedType: null,
+  };
+}
+
+function resetPreviewUsageWindow(
+  window: RateLimitWindow | null,
+  now: number,
+): RateLimitWindow | null {
+  if (window === null) return null;
+  return {
+    ...window,
+    usedPercent: 0,
+    resetsAt: window.windowDurationMins === null ? null : now + window.windowDurationMins * 60_000,
+  };
 }
 
 function readPreviewRequestString(args: unknown, key: string): string {

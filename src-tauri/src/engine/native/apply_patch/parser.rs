@@ -45,7 +45,8 @@ impl UpdateChunk {
         })
     }
 
-    pub(in crate::engine::native) fn new_lines(&self) -> impl Iterator<Item = &str> {
+    #[cfg(test)]
+    fn new_lines(&self) -> impl Iterator<Item = &str> {
         self.lines.iter().filter_map(|line| match line {
             UpdateLine::Deletion(_) => None,
             UpdateLine::Addition(value) | UpdateLine::Context(value) => Some(value.as_str()),
@@ -85,6 +86,12 @@ pub(in crate::engine::native) fn parse_patch(input: &str) -> Result<ParsedPatch,
     };
     let mut hunks = Vec::new();
     while cursor.index < cursor.end_index {
+        if hunks.len() == super::MAX_PATCH_FILES {
+            return Err(invalid(
+                cursor.line_number(),
+                format!("patch exceeds {} file hunks", super::MAX_PATCH_FILES),
+            ));
+        }
         hunks.push(parse_hunk(&mut cursor)?);
     }
     if hunks.is_empty() {

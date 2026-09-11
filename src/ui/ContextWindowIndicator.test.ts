@@ -9,22 +9,43 @@ describe("context window metrics", () => {
     expect(calculateContextWindowMetrics(usage(10, null))).toBeNull();
   });
 
-  it("uses the full model context window like the official desktop", () => {
+  it("uses the usable window attached to the measured model execution", () => {
     expect(calculateContextWindowMetrics(usage(174_000, 272_000, 258_400))).toEqual({
-      contextWindow: 272_000,
-      percent: (174_000 / 272_000) * 100,
-      remainingPercent: 36,
+      usableContextWindow: 258_400,
+      usedPercent: (174_000 / 258_400) * 100,
+      remainingPercent: 33,
       usedTokens: 174_000,
+      cachedInputTokens: 0,
+      cachedPercent: 0,
+    });
+  });
+
+  it("matches the desktop projection at the automatic compaction threshold", () => {
+    expect(calculateContextWindowMetrics(usage(244_800, 272_000, 258_400))).toEqual({
+      usableContextWindow: 258_400,
+      usedPercent: (244_800 / 258_400) * 100,
+      remainingPercent: 5,
+      usedTokens: 244_800,
+      cachedInputTokens: 0,
+      cachedPercent: 0,
     });
   });
 
   it("clamps over-reported usage to a complete donut", () => {
-    expect(calculateContextWindowMetrics(usage(300_000, 272_000))).toEqual({
-      contextWindow: 272_000,
-      percent: 100,
+    expect(calculateContextWindowMetrics(usage(300_000, 272_000, 258_400))).toEqual({
+      usableContextWindow: 258_400,
+      usedPercent: 100,
       remainingPercent: 0,
-      usedTokens: 272_000,
+      usedTokens: 258_400,
+      cachedInputTokens: 0,
+      cachedPercent: 0,
     });
+  });
+
+  it("computes cache hit rate from provider cached input tokens", () => {
+    const metrics = calculateContextWindowMetrics(usage(174_000, 272_000, 258_400, 120_000));
+    expect(metrics?.cachedInputTokens).toBe(120_000);
+    expect(metrics?.cachedPercent).toBeCloseTo((120_000 / 174_000) * 100, 10);
   });
 
   it("keeps useful precision for small token totals without cluttering the model limit", () => {
@@ -37,6 +58,7 @@ function usage(
   totalTokens: number,
   tokens: number | null,
   usableTokens = tokens ?? 0,
+  cachedInputTokens = 0,
 ): ContextUsageItem {
   return {
     type: "contextUsage",
@@ -44,7 +66,7 @@ function usage(
     model: "test-model",
     usage: {
       inputTokens: totalTokens,
-      cachedInputTokens: 0,
+      cachedInputTokens,
       outputTokens: 0,
       reasoningOutputTokens: 0,
       totalTokens,

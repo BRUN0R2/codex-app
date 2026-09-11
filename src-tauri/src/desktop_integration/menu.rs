@@ -7,7 +7,10 @@ use tauri::{
 };
 use tauri_plugin_dialog::DialogExt as _;
 
-use crate::error::{AppError, CommandResult};
+use crate::{
+    desktop_integration::DesktopIntegrationLifecycle,
+    error::{AppError, CommandResult},
+};
 
 const MAX_MENU_LABEL_CHARACTERS: usize = 128;
 const MAX_ABOUT_BODY_CHARACTERS: usize = 512;
@@ -215,16 +218,18 @@ fn build(app: &AppHandle, translation: &ApplicationMenuTranslation) -> tauri::Re
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn application_menu_update(
+pub async fn application_menu_update(
     app: AppHandle,
-    state: State<'_, ApplicationMenuState>,
+    lifecycle: State<'_, DesktopIntegrationLifecycle>,
+    menu_state: State<'_, ApplicationMenuState>,
     translation: ApplicationMenuTranslation,
 ) -> CommandResult<()> {
+    lifecycle.wait_until_ready().await?;
     let translation = translation.validate()?;
     let menu = build(&app, &translation).map_err(|error| {
         AppError::State(format!("could not build the application menu: {error}"))
     })?;
-    let mut current = state.lock()?;
+    let mut current = menu_state.lock()?;
     let previous_menu = app.set_menu(menu).map_err(|error| {
         AppError::State(format!("could not replace the application menu: {error}"))
     })?;
