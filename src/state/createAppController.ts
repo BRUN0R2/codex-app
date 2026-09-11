@@ -11,19 +11,11 @@ import {
 import type { ConfigurableNotificationEventKind } from "../contracts/notificationOverlay";
 import type {
   AccountProfileResponse,
-  AccountRateLimitsResponse,
   AccountReadResponse,
-  ApplicationPreferences,
   AppProduct,
   ApprovalDecision,
   Attachment,
-  Automation,
-  AutomationInput,
-  AutomationRun,
-  AutoTopUpSettingsSnapshot,
   ChatGptMode,
-  ChatModelOption,
-  CodexModel,
   CodexThread,
   ConfigReadResponse,
   ConfigUpdate,
@@ -36,48 +28,32 @@ import type {
   RuntimeDiagnostic,
   RuntimeStatus,
   ThreadSummary,
-  UsageResetCreditsResponse,
-  UsageResetRedemptionResponse,
 } from "../contracts/types";
 import { formatMessage, type TranslationMessages } from "../i18n/messages";
 import {
   archiveThread as archiveThreadCommand,
   cancelLogin as cancelLoginCommand,
   confirmDesktopDialog as confirm,
-  createAutomation as createAutomationCommand,
-  deleteAutomation as deleteAutomationCommand,
   deleteThread as deleteThreadCommand,
   describeDiagnosticError,
   describeError,
-  disableAutoTopUp as disableAutoTopUpCommand,
-  enableAutoTopUp as enableAutoTopUpCommand,
   forkThread as forkThreadCommand,
   inspectAttachments,
   interruptTurn,
   listAutomations,
-  listChatModels,
-  listModels,
   listThreads,
   loginWithChatGpt,
   logout as logoutCommand,
-  markAutomationRunReviewed as markAutomationRunReviewedCommand,
   openDesktopDialog as open,
   openExternalUrl as openExternalUrlCommand,
   openWorkspaceDirectory as openWorkspaceDirectoryCommand,
   readAccount,
-  readAccountProfile,
-  readApplicationPreferences,
   readAttachmentImage as readAttachmentImageCommand,
-  readAutoTopUpSettings,
   readOutput as readOutputCommand,
-  readRateLimits,
   readThread,
-  readUsageResets,
-  redeemUsageReset as redeemUsageResetCommand,
   reportFrontendDiagnostic,
   respondToServerRequest,
   resumeThread,
-  runAutomationNow as runAutomationNowCommand,
   savePastedImage,
   setThreadName,
   startEngine,
@@ -86,17 +62,12 @@ import {
   steerTurn,
   subscribeToEvents,
   unarchiveThread as unarchiveThreadCommand,
-  updateApplicationPreferences as updateApplicationPreferencesCommand,
-  updateAutomation as updateAutomationCommand,
-  updateAutoTopUp as updateAutoTopUpCommand,
   updateConfig,
 } from "../infrastructure/codexClient";
 import { subscribeToMenuEvents, synchronizeApplicationMenu } from "../infrastructure/desktopClient";
-import { isBrowserPreview, isDesktopRuntime } from "../platform/desktopRuntime";
-import {
-  createAccountProfileRefreshCoordinator,
-  mergeAccountProfile,
-} from "./accountProfileRefresh";
+import { isDesktopRuntime } from "../platform/desktopRuntime";
+import { mergeAccountProfile } from "./accountProfileRefresh";
+import { createAccountUsageController } from "./accountUsageController";
 import type {
   AppController,
   ApplicationShellActionRequest,
@@ -104,25 +75,18 @@ import type {
   DiagnosticEntry,
   SendMessageInput,
 } from "./appController";
-import {
-  type ApplicationPreferencesPatch,
-  DEFAULT_APPLICATION_PREFERENCES,
-  mergeApplicationPreferences,
-} from "./applicationPreferences";
+import { createApplicationPreferencesController } from "./applicationPreferencesController";
 import { type AppNotificationInput, createAppNotificationCenter } from "./appNotifications";
+import { createAutomationSessionController } from "./automationSessionController";
 import {
-  unreadAutomationRuns as readUnreadAutomationRuns,
-  removeAutomation,
-  removeAutomationRuns,
-  replaceAutomationRuns,
-  replaceAutomations,
-  upsertAutomation,
-  upsertAutomationRun,
-} from "./automations";
+  captureInitialization,
+  type SessionControllerHost,
+  settledQueueTail,
+  withBootTimeout,
+} from "./controllerSupport";
 import { applyCommandStreamDeltasToThread, readLatestTurnFailure } from "./conversation";
 import {
   type InitializationStage,
-  InitializationTimeoutError,
   initializationRetryDelay,
   isRetryableInitializationFailure,
 } from "./initializationRetry";
@@ -137,9 +101,10 @@ import {
   takeQueuedMessage as reduceTakeQueuedMessage,
   saveMessageQueue,
 } from "./messageQueue";
+import { createModelCatalogController } from "./modelCatalogController";
 import { createNotificationOverlayBridge } from "./notificationOverlayBridge";
 import { createNotificationPreview } from "./notificationPreview";
-import { findUsageLimitReset, notificationTaskLabel } from "./notificationTransitions";
+import { notificationTaskLabel } from "./notificationTransitions";
 import {
   loadPinnedThreadIds,
   removePinnedThreadId,
@@ -182,11 +147,6 @@ import {
   saveProjects,
   updateProject as updateProjectsList,
 } from "./projects";
-import {
-  createBrowserRateLimitRefreshHost,
-  createRateLimitRefreshCoordinator,
-} from "./rateLimitRefresh";
-import { mergeRateLimitUpdate } from "./rateLimits";
 import { SingleFlightOperations } from "./singleFlightOperations";
 import {
   createBrowserStreamDeltaScheduler,
@@ -229,9 +189,7 @@ const MAX_DIAGNOSTICS = 50;
 const EVENT_SUBSCRIPTION_TIMEOUT_MS = 15_000;
 const ENGINE_START_TIMEOUT_MS = 120_000;
 const ACCOUNT_READ_TIMEOUT_MS = 45_000;
-const APPLICATION_PREFERENCES_READ_TIMEOUT_MS = 15_000;
 const THREAD_PAGE_CACHE_CAPACITY = 8;
-const USAGE_RESET_REFRESH_STALE_MS = 5 * 60 * 1_000;
 
 interface AppControllerLocalization {
   readonly confirmations: Accessor<TranslationMessages["confirmations"]>;
@@ -253,34 +211,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
   });
   const [engine, setEngine] = createSignal<EngineStartResponse | null>(null);
   const [account, setAccount] = createSignal<AccountReadResponse>();
-  const [accountProfile, setAccountProfile] = createSignal<AccountProfileResponse | null>(null);
-  const [accountProfileError, setAccountProfileError] = createSignal<string | null>(null);
-  const [accountProfileLoading, setAccountProfileLoading] = createSignal(false);
-  const [chatModels, setChatModels] = createSignal<readonly ChatModelOption[]>([]);
-  const [models, setModels] = createSignal<readonly CodexModel[]>([]);
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
-  const [applicationPreferences, setApplicationPreferences] = createSignal<ApplicationPreferences>(
-    DEFAULT_APPLICATION_PREFERENCES,
-  );
-  const [applicationPreferencesError, setApplicationPreferencesError] = createSignal<string | null>(
-    null,
-  );
-  const [applicationPreferencesLoaded, setApplicationPreferencesLoaded] = createSignal(false);
-  const [applicationPreferencesSaving, setApplicationPreferencesSaving] = createSignal(false);
   const [applicationShellActionRequest, setApplicationShellActionRequest] =
     createSignal<ApplicationShellActionRequest | null>(null);
-  const [rateLimits, setRateLimits] = createSignal<AccountRateLimitsResponse | null>(null);
-  const [rateLimitsError, setRateLimitsError] = createSignal<string | null>(null);
-  const [rateLimitsLoading, setRateLimitsLoading] = createSignal(false);
-  const [usageResets, setUsageResets] = createSignal<UsageResetCreditsResponse | null>(null);
-  const [usageResetsError, setUsageResetsError] = createSignal<string | null>(null);
-  const [usageResetsLoading, setUsageResetsLoading] = createSignal(false);
-  const [usageResetRedeemingId, setUsageResetRedeemingId] = createSignal<string | null>(null);
-  const [autoTopUpSettings, setAutoTopUpSettings] = createSignal<AutoTopUpSettingsSnapshot | null>(
-    null,
-  );
-  const [autoTopUpError, setAutoTopUpError] = createSignal<string | null>(null);
-  const [autoTopUpLoading, setAutoTopUpLoading] = createSignal(false);
   const [threads, setThreads] = createSignal<readonly ThreadSummary[]>([]);
   const [threadsNextCursor, setThreadsNextCursor] = createSignal<string | null>(null);
   const [archivedThreads, setArchivedThreads] = createSignal<readonly ThreadSummary[]>([]);
@@ -289,9 +222,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
   const [archivedThreadsNextCursor, setArchivedThreadsNextCursor] = createSignal<string | null>(
     null,
   );
-  const [automations, setAutomations] = createSignal<readonly Automation[]>([]);
-  const [automationRuns, setAutomationRuns] = createSignal<readonly AutomationRun[]>([]);
-  const [automationsLoading, setAutomationsLoading] = createSignal(false);
   const [currentThread, setCurrentThread] = createSignal<CodexThread | null>(null);
   const [allAgentThreads, setAllAgentThreads] = createSignal<readonly ThreadSummary[]>([]);
   const activeTaskRootId = createMemo(
@@ -341,21 +271,10 @@ export function createAppController(localization: AppControllerLocalization): Ap
   const [error, setError] = createSignal<string | null>(null);
   const [pendingOperations, setPendingOperations] = createSignal(0);
   const [notificationUsageSettingsRequest, setNotificationUsageSettingsRequest] = createSignal(0);
-  const notificationCenter = createAppNotificationCenter(
-    () => applicationPreferences().notifications,
-  );
-  let pendingThreadSelectionId: string | null = null;
-  let threadSelectionRevision = 0;
   const [loginPending, setLoginPending] = createSignal(false);
   const [workspace, setWorkspace] = createSignal<string | null>(null);
   let loginId: string | null = null;
   let diagnosticSequence = 0;
-  let pendingAccountProfileReads = 0;
-  let pendingRateLimitReads = 0;
-  let lastUsageResetReadAt = 0;
-  let usageResetReadRevision = 0;
-  let accountUsageSessionRevision = 0;
-  let manualUsageResetNotificationPending = false;
   let disposed = false;
   let unsubscribe: (() => void) | null = null;
   let unsubscribeFromMenu: (() => void) | null = null;
@@ -364,9 +283,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
   let initializationRevision = 0;
   let initializationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let configQueue: Promise<void> = Promise.resolve();
-  let applicationPreferencesQueue: Promise<void> = Promise.resolve();
-  let confirmedApplicationPreferences: ApplicationPreferences = DEFAULT_APPLICATION_PREFERENCES;
-  let applicationPreferencesRevision = 0;
   const queuedDispatchTails = new Map<string, Promise<void>>();
   const singleFlightOperations = new SingleFlightOperations<string, boolean>();
   let authenticationSync: {
@@ -376,7 +292,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
   let authenticatedStateLoaded = false;
   let authenticatedStateRequest: Promise<void> | null = null;
   let persistedQueuesResumed = false;
-  let modelCatalogSessionRevision = 0;
   const capturedProjects = captureInitialization(loadProjects);
   const initialProjects = capturedProjects.failure === undefined ? capturedProjects.value : [];
   const projectLoadError = capturedProjects.failure ?? null;
@@ -394,6 +309,89 @@ export function createAppController(localization: AppControllerLocalization): Ap
     initialProductFlow.destinations[activeConversationMode(initialProductFlow)].workspace,
   );
 
+  function addDiagnostic(diagnostic: RuntimeDiagnostic): void {
+    diagnosticSequence += 1;
+    const entry: DiagnosticEntry = {
+      ...diagnostic,
+      id: diagnosticSequence,
+      occurredAt: new Date(),
+    };
+    setDiagnostics((current) => [...current.slice(-(MAX_DIAGNOSTICS - 1)), entry]);
+  }
+
+  function reportError(reason: unknown): void {
+    const message = describeError(reason);
+    const diagnostic = describeDiagnosticError(reason);
+    setError(message);
+    addDiagnostic({ stream: "runtime", message: diagnostic });
+    if (engine() !== null) {
+      void reportFrontendDiagnostic(diagnostic).catch((persistenceFailure: unknown) => {
+        addDiagnostic({
+          stream: "runtime",
+          message: `Failed to persist frontend diagnostic: ${describeError(persistenceFailure)}`,
+        });
+      });
+    }
+  }
+
+  async function withPending<T>(operation: () => Promise<T>): Promise<T> {
+    setPendingOperations((count) => count + 1);
+    try {
+      return await operation();
+    } finally {
+      setPendingOperations((count) => Math.max(0, count - 1));
+    }
+  }
+
+  const sessionHost: SessionControllerHost = {
+    isDisposed: () => disposed,
+    reportError,
+    setError,
+    singleFlight: singleFlightOperations,
+    withPending,
+  };
+
+  const modelCatalog = createModelCatalogController({
+    host: sessionHost,
+    isSignedIn: () => signedIn(),
+  });
+
+  function enqueueNotification(input: AppNotificationInput): boolean {
+    return preferences.applicationPreferencesLoaded() && notificationCenter.enqueue(input);
+  }
+
+  const accountUsage = createAccountUsageController({
+    account,
+    addDiagnostic,
+    applyAccountProfile: (profile: AccountProfileResponse) => {
+      setAccount((current) => mergeAccountProfile(current, profile));
+    },
+    enqueueNotification,
+    host: sessionHost,
+    isSignedIn: () => signedIn(),
+    localization: { notifications: localization.notifications },
+    onLunaReserveChanged: () => {
+      modelCatalog.invalidateCatalogs();
+      void modelCatalog.ensureModelsForMode(conversationMode());
+    },
+  });
+
+  const automationSession = createAutomationSessionController({
+    confirmations: localization.confirmations,
+    host: sessionHost,
+    isSignedIn: () => signedIn(),
+  });
+
+  const preferences = createApplicationPreferencesController({
+    isDisposed: () => disposed,
+    onSaved: notifySettingsSaved,
+    reportError,
+  });
+
+  const notificationCenter = createAppNotificationCenter(
+    () => preferences.applicationPreferences().notifications,
+  );
+
   const product = createMemo(() => productFlow().product);
   const chatGptMode = createMemo(() => productFlow().chatGptMode);
   const conversationMode = createMemo(() => activeConversationMode(productFlow()));
@@ -408,141 +406,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     ),
   );
   const signedIn = createMemo(() => account()?.account !== null && account() !== undefined);
-  createEffect(() => {
-    if (signedIn()) {
-      return;
-    }
-    notificationCenter.reset();
-    batch(() => {
-      setUsageResets(null);
-      setUsageResetsError(null);
-      setUsageResetsLoading(false);
-      setUsageResetRedeemingId(null);
-      lastUsageResetReadAt = 0;
-      setAutoTopUpSettings(null);
-      setAutoTopUpError(null);
-      setAutoTopUpLoading(false);
-    });
-  });
   const hasOlderHistory = createMemo(() => historyCursor() !== null);
-  const rateLimitRefresh = createRateLimitRefreshCoordinator({
-    getSessionKey: () => accountSessionKey(account()),
-    read: readRateLimitsWithStatus,
-    apply: applyRateLimits,
-    reportError: (reason) => {
-      setRateLimitsError(describeError(reason));
-      addDiagnostic({ stream: "runtime", message: describeError(reason) });
-    },
-    host: createBrowserRateLimitRefreshHost(),
-  });
-
-  function invalidateAccountUsageSession(): void {
-    accountUsageSessionRevision += 1;
-    manualUsageResetNotificationPending = false;
-    invalidateUsageResetReads();
-    rateLimitRefresh.invalidate();
-    setUsageResetRedeemingId(null);
-  }
-
-  function invalidateUsageResetReads(): void {
-    usageResetReadRevision += 1;
-    lastUsageResetReadAt = 0;
-    setUsageResetsLoading(false);
-  }
-
-  function applyRateLimits(value: AccountRateLimitsResponse): void {
-    const previous = rateLimits();
-    const reset = previous === null ? null : findUsageLimitReset(previous, value);
-    if (reset !== null) {
-      if (!manualUsageResetNotificationPending) {
-        enqueueNotification({
-          approval: null,
-          id: `usage-limit-reset:${reset.limitId}:${reset.resetsAt}`,
-          event: "usageLimitReset",
-          tone: "success",
-          title: localization.notifications().usageLimitResetTitle,
-          message: formatMessage(localization.notifications().usageLimitResetMessage, {
-            percent: reset.availablePercent,
-          }),
-          target: { type: "settings", page: "usage" },
-        });
-      }
-      manualUsageResetNotificationPending = false;
-    }
-    if (previous?.lunaReserveAvailable !== true && value.lunaReserveAvailable) {
-      enqueueNotification({
-        approval: null,
-        id: `luna-reserve-available:${value.rateLimits.primary?.resetsAt ?? "current"}`,
-        event: "lunaReserveAvailable",
-        tone: "attention",
-        title: localization.notifications().lunaReserveAvailableTitle,
-        message: localization.notifications().lunaReserveAvailableMessage,
-        target: { type: "settings", page: "usage" },
-      });
-    }
-    const previousAvailability = previous?.lunaReserveAvailable ?? false;
-    batch(() => {
-      setRateLimits(value);
-      setRateLimitsError(null);
-    });
-    if (previousAvailability !== value.lunaReserveAvailable) {
-      invalidateModelCatalogs();
-      void loadModelCatalog();
-    }
-    void refreshUsageResetsIfStale();
-  }
-
-  async function readRateLimitsWithStatus(): Promise<AccountRateLimitsResponse> {
-    pendingRateLimitReads += 1;
-    batch(() => {
-      setRateLimitsLoading(true);
-      setRateLimitsError(null);
-    });
-    try {
-      return await readRateLimits();
-    } finally {
-      pendingRateLimitReads = Math.max(0, pendingRateLimitReads - 1);
-      setRateLimitsLoading(pendingRateLimitReads > 0);
-    }
-  }
-
-  async function readAccountProfileWithStatus(): Promise<AccountProfileResponse> {
-    pendingAccountProfileReads += 1;
-    batch(() => {
-      setAccountProfileLoading(true);
-      setAccountProfileError(null);
-    });
-    try {
-      return await readAccountProfile();
-    } finally {
-      pendingAccountProfileReads = Math.max(0, pendingAccountProfileReads - 1);
-      setAccountProfileLoading(pendingAccountProfileReads > 0);
-    }
-  }
-
-  const accountProfileRefresh = createAccountProfileRefreshCoordinator({
-    getSessionKey: () => accountSessionKey(account()),
-    read: readAccountProfileWithStatus,
-    apply: (profile: AccountProfileResponse) => {
-      setAccountProfile(profile);
-      setAccountProfileError(null);
-      setAccount((current) => mergeAccountProfile(current, profile));
-    },
-    reportError: (reason) => {
-      const message = describeError(reason);
-      setAccountProfileError(message);
-      addDiagnostic({ stream: "runtime", message });
-    },
-  });
-  function invalidateAccountProfileSession(): void {
-    accountProfileRefresh.invalidateSession();
-    pendingAccountProfileReads = 0;
-    batch(() => {
-      setAccountProfile(null);
-      setAccountProfileError(null);
-      setAccountProfileLoading(false);
-    });
-  }
 
   const selectedRuntime = createMemo<ThreadRuntimeState | null>(() => {
     const threadId = currentThread()?.id;
@@ -586,7 +450,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
     return threadId === undefined ? [] : readQueuedMessages(messageQueues(), threadId);
   });
   const busy = createMemo(() => turnBusy() || pendingOperations() > 0);
-  const unreadAutomationRuns = createMemo(() => readUnreadAutomationRuns(automationRuns()));
   const projectSectionExpanded = createMemo(() => projectSidebarState().projectsExpanded);
   const lastTurnFailure = createMemo(() => {
     const thread = currentThread();
@@ -604,7 +467,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   createEffect(() => {
     const mode = conversationMode();
     if (signedIn()) {
-      void ensureModelsForMode(mode);
+      void modelCatalog.ensureModelsForMode(mode);
     }
   });
 
@@ -613,13 +476,90 @@ export function createAppController(localization: AppControllerLocalization): Ap
     if (isDesktopRuntime()) void synchronizeApplicationMenu(translation).catch(reportError);
   });
 
+  createEffect(() => {
+    if (!preferences.applicationPreferences().notifications.enabled) notificationCenter.clear();
+  });
+
   function publishApplicationShellAction(type: ApplicationShellActionRequest["type"]): void {
     applicationShellActionSequence += 1;
     setApplicationShellActionRequest({ sequence: applicationShellActionSequence, type });
   }
 
+  function notifySettingsSaved(): void {
+    notificationSequence += 1;
+    enqueueNotification({
+      approval: null,
+      id: `settings-saved:${notificationSequence}`,
+      event: "settingsSaved",
+      tone: "success",
+      title: localization.notifications().settingsSavedTitle,
+      message: localization.notifications().settingsSavedMessage,
+      target: null,
+    });
+  }
+
+  function previewNotification(event: ConfigurableNotificationEventKind): boolean {
+    if (!preferences.applicationPreferencesLoaded()) return false;
+    notificationSequence += 1;
+    return notificationCenter.preview(
+      createNotificationPreview(event, localization.notifications(), notificationSequence),
+    );
+  }
+
+  function notifyTurnCompletion(
+    notification: Extract<EngineNotification, { readonly method: "turn.completed" }>,
+  ): void {
+    if (notification.params.turn.status === "interrupted") return;
+    const task = notificationTaskLabel(
+      notification.params.threadId,
+      [...threads(), ...allAgentThreads()],
+      localization.notifications().untitledTask,
+    );
+    const failed =
+      notification.params.turn.status === "failed" || notification.params.error !== null;
+    enqueueNotification({
+      approval: null,
+      id: `task-${failed ? "failed" : "completed"}:${notification.params.turn.id}`,
+      event: failed ? "taskFailed" : "taskCompleted",
+      tone: failed ? "error" : "success",
+      title: failed
+        ? localization.notifications().taskFailedTitle
+        : localization.notifications().taskCompletedTitle,
+      message: formatMessage(
+        failed
+          ? localization.notifications().taskFailedMessage
+          : localization.notifications().taskCompletedMessage,
+        { task },
+      ),
+      target: { type: "thread", threadId: notification.params.threadId },
+    });
+  }
+
+  function handleServerRequest(request: EngineServerRequest): void {
+    setPendingApprovals((current) => {
+      if (current.some((entry) => entry.id === request.id)) {
+        throw new Error(`Approval ${request.id} was received twice.`);
+      }
+      return [...current, request];
+    });
+    const task = notificationTaskLabel(
+      request.params.threadId,
+      [...threads(), ...allAgentThreads()],
+      localization.notifications().untitledTask,
+    );
+    enqueueNotification({
+      approval: request,
+      id: `approval-required:${request.id}`,
+      event: "approvalRequired",
+      tone: "attention",
+      title: localization.notifications().approvalTitle,
+      message: formatMessage(localization.notifications().approvalMessage, { task }),
+      target: { type: "thread", threadId: request.params.threadId },
+    });
+  }
+
   onMount(() => {
-    rateLimitRefresh.start();
+    accountUsage.start();
     if (productFlowLoadError !== null) {
       reportError(productFlowLoadError);
     }
@@ -653,72 +593,10 @@ export function createAppController(localization: AppControllerLocalization): Ap
         })
         .catch(reportError);
     }
-    void loadApplicationPreferences().finally(() => {
+    void preferences.loadApplicationPreferences().finally(() => {
       if (!disposed) beginInitialization();
     });
   });
-
-  async function loadApplicationPreferences(): Promise<void> {
-    if (!isDesktopRuntime() && !isBrowserPreview()) {
-      return;
-    }
-    setApplicationPreferencesError(null);
-    try {
-      const stored = await withBootTimeout(
-        "load application preferences",
-        APPLICATION_PREFERENCES_READ_TIMEOUT_MS,
-        readApplicationPreferences,
-      );
-      confirmedApplicationPreferences = stored;
-      setApplicationPreferences(stored);
-      setApplicationPreferencesLoaded(true);
-    } catch (reason) {
-      setApplicationPreferencesError(describeError(reason));
-      reportError(reason);
-    }
-  }
-
-  async function updateApplicationPreferences(
-    patch: ApplicationPreferencesPatch,
-  ): Promise<boolean> {
-    if (!applicationPreferencesLoaded()) return false;
-    const desired = mergeApplicationPreferences(applicationPreferences(), patch);
-    applicationPreferencesRevision += 1;
-    const revision = applicationPreferencesRevision;
-    batch(() => {
-      setApplicationPreferences(desired);
-      setApplicationPreferencesError(null);
-      setApplicationPreferencesSaving(true);
-    });
-
-    const operation = applicationPreferencesQueue.then(async () => {
-      const persisted = mergeApplicationPreferences(confirmedApplicationPreferences, patch);
-      const stored = await updateApplicationPreferencesCommand(persisted);
-      confirmedApplicationPreferences = stored;
-      if (!disposed && revision === applicationPreferencesRevision) {
-        setApplicationPreferences(stored);
-      }
-    });
-    applicationPreferencesQueue = settledQueueTail(operation);
-    try {
-      await operation;
-      notifySettingsSaved();
-      return true;
-    } catch (reason) {
-      if (!disposed && revision === applicationPreferencesRevision) {
-        batch(() => {
-          setApplicationPreferences(confirmedApplicationPreferences);
-          setApplicationPreferencesError(describeError(reason));
-        });
-      }
-      reportError(reason);
-      return false;
-    } finally {
-      if (!disposed && revision === applicationPreferencesRevision) {
-        setApplicationPreferencesSaving(false);
-      }
-    }
-  }
 
   onCleanup(() => {
     disposed = true;
@@ -727,8 +605,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       clearTimeout(initializationRetryTimer);
       initializationRetryTimer = null;
     }
-    accountProfileRefresh.dispose();
-    rateLimitRefresh.dispose();
+    accountUsage.dispose();
     streamDeltas.dispose();
     unsubscribe?.();
     unsubscribe = null;
@@ -797,16 +674,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
       if (!isCurrentInitialization(revision)) {
         return;
       }
-      invalidateAccountProfileSession();
-      invalidateAccountUsageSession();
-      if (accountSessionKey(account()) !== accountSessionKey(currentAccount)) {
-        invalidateAuthenticatedStateLoad();
-        invalidateModelCatalogs();
-      }
-      setAccount(currentAccount);
-      surfaceRefreshFailure(currentAccount);
+      applyAccountSession(currentAccount);
       if (currentAccount.account !== null) {
-        void accountProfileRefresh.refreshIfStale();
+        void accountUsage.refreshAccountProfile();
         stage = "authenticatedState";
         await loadAuthenticatedState();
       }
@@ -816,17 +686,16 @@ export function createAppController(localization: AppControllerLocalization): Ap
       }
       const message = describeError(reason);
       invalidateAuthenticatedStateLoad();
-      invalidateModelCatalogs();
-      invalidateAccountProfileSession();
-      invalidateAccountUsageSession();
+      modelCatalog.invalidateCatalogs();
+      accountUsage.invalidateProfileSession();
+      accountUsage.invalidateUsageSession();
       if (isRetryableInitializationFailure(reason, stage)) {
         const delay = initializationRetryDelay(attempt);
         batch(() => {
           setEngine(null);
           setAccount(undefined);
           setConfig(null);
-          setRateLimits(null);
-          setRateLimitsError(null);
+          accountUsage.applySignedOut();
           setError(null);
           setRuntimeStatus({
             state: "starting",
@@ -845,8 +714,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
           setEngine(null);
           setAccount(undefined);
           setConfig(null);
-          setRateLimits(null);
-          setRateLimitsError(null);
+          accountUsage.applySignedOut();
           setError(message);
           setRuntimeStatus({ state: "failed", message });
         });
@@ -855,6 +723,19 @@ export function createAppController(localization: AppControllerLocalization): Ap
       if (releaseEvents === null) {
         void subscription.then((release) => release()).catch(reportError);
       }
+    }
+  }
+
+  function applyAccountSession(currentAccount: AccountReadResponse): void {
+    accountUsage.invalidateProfileSession();
+    accountUsage.invalidateUsageSession();
+    if (accountSessionKey(account()) !== accountSessionKey(currentAccount)) {
+      invalidateAuthenticatedStateLoad();
+      modelCatalog.invalidateCatalogs();
+    }
+    setAccount(currentAccount);
+    if (currentAccount.refresh.status === "failed") {
+      setError(currentAccount.refresh.error ?? "The ChatGPT session refresh failed.");
     }
   }
 
@@ -871,15 +752,14 @@ export function createAppController(localization: AppControllerLocalization): Ap
 
   function retryInitialization(): void {
     invalidateAuthenticatedStateLoad();
-    invalidateModelCatalogs();
+    modelCatalog.invalidateCatalogs();
     batch(() => {
-      invalidateAccountProfileSession();
-      invalidateAccountUsageSession();
+      accountUsage.invalidateProfileSession();
+      accountUsage.invalidateUsageSession();
       setEngine(null);
       setAccount(undefined);
       setConfig(null);
-      setRateLimits(null);
-      setRateLimitsError(null);
+      accountUsage.applySignedOut();
       setError(null);
       setRuntimeStatus({ state: "starting", message: null });
     });
@@ -901,8 +781,8 @@ export function createAppController(localization: AppControllerLocalization): Ap
       .then((loaded) => {
         if (loaded) {
           authenticatedStateLoaded = true;
-          void rateLimitRefresh.refreshIfStale();
-          void refreshUsageResetsIfStale();
+          void accountUsage.refreshRateLimitsIfStale();
+          void accountUsage.refreshUsageResetsIfStale();
         }
       })
       .finally(() => {
@@ -915,7 +795,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   }
 
   async function loadLocalAuthenticatedState(expectedSessionKey: string): Promise<boolean> {
-    setAutomationsLoading(true);
+    automationSession.setLoading(true);
     try {
       const [threadPage, automationSnapshot] = await Promise.all([
         listThreads(null),
@@ -927,8 +807,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       batch(() => {
         setThreads(threadPage.data);
         setThreadsNextCursor(threadPage.nextCursor);
-        setAutomations(replaceAutomations(automationSnapshot.data));
-        setAutomationRuns(replaceAutomationRuns(automationSnapshot.runs));
+        automationSession.loadSession(automationSnapshot);
       });
       await restoreActiveDestination(productFlow());
       const loaded = !disposed && accountSessionKey(account()) === expectedSessionKey;
@@ -938,202 +817,16 @@ export function createAppController(localization: AppControllerLocalization): Ap
       return loaded;
     } finally {
       if (!disposed) {
-        setAutomationsLoading(false);
+        automationSession.setLoading(false);
       }
     }
-  }
-
-  async function refreshAutomations(): Promise<boolean> {
-    if (!signedIn() || automationsLoading()) {
-      return false;
-    }
-    setAutomationsLoading(true);
-    try {
-      const snapshot = await withPending(() => listAutomations());
-      batch(() => {
-        setAutomations(replaceAutomations(snapshot.data));
-        setAutomationRuns((current) => replaceAutomationRuns([...snapshot.runs, ...current]));
-      });
-      return true;
-    } catch (reason) {
-      reportError(reason);
-      return false;
-    } finally {
-      setAutomationsLoading(false);
-    }
-  }
-
-  async function createAutomation(input: AutomationInput): Promise<boolean> {
-    try {
-      const created = await withPending(() => createAutomationCommand(input));
-      setAutomations((current) => upsertAutomation(current, created));
-      return true;
-    } catch (reason) {
-      reportError(reason);
-      return false;
-    }
-  }
-
-  async function updateAutomation(
-    automationId: string,
-    expectedVersion: number,
-    input: AutomationInput,
-  ): Promise<boolean> {
-    try {
-      const updated = await withPending(() =>
-        updateAutomationCommand(automationId, expectedVersion, input),
-      );
-      setAutomations((current) => upsertAutomation(current, updated));
-      return true;
-    } catch (reason) {
-      reportError(reason);
-      return false;
-    }
-  }
-
-  function deleteAutomation(automationId: string): Promise<boolean> {
-    return singleFlightOperations.run(`automation:delete:${automationId}`, () =>
-      deleteAutomationOnce(automationId),
-    );
-  }
-
-  async function deleteAutomationOnce(automationId: string): Promise<boolean> {
-    const automation = automations().find((entry) => entry.id === automationId);
-    if (automation === undefined) {
-      setError("The automation to delete is no longer available.");
-      return false;
-    }
-    const hasActiveRun = automationRuns().some(
-      (run) =>
-        run.automationId === automationId && (run.status === "queued" || run.status === "running"),
-    );
-    if (hasActiveRun) {
-      setError("Wait for the active run to finish before deleting this automation.");
-      return false;
-    }
-    try {
-      const confirmed = await confirm(
-        formatMessage(localization.confirmations().deleteAutomationDescription, {
-          name: automation.name,
-        }),
-        {
-          cancelLabel: localization.confirmations().cancel,
-          kind: "warning",
-          okLabel: localization.confirmations().delete,
-          title: localization.confirmations().deleteAutomationTitle,
-        },
-      );
-      if (!confirmed) {
-        return false;
-      }
-      await withPending(() => deleteAutomationCommand(automationId));
-      batch(() => {
-        setAutomations((current) => removeAutomation(current, automationId));
-        setAutomationRuns((current) => removeAutomationRuns(current, automationId));
-      });
-      return true;
-    } catch (reason) {
-      reportError(reason);
-      return false;
-    }
-  }
-
-  function runAutomationNow(automationId: string): Promise<boolean> {
-    return singleFlightOperations.run(`automation:run:${automationId}`, () =>
-      runAutomationNowOnce(automationId),
-    );
-  }
-
-  async function runAutomationNowOnce(automationId: string): Promise<boolean> {
-    try {
-      const run = await withPending(() => runAutomationNowCommand(automationId));
-      setAutomationRuns((current) => upsertAutomationRun(current, run));
-      return true;
-    } catch (reason) {
-      reportError(reason);
-      return false;
-    }
-  }
-
-  function markAutomationRunReviewed(runId: string): Promise<boolean> {
-    return singleFlightOperations.run(`automation:review:${runId}`, () =>
-      markAutomationRunReviewedOnce(runId),
-    );
-  }
-
-  async function markAutomationRunReviewedOnce(runId: string): Promise<boolean> {
-    try {
-      await withPending(() => markAutomationRunReviewedCommand(runId));
-      const run = automationRuns().find((entry) => entry.id === runId);
-      if (run !== undefined) {
-        setAutomationRuns((current) => upsertAutomationRun(current, { ...run, reviewed: true }));
-      }
-      return true;
-    } catch (reason) {
-      reportError(reason);
-      return false;
-    }
-  }
-
-  function ensureModelsForMode(mode: ConversationMode): Promise<boolean> {
-    return mode === "chat" ? loadChatModelCatalog() : loadModelCatalog();
-  }
-
-  function loadModelCatalog(): Promise<boolean> {
-    const revision = modelCatalogSessionRevision;
-    return singleFlightOperations.run(`models:codex:${revision}`, async () => {
-      try {
-        const catalog = await listModels();
-        if (disposed || revision !== modelCatalogSessionRevision || !signedIn()) {
-          return false;
-        }
-        setModels(catalog.data.filter((model) => !model.hidden));
-        return true;
-      } catch (reason) {
-        if (!disposed && revision === modelCatalogSessionRevision) {
-          reportError(reason);
-        }
-        return false;
-      }
-    });
-  }
-
-  function loadChatModelCatalog(): Promise<boolean> {
-    const revision = modelCatalogSessionRevision;
-    return singleFlightOperations.run(`models:chat:${revision}`, async () => {
-      try {
-        const catalog = await listChatModels();
-        if (disposed || revision !== modelCatalogSessionRevision || !signedIn()) {
-          return false;
-        }
-        setChatModels(catalog.data);
-        return true;
-      } catch (reason) {
-        if (!disposed && revision === modelCatalogSessionRevision) {
-          reportError(reason);
-        }
-        return false;
-      }
-    });
-  }
-
-  function invalidateModelCatalogs(): void {
-    modelCatalogSessionRevision += 1;
-    batch(() => {
-      setModels([]);
-      setChatModels([]);
-    });
   }
 
   function invalidateAuthenticatedStateLoad(): void {
     authenticatedStateLoaded = false;
     authenticatedStateRequest = null;
     persistedQueuesResumed = false;
-    batch(() => {
-      setAutomations([]);
-      setAutomationRuns([]);
-      setAutomationsLoading(false);
-    });
+    automationSession.clearSession();
   }
 
   function handleNotification(notification: EngineNotification): void {
@@ -1183,39 +876,20 @@ export function createAppController(localization: AppControllerLocalization): Ap
       case "auth.sessionChanged":
         void synchronizeAuthentication(notification.params.signedIn);
         return;
-      case "account.rateLimitsUpdated": {
+      case "account.rateLimitsUpdated":
         if (!signedIn()) {
           return;
         }
-        const current = rateLimits();
-        if (current === null) {
-          void rateLimitRefresh.refresh();
-          return;
-        }
-        applyRateLimits(mergeRateLimitUpdate(current, notification.params.rateLimits));
+        accountUsage.applyRateLimitNotification(notification.params.rateLimits);
         return;
-      }
       case "automation.changed":
-        if (signedIn()) {
-          setAutomations((current) => upsertAutomation(current, notification.params.automation));
-        }
+        automationSession.applyChanged(notification.params.automation);
         return;
       case "automation.deleted":
-        if (signedIn()) {
-          batch(() => {
-            setAutomations((current) =>
-              removeAutomation(current, notification.params.automationId),
-            );
-            setAutomationRuns((current) =>
-              removeAutomationRuns(current, notification.params.automationId),
-            );
-          });
-        }
+        automationSession.applyDeleted(notification.params.automationId);
         return;
       case "automation.runUpdated":
-        if (signedIn()) {
-          setAutomationRuns((current) => upsertAutomationRun(current, notification.params.run));
-        }
+        automationSession.applyRunUpdated(notification.params.run);
         return;
       case "thread.created":
       case "thread.updated":
@@ -1284,7 +958,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
           modelVerifications: [],
           safetyBuffering: null,
         }));
-        void rateLimitRefresh.refreshIfStale();
+        void accountUsage.refreshRateLimitsIfStale();
         return;
       case "turn.completed":
         {
@@ -1323,7 +997,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
             });
           }
           notifyTurnCompletion(notification);
-          void rateLimitRefresh.refreshIfStale();
+          void accountUsage.refreshRateLimitsIfStale();
         }
         return;
       case "model.rerouted":
@@ -1427,83 +1101,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
     }
   }
 
-  function handleServerRequest(request: EngineServerRequest): void {
-    setPendingApprovals((current) => {
-      if (current.some((entry) => entry.id === request.id)) {
-        throw new Error(`Approval ${request.id} was received twice.`);
-      }
-      return [...current, request];
-    });
-    const task = notificationTaskLabel(
-      request.params.threadId,
-      [...threads(), ...allAgentThreads()],
-      localization.notifications().untitledTask,
-    );
-    enqueueNotification({
-      approval: request,
-      id: `approval-required:${request.id}`,
-      event: "approvalRequired",
-      tone: "attention",
-      title: localization.notifications().approvalTitle,
-      message: formatMessage(localization.notifications().approvalMessage, { task }),
-      target: { type: "thread", threadId: request.params.threadId },
-    });
-  }
-
-  function enqueueNotification(input: AppNotificationInput): boolean {
-    return applicationPreferencesLoaded() && notificationCenter.enqueue(input);
-  }
-
-  function previewNotification(event: ConfigurableNotificationEventKind): boolean {
-    if (!applicationPreferencesLoaded()) return false;
-    notificationSequence += 1;
-    return notificationCenter.preview(
-      createNotificationPreview(event, localization.notifications(), notificationSequence),
-    );
-  }
-
-  function notifySettingsSaved(): void {
-    notificationSequence += 1;
-    enqueueNotification({
-      approval: null,
-      id: `settings-saved:${notificationSequence}`,
-      event: "settingsSaved",
-      tone: "success",
-      title: localization.notifications().settingsSavedTitle,
-      message: localization.notifications().settingsSavedMessage,
-      target: null,
-    });
-  }
-
-  function notifyTurnCompletion(
-    notification: Extract<EngineNotification, { readonly method: "turn.completed" }>,
-  ): void {
-    if (notification.params.turn.status === "interrupted") return;
-    const task = notificationTaskLabel(
-      notification.params.threadId,
-      [...threads(), ...allAgentThreads()],
-      localization.notifications().untitledTask,
-    );
-    const failed =
-      notification.params.turn.status === "failed" || notification.params.error !== null;
-    enqueueNotification({
-      approval: null,
-      id: `task-${failed ? "failed" : "completed"}:${notification.params.turn.id}`,
-      event: failed ? "taskFailed" : "taskCompleted",
-      tone: failed ? "error" : "success",
-      title: failed
-        ? localization.notifications().taskFailedTitle
-        : localization.notifications().taskCompletedTitle,
-      message: formatMessage(
-        failed
-          ? localization.notifications().taskFailedMessage
-          : localization.notifications().taskCompletedMessage,
-        { task },
-      ),
-      target: { type: "thread", threadId: notification.params.threadId },
-    });
-  }
-
   function synchronizeAuthentication(expectedSignedIn: boolean): Promise<void> {
     const activeSync = authenticationSync;
     if (activeSync?.expectedSignedIn === expectedSignedIn) {
@@ -1514,29 +1111,21 @@ export function createAppController(localization: AppControllerLocalization): Ap
     const promise = predecessor
       .then(async () => {
         const currentAccount = await readAccount();
-        invalidateAccountProfileSession();
-        invalidateAccountUsageSession();
-        if (accountSessionKey(account()) !== accountSessionKey(currentAccount)) {
-          invalidateAuthenticatedStateLoad();
-          invalidateModelCatalogs();
-        }
-        setAccount(currentAccount);
-        surfaceRefreshFailure(currentAccount);
+        applyAccountSession(currentAccount);
         if ((currentAccount.account !== null) !== expectedSignedIn) {
           throw new Error(
             "The authentication state differs from the transition emitted by the engine.",
           );
         }
         if (expectedSignedIn) {
-          void accountProfileRefresh.refreshIfStale();
+          void accountUsage.refreshAccountProfile();
         }
         if (expectedSignedIn && !authenticatedStateLoaded) {
           await loadAuthenticatedState();
         } else if (expectedSignedIn) {
-          void rateLimitRefresh.refreshIfStale();
+          void accountUsage.refreshRateLimitsIfStale();
         } else {
-          setRateLimits(null);
-          setRateLimitsError(null);
+          accountUsage.applySignedOut();
         }
       })
       .catch(reportError)
@@ -1599,10 +1188,10 @@ export function createAppController(localization: AppControllerLocalization): Ap
   async function logout(): Promise<boolean> {
     try {
       const response = await withPending(() => logoutCommand());
-      invalidateAccountProfileSession();
-      invalidateAccountUsageSession();
+      accountUsage.invalidateProfileSession();
+      accountUsage.invalidateUsageSession();
       invalidateAuthenticatedStateLoad();
-      invalidateModelCatalogs();
+      modelCatalog.invalidateCatalogs();
       try {
         clearPersistedMessageQueues();
       } catch (reason) {
@@ -1614,8 +1203,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
           requiresOpenaiAuth: true,
           refresh: { status: "notRequired", error: null },
         });
-        setRateLimits(null);
-        setRateLimitsError(null);
+        accountUsage.applySignedOut();
         setThreads([]);
         setAllAgentThreads([]);
         setThreadsNextCursor(null);
@@ -1944,7 +1532,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   function newThread(targetWorkspace?: string): boolean {
     const mode = conversationMode();
     if (signedIn()) {
-      void ensureModelsForMode(mode);
+      void modelCatalog.ensureModelsForMode(mode);
     }
     const requestedWorkspace = mode === "chat" ? null : (targetWorkspace ?? null);
     if (requestedWorkspace === null) {
@@ -2530,210 +2118,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
     return readOutputCommand(outputId, cursor);
   }
 
-  async function refreshRateLimits(): Promise<boolean> {
-    return rateLimitRefresh.refresh();
-  }
-
-  function refreshUsageResets(): Promise<boolean> {
-    const revision = usageResetReadRevision;
-    const sessionKey = accountSessionKey(account());
-    if (sessionKey === null || disposed) return Promise.resolve(false);
-    return singleFlightOperations.run(`account:usage-resets:${revision}:${sessionKey}`, () =>
-      refreshUsageResetsOnce(revision, sessionKey),
-    );
-  }
-
-  function refreshUsageResetsIfStale(): Promise<boolean> {
-    if (Date.now() - lastUsageResetReadAt < USAGE_RESET_REFRESH_STALE_MS) {
-      return Promise.resolve(true);
-    }
-    return refreshUsageResets();
-  }
-
-  function isCurrentUsageResetRead(revision: number, sessionKey: string): boolean {
-    return (
-      !disposed &&
-      revision === usageResetReadRevision &&
-      sessionKey === accountSessionKey(account())
-    );
-  }
-
-  async function refreshUsageResetsOnce(revision: number, sessionKey: string): Promise<boolean> {
-    if (!isCurrentUsageResetRead(revision, sessionKey)) {
-      return false;
-    }
-    setUsageResetsLoading(true);
-    setUsageResetsError(null);
-    try {
-      const value = await readUsageResets();
-      if (!isCurrentUsageResetRead(revision, sessionKey)) return false;
-      applyUsageResets(value);
-      return true;
-    } catch (reason) {
-      if (!isCurrentUsageResetRead(revision, sessionKey)) return false;
-      const message = describeError(reason);
-      setUsageResetsError(message);
-      addDiagnostic({ stream: "runtime", message });
-      return false;
-    } finally {
-      if (isCurrentUsageResetRead(revision, sessionKey)) setUsageResetsLoading(false);
-    }
-  }
-
-  function applyUsageResets(value: UsageResetCreditsResponse): void {
-    const previous = usageResets();
-    const previousAvailableIds = new Set(
-      previous?.credits
-        .filter((credit) => credit.status === "available")
-        .map((credit) => credit.id) ?? [],
-    );
-    const available = value.credits.filter((credit) => credit.status === "available");
-    const added = available.filter((credit) => !previousAvailableIds.has(credit.id));
-    const countIncreased = value.availableCount > (previous?.availableCount ?? 0);
-    lastUsageResetReadAt = Date.now();
-    setUsageResets(value);
-    const identity = added[0]?.id ?? (countIncreased ? `count-${value.availableCount}` : null);
-    if (value.availableCount === 0 || identity === null) return;
-
-    enqueueNotification({
-      approval: null,
-      id: `usage-reset-available:${identity}`,
-      event: "usageResetAvailable",
-      tone: "attention",
-      title: localization.notifications().usageResetAvailableTitle,
-      message: formatMessage(
-        value.availableCount === 1
-          ? localization.notifications().usageResetAvailableMessage
-          : localization.notifications().usageResetsAvailableMessage,
-        { count: value.availableCount },
-      ),
-      target: { type: "settings", page: "usage" },
-    });
-  }
-
-  async function redeemUsageReset(
-    creditId: string | null,
-    redeemRequestId: string,
-  ): Promise<UsageResetRedemptionResponse | null> {
-    const sessionRevision = accountUsageSessionRevision;
-    const sessionKey = accountSessionKey(account());
-    const isCurrentSession = () =>
-      !disposed &&
-      sessionRevision === accountUsageSessionRevision &&
-      sessionKey === accountSessionKey(account());
-    if (disposed || sessionKey === null || usageResetRedeemingId() !== null) {
-      return null;
-    }
-    let synchronizationContinues = false;
-    setUsageResetRedeemingId(creditId ?? "automatic");
-    setUsageResetsError(null);
-    try {
-      const response = await redeemUsageResetCommand(creditId, redeemRequestId);
-      if (!isCurrentSession()) return null;
-      if (response.code === "reset" || response.code === "already_redeemed") {
-        manualUsageResetNotificationPending = enqueueNotification({
-          approval: null,
-          id: `usage-limit-reset:manual:${redeemRequestId}`,
-          event: "usageLimitReset",
-          tone: "success",
-          title: localization.notifications().usageLimitResetTitle,
-          message: localization.notifications().usageResetRedeemedMessage,
-          target: { type: "settings", page: "usage" },
-        });
-        invalidateUsageResetReads();
-        rateLimitRefresh.invalidate();
-        const synchronization = Promise.all([refreshUsageResets(), rateLimitRefresh.refresh()]);
-        synchronizationContinues = true;
-        void synchronization.then(
-          () => {
-            if (isCurrentSession()) setUsageResetRedeemingId(null);
-          },
-          (reason: unknown) => {
-            if (!isCurrentSession()) return;
-            setUsageResetRedeemingId(null);
-            reportError(reason);
-          },
-        );
-      } else {
-        setUsageResetsError(usageResetRedemptionError(response.code));
-      }
-      return response;
-    } catch (reason) {
-      if (!isCurrentSession()) return null;
-      const message = describeError(reason);
-      setUsageResetsError(message);
-      addDiagnostic({ stream: "runtime", message });
-      return null;
-    } finally {
-      if (!synchronizationContinues && isCurrentSession()) setUsageResetRedeemingId(null);
-    }
-  }
-
-  async function refreshAutoTopUpSettings(): Promise<boolean> {
-    if (!signedIn()) {
-      return false;
-    }
-    setAutoTopUpLoading(true);
-    setAutoTopUpError(null);
-    try {
-      setAutoTopUpSettings(await readAutoTopUpSettings());
-      return true;
-    } catch (reason) {
-      const message = describeError(reason);
-      setAutoTopUpError(message);
-      addDiagnostic({ stream: "runtime", message });
-      return false;
-    } finally {
-      setAutoTopUpLoading(false);
-    }
-  }
-
-  async function enableAutoTopUp(
-    rechargeThreshold: string,
-    rechargeTarget: string,
-    rechargeMonthlyLimit: string | null,
-  ): Promise<boolean> {
-    return mutateAutoTopUp(() =>
-      enableAutoTopUpCommand(rechargeThreshold, rechargeTarget, rechargeMonthlyLimit),
-    );
-  }
-
-  async function updateAutoTopUp(
-    rechargeThreshold: string,
-    rechargeTarget: string,
-    rechargeMonthlyLimit: string | null,
-  ): Promise<boolean> {
-    return mutateAutoTopUp(() =>
-      updateAutoTopUpCommand(rechargeThreshold, rechargeTarget, rechargeMonthlyLimit),
-    );
-  }
-
-  async function disableAutoTopUp(): Promise<boolean> {
-    return mutateAutoTopUp(disableAutoTopUpCommand);
-  }
-
-  async function mutateAutoTopUp(
-    operation: () => Promise<AutoTopUpSettingsSnapshot>,
-  ): Promise<boolean> {
-    if (!signedIn() || autoTopUpLoading()) {
-      return false;
-    }
-    setAutoTopUpLoading(true);
-    setAutoTopUpError(null);
-    try {
-      setAutoTopUpSettings(await operation());
-      void rateLimitRefresh.refresh();
-      return true;
-    } catch (reason) {
-      const message = describeError(reason);
-      setAutoTopUpError(message);
-      addDiagnostic({ stream: "runtime", message });
-      return false;
-    } finally {
-      setAutoTopUpLoading(false);
-    }
-  }
-
   async function saveClipboard(dataBase64: string): Promise<Attachment | null> {
     try {
       return await savePastedImage(dataBase64);
@@ -2930,6 +2314,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
     }
   }
 
+  let pendingThreadSelectionId: string | null = null;
+  let threadSelectionRevision = 0;
+
   function beginThreadSelection(threadId: string): number {
     threadSelectionRevision += 1;
     pendingThreadSelectionId = threadId;
@@ -2963,53 +2350,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
     });
   }
 
-  function accountSessionKey(value: AccountReadResponse | undefined): string | null {
-    const currentAccount = value?.account;
-    return currentAccount === null || currentAccount === undefined
-      ? null
-      : (currentAccount.email ?? "chatgpt");
-  }
-
-  function surfaceRefreshFailure(value: AccountReadResponse): void {
-    if (value.refresh.status === "failed") {
-      setError(value.refresh.error ?? "The ChatGPT session refresh failed.");
-    }
-  }
-
-  function addDiagnostic(diagnostic: RuntimeDiagnostic): void {
-    diagnosticSequence += 1;
-    const entry: DiagnosticEntry = {
-      ...diagnostic,
-      id: diagnosticSequence,
-      occurredAt: new Date(),
-    };
-    setDiagnostics((current) => [...current.slice(-(MAX_DIAGNOSTICS - 1)), entry]);
-  }
-
-  function reportError(reason: unknown): void {
-    const message = describeError(reason);
-    const diagnostic = describeDiagnosticError(reason);
-    setError(message);
-    addDiagnostic({ stream: "runtime", message: diagnostic });
-    if (engine() !== null) {
-      void reportFrontendDiagnostic(diagnostic).catch((persistenceFailure: unknown) => {
-        addDiagnostic({
-          stream: "runtime",
-          message: `Failed to persist frontend diagnostic: ${describeError(persistenceFailure)}`,
-        });
-      });
-    }
-  }
-
-  async function withPending<T>(operation: () => Promise<T>): Promise<T> {
-    setPendingOperations((count) => count + 1);
-    try {
-      return await operation();
-    } finally {
-      setPendingOperations((count) => Math.max(0, count - 1));
-    }
-  }
-
   function updateProject(
     path: string,
     updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
@@ -3020,10 +2360,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
       return next;
     });
   }
-
-  createEffect(() => {
-    if (!applicationPreferences().notifications.enabled) notificationCenter.clear();
-  });
 
   createNotificationOverlayBridge({
     approvalFor: notificationCenter.approvalFor,
@@ -3044,26 +2380,26 @@ export function createAppController(localization: AppControllerLocalization): Ap
 
   return {
     account,
-    accountProfile,
-    accountProfileError,
-    accountProfileLoading,
+    accountProfile: accountUsage.accountProfile,
+    accountProfileError: accountUsage.accountProfileError,
+    accountProfileLoading: accountUsage.accountProfileLoading,
     activePlan,
     activeTaskRootId,
     activeTurnId,
     agentThreads,
     approvals,
-    applicationPreferences,
-    applicationPreferencesError,
-    applicationPreferencesLoaded,
-    applicationPreferencesSaving,
+    applicationPreferences: preferences.applicationPreferences,
+    applicationPreferencesError: preferences.applicationPreferencesError,
+    applicationPreferencesLoaded: preferences.applicationPreferencesLoaded,
+    applicationPreferencesSaving: preferences.applicationPreferencesSaving,
     applicationShellActionRequest,
     archivedThreads: visibleArchivedThreads,
     archivedThreadsLoaded,
     archivedThreadsLoading,
     archivedThreadsNextCursor,
-    automations,
-    automationRuns,
-    automationsLoading,
+    automations: automationSession.automations,
+    automationRuns: automationSession.automationRuns,
+    automationsLoading: automationSession.automationsLoading,
     busy,
     config,
     contextUsage,
@@ -3072,14 +2408,14 @@ export function createAppController(localization: AppControllerLocalization): Ap
     historyLoading,
     product,
     chatGptMode,
-    chatModels,
+    chatModels: modelCatalog.chatModels,
     conversationMode,
     diagnostics,
     engine,
     error,
     lastTurnFailure,
     loginPending,
-    models,
+    models: modelCatalog.models,
     modelReroute,
     modelVerifications,
     pendingOperations,
@@ -3089,17 +2425,17 @@ export function createAppController(localization: AppControllerLocalization): Ap
     projectSectionExpanded,
     projects,
     queuedMessages,
-    rateLimits,
-    rateLimitsError,
-    rateLimitsLoading,
-    usageResets,
-    usageResetsError,
-    usageResetsLoading,
-    usageResetRedeemingId,
+    rateLimits: accountUsage.rateLimits,
+    rateLimitsError: accountUsage.rateLimitsError,
+    rateLimitsLoading: accountUsage.rateLimitsLoading,
+    usageResets: accountUsage.usageResets,
+    usageResetsError: accountUsage.usageResetsError,
+    usageResetsLoading: accountUsage.usageResetsLoading,
+    usageResetRedeemingId: accountUsage.usageResetRedeemingId,
     notificationUsageSettingsRequest,
-    autoTopUpSettings,
-    autoTopUpError,
-    autoTopUpLoading,
+    autoTopUpSettings: accountUsage.autoTopUpSettings,
+    autoTopUpError: accountUsage.autoTopUpError,
+    autoTopUpLoading: accountUsage.autoTopUpLoading,
     runtimeStatus,
     signedIn,
     safetyBuffering,
@@ -3107,18 +2443,18 @@ export function createAppController(localization: AppControllerLocalization): Ap
     threadsNextCursor,
     turnBusy,
     turns,
-    unreadAutomationRuns,
+    unreadAutomationRuns: automationSession.unreadAutomationRuns,
     workspace,
     archiveThread,
     cancelLogin,
     chooseAttachments,
     chooseWorkspace,
     clearError: () => setError(null),
-    createAutomation,
-    deleteAutomation,
+    createAutomation: automationSession.createAutomation,
+    deleteAutomation: automationSession.deleteAutomation,
     deleteThread,
     deleteQueuedMessage,
-    ensureModelsForMode,
+    ensureModelsForMode: modelCatalog.ensureModelsForMode,
     enqueueMessage,
     forkThread,
     interrupt,
@@ -3132,29 +2468,29 @@ export function createAppController(localization: AppControllerLocalization): Ap
     loadOlderHistory,
     login,
     logout,
-    markAutomationRunReviewed,
+    markAutomationRunReviewed: automationSession.markAutomationRunReviewed,
     newThread,
     openExternalUrl: requestExternalUrl,
     openThread,
     openWorkspaceDirectory: requestWorkspaceDirectory,
     readAttachmentImage: readAttachmentImageSource,
     readThreadOutput,
-    refreshAutomations,
-    refreshAccountProfile: accountProfileRefresh.refreshIfStale,
-    refreshRateLimits,
-    refreshRateLimitsIfStale: rateLimitRefresh.refreshIfStale,
-    refreshUsageResets,
-    redeemUsageReset,
-    refreshAutoTopUpSettings,
-    enableAutoTopUp,
-    updateAutoTopUp,
-    disableAutoTopUp,
+    refreshAutomations: automationSession.refreshAutomations,
+    refreshAccountProfile: accountUsage.refreshAccountProfile,
+    refreshRateLimits: accountUsage.refreshRateLimits,
+    refreshRateLimitsIfStale: accountUsage.refreshRateLimitsIfStale,
+    refreshUsageResets: accountUsage.refreshUsageResets,
+    redeemUsageReset: accountUsage.redeemUsageReset,
+    refreshAutoTopUpSettings: accountUsage.refreshAutoTopUpSettings,
+    enableAutoTopUp: accountUsage.enableAutoTopUp,
+    updateAutoTopUp: accountUsage.updateAutoTopUp,
+    disableAutoTopUp: accountUsage.disableAutoTopUp,
     reportError,
     removeProject: removeProjectFromSidebar,
     renameThread,
     retryInitialization,
     respondToApproval,
-    runAutomationNow,
+    runAutomationNow: automationSession.runAutomationNow,
     saveSetting,
     saveClipboardImage: saveClipboard,
     selectProject,
@@ -3168,28 +2504,12 @@ export function createAppController(localization: AppControllerLocalization): Ap
     toggleProjectExpanded,
     toggleProjectSection,
     toggleProjectThreadListExpanded,
-    updateAutomation,
+    updateAutomation: automationSession.updateAutomation,
     updateProject,
     updateSetting,
-    updateApplicationPreferences,
+    updateApplicationPreferences: preferences.updateApplicationPreferences,
     unarchiveThread,
   };
-}
-
-function usageResetRedemptionError(code: string): string {
-  switch (code) {
-    case "expired":
-    case "credit_expired":
-      return "This reset has expired and can no longer be used.";
-    case "not_available":
-    case "no_credits_available":
-      return "No reset is available to use.";
-    case "ineligible":
-    case "not_eligible":
-      return "This account is not eligible to use the reset.";
-    default:
-      return `The account reset could not be used (${code}).`;
-  }
 }
 
 type StreamNotification = Extract<
@@ -3242,24 +2562,6 @@ function streamDeltasFromNotification(notification: StreamNotification): readonl
   });
 }
 
-function withBootTimeout<T>(
-  label: string,
-  timeoutMs: number,
-  operation: () => Promise<T>,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(
-        new InitializationTimeoutError(
-          `Initialization did not complete the "${label}" step within ${timeoutMs / 1000} seconds. Try again.`,
-        ),
-      );
-    }, timeoutMs);
-  });
-  return Promise.race([operation(), timeout]).finally(() => clearTimeout(timer));
-}
-
 function mergeThreadPages(
   current: readonly ThreadSummary[],
   incoming: readonly ThreadSummary[],
@@ -3275,25 +2577,9 @@ function assertNever(value: never): never {
   throw new Error(`Unhandled notification state: ${JSON.stringify(value)}`);
 }
 
-function asError(reason: unknown): Error {
-  return reason instanceof Error ? reason : new Error(describeError(reason));
-}
-
-type CapturedInitialization<T> =
-  | { readonly value: T; readonly failure: undefined }
-  | { readonly value: undefined; readonly failure: Error };
-
-function captureInitialization<T>(load: () => T): CapturedInitialization<T> {
-  try {
-    return { value: load(), failure: undefined };
-  } catch (reason) {
-    return { value: undefined, failure: asError(reason) };
-  }
-}
-
-function settledQueueTail(operation: Promise<unknown>): Promise<void> {
-  return operation.then(
-    () => undefined,
-    () => undefined,
-  );
+function accountSessionKey(value: AccountReadResponse | undefined): string | null {
+  const currentAccount = value?.account;
+  return currentAccount === null || currentAccount === undefined
+    ? null
+    : (currentAccount.email ?? "chatgpt");
 }
