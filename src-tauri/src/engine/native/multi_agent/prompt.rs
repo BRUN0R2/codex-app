@@ -158,7 +158,7 @@ mod tests {
         .expect("fixture should decode");
         ModelCatalog::from_wire(wire, 1)
             .expect("fixture should validate")
-            .select(None)
+            .select_for_account(None, true)
             .expect("model should resolve")
     }
 

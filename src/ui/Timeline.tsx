@@ -116,12 +116,12 @@ import {
   useTimelineDisclosureStorageKey,
 } from "./timelineDisclosureContext";
 import { timelineFileChangeIdentity, timelineItemRenderIdentity } from "./timelineIdentity";
+import { TimelineLayoutMeasurement } from "./timelineLayoutMeasurement";
 import {
   commandHeadline,
   commandLiveOutputText,
   commandOutputText,
   commandPollActivityTitle,
-  confirmedOutputTokenLabel,
   fileChangeActionLabel,
   fileChangeGroupTitle,
   fileReadActivityTitle,
@@ -143,7 +143,7 @@ import {
   isTimelineNearEnd,
   resolveTimelineAnchorCorrection,
   resolveTimelineFollowing,
-  resolveTimelineMessageOffset,
+  resolveTimelineMessageLogicalOffset,
   resolveTimelineRestorationTop,
   type ScrollbarMetrics,
   shouldHandleTimelineWheel,
@@ -191,7 +191,6 @@ const TIMELINE_SESSION_CACHE_CAPACITY: number = 16;
 const ACTIVITY_SESSION_CACHE_CAPACITY = 256;
 const ACTIVITY_ITEM_VIRTUALIZATION_THRESHOLD = 48;
 const ACTIVITY_OPEN_DISCLOSURE_VIRTUALIZATION_THRESHOLD = 4;
-const USER_MESSAGE_NAVIGATION_MAX_FRAMES: number = 8;
 const USER_MESSAGE_NAVIGATION_QUIET_FRAMES: number = 8;
 const USER_MESSAGE_SCROLL_INSET_PX: number = 32;
 const USER_MESSAGE_NAVIGATOR_TITLE_PREVIEW_CHARACTERS: number = 180;
@@ -211,6 +210,9 @@ interface TimelineUserMessageEntry extends UserMessageEntry {
 }
 
 interface PendingUserMessageNavigation {
+  targetScrollTop: number | null;
+  quietFrames: number;
+  unmountedFrames: number;
   readonly message: TimelineUserMessageEntry;
   readonly threadId: string;
 }
@@ -283,7 +285,6 @@ export function Timeline(props: {
   const [activityContentDeferred, setActivityContentDeferred] = createSignal(false);
   const [activityMinimalOverscan, setActivityMinimalOverscan] = createSignal(false);
   const [activityLayoutRevision, setActivityLayoutRevision] = createSignal(0);
-  const [activityScrollTop, setActivityScrollTop] = createSignal(0);
   const [clock, setClock] = createSignal(Date.now());
   const [timelineLayoutWidth, setTimelineLayoutWidth] = createSignal(0);
   const timelineSessions = new TimelineThreadSessionStore(
@@ -302,7 +303,6 @@ export function Timeline(props: {
   const [virtualViewport, setVirtualViewportSignal] =
     createSignal<TimelineVirtualViewport>(virtualViewportBufferA);
   function commitVirtualViewport(offset: number, scrollTop: number, size: number): void {
-    setActivityScrollTop(scrollTop);
     const current = untrack(virtualViewport);
     if (current.offset === offset && current.scrollTop === scrollTop && current.size === size) {
       return;
@@ -321,11 +321,12 @@ export function Timeline(props: {
     thumbTop: 0,
   });
   const disclosures = createTimelineDisclosureStore();
+  const layoutMeasurement = new TimelineLayoutMeasurement(measureMountedVirtualTurns);
   const disclosureContext: TimelineDisclosureContextValue = {
     keyPrefix: () => timelineDisclosureNamespacePrefix(props.controller.currentThread()?.id ?? ""),
     onLayoutChange: () => {
       recordTimelineLayoutChange();
-      queueMicrotask(measureMountedVirtualTurns);
+      layoutMeasurement.request();
     },
     store: disclosures,
   };
@@ -339,21 +340,33 @@ export function Timeline(props: {
     const preferences = props.controller.config()?.config.desktop;
     return [width, preferences?.uiFontSize ?? 14, preferences?.diffDisplay ?? "unified"].join(":");
   });
+  const virtualGeometry = createMemo(() => {
+    virtualRevision();
+    const viewport = virtualViewport();
+    return resolveBoundedVirtualViewport({
+      logicalTotalSize: virtualizer.totalSize(),
+      physicalOffset: viewport.offset,
+      viewportSize: viewport.size,
+    });
+  });
   const activityViewport = createMemo<TimelineActivityViewportSnapshot | null>((previous) => {
     virtualRevision();
     const viewport = virtualViewport();
-    const scrollTop = activityScrollTop();
+    const scrollTop = viewport.scrollTop;
     const element = scrollElement;
     if (element === undefined) {
       return null;
     }
     const size = Math.max(1, viewport.size - props.bottomOcclusion);
+    const geometry = virtualGeometry();
+    const contentTranslation = Math.round(geometry.physicalOffset - geometry.logicalOffset);
     return previous !== null &&
       previous.element === element &&
       previous.scrollTop === scrollTop &&
+      previous.contentTranslation === contentTranslation &&
       previous.size === size
       ? previous
-      : { element, scrollTop, size };
+      : { element, contentTranslation, scrollTop, size };
   }, null);
   const activityContext: TimelineActivityContextValue = {
     preserveVisualAnchor: (anchor) => {
@@ -372,15 +385,6 @@ export function Timeline(props: {
     shouldPreserveAnchor: () => !followingLatest() && !programmaticTimelineNavigationActive(),
     viewport: activityViewport,
   };
-  const virtualGeometry = createMemo(() => {
-    virtualRevision();
-    const viewport = virtualViewport();
-    return resolveBoundedVirtualViewport({
-      logicalTotalSize: virtualizer.totalSize(),
-      physicalOffset: viewport.offset,
-      viewportSize: viewport.size,
-    });
-  });
   const virtualRange = createMemo<VirtualRange>((previousRange) => {
     const viewport = virtualGeometry();
     const nextRange = virtualizer.range(
@@ -408,9 +412,14 @@ export function Timeline(props: {
   const virtualTotalSize = createMemo(() => {
     return virtualGeometry().physicalTotalSize;
   });
-  const userMessages = createMemo<readonly TimelineUserMessageEntry[]>(() =>
-    props.controller.persistedTurns().flatMap((turn, turnIndex) => {
-      const response = [...turn.items].reverse().find((item) => item.type === "agentMessage");
+  const userMessages = createMemo<readonly TimelineUserMessageEntry[]>((previous = []) => {
+    const previousById = new Map(previous.map((message) => [message.id, message]));
+    const result: TimelineUserMessageEntry[] = [];
+    const turns = props.controller.turns();
+    for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
+      const turn = turns.at(turnIndex);
+      if (turn === undefined) continue;
+      const response = turn.items.findLast((item) => item.type === "agentMessage");
       const detail =
         response?.type === "agentMessage"
           ? blockPreview(
@@ -418,27 +427,34 @@ export function Timeline(props: {
               USER_MESSAGE_NAVIGATOR_DETAIL_PREVIEW_CHARACTERS,
             )
           : null;
-      return turn.items.flatMap((item) => {
-        if (item.type !== "userMessage") {
-          return [];
-        }
+      for (const item of turn.items) {
+        if (item.type !== "userMessage") continue;
         const title = inlinePreview(
           userMessageCopyText(item.content, messages()),
           USER_MESSAGE_NAVIGATOR_TITLE_PREVIEW_CHARACTERS,
           messages().textlessMessage,
         );
-        return [
-          {
-            id: item.id,
-            title,
-            detail,
-            label: detail === null ? title : `${title}. ${detail.replace(/\s+/gu, " ")}`,
-            turnIndex,
-          },
-        ];
-      });
-    }),
-  );
+        const previousEntry = previousById.get(item.id);
+        result.push(
+          previousEntry?.title === title &&
+            previousEntry.detail === detail &&
+            previousEntry.turnIndex === turnIndex
+            ? previousEntry
+            : {
+                id: item.id,
+                title,
+                detail,
+                label: detail === null ? title : `${title}. ${detail.replace(/\s+/gu, " ")}`,
+                turnIndex,
+              },
+        );
+      }
+    }
+    return result.length === previous.length &&
+      result.every((entry, index) => entry === previous[index])
+      ? previous
+      : result;
+  });
 
   function readMountedUserMessageOffset(
     messageId: string,
@@ -451,36 +467,28 @@ export function Timeline(props: {
     if (!(anchor instanceof HTMLElement) || !virtualListElement.contains(anchor)) {
       return null;
     }
-    return Math.max(
-      0,
+    return (
       anchor.getBoundingClientRect().top -
-        (virtualListTop ?? virtualListElement.getBoundingClientRect().top),
+      (virtualListTop ?? virtualListElement.getBoundingClientRect().top)
     );
   }
 
   function recordTimelineLayoutChange(): void {
     timelineLayoutRevision += 1;
     setActivityLayoutRevision(timelineLayoutRevision);
-    const pending = pendingUserMessageNavigation;
-    if (pending === undefined) {
-      return;
+    if (pendingUserMessageNavigation !== undefined) {
+      scheduleUserMessageNavigation();
     }
-    cancelUserMessageNavigationFrame();
-    scheduleMountedUserMessageNavigation(
-      pending.message,
-      pending.threadId,
-      USER_MESSAGE_NAVIGATION_MAX_FRAMES,
-      timelineLayoutRevision,
-    );
   }
 
-  function readUserMessageOffset(
+  function readUserMessageLogicalOffset(
     message: TimelineUserMessageEntry,
     virtualListTop: number | null = null,
   ): number {
-    return resolveTimelineMessageOffset(
+    return resolveTimelineMessageLogicalOffset(
       readMountedUserMessageOffset(message.id, virtualListTop),
-      virtualOffset(message.turnIndex),
+      virtualizer.offsetOf(message.turnIndex),
+      virtualGeometry(),
     );
   }
 
@@ -581,7 +589,7 @@ export function Timeline(props: {
   }): number {
     const messages = userMessages();
     const list = virtualListElement;
-    if (messages.length === 0 || list === undefined) {
+    if (messages.length <= 1 || list === undefined) {
       return 0;
     }
     if (
@@ -593,15 +601,25 @@ export function Timeline(props: {
     ) {
       return messages.length - 1;
     }
-    const viewportTop = Math.max(
-      0,
-      input.scrollTop - input.listOffset + ACTIVE_MESSAGE_VIEWPORT_INSET_PX,
-    );
+    const physicalOffset = Math.max(0, input.scrollTop - input.listOffset);
+    const viewport = resolveBoundedVirtualViewport({
+      logicalTotalSize: virtualizer.totalSize(),
+      physicalOffset,
+      viewportSize: input.clientHeight,
+    });
+    const viewportTop =
+      viewport.logicalOffset +
+      physicalOffset -
+      viewport.physicalOffset +
+      ACTIVE_MESSAGE_VIEWPORT_INSET_PX;
+    const listTop = list.getBoundingClientRect().top;
     return findTimelineAnchorIndex(
       messages.length,
       (index) => {
         const message = messages[index];
-        return message === undefined ? Number.MAX_SAFE_INTEGER : virtualOffset(message.turnIndex);
+        return message === undefined
+          ? Number.MAX_SAFE_INTEGER
+          : readUserMessageLogicalOffset(message, listTop);
       },
       viewportTop,
     );
@@ -637,17 +655,6 @@ export function Timeline(props: {
     });
   }
 
-  function updateVirtualViewport(): void {
-    if (scrollElement === undefined || virtualListElement === undefined) {
-      return;
-    }
-    commitVirtualViewport(
-      Math.max(0, scrollElement.scrollTop - virtualListElement.offsetTop),
-      Math.max(0, scrollElement.scrollTop),
-      Math.max(1, scrollElement.clientHeight),
-    );
-  }
-
   function scrollTimelineTo(
     top: number,
     behavior: ScrollBehavior = "auto",
@@ -674,12 +681,6 @@ export function Timeline(props: {
     }
     programmaticScroll.begin("smooth", target);
     scrollElement.scrollTo({ behavior, top: target });
-  }
-
-  function consumeProgrammaticScroll(): boolean {
-    return scrollElement === undefined
-      ? false
-      : programmaticScroll.consume(scrollElement.scrollTop);
   }
 
   function saveActiveTimelineViewport(nextFollowingLatest = followingLatest()): void {
@@ -778,6 +779,7 @@ export function Timeline(props: {
   }
 
   function cancelPendingTimelineWork(): number {
+    layoutMeasurement.cancel();
     timelineTransitionRevision += 1;
     cancelPendingUserMessageNavigation();
     if (animationFrame !== undefined) {
@@ -1301,6 +1303,7 @@ export function Timeline(props: {
     if (scrollElement === undefined) {
       return;
     }
+    claimTimelineScrollOwnership();
     setActiveTimelineFollowing(true);
     scrollTimelineTo(scrollElement.scrollHeight, behavior);
     if (behavior === "auto") {
@@ -1308,129 +1311,89 @@ export function Timeline(props: {
     }
   }
 
-  function scheduleUserMessageNavigationCompletion(
-    message: TimelineUserMessageEntry,
-    threadId: string,
-    alignedOffset: number,
-    alignedLayoutRevision: number,
-    quietFrames: number,
-  ): void {
-    userMessageNavigationFrame = requestAnimationFrame(() => {
-      userMessageNavigationFrame = undefined;
-      const pending = pendingUserMessageNavigation;
-      if (
-        pending?.threadId !== threadId ||
-        pending.message.id !== message.id ||
-        props.controller.currentThread()?.id !== threadId
-      ) {
-        return;
-      }
-      const mountedOffset = readMountedUserMessageOffset(message.id);
-      const layoutStable =
-        timelineLayoutRevision === alignedLayoutRevision &&
-        measuredTimelineLayoutRevision >= timelineLayoutRevision;
-      const geometryStable = mountedOffset !== null && Math.abs(mountedOffset - alignedOffset) <= 1;
-      if (layoutStable && geometryStable) {
-        if (quietFrames <= 1) {
-          pendingUserMessageNavigation = undefined;
-          return;
-        }
-        scheduleUserMessageNavigationCompletion(
-          message,
-          threadId,
-          mountedOffset,
-          alignedLayoutRevision,
-          quietFrames - 1,
-        );
-        return;
-      }
-      scheduleMountedUserMessageNavigation(
-        message,
-        threadId,
-        USER_MESSAGE_NAVIGATION_MAX_FRAMES,
-        timelineLayoutRevision,
-        mountedOffset,
-      );
-    });
+  function scheduleUserMessageNavigation(): void {
+    if (userMessageNavigationFrame === undefined && pendingUserMessageNavigation !== undefined) {
+      userMessageNavigationFrame = requestAnimationFrame(runUserMessageNavigation);
+    }
   }
 
-  function scheduleMountedUserMessageNavigation(
-    message: TimelineUserMessageEntry,
-    threadId: string,
-    remainingFrames: number,
-    requiredLayoutRevision: number,
-    previousOffset: number | null = null,
-  ): void {
-    userMessageNavigationFrame = requestAnimationFrame(() => {
-      userMessageNavigationFrame = undefined;
-      if (props.controller.currentThread()?.id !== threadId || virtualListElement === undefined) {
-        return;
-      }
-      const mountedOffset = readMountedUserMessageOffset(message.id);
-      if (mountedOffset === null) {
-        if (remainingFrames <= 1) {
-          return;
-        }
-        updateVirtualViewport();
-        scheduleMountedUserMessageNavigation(
-          message,
-          threadId,
-          remainingFrames - 1,
-          requiredLayoutRevision,
-          null,
-        );
-        return;
-      }
-      const stable = previousOffset !== null && Math.abs(mountedOffset - previousOffset) <= 1;
-      const layoutSettled = measuredTimelineLayoutRevision >= requiredLayoutRevision;
-      if ((layoutSettled && stable) || remainingFrames <= 1) {
-        const alignedLayoutRevision = timelineLayoutRevision;
-        scrollTimelineTo(
-          virtualListElement.offsetTop + mountedOffset - USER_MESSAGE_SCROLL_INSET_PX,
-        );
-        scheduleUserMessageNavigationCompletion(
-          message,
-          threadId,
-          mountedOffset,
-          alignedLayoutRevision,
-          USER_MESSAGE_NAVIGATION_QUIET_FRAMES,
-        );
-        return;
-      }
-      scheduleMountedUserMessageNavigation(
-        message,
-        threadId,
-        remainingFrames - 1,
-        requiredLayoutRevision,
+  function runUserMessageNavigation(): void {
+    userMessageNavigationFrame = undefined;
+    const pending = pendingUserMessageNavigation;
+    if (pending === undefined || scrollElement === undefined || virtualListElement === undefined)
+      return;
+    const message = userMessages().find((entry) => entry.id === pending.message.id);
+    if (props.controller.currentThread()?.id !== pending.threadId || message === undefined) {
+      cancelPendingUserMessageNavigation();
+      return;
+    }
+    const mountedOffset = readMountedUserMessageOffset(message.id);
+    const logicalOffset =
+      resolveTimelineMessageLogicalOffset(
         mountedOffset,
+        virtualizer.offsetOf(message.turnIndex),
+        virtualGeometry(),
+      ) - USER_MESSAGE_SCROLL_INSET_PX;
+    const boundedLogicalOffset = Math.min(
+      Math.max(0, virtualizer.totalSize() - virtualViewport().size),
+      Math.max(0, logicalOffset),
+    );
+    const targetOffset =
+      virtualListElement.offsetTop +
+      virtualLogicalToPhysicalOffset(
+        boundedLogicalOffset,
+        virtualizer.totalSize(),
+        virtualViewport().size,
+      ) +
+      logicalOffset -
+      boundedLogicalOffset;
+    const maximum = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+    const target = Math.min(maximum, Math.max(0, targetOffset));
+    const currentTop = scrollElement.scrollTop;
+    if (pending.targetScrollTop === null || Math.abs(pending.targetScrollTop - target) > 1) {
+      pending.targetScrollTop = target;
+      pending.quietFrames = 0;
+      scrollTimelineTo(
+        target,
+        matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
       );
-    });
+    }
+    const reachedTarget = Math.abs(currentTop - target) <= 1;
+    const layoutSettled = measuredTimelineLayoutRevision >= timelineLayoutRevision;
+    pending.quietFrames = reachedTarget && mountedOffset !== null ? pending.quietFrames + 1 : 0;
+    pending.unmountedFrames =
+      reachedTarget && mountedOffset === null && layoutSettled && !programmaticScroll.smoothActive()
+        ? pending.unmountedFrames + 1
+        : 0;
+    if (pending.unmountedFrames >= USER_MESSAGE_NAVIGATION_QUIET_FRAMES) {
+      cancelPendingUserMessageNavigation();
+      reportFrontendFailure(
+        new Error("The selected user message did not mount at its virtual position."),
+      );
+      return;
+    }
+    if (pending.quietFrames >= USER_MESSAGE_NAVIGATION_QUIET_FRAMES) {
+      pendingUserMessageNavigation = undefined;
+      return;
+    }
+    scheduleUserMessageNavigation();
   }
 
   function scrollToUserMessage(message: UserMessageEntry): void {
-    if (scrollElement === undefined || virtualListElement === undefined) {
-      return;
-    }
+    if (scrollElement === undefined || virtualListElement === undefined) return;
     const target = userMessages().find((entry) => entry.id === message.id);
     const threadId = props.controller.currentThread()?.id;
-    if (target === undefined || threadId === undefined) {
-      return;
-    }
+    if (target === undefined || threadId === undefined) return;
     cancelPendingUserMessageNavigation();
-    pendingUserMessageNavigation = { message: target, threadId };
-    setActiveTimelineFollowing(false);
-    if (readMountedUserMessageOffset(target.id) === null) {
-      scrollTimelineTo(
-        virtualListElement.offsetTop + readUserMessageOffset(target) - USER_MESSAGE_SCROLL_INSET_PX,
-      );
-      updateVirtualViewport();
-    }
-    scheduleMountedUserMessageNavigation(
-      target,
+    pendingUserMessageNavigation = {
+      message: target,
       threadId,
-      USER_MESSAGE_NAVIGATION_MAX_FRAMES,
-      timelineLayoutRevision,
-    );
+      targetScrollTop: null,
+      quietFrames: 0,
+      unmountedFrames: 0,
+    };
+    setActiveTimelineFollowing(false);
+    scheduleUserMessageNavigation();
   }
 
   function setScrollTopFromThumb(thumbTop: number, userInitiated: boolean): void {
@@ -1604,11 +1567,11 @@ export function Timeline(props: {
       return;
     }
     const handleScroll = () => {
-      setActivityScrollTop(Math.max(0, scrollElement?.scrollTop ?? 0));
-      if (!consumeProgrammaticScroll()) {
+      if (!programmaticScroll.consume(Math.max(0, scrollElement?.scrollTop ?? 0))) {
         pendingUnownedScrollMeasurement = true;
       }
-      scheduleTimelineFrame(false, false);
+      if (animationFrame !== undefined) cancelAnimationFrame(animationFrame);
+      runScheduledTimelineFrame();
     };
     const handleScrollEnd = () => {
       programmaticScroll.finish();
@@ -1622,7 +1585,7 @@ export function Timeline(props: {
     scrollElement.addEventListener("scrollend", handleScrollEnd);
     resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(scrollElement);
-    resizeObserver.observe(contentElement);
+    resizeObserver.observe(contentElement, { box: "border-box" });
     if (scrollbarTrackElement !== undefined) {
       resizeObserver.observe(scrollbarTrackElement);
     }
@@ -1643,6 +1606,7 @@ export function Timeline(props: {
 
   onCleanup(() => {
     saveActiveTimelineViewport();
+    layoutMeasurement.cancel();
     resizeObserver?.disconnect();
     cancelPendingUserMessageNavigation();
     if (animationFrame !== undefined) {
@@ -1781,7 +1745,7 @@ export function Timeline(props: {
                 aria-orientation="vertical"
                 aria-valuemax={Math.round(scrollbar().maximumScroll)}
                 aria-valuemin={0}
-                aria-valuenow={Math.round(scrollElement?.scrollTop ?? 0)}
+                aria-valuenow={Math.round(virtualViewport().scrollTop)}
                 class="surface-scrollbar-track"
                 onKeyDown={handleScrollbarKeyDown}
                 onPointerDown={handleScrollbarTrackPointerDown}
@@ -1991,7 +1955,6 @@ function ConversationTurn(props: {
             }
             blockIndex={index()}
             clock={props.clock}
-            confirmedOutputTokens={props.turn.confirmedOutputTokens}
             diffDisplay={props.diffDisplay}
             disclosure={disclosure}
             firstWorkBlockIndex={presentation().firstWorkBlockIndex}
@@ -2006,18 +1969,14 @@ function ConversationTurn(props: {
 
       <Show when={needsTrailingThinking()}>
         <Show when={presentation().firstWorkBlockIndex === null}>
-          <TurnHeader
-            confirmedOutputTokens={props.turn.confirmedOutputTokens}
-            disclosure={disclosure}
-            label={turnLabel()}
-            status={props.turn.status}
-          />
+          <TurnHeader disclosure={disclosure} label={turnLabel()} status={props.turn.status} />
         </Show>
         <TimelineDisclosureContext.Provider value={disclosure.descendantContext}>
           <TurnWorkBlock
             activeThinkingPresentation="standalone"
             clock={props.clock}
             diffDisplay={props.diffDisplay}
+            isItemStreaming={props.isItemStreaming}
             items={[]}
             reasoningHeading={latestReasoningHeading()}
           />
@@ -2048,7 +2007,6 @@ function TurnPresentationBlockView(props: {
   readonly block: () => TurnPresentationBlock;
   readonly blockIndex: number;
   readonly clock: number;
-  readonly confirmedOutputTokens: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly disclosure: TimelineDisclosureBinding;
   readonly firstWorkBlockIndex: number | null;
@@ -2084,7 +2042,6 @@ function TurnPresentationBlockView(props: {
           <>
             <Show when={props.firstWorkBlockIndex === props.blockIndex}>
               <TurnHeader
-                confirmedOutputTokens={props.confirmedOutputTokens}
                 disclosure={props.disclosure}
                 label={props.turnLabel}
                 status={props.status}
@@ -2096,6 +2053,7 @@ function TurnPresentationBlockView(props: {
                   activeThinkingPresentation={props.activeThinkingPresentation}
                   clock={props.clock}
                   diffDisplay={props.diffDisplay}
+                  isItemStreaming={props.isItemStreaming}
                   items={workBlock().items}
                   reasoningHeading={props.reasoningHeading}
                 />
@@ -2109,7 +2067,6 @@ function TurnPresentationBlockView(props: {
 }
 
 function TurnHeader(props: {
-  readonly confirmedOutputTokens: number;
   readonly disclosure: TimelineDisclosureBinding;
   readonly label: string;
   readonly status: VisibleThreadTurn["status"];
@@ -2132,14 +2089,12 @@ function TurnHeader(props: {
             type="button"
           >
             <span class="turn-duration-label">{props.label}</span>
-            <TurnTokenUsage tokens={props.confirmedOutputTokens} />
             <Icon name={props.disclosure.isOpen() ? "chevronDown" : "chevronRight"} size={12} />
           </button>
         }
       >
         <div aria-atomic="true" aria-live="polite" class="turn-active-status" role="status">
           <span class="turn-duration-label">{props.label}</span>
-          <TurnTokenUsage tokens={props.confirmedOutputTokens} />
         </div>
       </Show>
       <div class="turn-header-line" />
@@ -2147,22 +2102,11 @@ function TurnHeader(props: {
   );
 }
 
-function TurnTokenUsage(props: { readonly tokens: number }) {
-  const i18n = useI18n();
-  const messages = () => i18n.messages().timeline;
-  return (
-    <Show when={props.tokens > 0}>
-      <span class="turn-token-usage" title={messages().confirmedOutputTokens}>
-        · {confirmedOutputTokenLabel(props.tokens, messages(), i18n.locale())}
-      </span>
-    </Show>
-  );
-}
-
 function TurnWorkBlock(props: {
   readonly activeThinkingPresentation: "activity" | "none" | "standalone";
   readonly clock: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
+  readonly isItemStreaming: (itemId: string) => boolean;
   readonly items: readonly TurnWorkItem[];
   readonly reasoningHeading: string | null;
 }) {
@@ -2184,6 +2128,7 @@ function TurnWorkBlock(props: {
             <WorkTimelineUnit
               clock={props.clock}
               diffDisplay={props.diffDisplay}
+              isItemStreaming={props.isItemStreaming}
               isCurrent={
                 index() === workUnits().length - 1 &&
                 props.activeThinkingPresentation === "activity"
@@ -2217,6 +2162,7 @@ function WorkTimelineUnit(props: {
   readonly clock: number;
   readonly diffDisplay?: "split" | "unified" | undefined;
   readonly isCurrent: boolean;
+  readonly isItemStreaming: (itemId: string) => boolean;
   readonly reasoningHeading: string | null;
   readonly unit: () => AgentActivityRenderUnit;
 }) {
@@ -2246,6 +2192,9 @@ function WorkTimelineUnit(props: {
             clock={props.clock}
             diffDisplay={props.diffDisplay}
             item={itemUnit().item}
+            streaming={
+              itemUnit().item.type === "agentMessage" && props.isItemStreaming(itemUnit().item.id)
+            }
           />
         )}
       </Match>

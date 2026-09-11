@@ -24,6 +24,7 @@ import {
 type SidebarController = Pick<
   AppController,
   | "account"
+  | "activeTaskRootId"
   | "archiveThread"
   | "chooseWorkspace"
   | "currentThread"
@@ -62,10 +63,14 @@ type SidebarController = Pick<
 
 import { partitionProjectsByPinnedPaths } from "../state/projectPins";
 import { pathsEqual } from "../state/projects";
+import { generalRateLimitSnapshot } from "../state/rateLimits";
 import { threadsWithoutConfiguredProject } from "../state/sidebarThreads";
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { CodexGlyph } from "./CodexGlyph";
+import { formatShortDate } from "./dateFormat";
+import { useExternalNavigation } from "./ExternalNavigation";
 import { Icon, type IconName } from "./Icon";
+import { presentLunaReserveUsage } from "./lunaReserve";
 import type { SettingsPage } from "./SettingsDialog";
 
 const MAX_VISIBLE_PROJECT_GROUPS = 5;
@@ -81,6 +86,7 @@ interface SidebarProjectGroup {
 
 export interface SidebarProps {
   readonly automationsActive: boolean;
+  readonly chromeOwnsBrand: boolean;
   readonly collapsed: boolean;
   readonly controller: SidebarController;
   readonly inert: boolean;
@@ -177,6 +183,13 @@ export function Sidebar(props: SidebarProps) {
       setBrandMenuOpen(false);
     }
   });
+  createEffect(() => {
+    const account = props.controller.account();
+    if (account?.account === null || account?.account === undefined) {
+      return;
+    }
+    void props.controller.refreshRateLimitsIfStale();
+  });
 
   function dismissSidebarMenusFromPointer(event: PointerEvent): void {
     if (!(event.target instanceof Element)) {
@@ -184,7 +197,7 @@ export function Sidebar(props: SidebarProps) {
       setBrandMenuOpen(false);
       return;
     }
-    if (event.target.closest(".sidebar-account-trigger, #account-menu") === null) {
+    if (event.target.closest(".sidebar-account-trigger, #account-popover") === null) {
       setAccountMenuOpen(false);
     }
     if (event.target.closest(".sidebar-brand, .brand-menu") === null) {
@@ -263,8 +276,8 @@ export function Sidebar(props: SidebarProps) {
       inert={props.inert}
       ref={sidebarElement}
     >
-      <header class="sidebar-titlebar">
-        <Show when={!props.collapsed}>
+      <header class="sidebar-titlebar" classList={{ "chrome-owns-brand": props.chromeOwnsBrand }}>
+        <Show when={!props.collapsed && !props.chromeOwnsBrand}>
           <div class="brand-menu-anchor">
             <button
               aria-expanded={brandMenuOpen()}
@@ -610,80 +623,90 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       <footer class="sidebar-footer">
-        <Show when={!props.collapsed && accountMenuOpen()}>
-          <div aria-label={messages().account} class="account-menu" id="account-menu" role="menu">
-            <div class="account-menu-identity" role="presentation">
-              <AccountAvatar account={props.controller.account()?.account} />
-              <strong>{accountLabel(props.controller)}</strong>
+        <div class="sidebar-footer-account">
+          <Show when={!props.collapsed && accountMenuOpen()}>
+            <div class="account-popover" id="account-popover">
+              <LunaReserveCard response={() => props.controller.rateLimits()} />
+              <div
+                aria-label={messages().account}
+                class="account-menu"
+                id="account-menu"
+                role="menu"
+              >
+                <div class="account-menu-identity" role="presentation">
+                  <AccountAvatar account={props.controller.account()?.account} />
+                  <strong>{accountLabel(props.controller)}</strong>
+                </div>
+                <hr class="account-menu-separator" />
+                <button
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    props.onOpenSettings("usage");
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="creditCard" size={15} />
+                  <span>{messages().remainingUsage}</span>
+                  <small class="usage-badge">{remainingUsageLabel(props.controller)}</small>
+                  <Icon name="chevronRight" size={13} />
+                </button>
+                <button
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    props.onOpenSettings();
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="settings" size={15} />
+                  <span>{messages().settings}</span>
+                  <kbd>Ctrl+,</kbd>
+                </button>
+                <button
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    void props.controller.logout();
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="logout" size={15} />
+                  <span>{messages().signOut}</span>
+                </button>
+              </div>
             </div>
-            <hr class="account-menu-separator" />
+          </Show>
+          <div class="sidebar-footer-row">
             <button
+              aria-controls="account-menu"
+              aria-expanded={accountMenuOpen()}
+              aria-haspopup="menu"
+              class="sidebar-account-trigger"
               onClick={() => {
-                setAccountMenuOpen(false);
-                props.onOpenSettings("usage");
+                setBrandMenuOpen(false);
+                if (props.collapsed) {
+                  props.onOpenSettings("profile");
+                  return;
+                }
+                const opening = !accountMenuOpen();
+                setAccountMenuOpen(opening);
+                if (opening) {
+                  void props.controller.refreshAccountProfile();
+                  void props.controller.refreshRateLimitsIfStale();
+                }
               }}
-              role="menuitem"
+              title={messages().account}
               type="button"
             >
-              <Icon name="creditCard" size={15} />
-              <span>{messages().remainingUsage}</span>
-              <small class="usage-badge">{remainingUsageLabel(props.controller)}</small>
-              <Icon name="chevronRight" size={13} />
-            </button>
-            <button
-              onClick={() => {
-                setAccountMenuOpen(false);
-                props.onOpenSettings();
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <Icon name="settings" size={15} />
-              <span>{messages().settings}</span>
-              <kbd>Ctrl+,</kbd>
-            </button>
-            <button
-              onClick={() => {
-                setAccountMenuOpen(false);
-                void props.controller.logout();
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <Icon name="logout" size={15} />
-              <span>{messages().signOut}</span>
+              <AccountAvatar account={props.controller.account()?.account} />
+              <Show when={!props.collapsed}>
+                <span class="account-label">
+                  <strong>{accountLabel(props.controller)}</strong>
+                </span>
+              </Show>
             </button>
           </div>
-        </Show>
-        <div class="sidebar-footer-row">
-          <button
-            aria-controls="account-menu"
-            aria-expanded={accountMenuOpen()}
-            aria-haspopup="menu"
-            class="sidebar-account-trigger"
-            onClick={() => {
-              setBrandMenuOpen(false);
-              if (props.collapsed) {
-                props.onOpenSettings("profile");
-                return;
-              }
-              const opening = !accountMenuOpen();
-              setAccountMenuOpen(opening);
-              if (opening) {
-                void props.controller.refreshAccountProfile();
-                void props.controller.refreshRateLimitsIfStale();
-              }
-            }}
-            title={messages().account}
-            type="button"
-          >
-            <AccountAvatar account={props.controller.account()?.account} />
-            <Show when={!props.collapsed}>
-              <span class="account-label">
-                <strong>{accountLabel(props.controller)}</strong>
-              </span>
-            </Show>
-          </button>
         </div>
       </footer>
     </aside>
@@ -954,7 +977,7 @@ function ThreadButton(props: ThreadButtonProps) {
   return (
     <div
       class="thread-row"
-      classList={{ active: props.controller.currentThread()?.id === props.thread.id }}
+      classList={{ active: props.controller.activeTaskRootId() === props.thread.id }}
     >
       <Show
         when={!props.renaming}
@@ -971,7 +994,7 @@ function ThreadButton(props: ThreadButtonProps) {
       >
         <button
           aria-current={
-            props.controller.currentThread()?.id === props.thread.id ? "page" : undefined
+            props.controller.activeTaskRootId() === props.thread.id ? "page" : undefined
           }
           class="thread-main"
           onClick={() => {
@@ -1056,6 +1079,68 @@ function ThreadButton(props: ThreadButtonProps) {
   );
 }
 
+function LunaReserveCard(props: {
+  readonly response: () => ReturnType<SidebarController["rateLimits"]>;
+}) {
+  const i18n = useI18n();
+  const openExternalUrl = useExternalNavigation();
+  const messages = () => i18n.messages().sidebar;
+  const usage = () => presentLunaReserveUsage(props.response());
+
+  return (
+    <Show when={usage()}>
+      {(current) => {
+        const reserve = current();
+        const resetDate =
+          reserve.resetAt === null
+            ? i18n.messages().common.soon
+            : formatShortDate(reserve.resetAt, i18n.locale(), i18n.messages().common.soon);
+        return (
+          <section aria-label={messages().lunaReserve} class="luna-reserve-card">
+            <div class="luna-reserve-heading">
+              <span aria-hidden="true" class="luna-reserve-icon">
+                🌙
+              </span>
+              <strong>
+                {formatMessage(messages().lunaReserveRemaining, {
+                  percent: reserve.remainingPercent,
+                })}
+              </strong>
+            </div>
+            <progress
+              aria-label={formatMessage(messages().lunaReserveRemaining, {
+                percent: reserve.remainingPercent,
+              })}
+              class="luna-reserve-progress"
+              max={100}
+              value={reserve.remainingPercent}
+            >
+              {reserve.remainingPercent}%
+            </progress>
+            <small class="luna-reserve-reset">
+              {formatMessage(messages().lunaReserveReset, { date: resetDate })}
+            </small>
+            <div class="luna-reserve-actions">
+              <button
+                onClick={() => void openExternalUrl("https://chatgpt.com/membership/plans")}
+                type="button"
+              >
+                {messages().upgrade}
+              </button>
+              <button
+                onClick={() => void openExternalUrl("https://chatgpt.com/settings/billing")}
+                type="button"
+              >
+                {messages().addCredits}
+              </button>
+            </div>
+          </section>
+        );
+      }}
+    </Show>
+  );
+}
+
 export function threadTitle(thread: ThreadSummary, fallback: string): string {
   return (thread.name ?? thread.preview) || fallback;
 }
@@ -1101,7 +1186,7 @@ function accountLabel(controller: SidebarController): string {
 }
 
 function remainingUsageLabel(controller: SidebarController): string {
-  const usedPercent = controller.rateLimits()?.rateLimits.primary?.usedPercent;
+  const usedPercent = generalRateLimitSnapshot(controller.rateLimits())?.primary?.usedPercent;
   if (usedPercent === undefined) {
     return "—";
   }

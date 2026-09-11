@@ -56,17 +56,23 @@ describe("tooling bootstrap contract", () => {
     expect(visualAuditRuntime).toContain('"--enable-smooth-scrolling"');
     expect(visualAuditRuntime).toContain('"--force-prefers-no-reduced-motion"');
     expect(visualAuditScript).toContain(
-      'features: [{ name: "prefers-reduced-motion", value: "no-preference" }]',
+      'features: [{ name: "prefers-reduced-motion", value: scenario.reducedMotion === true ? "reduce" : "no-preference" }]',
     );
   });
 
-  it("lets Chromium own its ephemeral DevTools port without hiding early exits", () => {
+  it("scopes a background Chromium target to each visual scenario and viewport", () => {
     expect(packageManifest.scripts?.["verify:visual"]).toContain(
       "node --experimental-strip-types scripts/verify-visual-preview.mjs",
     );
     expect(visualAuditRuntime).toContain('"--remote-debugging-port=0"');
     expect(visualAuditRuntime).toContain('"--edge-skip-compat-layer-relaunch"');
+    expect(visualAuditRuntime).toContain('"--no-startup-window"');
     expect(visualAuditScript).toContain("chromiumAuditArguments(browserProfile)");
+    expect(visualAuditScript).toMatch(
+      /for \(const viewport of scenario.viewports \?\? VIEWPORTS\) \{\s*reports\.push\(\s*await withAuditTarget\(browserController,/u,
+    );
+    expect(visualAuditScript).not.toContain("/json/new");
+    expect(visualAuditScript).not.toContain("/json/close");
     expect(visualAuditScript).toContain("waitForDevToolsEndpoint");
     expect(visualAuditScript).not.toContain("/json/version");
     expect(visualAuditScript).not.toContain("reservePort");

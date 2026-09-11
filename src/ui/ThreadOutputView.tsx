@@ -3,8 +3,8 @@ import { createEffect, createMemo, createSignal, Show } from "solid-js";
 import type { ThreadOutput, ToolOutputPresentation } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
-import { readOutput } from "../infrastructure/codexClient";
 import { utf8ByteLength } from "../utf8";
+import { useContentResourceReader } from "./ContentResourceReader";
 import { frontendFailureMessage, useFrontendFailureReporter } from "./frontendFailure";
 import { ToolOutputContent } from "./ToolOutputContent";
 
@@ -17,6 +17,7 @@ export function ThreadOutputView(props: {
 }) {
   const i18n = useI18n();
   const reportFailure = useFrontendFailureReporter();
+  const resources = useContentResourceReader();
   const [chunks, setChunks] = createSignal<readonly string[]>([props.output.preview]);
   const [loadedBytes, setLoadedBytes] = createSignal(utf8ByteLength(props.output.preview));
   const [nextCursor, setNextCursor] = createSignal<string | null>(props.output.nextCursor);
@@ -58,7 +59,7 @@ export function ThreadOutputView(props: {
     setLoading(true);
     setFailure(null);
     try {
-      const response = await readOutput(outputId, cursor);
+      const response = await resources.readThreadOutput(outputId, cursor);
       if (props.output.id !== outputId) {
         return;
       }

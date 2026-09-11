@@ -9,11 +9,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   chromiumAuditArguments,
   compareRetainedIdentities,
+  type DevToolsCommandClient,
   loopbackHttpOrigin,
   type ObservedProcess,
   observeProcess,
   parseDevToolsActivePort,
   waitForDevToolsEndpoint,
+  withAuditTarget,
 } from "./visualAuditRuntime";
 
 const temporaryDirectories: string[] = [];
@@ -32,10 +34,80 @@ describe("visual audit runtime", () => {
     const arguments_ = chromiumAuditArguments(profile);
 
     expect(arguments_).toContain("--edge-skip-compat-layer-relaunch");
+    expect(arguments_).toContain("--no-startup-window");
     expect(arguments_).toContain("--remote-debugging-port=0");
     expect(arguments_.filter((argument) => argument.startsWith("--user-data-dir="))).toEqual([
       `--user-data-dir=${profile}`,
     ]);
+    expect(arguments_).not.toContain("about:blank");
+    expect(arguments_).not.toContain("--hide-scrollbars");
+  });
+
+  it("isolates consecutive measurements and closes each target before returning", async () => {
+    const client = commandClient([
+      { targetId: "first-page" },
+      { success: true },
+      { targetId: "second-page" },
+      { success: true },
+    ]);
+
+    await expect(withAuditTarget(client, async (id) => id)).resolves.toBe("first-page");
+    await expect(withAuditTarget(client, async (id) => id)).resolves.toBe("second-page");
+    expect(client.calls).toEqual([
+      {
+        method: "Target.createTarget",
+        params: { background: true, url: "about:blank" },
+      },
+      { method: "Target.closeTarget", params: { targetId: "first-page" } },
+      {
+        method: "Target.createTarget",
+        params: { background: true, url: "about:blank" },
+      },
+      { method: "Target.closeTarget", params: { targetId: "second-page" } },
+    ]);
+  });
+
+  it("fails rather than leaking an audit target when creation or closure is unconfirmed", async () => {
+    await expect(withAuditTarget(commandClient([{}]), async () => undefined)).rejects.toThrow(
+      /did not return an audit target id/u,
+    );
+    await expect(
+      withAuditTarget(
+        commandClient([{ targetId: "audit-target" }, { success: false }]),
+        async () => undefined,
+      ),
+    ).rejects.toThrow(/did not confirm/u);
+  });
+
+  it("closes an audit target even when the measurement fails", async () => {
+    const client = commandClient([{ targetId: "audit-target" }, { success: true }]);
+    const failure = new Error("Invalid timeline measurement");
+
+    await expect(
+      withAuditTarget(client, async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(client.calls.at(-1)).toEqual({
+      method: "Target.closeTarget",
+      params: { targetId: "audit-target" },
+    });
+  });
+
+  it("preserves both the measurement failure and an unconfirmed cleanup", async () => {
+    const client = commandClient([{ targetId: "audit-target" }, { success: false }]);
+    const failure = new Error("Invalid timeline measurement");
+
+    await expect(
+      withAuditTarget(client, async () => {
+        throw failure;
+      }),
+    ).rejects.toMatchObject({
+      errors: [
+        failure,
+        expect.objectContaining({ message: expect.stringMatching(/did not confirm/u) }),
+      ],
+    });
   });
 
   it("rejects a relative browser profile", () => {
@@ -159,5 +231,21 @@ function healthyProcessObservation(): ObservedProcess {
   return {
     diagnostics: () => "Saída capturada: (vazia)",
     failure: () => undefined,
+  };
+}
+
+function commandClient(results: readonly unknown[]): DevToolsCommandClient & {
+  readonly calls: Array<{ method: string; params: Record<string, unknown> | undefined }>;
+} {
+  const calls: Array<{ method: string; params: Record<string, unknown> | undefined }> = [];
+  let resultIndex = 0;
+  return {
+    calls,
+    send: async (method, params) => {
+      calls.push({ method, params });
+      const result = results[resultIndex];
+      resultIndex += 1;
+      return result;
+    },
   };
 }

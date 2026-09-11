@@ -39,7 +39,6 @@ describe("visible turn sequence", () => {
 function turn(id: string, text: string): VisibleThreadTurn {
   return {
     id,
-    confirmedOutputTokens: 0,
     status: "completed",
     error: null,
     createdAt: 1,

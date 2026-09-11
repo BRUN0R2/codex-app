@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ContractError,
   decodeAccountProfileResponse,
+  decodeAccountRateLimitsResponse,
   decodeAccountReadResponse,
   decodeApplicationPreferences,
   decodeAttachmentImageResponse,
@@ -200,10 +201,23 @@ describe("decodificação dos contratos nativos", () => {
 
   it("valida preferências de inicialização e bandeja", () => {
     const preferences = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       startWithWindows: true,
       startMinimized: true,
       closeToTray: true,
+      notifications: {
+        enabled: true,
+        transientPosition: "bottomRight",
+        transientDurationSeconds: 8,
+        events: {
+          approvalRequired: { enabled: true, priority: true },
+          taskCompleted: { enabled: true, priority: false },
+          taskFailed: { enabled: true, priority: true },
+          usageLimitReset: { enabled: true, priority: false },
+          usageResetAvailable: { enabled: true, priority: true },
+          lunaReserveAvailable: { enabled: true, priority: true },
+        },
+      },
     };
 
     expect(decodeApplicationPreferences(preferences)).toEqual(preferences);
@@ -211,6 +225,12 @@ describe("decodificação dos contratos nativos", () => {
       decodeApplicationPreferences({
         ...preferences,
         startWithWindows: false,
+      }),
+    ).toThrow(ContractError);
+    expect(() =>
+      decodeApplicationPreferences({
+        ...preferences,
+        notifications: { ...preferences.notifications, transientDurationSeconds: 31 },
       }),
     ).toThrow(ContractError);
     expect(() =>
@@ -371,7 +391,7 @@ describe("decodificação dos contratos nativos", () => {
           "scheduledAutomations",
         ],
       },
-      schemaVersion: 21,
+      schemaVersion: 23,
       config: configFixture(),
       diagnosticLogPath: "C:\\Users\\Developer\\AppData\\Roaming\\codex-app\\logs\\runtime.jsonl",
       permissionProfiles: [
@@ -398,7 +418,7 @@ describe("decodificação dos contratos nativos", () => {
           storage: "sqlite",
           capabilities: [],
         },
-        schemaVersion: 21,
+        schemaVersion: 23,
         config: configFixture({
           sandbox: "danger-full-access",
           approvals: "on-request",
@@ -634,9 +654,11 @@ describe("decodificação dos contratos nativos", () => {
 
   it("mantém saídas grandes fora do contrato do turno e valida cada bloco paginado", () => {
     const response = (output: unknown) => ({
+      agentThreads: [],
       nextCursor: null,
       thread: {
         id: "thread-output-limit",
+        agent: null,
         mode: "codex",
         preview: "Teste de limite",
         name: null,
@@ -926,6 +948,68 @@ describe("decodificação dos contratos nativos", () => {
     ).toThrow("rolling updates require a bucket id");
   });
 
+  it("rejeita um limite geral que não identifica o bucket codex", () => {
+    const general = {
+      limitId: "codex",
+      limitName: null,
+      primary: null,
+      secondary: { usedPercent: 12, windowDurationMins: 10_080, resetsAt: 1_800_000_000_000 },
+      credits: null,
+      individualLimit: null,
+      spendControlReached: null,
+      planType: "pro",
+      rateLimitReachedType: null,
+    };
+    const reserve = {
+      ...general,
+      limitId: "base_model_inference",
+      limitName: "gpt-reserve",
+      secondary: { usedPercent: 1, windowDurationMins: 10_080, resetsAt: 1_800_000_000_000 },
+    };
+    const payload = {
+      lunaReserveAvailable: true,
+      planPrice: null,
+      generalRateLimit: reserve,
+      additionalRateLimitsByLimitId: { base_model_inference: reserve },
+    };
+
+    expect(() => decodeAccountRateLimitsResponse(payload)).toThrow(
+      "must identify the canonical codex bucket",
+    );
+  });
+
+  it("decodifica o limite geral e mantém buckets adicionais por identidade", () => {
+    const general = {
+      limitId: "codex",
+      limitName: null,
+      primary: { usedPercent: 62, windowDurationMins: 300, resetsAt: 1_800_000_000_000 },
+      secondary: null,
+      credits: null,
+      individualLimit: null,
+      spendControlReached: null,
+      planType: "pro",
+      rateLimitReachedType: null,
+    };
+    const reserve = {
+      ...general,
+      limitId: "base_model_inference",
+      limitName: "gpt-reserve",
+      primary: null,
+      secondary: { usedPercent: 1, windowDurationMins: 10_080, resetsAt: 1_800_000_000_000 },
+    };
+
+    const decoded = decodeAccountRateLimitsResponse({
+      generalRateLimit: general,
+      additionalRateLimitsByLimitId: { base_model_inference: reserve },
+      lunaReserveAvailable: true,
+      planPrice: null,
+    });
+
+    expect(decoded.generalRateLimit.primary?.usedPercent).toBe(62);
+    const reserveLimitId = "base_model_inference";
+    expect(decoded.additionalRateLimitsByLimitId[reserveLimitId]?.limitName).toBe("gpt-reserve");
+  });
+
   it("decodifica somente projeções terminais completas", () => {
     const notification = (turn: Record<string, unknown>) => ({
       method: "turn.completed",
@@ -998,9 +1082,11 @@ describe("decodificação dos contratos nativos", () => {
 
   it("preserva falhas de turno e rejeita estados incoerentes", () => {
     const response = {
+      agentThreads: [],
       nextCursor: null,
       thread: {
         id: "thread-1",
+        agent: null,
         mode: "codex",
         preview: "Teste",
         name: null,
@@ -1039,6 +1125,7 @@ describe("decodificação dos contratos nativos", () => {
     );
     expect(
       decodeThreadReadResponse({
+        agentThreads: [],
         nextCursor: null,
         thread: {
           ...response.thread,
@@ -1049,6 +1136,7 @@ describe("decodificação dos contratos nativos", () => {
     ).toBeNull();
     expect(() =>
       decodeThreadReadResponse({
+        agentThreads: [],
         nextCursor: null,
         thread: {
           ...response.thread,
@@ -1058,6 +1146,7 @@ describe("decodificação dos contratos nativos", () => {
     ).toThrow("failed turns require an error");
     expect(() =>
       decodeThreadReadResponse({
+        agentThreads: [],
         nextCursor: null,
         thread: {
           ...response.thread,

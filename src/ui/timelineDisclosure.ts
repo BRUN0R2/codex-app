@@ -16,7 +16,7 @@ export interface TimelineDisclosureStore {
 }
 
 interface DisclosureNode {
-  children: Map<string, DisclosureNode>;
+  children: Map<string, DisclosureNode> | null;
   childrenGeneration: number;
   explicitOpen: boolean | undefined;
   openSubtreeCount: number;
@@ -74,7 +74,7 @@ function recordExplicitDisclosureState(
 
 function createDisclosureNode(parent: DisclosureNode | null): DisclosureNode {
   return {
-    children: new Map(),
+    children: null,
     childrenGeneration: 0,
     explicitOpen: undefined,
     openSubtreeCount: 0,
@@ -101,7 +101,7 @@ function findDisclosureNode(
   }
   let node = root;
   for (const prefix of timelineIdentityPrefixes(key)) {
-    const child = node.children.get(prefix);
+    const child = node.children?.get(prefix);
     if (child === undefined) {
       cacheDisclosureNode(nodeCache, key, null);
       return null;
@@ -119,10 +119,12 @@ function resolveDisclosurePath(
   const path: DisclosureNode[] = [root];
   let node = root;
   for (const prefix of timelineIdentityPrefixes(key)) {
-    let child = node.children.get(prefix);
+    node.children ??= new Map();
+    const children = node.children;
+    let child = children.get(prefix);
     if (child === undefined) {
       child = createDisclosureNode(node);
-      node.children.set(prefix, child);
+      children.set(prefix, child);
     }
     path.push(child);
     node = child;
@@ -151,7 +153,7 @@ function setDisclosureOpen(
 
   const currentOpenCount = node.explicitOpen === true ? 1 : 0;
   const openDescendantCount = node.openSubtreeCount - currentOpenCount;
-  if (node.children.size === 0) {
+  if (node.children === null) {
     if (node.explicitOpen === false) {
       return false;
     }
@@ -163,7 +165,7 @@ function setDisclosureOpen(
   }
 
   const removedOpenCount = node.openSubtreeCount;
-  node.children = new Map();
+  node.children = null;
   node.childrenGeneration += 1;
   node.explicitOpen = false;
   node.openSubtreeCount = 0;

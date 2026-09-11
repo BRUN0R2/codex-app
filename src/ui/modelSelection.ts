@@ -17,13 +17,17 @@ export function selectRuntimeCompatibleModel(
   fallback: string | null,
 ): CodexModel | undefined {
   for (const id of [requested, fallback]) {
-    const candidate = id === null ? undefined : models.find((model) => model.id === id);
+    const candidate =
+      id === null ? undefined : models.find((model) => !model.hidden && model.id === id);
     if (candidate !== undefined) {
       return candidate;
     }
   }
 
-  return models.find((model) => model.isDefault) ?? models[0];
+  return (
+    models.find((model) => !model.hidden && model.isDefault) ??
+    models.find((model) => !model.hidden)
+  );
 }
 
 export function selectRuntimeCompatibleReasoningEffort(

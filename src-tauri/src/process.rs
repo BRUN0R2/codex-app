@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 #[cfg(windows)]
 use std::future::Future;
+use std::io;
 #[cfg(windows)]
 use std::process::Stdio;
 #[cfg(windows)]
@@ -10,6 +11,8 @@ use tokio::process::Command;
 #[cfg(windows)]
 use tokio::sync::OnceCell;
 
+#[cfg(windows)]
+mod windows_environment;
 #[cfg(windows)]
 mod windows_job;
 #[cfg(windows)]
@@ -37,6 +40,12 @@ const WINDOWS_POWERSHELL_SESSION_SETUP: &str = concat!(
 #[cfg(windows)]
 static POWERSHELL_VERSION: OnceCell<String> = OnceCell::const_new();
 
+#[derive(Clone, Copy)]
+pub(crate) enum ShellProfile {
+    Load,
+    Skip,
+}
+
 pub(crate) fn headless_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     #[cfg(windows)]
@@ -60,15 +69,9 @@ pub(crate) async fn shell_version() -> Option<String> {
 
 #[cfg(windows)]
 async fn detect_powershell_version() -> Option<String> {
-    let mut command = headless_command(WINDOWS_POWERSHELL_EXECUTABLE);
+    let mut command =
+        headless_shell_command("$PSVersionTable.PSVersion.ToString()", ShellProfile::Skip).ok()?;
     command
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$PSVersionTable.PSVersion.ToString()",
-        ])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
@@ -105,24 +108,33 @@ fn parse_powershell_version(output: &[u8]) -> Option<String> {
 }
 
 #[cfg(windows)]
-pub(crate) fn headless_shell_command(command: &str) -> Command {
+pub(crate) fn headless_shell_command(command: &str, profile: ShellProfile) -> io::Result<Command> {
     let mut process = headless_command(WINDOWS_POWERSHELL_EXECUTABLE);
+    process.env(
+        "PATH",
+        windows_environment::child_path(std::env::var_os("PATH"))?,
+    );
     let script = format!("{WINDOWS_POWERSHELL_SESSION_SETUP}\n{command}");
-    process.args([
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        &script,
-    ]);
-    process
+    process.arg("-NoLogo");
+    if matches!(profile, ShellProfile::Skip) {
+        process.arg("-NoProfile");
+    }
+    process.args(["-NonInteractive", "-Command", &script]);
+    Ok(process)
 }
 
 #[cfg(not(windows))]
-pub(crate) fn headless_shell_command(command: &str) -> Command {
+pub(crate) fn headless_shell_command(command: &str, profile: ShellProfile) -> io::Result<Command> {
     let mut process = headless_command("sh");
-    process.args(["-lc", command]);
-    process
+    process.args([
+        if matches!(profile, ShellProfile::Load) {
+            "-lc"
+        } else {
+            "-c"
+        },
+        command,
+    ]);
+    Ok(process)
 }
 
 #[cfg(test)]
@@ -139,7 +151,8 @@ mod tests {
 
     #[cfg(windows)]
     use super::{
-        cached_powershell_version, headless_shell_command, parse_powershell_version, shell_version,
+        ShellProfile, cached_powershell_version, headless_shell_command, parse_powershell_version,
+        shell_version,
     };
 
     #[cfg(windows)]
@@ -207,7 +220,9 @@ mod tests {
     async fn powershell_session_is_modern_utf8_headless_and_joined() {
         let output = headless_shell_command(
             "Write-Output \"$($PSVersionTable.PSEdition)|$($PSVersionTable.PSVersion.Major)|$([Console]::InputEncoding.WebName)|$([Console]::OutputEncoding.WebName)|$($OutputEncoding.WebName)|$($PSDefaultParameterValues['*:Encoding'])|$($PSDefaultParameterValues['Start-Process:WindowStyle'])|$($PSDefaultParameterValues['Start-Process:Wait'])|$([char]0x00E1)\"",
+            ShellProfile::Skip,
         )
+        .expect("command environment should be prepared")
         .output()
         .await
         .expect("PowerShell should execute");
@@ -239,7 +254,8 @@ mod tests {
             powershell_literal(&set_content),
             powershell_literal(&out_file),
         );
-        let output = headless_shell_command(&script)
+        let output = headless_shell_command(&script, ShellProfile::Skip)
+            .expect("command environment should be prepared")
             .output()
             .await
             .expect("PowerShell should execute");
@@ -264,10 +280,14 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn cmd_output_inherits_the_utf8_console_contract() {
-        let output = headless_shell_command(r#"cmd.exe /d /s /c "echo ação çãõ ÁÉÍÓÚ""#)
-            .output()
-            .await
-            .expect("cmd should execute through PowerShell");
+        let output = headless_shell_command(
+            r#"cmd.exe /d /s /c "echo ação çãõ ÁÉÍÓÚ""#,
+            ShellProfile::Skip,
+        )
+        .expect("command environment should be prepared")
+        .output()
+        .await
+        .expect("cmd should execute through PowerShell");
 
         assert!(output.status.success());
         assert_eq!(
@@ -284,7 +304,9 @@ mod tests {
         let started_at = Instant::now();
         let output = headless_shell_command(
             "Start-Process -FilePath pwsh.exe -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Milliseconds 250'); Write-Output 'completed'",
+            ShellProfile::Skip,
         )
+        .expect("command environment should be prepared")
         .output()
         .await
         .expect("PowerShell should execute");

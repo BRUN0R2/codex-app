@@ -154,7 +154,7 @@ describe("atualização dos limites de uso", () => {
     });
 
     const request = coordinator.refresh();
-    coordinator.invalidateSession();
+    coordinator.invalidate();
     pending.resolve(28);
 
     await expect(request).resolves.toBe(false);

@@ -4,6 +4,7 @@ import type { ThreadOutput, ToolOutputPresentation } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { activityContentProjectionCache } from "./activityContentProjectionCache";
 import { ImagePreview } from "./ImagePreview";
+import { MONOSPACE_TAB_COLUMNS } from "./monospace";
 import { PlainTextOutput } from "./PlainTextOutput";
 import { SyntaxTokens } from "./syntax/SyntaxTokens";
 import {
@@ -70,7 +71,11 @@ export function ToolOutputContent(props: {
       </Match>
       <Match when={props.presentation.type === "searchResults" && searchLines()}>
         {(lines) => (
-          <table aria-label={i18n.messages().toolOutput.searchResults} class="tool-search-output">
+          <table
+            aria-label={i18n.messages().toolOutput.searchResults}
+            class="tool-search-output"
+            style={{ "tab-size": MONOSPACE_TAB_COLUMNS }}
+          >
             <tbody>
               <For each={lines()}>
                 {(line) => (

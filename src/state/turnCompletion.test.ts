@@ -118,6 +118,7 @@ function runningCommand(): Extract<ThreadItem, { type: "commandExecution" }> {
 function threadFixture(status: "completed" | "inProgress"): CodexThread {
   return {
     id: "thread-a",
+    agent: null,
     mode: "codex",
     preview: "Teste",
     name: null,

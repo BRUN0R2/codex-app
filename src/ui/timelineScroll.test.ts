@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import {
+  projectVirtualLogicalOffset,
+  resolveBoundedVirtualViewport,
+} from "./boundedVirtualViewport";
 
 import {
   calculateTimelineScrollbar,
@@ -6,7 +10,7 @@ import {
   isTimelineNearEnd,
   resolveTimelineAnchorCorrection,
   resolveTimelineFollowing,
-  resolveTimelineMessageOffset,
+  resolveTimelineMessageLogicalOffset,
   resolveTimelineRestorationTop,
   shouldHandleTimelineWheel,
   shouldMeasureTimelineScrollAsUserInitiated,
@@ -225,8 +229,31 @@ describe("timeline scroll metrics", () => {
   });
 
   it("uses the current message anchor instead of the turn start after expansion", () => {
-    expect(resolveTimelineMessageOffset(780, 120)).toBe(780);
-    expect(resolveTimelineMessageOffset(null, 120)).toBe(120);
-    expect(() => resolveTimelineMessageOffset(-1, 120)).toThrow("Mounted timeline message offset");
+    const viewport = resolveBoundedVirtualViewport({
+      logicalTotalSize: 2000,
+      physicalOffset: 100,
+      viewportSize: 800,
+    });
+    expect(resolveTimelineMessageLogicalOffset(780, 120, viewport)).toBe(780);
+    expect(resolveTimelineMessageLogicalOffset(null, 120, viewport)).toBe(120);
+    expect(() => resolveTimelineMessageLogicalOffset(Number.NaN, 120, viewport)).toThrow(
+      "Mounted timeline message offset",
+    );
+  });
+
+  it("recovers the same navigation target across 100,000 compressed history positions", () => {
+    for (let index = 0; index < 100_000; index++) {
+      const logicalOffset = index * 390;
+      const viewport = resolveBoundedVirtualViewport({
+        logicalTotalSize: 40_000_000,
+        physicalOffset: (index * 7919) % 7_900_000,
+        viewportSize: 800,
+      });
+      const mountedOffset = projectVirtualLogicalOffset(viewport, logicalOffset);
+      expect(resolveTimelineMessageLogicalOffset(mountedOffset, 0, viewport)).toBeCloseTo(
+        logicalOffset,
+        7,
+      );
+    }
   });
 });

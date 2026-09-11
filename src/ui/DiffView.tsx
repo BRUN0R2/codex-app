@@ -10,6 +10,7 @@ import {
 } from "./diffViewport";
 import { readDiffVirtualRows } from "./diffVirtualRows";
 import { observeElementResize, readResizeObserverBorderBoxHeight } from "./elementResize";
+import { MONOSPACE_TAB_COLUMNS } from "./monospace";
 import {
   releaseVirtualRowsCanvas,
   type VirtualRowsCanvas,
@@ -37,7 +38,7 @@ export function DiffView(props: {
   const usesContainerSizing = props.viewportSizing === "container";
   const viewportMeasurement = usesContainerSizing ? createSignal<number | null>(null) : undefined;
   const [scrollTop, setScrollTop] = createSignal(0);
-  const splitProjection = createMemo(() => props.document.splitProjection());
+  const splitProjection = () => props.document.splitProjection();
   const rowCount = createMemo(() =>
     props.mode === "split" ? splitProjection().rows.length : props.document.unifiedRows.length,
   );
@@ -143,7 +144,10 @@ export function DiffView(props: {
       onScroll={updateViewportScroll}
       ref={viewportElement}
       style={{
-        height: usesContainerSizing ? undefined : `${intrinsicViewportHeight()}px`,
+        "tab-size": MONOSPACE_TAB_COLUMNS,
+        "contain-intrinsic-block-size": usesContainerSizing
+          ? undefined
+          : `${intrinsicViewportHeight()}px`,
       }}
       // biome-ignore lint/a11y/noNoninteractiveTabindex: the virtual diff viewport must remain keyboard-scrollable without mounting the full document.
       tabIndex={0}

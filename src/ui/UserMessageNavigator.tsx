@@ -1,6 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
+import { userMessageAnchor } from "./TimelineMessages";
 import { userMessageMarkerWidth } from "./timelinePresentation";
 
 export interface UserMessageEntry {
@@ -28,6 +29,7 @@ export function UserMessageNavigator(props: {
         <For each={props.messages}>
           {(message, index) => (
             <button
+              aria-controls={userMessageAnchor(message.id)}
               aria-current={index() === props.activeIndex ? "true" : undefined}
               aria-label={formatMessage(i18n.messages().userMessages.goTo, {
                 number: index() + 1,

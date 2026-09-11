@@ -1,3 +1,4 @@
+import { strictEqual } from "node:assert";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -8,6 +9,19 @@ import {
 } from "./boundedVirtualViewport";
 
 describe("bounded virtual viewport", () => {
+  it("preserves fractional uncompressed coordinates exactly across 100,000 positions", () => {
+    for (let index = 0; index < 100_000; index += 1) {
+      const offset = index / 7;
+      const viewport = resolveBoundedVirtualViewport({
+        logicalTotalSize: 40_000.125,
+        physicalOffset: offset,
+        viewportSize: 606.75,
+      });
+      strictEqual(viewport.logicalOffset, offset);
+      strictEqual(projectVirtualLogicalOffset(viewport, 0), 0);
+      strictEqual(virtualLogicalToPhysicalOffset(offset, 40_000.125, 606.75), offset);
+    }
+  });
   it("keeps ordinary lists in one-to-one physical coordinates", () => {
     const viewport = resolveBoundedVirtualViewport({
       logicalTotalSize: 40_000,

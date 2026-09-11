@@ -4,24 +4,34 @@ import type {
   RateLimitUpdateSnapshot,
 } from "../contracts/types";
 
+export const GENERAL_RATE_LIMIT_ID = "codex";
+
+export function generalRateLimitSnapshot(
+  response: AccountRateLimitsResponse | null | undefined,
+): RateLimitSnapshot | null {
+  return response?.generalRateLimit ?? null;
+}
+
 /** Merges a sparse provider update without clearing metadata absent from the stream event. */
 export function mergeRateLimitUpdate(
   current: AccountRateLimitsResponse,
   update: RateLimitUpdateSnapshot,
 ): AccountRateLimitsResponse {
-  const currentBucket = current.rateLimitsByLimitId[update.limitId];
+  const currentBucket =
+    update.limitId === GENERAL_RATE_LIMIT_ID
+      ? current.generalRateLimit
+      : current.additionalRateLimitsByLimitId[update.limitId];
   const mergedBucket = mergeSnapshot(currentBucket, update);
-  const updatesPrimary =
-    update.limitId === "codex" || current.rateLimits.limitId === update.limitId;
 
-  return {
-    ...current,
-    rateLimits: updatesPrimary ? mergeSnapshot(current.rateLimits, update) : current.rateLimits,
-    rateLimitsByLimitId: {
-      ...current.rateLimitsByLimitId,
-      [update.limitId]: mergedBucket,
-    },
-  };
+  return update.limitId === GENERAL_RATE_LIMIT_ID
+    ? { ...current, generalRateLimit: mergedBucket }
+    : {
+        ...current,
+        additionalRateLimitsByLimitId: {
+          ...current.additionalRateLimitsByLimitId,
+          [update.limitId]: mergedBucket,
+        },
+      };
 }
 
 function mergeSnapshot(

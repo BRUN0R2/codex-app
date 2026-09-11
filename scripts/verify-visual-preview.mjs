@@ -12,12 +12,15 @@ import {
   loopbackHttpOrigin,
   observeProcess,
   waitForDevToolsEndpoint,
+  withAuditTarget,
 } from "../src/tooling/visualAuditRuntime.ts";
+import { observeTimelineScrollWork, probeTimelineScrollCommit } from "../src/tooling/timelineScrollAudit.ts";
 import { PROFILE_STORAGE_KEYS } from "../src/state/profileStorage.ts";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PREVIEW_PLACEHOLDER_ORIGIN = "http://127.0.0.1";
 const HOME_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1`;
+const CONTEXT_USAGE_PREVIEW_URL = `${HOME_PREVIEW_URL}&contextUsage=preCompact`;
 const MODEL_WARMUP_PREVIEW_URL = `${HOME_PREVIEW_URL}&modelRefreshDelay=180`;
 const RUNTIME_RESTRICTIONS_PREVIEW_URL = `${HOME_PREVIEW_URL}&runtimeRestrictions=1`;
 const REASONING_REFLECTION_PREVIEW_URL = `${HOME_PREVIEW_URL}&reasoningReflection=1`;
@@ -30,7 +33,12 @@ const BROWSER_DEBUG_PREVIEW_URL = `${BROWSER_PANEL_PREVIEW_URL}&browserMetrics=1
 const OFFICIAL_READ_ICON_PATH =
   "M16.3965 5.01128C16.3963 4.93399 16.3489 4.87691 16.293 4.85406L16.2354 4.84332C13.9306 4.91764 12.5622 5.32101 10.665 6.34722V16.3716C11.3851 15.9994 12.0688 15.7115 12.7861 15.5015C13.8286 15.1965 14.9113 15.0633 16.2402 15.0435L16.2979 15.0308C16.353 15.0063 16.3965 14.9483 16.3965 14.8755V5.01128ZM3.54492 14.8765C3.54492 14.9725 3.62159 15.0422 3.70117 15.0435L4.19629 15.0562C5.94062 15.1247 7.26036 15.4201 8.65918 16.0484C8.05544 15.1706 7.14706 14.436 6.17871 14.1109V14.1099C5.56757 13.9045 5.16816 13.3314 5.16797 12.6988V4.98882C4.86679 4.93786 4.60268 4.8999 4.28223 4.87457L3.72754 4.84429C3.62093 4.84079 3.54505 4.92417 3.54492 5.01226V14.8765ZM17.7266 14.8755C17.7266 15.6314 17.1607 16.2751 16.4121 16.3628L16.2598 16.3736C15.0122 16.3922 14.0555 16.5159 13.1602 16.7779C12.2629 17.0404 11.3966 17.4508 10.3369 18.0738C10.129 18.1959 9.87099 18.1958 9.66309 18.0738C7.71455 16.9283 6.31974 16.4689 4.12988 16.3853L3.68164 16.3736C2.85966 16.3614 2.21484 15.6838 2.21484 14.8765V5.01226C2.21497 4.15391 2.93263 3.4871 3.77246 3.51519L4.39844 3.54937C4.67996 3.57191 4.92258 3.60421 5.16797 3.64214V2.51031C5.16797 1.44939 6.29018 0.645615 7.31055 1.15679L7.31152 1.15582C8.78675 1.89511 10.0656 3.33006 10.5352 4.91461C12.3595 3.98907 13.8688 3.58817 16.1924 3.51324L16.3506 3.51714C17.1285 3.5741 17.7264 4.23496 17.7266 5.01128V14.8755ZM6.49805 12.6988C6.49824 12.7723 6.5442 12.8296 6.60254 12.8492L6.96289 12.9859C7.85245 13.3586 8.68125 13.9846 9.33496 14.7496V5.5816C9.08794 4.37762 8.13648 3.1566 6.95801 2.47613L6.71582 2.34527C6.67779 2.32617 6.6337 2.32502 6.58301 2.35796C6.52946 2.39279 6.49805 2.44863 6.49805 2.51031V12.6988Z";
 const SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=general`;
+const NOTIFICATION_SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=notifications`;
+const PRIORITY_NOTIFICATION_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&surface=notification-overlay&channel=priority`;
+const TRANSIENT_NOTIFICATION_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&surface=notification-overlay&channel=transient`;
+const PERSONALIZATION_SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=personalization`;
 const USAGE_SETTINGS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=usage`;
+const EMPTY_USAGE_SETTINGS_PREVIEW_URL = `${USAGE_SETTINGS_PREVIEW_URL}&usageResets=empty`;
 const SETTINGS_INTERACTION_PREVIEW_URL = `${SETTINGS_PREVIEW_URL}&preferenceDelay=400`;
 const AUTOMATIONS_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&surface=automations`;
 const PROFILE_PREVIEW_URL = `${PREVIEW_PLACEHOLDER_ORIGIN}/?preview=1&chrome=1&settings=profile`;
@@ -41,6 +49,8 @@ const VIEWPORTS = [
   { width: 1280, height: 820 },
   { width: 1920, height: 1080 },
 ];
+const PRIORITY_NOTIFICATION_VIEWPORTS = [{ width: 460, height: 420 }];
+const TRANSIENT_NOTIFICATION_VIEWPORTS = [{ width: 390, height: 260 }];
 const FILE_VIEWER_VIEWPORTS = [
   { width: 789, height: 422 },
   { width: 881, height: 1030 },
@@ -57,6 +67,47 @@ const REQUESTED_SCENARIOS = new Set(
     .filter((value) => value.length > 0),
 );
 const SCENARIOS = [
+  {
+    id: "workspace-last-tab-close",
+    url: TIMELINE_STRESS_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de timeline expandida"))`,
+    prepareExpression: `void (async () => {
+      try { window.__previewWorkspaceClosureMetrics = await (await import("/src/tooling/workspaceClosureAudit.ts")).auditWorkspaceClosure(); }
+      catch (error) { window.__previewWorkspaceClosureError = String(error?.stack ?? error); }
+      finally { window.__previewWorkspaceClosureReady = true; }
+    })()`,
+    readyExpression: "window.__previewWorkspaceClosureReady === true",
+    auditExpression: () => `(() => {
+      if (window.__previewWorkspaceClosureError !== undefined) throw new Error(window.__previewWorkspaceClosureError);
+      return window.__previewWorkspaceClosureMetrics;
+    })()`,
+    validate: (metrics) => {
+      assert(metrics.tabCount === 1 && metrics.openedWidth < metrics.initialWidth, "the final-tab audit did not open a review panel");
+      assert(!metrics.panelPresent && !metrics.splitterPresent && metrics.expanded === "false", "closing the final tab left an empty workspace open");
+      assert(Math.abs(metrics.closedWidth - metrics.initialWidth) <= 1, "closing the workspace did not restore the conversation width");
+    },
+  },
+  ...["composer-sizing", "timeline-dock-resize"].map((id) => ({
+    id,
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"))`,
+    prepareExpression: `void (async () => {
+      try {
+        const audit = await import("/src/tooling/chatLayoutAudit.ts");
+        window.__previewChatLayoutMetrics = await audit.${id === "composer-sizing" ? "auditComposerSizing" : "auditTimelineDockResize"}();
+      } catch (error) { window.__previewChatLayoutError = String(error?.stack ?? error); }
+      finally { window.__previewChatLayoutReady = true; }
+    })()`,
+    readyExpression: "window.__previewChatLayoutReady === true",
+    interact: id === "timeline-dock-resize" ? exerciseTimelineEndInputs : exerciseComposerFocusLoss,
+    auditExpression: () => `(() => {
+      if (window.__previewChatLayoutError !== undefined) throw new Error(window.__previewChatLayoutError);
+      return window.__previewChatLayoutMetrics;
+    })()`,
+    validate: id === "composer-sizing" ? validateComposerSizing : validateTimelineDockResize,
+  })),
   {
     id: "composer-fast-mode",
     url: HOME_PREVIEW_URL,
@@ -123,6 +174,28 @@ const SCENARIOS = [
     })()`,
     auditExpression: composerContextWindowVisualAuditExpression,
     validate: validateComposerContextWindowMetrics,
+  },
+  {
+    id: "composer-context-usage",
+    url: CONTEXT_USAGE_PREVIEW_URL,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+    )`,
+    prepareExpression: `(() => {
+      const threadButton = [...document.querySelectorAll(".thread-main")].find(
+        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
+      );
+      if (!(threadButton instanceof HTMLButtonElement)) {
+        throw new Error("The context preview task is missing.");
+      }
+      threadButton.click();
+    })()`,
+    readyExpression: `document.querySelector(".composer-context-ring-anchor")?.getAttribute(
+      "aria-label",
+    ) === "Uso de contexto: 95%"`,
+    interact: hoverComposerContextUsage,
+    auditExpression: composerContextUsageVisualAuditExpression,
+    validate: validateComposerContextUsageMetrics,
   },
   {
     id: "composer-speed-options",
@@ -202,7 +275,7 @@ const SCENARIOS = [
     id: "composer-runtime-restrictions",
     url: RUNTIME_RESTRICTIONS_PREVIEW_URL,
     initialReadyExpression: `document.querySelector(".model-button") instanceof HTMLButtonElement &&
-      document.querySelector(".model-button-name")?.textContent?.includes("5.6 Luna") === true`,
+      document.querySelector(".model-button-name")?.textContent?.includes("GPT-5.6 Luna") === true`,
     prepareExpression: `(() => {
       const modelButton = document.querySelector(".model-button");
       if (!(modelButton instanceof HTMLButtonElement)) {
@@ -268,6 +341,14 @@ const SCENARIOS = [
     validate: validateActiveActivityReflectionMetrics,
   },
   {
+    id: "sidebar-layout",
+    url: HOME_PREVIEW_URL,
+    readyExpression: `document.querySelector(".sidebar-splitter") !== null`,
+    interact: exerciseSidebarWidthInteraction,
+    auditExpression: sidebarLayoutVisualAuditExpression,
+    validate: validateSidebarLayoutMetrics,
+  },
+  {
     id: "reasoning-activity-reflection",
     url: REASONING_REFLECTION_PREVIEW_URL,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
@@ -289,54 +370,24 @@ const SCENARIOS = [
     auditExpression: activeActivityReflectionVisualAuditExpression,
     validate: validateReasoningActivityReflectionMetrics,
   },
-  {
-    id: "user-message-navigation",
+  ...[false, true].map((reducedMotion) => ({
+    id: reducedMotion ? "user-message-navigation-reduced-motion" : "user-message-navigation",
     url: HOME_PREVIEW_URL,
+    reducedMotion,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
-      (button) => button.textContent?.includes("Inspecionar janela de contexto"),
-    )`,
-    prepareExpression: `(() => {
-      const threadButton = [...document.querySelectorAll(".thread-main")].find(
-        (button) => button.textContent?.includes("Inspecionar janela de contexto"),
-      );
-      threadButton?.click();
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        const activeTurn = [...document.querySelectorAll(".conversation-turn")].at(-1);
-        const group = activeTurn?.querySelector(".agent-activity-group:not([open]) > summary");
-        group?.click();
-        queueMicrotask(() => {
-          document.querySelectorAll(".user-message-navigator button")[2]?.click();
-          requestAnimationFrame(() => {
-            window.__previewUserMessageNavigationRequested = true;
-          });
-        });
-      }));
+      (button) => button.textContent?.includes("Inspecionar janela de contexto"))`,
+    prepareExpression: `void (async () => {
+      try { window.__previewUserNavigationMetrics = await (await import("/src/tooling/userMessageNavigationAudit.ts")).auditUserMessageNavigation(); }
+      catch (error) { window.__previewUserNavigationError = String(error?.stack ?? error); }
+      finally { window.__previewUserNavigationReady = true; }
     })()`,
-    readyExpression: `(() => {
-      if (window.__previewUserMessageNavigationRequested !== true) {
-        return false;
-      }
-      const timeline = document.querySelector(".timeline");
-      const target = document.getElementById("user-message-preview-image-user-message");
-      const marker = document.querySelectorAll(".user-message-navigator button")[2];
-      if (
-        !(timeline instanceof HTMLElement) ||
-        !(target instanceof HTMLElement) ||
-        !(marker instanceof HTMLButtonElement)
-      ) {
-        return false;
-      }
-      const targetGap =
-        target.getBoundingClientRect().top - timeline.getBoundingClientRect().top;
-      const targetOffset = timeline.scrollTop + targetGap;
-      const maximumScroll = timeline.scrollHeight - timeline.clientHeight;
-      const expectedScroll = Math.min(maximumScroll, Math.max(0, targetOffset - 32));
-      return Math.abs(timeline.scrollTop - expectedScroll) <= 2 &&
-        marker.getAttribute("aria-current") === "true";
+    readyExpression: "window.__previewUserNavigationReady === true",
+    auditExpression: () => `(() => {
+      if (window.__previewUserNavigationError !== undefined) throw new Error(window.__previewUserNavigationError);
+      return { viewport: { width: innerWidth, height: innerHeight }, ...window.__previewUserNavigationMetrics };
     })()`,
-    auditExpression: userMessageNavigationVisualAuditExpression,
     validate: validateUserMessageNavigationMetrics,
-  },
+  })),
   {
     id: "manual-scroll-ownership",
     url: HOME_PREVIEW_URL,
@@ -480,7 +531,64 @@ const SCENARIOS = [
         element.closest(".file-change-diff")?.querySelector(".syntax-token") !== null,
     )`,
     auditExpression: syntaxHighlightedDiffVisualAuditExpression,
+    interact: exerciseDiffFill,
     validate: validateSyntaxHighlightedDiffMetrics,
+  },
+  {
+    id: "code-whitespace",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: 'document.querySelector(".chat-page") !== null',
+    prepareExpression: `void (async () => {
+      try { window.__codeWhitespace = await (await import("/src/tooling/codeWhitespaceAudit.tsx")).auditCodeWhitespace(); }
+      catch (error) { window.__codeWhitespaceError = String(error?.stack ?? error); }
+      finally { window.__codeWhitespaceReady = true; }
+    })()`,
+    readyExpression: "window.__codeWhitespaceReady === true",
+    auditExpression: () => `(() => {
+      if (window.__codeWhitespaceError !== undefined) throw new Error(window.__codeWhitespaceError);
+      return window.__codeWhitespace;
+    })()`,
+    validate: (samples) => {
+      assert(samples.length === 32, "the code whitespace matrix is incomplete");
+      for (const sample of samples) {
+        const detail = JSON.stringify(sample);
+        assert(sample.textMatches, `code text changed during presentation: ${detail}`);
+        assert(Math.abs(sample.actualPrefixWidth - sample.expectedPrefixWidth) <= 1,
+          `code indentation differs from its column projection: ${detail}`);
+        assert(sample.verticalOverflow <= 1, `a short code viewport clips its line: ${detail}`);
+      }
+    },
+  },
+  {
+    id: "short-diff-sizing",
+    url: HOME_PREVIEW_URL,
+    initialReadyExpression: 'document.querySelector(".chat-page") !== null',
+    prepareExpression: `void (async () => {
+      try { window.__shortDiffSizing = await (await import("/src/tooling/diffIntrinsicSizingAudit.tsx")).auditDiffIntrinsicSizing(); }
+      catch (error) { window.__shortDiffSizingError = String(error?.stack ?? error); }
+      finally { window.__shortDiffSizingReady = true; }
+    })()`,
+    readyExpression: "window.__shortDiffSizingReady === true",
+    auditExpression: () => `(() => {
+      if (window.__shortDiffSizingError !== undefined) throw new Error(window.__shortDiffSizingError);
+      return window.__shortDiffSizing;
+    })()`,
+    validate: (samples) => {
+      assert(samples.length === 32, "the intrinsic diff sizing matrix is incomplete");
+      for (const sample of samples) {
+        assert(sample.mode === "split" ? sample.splitProjectionReads > 0 : sample.splitProjectionReads === 0,
+          `diff projection did not follow the display mode: ${JSON.stringify(sample)}`);
+        const detail = JSON.stringify(sample);
+        assert(sample.longLines === (sample.horizontalOverflow > 0), `unexpected horizontal scrolling: ${detail}`);
+        if (sample.rowCount < 18) {
+          assert(sample.verticalOverflow <= 1 && sample.clippedRows === 0 &&
+            sample.mountedRows === sample.rowCount, `short diff lines were clipped: ${detail}`);
+        } else {
+          assert(sample.outerHeight <= 360.5 && sample.verticalOverflow > 0 &&
+            sample.mountedRows <= 19, `large diff lost bounded virtualization: ${detail}`);
+        }
+      }
+    },
   },
   {
     id: "review-file-layout",
@@ -617,6 +725,7 @@ const SCENARIOS = [
     prepareExpression: composerPopoverLayeringPrepareExpression(),
     readyExpression: `window.__previewComposerPopoverLayeringReady === true`,
     auditExpression: composerPopoverLayeringVisualAuditExpression,
+    interact: exerciseComposerFooterOcclusion,
     validate: validateComposerPopoverLayeringMetrics,
   },
   {
@@ -758,12 +867,73 @@ const SCENARIOS = [
     validate: validateUsageSettingsMetrics,
   },
   {
+    id: "usage-settings-empty-resets",
+    url: EMPTY_USAGE_SETTINGS_PREVIEW_URL,
+    initialReadyExpression: `document.querySelector(".usage-reset-empty") !== null`,
+    prepareExpression: `document.querySelector(".usage-reset-empty")?.scrollIntoView({ block: "center" })`,
+    readyExpression: `(() => {
+      const state = document.querySelector(".usage-reset-empty");
+      const bounds = state?.getBoundingClientRect();
+      return bounds !== undefined && bounds.top >= 0 && bounds.bottom <= innerHeight;
+    })()`,
+    auditExpression: emptyUsageResetsVisualAuditExpression,
+    validate: validateEmptyUsageResetsMetrics,
+  },
+  {
+    id: "notification-settings",
+    url: NOTIFICATION_SETTINGS_PREVIEW_URL,
+    initialReadyExpression: `document.querySelectorAll(".notification-test-button").length === 6`,
+    prepareExpression: `(() => {
+      const slider = document.querySelector('.notification-duration-control input[type="range"]');
+      if (!(slider instanceof HTMLInputElement)) {
+        throw new Error("The notification duration slider is missing.");
+      }
+      slider.value = "17";
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+      window.__notificationDurationDuringInput =
+        document.querySelector(".notification-duration-control span")?.textContent?.trim();
+    })()`,
+    readyExpression: `window.__notificationDurationDuringInput === "17s"`,
+    auditExpression: notificationSettingsVisualAuditExpression,
+    validate: validateNotificationSettingsMetrics,
+  },
+  {
+    id: "notification-priority-overlay",
+    url: PRIORITY_NOTIFICATION_PREVIEW_URL,
+    viewports: PRIORITY_NOTIFICATION_VIEWPORTS,
+    readyExpression: `document.querySelectorAll(".notification-decision").length === 4 &&
+      document.querySelector(".notification-approval .approval-command")?.textContent?.trim() === "pnpm verify"`,
+    auditExpression: notificationOverlayVisualAuditExpression,
+    validate: validatePriorityNotificationOverlayMetrics,
+  },
+  {
+    id: "notification-transient-overlay",
+    url: TRANSIENT_NOTIFICATION_PREVIEW_URL,
+    viewports: TRANSIENT_NOTIFICATION_VIEWPORTS,
+    readyExpression: `document.querySelector(".notification-card.transient") !== null &&
+      document.querySelector(".notification-progress") !== null`,
+    auditExpression: notificationOverlayVisualAuditExpression,
+    validate: validateTransientNotificationOverlayMetrics,
+  },
+  {
+    id: "personalization-save-feedback",
+    url: PERSONALIZATION_SETTINGS_PREVIEW_URL,
+    initialReadyExpression: `document.querySelector(".settings-actions .primary-button") !== null`,
+    prepareExpression: `document.querySelector(".settings-actions .primary-button")?.click()`,
+    readyExpression: `document.querySelector(".settings-save-confirmed")?.textContent?.trim() === "Salvo"`,
+    auditExpression: personalizationSaveFeedbackVisualAuditExpression,
+    validate: validatePersonalizationSaveFeedbackMetrics,
+  },
+  {
     id: "usage-settings-interaction",
     url: USAGE_SETTINGS_PREVIEW_URL,
     initialReadyExpression: `document.querySelector(".usage-reset-button")?.textContent?.trim() === "Usar redefinição" &&
       document.querySelector(".usage-switch")?.getAttribute("aria-checked") === "false"`,
     prepareExpression: `(() => {
       const resetButton = document.querySelector(".usage-reset-button");
+      window.__usageLimitsBeforeReset = [...document.querySelectorAll(".usage-limit-meter")].map(
+        (meter) => meter.value,
+      );
       resetButton?.click();
       requestAnimationFrame(() => {
         if (resetButton?.textContent?.trim() === "Confirmar") {
@@ -938,16 +1108,39 @@ const SCENARIOS = [
             (button) => button.textContent?.includes("Estresse de timeline expandida"),
           );
           threadButton?.click();
-          let closeButton;
+          let toggle;
           for (let index = 0; index < 30; index += 1) {
             await frame();
-            closeButton = document.querySelector('[aria-label="Fechar área de trabalho"]');
-            if (closeButton !== null) break;
+            toggle = document.querySelector(".workspace-panel-toggle");
+            if (toggle?.getAttribute("aria-expanded") === "true") break;
           }
-          if (!(closeButton instanceof HTMLButtonElement)) {
+          if (!(toggle instanceof HTMLButtonElement)) {
             throw new Error("The browser did not open for its disposal check.");
           }
-          closeButton.click();
+          toggle.click();
+          await frame();
+          await frame();
+          if (
+            toggle.getAttribute("aria-expanded") !== "false" ||
+            document.querySelector(".browser-panel") !== null
+          ) {
+            throw new Error("The permanent workspace control did not close the browser.");
+          }
+          toggle.click();
+          for (let index = 0; index < 30; index += 1) {
+            await frame();
+            if (
+              toggle.getAttribute("aria-expanded") === "true" &&
+              document.querySelector(".browser-panel") !== null
+            ) {
+              window.__previewBrowserPanelReopened = true;
+              break;
+            }
+          }
+          if (window.__previewBrowserPanelReopened !== true) {
+            throw new Error("The permanent workspace control did not reopen the browser.");
+          }
+          toggle.click();
           await frame();
           await frame();
         } catch (error) {
@@ -1021,6 +1214,19 @@ const SCENARIOS = [
     auditExpression: timelineExtremeFilesAuditExpression,
     validate: validateTimelineExtremeFilesMetrics,
   },
+
+  {
+    id: "timeline-expanded-100k",
+    url: TIMELINE_EXTREME_PREVIEW_URL,
+    readyTimeoutMs: 660_000,
+    initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
+      (button) => button.textContent?.includes("Estresse de 100000 arquivos"),
+    )`,
+    prepare: prepareExpandedTimeline,
+    readyExpression: `window.__timelineExtremeFilesReady === true`,
+    auditExpression: timelineExtremeFilesAuditExpression,
+    validate: validateTimelineExpandedFilesMetrics,
+  },
 ];
 
 async function main() {
@@ -1078,10 +1284,19 @@ async function main() {
     }));
     for (const scenario of scenarios) {
       for (const viewport of scenario.viewports ?? VIEWPORTS) {
-        reports.push(await auditViewport(devToolsEndpoint.port, viewport, scenario));
+        reports.push(
+          await withAuditTarget(browserController, async (targetId) => {
+            const auditClient = await browserController.attachToTarget(targetId);
+            await auditClient.send("Page.enable");
+            await auditClient.send("Runtime.enable");
+            await auditClient.send("Page.addScriptToEvaluateOnNewDocument", {
+              source: `localStorage.setItem(${JSON.stringify(PROFILE_STORAGE_KEYS.locale)}, ${JSON.stringify(VISUAL_AUDIT_LOCALE)});`,
+            });
+            return auditViewport(auditClient, viewport, scenario);
+          }),
+        );
       }
     }
-
     process.stdout.write(`${JSON.stringify({ browserPath, reports }, null, 2)}\n`);
   } finally {
     if (browserController !== undefined) {
@@ -1110,86 +1325,142 @@ function rebasePreviewUrl(url, previewOrigin) {
   return `${previewOrigin}${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
-async function auditViewport(debugPort, viewport, scenario) {
-  const target = await fetchJson(
-    `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent("about:blank")}`,
-    { method: "PUT" },
+async function exerciseComposerFocusLoss(client) {
+  await client.send("Page.bringToFront");
+  const expandedHeight = await client.evaluate(`(async () => (await import("/src/tooling/chatLayoutAudit.ts")).prepareComposerFocusLoss())()`, true);
+  const background = await withAuditTarget(client.client, async (targetId) => {
+    const otherWindow = await client.client.attachToTarget(targetId);
+    await otherWindow.send("Page.bringToFront");
+    return client.evaluate(`(async () => (await import("/src/tooling/chatLayoutAudit.ts")).submitComposerWhileUnfocused())()`, true);
+  });
+  await client.send("Page.bringToFront");
+  await client.evaluate(`window.__previewChatLayoutMetrics.focusLoss = {
+    expandedHeight: ${expandedHeight},
+    background: ${JSON.stringify(background)},
+    restoredHeight: document.querySelector(".composer textarea").getBoundingClientRect().height,
+    focused: document.hasFocus(),
+  }`, false);
+}
+
+async function exerciseTimelineEndInputs(client) {
+  for (const input of ["wheel", "thumb", "arrow"]) {
+    const geometry = await client.evaluate(`(async () => (await import("/src/tooling/chatLayoutAudit.ts")).prepareTimelineEndInput(${input === "arrow"}))()`, true);
+    const point = geometry[input];
+    await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
+    if (input === "wheel") {
+      await client.send("Input.dispatchMouseEvent", {
+        type: "mouseWheel", ...point, deltaX: 0, deltaY: geometry.scrollDistance,
+      });
+    } else {
+      await client.send("Input.dispatchMouseEvent", {
+        type: "mousePressed", ...point, button: "left", buttons: 1, clickCount: 1,
+      });
+      if (input === "thumb") {
+        await client.send("Input.dispatchMouseEvent", {
+          type: "mouseMoved", x: point.x, y: geometry.trackBottom, button: "left", buttons: 1,
+        });
+      }
+      await client.send("Input.dispatchMouseEvent", {
+        type: "mouseReleased", x: point.x, y: input === "thumb" ? geometry.trackBottom : point.y,
+        button: "left", buttons: 0, clickCount: 1,
+      });
+    }
+    await client.evaluate(`new Promise((resolve) => setTimeout(resolve, 500))`, true);
+    await client.evaluate(`(async () => { window.__previewChatLayoutMetrics.${input} = (await import("/src/tooling/chatLayoutAudit.ts")).measureTimelineEnd(); })()`, true);
+  }
+}
+
+async function hoverComposerContextUsage(client) {
+  const point = await client.evaluate(
+    `(() => {
+      const indicator = document.querySelector(".composer-context-ring-anchor");
+      if (!(indicator instanceof HTMLElement)) {
+        throw new Error("The context usage indicator is missing.");
+      }
+      const bounds = indicator.getBoundingClientRect();
+      return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+    })()`,
+    false,
   );
-  const client = await CdpClient.connect(target.webSocketDebuggerUrl);
-  try {
-    await client.send("Page.enable");
-    await client.send("Runtime.enable");
-    await client.send("Page.addScriptToEvaluateOnNewDocument", {
-      source: `localStorage.setItem(${JSON.stringify(PROFILE_STORAGE_KEYS.locale)}, ${JSON.stringify(VISUAL_AUDIT_LOCALE)});`,
-    });
-    await client.send("Storage.clearDataForOrigin", {
-      origin: new URL(scenario.url).origin,
-      storageTypes: "all",
-    });
-    await client.send("Emulation.setDeviceMetricsOverride", {
-      width: viewport.width,
-      height: viewport.height,
-      deviceScaleFactor: 1,
-      mobile: false,
-    });
-    await client.send("Emulation.setEmulatedMedia", {
-      features: [{ name: "prefers-reduced-motion", value: "no-preference" }],
-    });
-    const loaded = client.waitForEvent("Page.loadEventFired");
-    await client.send("Page.navigate", { url: scenario.url });
-    await loaded;
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: point.x,
+    y: point.y,
+  });
+  await client.evaluate(
+    `new Promise((resolve) => setTimeout(resolve, 150))`,
+    true,
+  );
+}
+
+async function auditViewport(client, viewport, scenario) {
+  await client.send("Storage.clearDataForOrigin", {
+    origin: new URL(scenario.url).origin,
+    storageTypes: "all",
+  });
+  await client.send("Emulation.setDeviceMetricsOverride", {
+    width: viewport.width,
+    height: viewport.height,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await client.send("Emulation.setEmulatedMedia", {
+    features: [{ name: "prefers-reduced-motion", value: scenario.reducedMotion === true ? "reduce" : "no-preference" }],
+  });
+  const loaded = client.waitForEvent("Page.loadEventFired");
+  await client.send("Page.navigate", { url: scenario.url });
+  await loaded;
+  await waitForPreview(
+    client,
+    scenario.initialReadyExpression ?? scenario.readyExpression,
+    scenario.id,
+  );
+  if (scenario.prepare !== undefined || scenario.prepareExpression !== undefined) {
+    if (scenario.prepare !== undefined) await scenario.prepare(client, viewport);
+    else await client.evaluate(scenario.prepareExpression, false);
     await waitForPreview(
       client,
-      scenario.initialReadyExpression ?? scenario.readyExpression,
+      scenario.readyExpression,
       scenario.id,
+      scenario.readyTimeoutMs,
     );
-    if (scenario.prepareExpression !== undefined) {
-      await client.evaluate(scenario.prepareExpression, false);
-      await waitForPreview(
-        client,
-        scenario.readyExpression,
-        scenario.id,
-        scenario.readyTimeoutMs,
-      );
-    }
-    if (scenario.interact !== undefined) {
-      await scenario.interact(client);
-    }
-    await client.evaluate(
-      `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(async () => {
-        await document.fonts.ready;
-        resolve(true);
-      })))`,
-      true,
-    );
-
-    const metrics = await client.evaluate(scenario.auditExpression(), false);
-    try {
-      scenario.validate(metrics, viewport);
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `Scenario ${scenario.id} is invalid at ${viewport.width}x${viewport.height}: ${reason}. Metrics: ${JSON.stringify(metrics)}`,
-        { cause: error },
-      );
-    }
-    const screenshot = await client.send("Page.captureScreenshot", {
-      format: "png",
-      fromSurface: true,
-      captureBeyondViewport: false,
-    });
-    const screenshotPath = path.join(
-      ARTIFACT_DIRECTORY,
-      `${scenario.id}-${viewport.width}x${viewport.height}.png`,
-    );
-    await writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
-    return { scenario: scenario.id, viewport, screenshotPath, metrics };
-  } finally {
-    client.close();
-    await fetch(
-      `http://127.0.0.1:${debugPort}/json/close/${encodeURIComponent(target.id)}`,
-    ).catch(() => undefined);
   }
+  if (scenario.interact !== undefined) {
+    await scenario.interact(client);
+  }
+  await client.evaluate(
+    `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(async () => {
+      await document.fonts.ready;
+      resolve(true);
+    })))`,
+    true,
+  );
+
+  const metrics = await client.evaluate(scenario.auditExpression(), false);
+  await writeFile(
+    path.join(ARTIFACT_DIRECTORY, `${scenario.id}-${viewport.width}x${viewport.height}.metrics.json`),
+    JSON.stringify(metrics, null, 2),
+  );
+  try {
+    scenario.validate(metrics, viewport);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Scenario ${scenario.id} is invalid at ${viewport.width}x${viewport.height}: ${reason}. Metrics: ${JSON.stringify(metrics)}`,
+      { cause: error },
+    );
+  }
+  const screenshot = await client.send("Page.captureScreenshot", {
+    format: "png",
+    fromSurface: true,
+    captureBeyondViewport: false,
+  });
+  const screenshotPath = path.join(
+    ARTIFACT_DIRECTORY,
+    `${scenario.id}-${viewport.width}x${viewport.height}.png`,
+  );
+  await writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
+  return { scenario: scenario.id, viewport, screenshotPath, metrics };
 }
 
 async function waitForPreview(client, readyExpression, scenarioId, timeoutMs = 15_000) {
@@ -1232,13 +1503,15 @@ function browserPanelVisualAuditExpression() {
     const toolbar = document.querySelector(".browser-toolbar");
     const address = document.querySelector(".browser-address");
     const surface = document.querySelector(".browser-native-surface");
+    const toggle = document.querySelector(".workspace-panel-toggle");
     if (
       !(workspace instanceof HTMLElement) ||
       !(panel instanceof HTMLElement) ||
       !(tabs instanceof HTMLElement) ||
       !(toolbar instanceof HTMLElement) ||
       !(address instanceof HTMLElement) ||
-      !(surface instanceof HTMLElement)
+      !(surface instanceof HTMLElement) ||
+      !(toggle instanceof HTMLButtonElement)
     ) {
       throw new Error("The built-in browser surface is incomplete.");
     }
@@ -1263,11 +1536,91 @@ function browserPanelVisualAuditExpression() {
       toolbar: rectangle(toolbar),
       address: rectangle(address),
       surface: rectangle(surface),
+      toggle: rectangle(toggle),
+      toggleCount: document.querySelectorAll(".workspace-panel-toggle").length,
+      toggleExpanded: toggle.getAttribute("aria-expanded"),
       tabCount: workspace.querySelectorAll('[role="tab"]').length,
       selectedTabs: workspace.querySelectorAll('[role="tab"][aria-selected="true"]').length,
       navigationButtons: panel.querySelectorAll(".browser-toolbar > .browser-toolbar-button").length,
       addressInputs: panel.querySelectorAll('.browser-address input[aria-label="Pesquisar ou digitar endereço"]').length,
       previewPages: panel.querySelectorAll(".browser-preview-page").length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function sidebarLayoutVisualAuditExpression({ requireReserveCard = true } = {}) {
+  return `(() => {
+    const rectangle = (element, label) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Missing element: " + label);
+      }
+      const bounds = element.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    };
+    const root = document.querySelector(".app-shell");
+    const sidebar = document.querySelector(".sidebar");
+    const splitter = document.querySelector(".sidebar-splitter");
+    const main = document.querySelector(".main-panel");
+    const card = document.querySelector("#account-popover > .luna-reserve-card");
+    const accountMenu = document.querySelector("#account-popover > #account-menu");
+    if (
+      !(root instanceof HTMLElement) ||
+      !(sidebar instanceof HTMLElement) ||
+      !(splitter instanceof HTMLElement) ||
+      !(main instanceof HTMLElement) ||
+      (${requireReserveCard} &&
+        (!(card instanceof HTMLElement) || !(accountMenu instanceof HTMLElement)))
+    ) {
+      throw new Error("The sidebar layout or Luna Reserve account popover is incomplete.");
+    }
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      root: rectangle(root, ".app-shell"),
+      sidebar: rectangle(sidebar, ".sidebar"),
+      splitter: rectangle(splitter, ".sidebar-splitter"),
+      main: rectangle(main, ".main-panel"),
+      card: card instanceof HTMLElement ? rectangle(card, ".luna-reserve-card") : null,
+      accountMenu:
+        accountMenu instanceof HTMLElement ? rectangle(accountMenu, "#account-menu") : null,
+      cardDisplay: card instanceof HTMLElement ? getComputedStyle(card).display : null,
+      cardVisible: (() => {
+        if (!(card instanceof HTMLElement)) {
+          return false;
+        }
+        const bounds = card.getBoundingClientRect();
+        const hit = document.elementFromPoint(
+          bounds.left + bounds.width / 2,
+          bounds.top + bounds.height / 2,
+        );
+        return hit !== null && card.contains(hit);
+      })(),
+      splitterDisplay: getComputedStyle(splitter).display,
+      ariaMaximum: Number(splitter.getAttribute("aria-valuemax")),
+      ariaMinimum: Number(splitter.getAttribute("aria-valuemin")),
+      ariaNow: Number(splitter.getAttribute("aria-valuenow")),
+      ariaOrientation: splitter.getAttribute("aria-orientation"),
+      ariaText: splitter.getAttribute("aria-valuetext"),
+      role: splitter.getAttribute("role") ?? (splitter.tagName === "HR" ? "separator" : null),
+      accountPopoverReserveCardCount: document.querySelectorAll(
+        "#account-popover > .luna-reserve-card",
+      ).length,
+      accountMenuReserveCardCount: document.querySelectorAll("#account-menu .luna-reserve-card")
+        .length,
+      accountMenuVisible: document.querySelector("#account-menu") instanceof HTMLElement,
+      reserveAboveMenu:
+        card instanceof HTMLElement &&
+        accountMenu instanceof HTMLElement &&
+        card.getBoundingClientRect().bottom < accountMenu.getBoundingClientRect().top,
+      persistedWidth: localStorage.getItem("codex-desktop.profile-v2.sidebar-width"),
+      interaction: window.__previewSidebarWidthInteraction ?? null,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
     };
   })()`;
@@ -1417,6 +1770,11 @@ function browserPanelLifecycleVisualAuditExpression() {
     return {
       viewport: { width: innerWidth, height: innerHeight },
       panelCount: document.querySelectorAll(".browser-panel").length,
+      toggleCount: document.querySelectorAll(".workspace-panel-toggle").length,
+      toggleExpanded: document
+        .querySelector(".workspace-panel-toggle")
+        ?.getAttribute("aria-expanded") ?? null,
+      reopened: window.__previewBrowserPanelReopened === true,
       failureCount: document.querySelectorAll(
         ".bootstrap-failure, .render-failure, .frontend-failure, [role='alert']",
       ).length,
@@ -1714,6 +2072,7 @@ function previewHighlightedToolOutputsPrepareExpression() {
             return {
               canvasHeight: currentCanvas.getBoundingClientRect().height,
               clientHeight: currentViewport.clientHeight,
+              outerHeight: viewportBounds.height,
               lineNumbers: currentRows.map(
                 (row) => row.querySelector(".tool-source-line-number")?.textContent?.trim() ?? "",
               ),
@@ -1855,6 +2214,7 @@ function previewHighlightedToolOutputsPrepareExpression() {
               sourceInlineOverlapCount,
               sourceCanvasHeight: sourceCanvas.getBoundingClientRect().height,
               sourceViewportClientHeight: sourceViewport.clientHeight,
+              sourceViewportHeight: sourceViewportBounds.height,
               sourceViewportScrollHeight: sourceViewport.scrollHeight,
               sourceVirtualizationCycle: { firstOpen, reopened, bottom, restored },
               sourceTokenKinds: [
@@ -2335,7 +2695,18 @@ function nestedScrollContainmentPrepareExpression() {
             };
             const run = async (region, requestedTop, deltaY) => {
               timeline.scrollTop = baseTimelineScroll;
-              await frame();
+              let previousGeometry = "";
+              let quietFrames = 0;
+              const settlementDeadline = performance.now() + 1000;
+              while (quietFrames < 8) {
+                await frame();
+                const geometry = [timeline.scrollTop, timeline.scrollHeight, region.scrollHeight].join(":");
+                quietFrames = geometry === previousGeometry ? quietFrames + 1 : 0;
+                previousGeometry = geometry;
+                if (performance.now() > settlementDeadline) {
+                  throw new Error("Nested-scroll setup geometry did not settle.");
+                }
+              }
               region.scrollTop = requestedTop;
               const nestedStart = region.scrollTop;
               const overscrollBehaviorY = originalGetComputedStyle(region).overscrollBehaviorY;
@@ -3194,6 +3565,129 @@ async function exerciseHighlightedReadInteraction(client) {
   });
 }
 
+async function exerciseSidebarWidthInteraction(client) {
+  const initial = await client.evaluate(
+    sidebarLayoutVisualAuditExpression({ requireReserveCard: false }),
+    false,
+  );
+  const pointer = {
+    startX: initial.splitter.left + initial.splitter.width / 2,
+    targetX: initial.sidebar.left + 420 + initial.splitter.width / 2,
+    y: initial.splitter.top + Math.min(120, initial.splitter.height / 2),
+  };
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: pointer.startX,
+    y: pointer.y,
+  });
+  await client.send("Input.dispatchMouseEvent", {
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+    type: "mousePressed",
+    x: pointer.startX,
+    y: pointer.y,
+  });
+  for (let step = 1; step <= 5; step += 1) {
+    await client.send("Input.dispatchMouseEvent", {
+      button: "left",
+      buttons: 1,
+      type: "mouseMoved",
+      x: pointer.startX + ((pointer.targetX - pointer.startX) * step) / 5,
+      y: pointer.y,
+    });
+  }
+  await client.send("Input.dispatchMouseEvent", {
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+    type: "mouseReleased",
+    x: pointer.targetX,
+    y: pointer.y,
+  });
+  await client.evaluate(
+    `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+    true,
+  );
+  const dragged = await client.evaluate(
+    sidebarLayoutVisualAuditExpression({ requireReserveCard: false }),
+    false,
+  );
+
+  await client.evaluate(`document.querySelector(".sidebar-splitter")?.focus()`, false);
+  await client.send("Input.dispatchKeyEvent", {
+    code: "ArrowRight",
+    key: "ArrowRight",
+    nativeVirtualKeyCode: 39,
+    type: "keyDown",
+    windowsVirtualKeyCode: 39,
+  });
+  await client.send("Input.dispatchKeyEvent", {
+    code: "ArrowRight",
+    key: "ArrowRight",
+    nativeVirtualKeyCode: 39,
+    type: "keyUp",
+    windowsVirtualKeyCode: 39,
+  });
+  await client.evaluate(
+    `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+    true,
+  );
+  const keyboard = await client.evaluate(
+    sidebarLayoutVisualAuditExpression({ requireReserveCard: false }),
+    false,
+  );
+
+  const reset = {
+    x: keyboard.splitter.left + keyboard.splitter.width / 2,
+    y: keyboard.splitter.top + Math.min(120, keyboard.splitter.height / 2),
+  };
+  await client.send("Input.dispatchMouseEvent", {
+    button: "left",
+    buttons: 1,
+    clickCount: 2,
+    type: "mousePressed",
+    x: reset.x,
+    y: reset.y,
+  });
+  await client.send("Input.dispatchMouseEvent", {
+    button: "left",
+    buttons: 0,
+    clickCount: 2,
+    type: "mouseReleased",
+    x: reset.x,
+    y: reset.y,
+  });
+  await client.evaluate(
+    `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+    true,
+  );
+  const restored = await client.evaluate(
+    sidebarLayoutVisualAuditExpression({ requireReserveCard: false }),
+    false,
+  );
+  await client.evaluate(
+    `document.querySelector(".sidebar-account-trigger")?.click()`,
+    false,
+  );
+  await client.evaluate(
+    `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+    true,
+  );
+  const accountMenuOpen = await client.evaluate(sidebarLayoutVisualAuditExpression(), false);
+  await client.evaluate(
+    `window.__previewSidebarWidthInteraction = ${JSON.stringify({
+      accountMenuOpen,
+      dragged,
+      initial,
+      keyboard,
+      restored,
+      supported: true,
+    })}`,
+    false,
+  );
+}
+
 async function exerciseWorkspaceSplitInteraction(client) {
   const initial = await client.evaluate(workspaceSplitVisualStateExpression(), false);
   if (initial.splitterDisplay === "none") {
@@ -3617,6 +4111,7 @@ function timelinePerformanceStressPrepareExpression() {
           visited: visited.size,
         };
 
+        const scrollCommit = await (${probeTimelineScrollCommit.toString()})(timeline);
         const mountedSummariesByKey = () => {
           const summaries = new Map();
           for (const wrapper of document.querySelectorAll(".agent-activity-virtual-item")) {
@@ -3656,6 +4151,7 @@ function timelinePerformanceStressPrepareExpression() {
           previousProbeSummaries = currentProbeSummaries;
         }
 
+        const scrollWork = (${observeTimelineScrollWork.toString()})(timeline);
         const frameIntervals = [];
         const animationWorkByFrame = new Map();
         const animationCallbackOutliers = [];
@@ -3679,12 +4175,13 @@ function timelinePerformanceStressPrepareExpression() {
                 };
                 animationWorkByFrame.set(timestamp, measurement);
               }
+              const scrollDuration = scrollWork.takeDuration();
               measurement.applicationDuration +=
-                callback === auditAnimationCallback ? 0 : duration;
+                scrollDuration + (callback === auditAnimationCallback ? 0 : duration);
               measurement.auditDuration +=
                 callback === auditAnimationCallback ? duration : 0;
               measurement.callbacks += 1;
-              measurement.duration += duration;
+              measurement.duration += duration + scrollDuration;
               measurement.durations.push(duration);
               if (callback !== auditAnimationCallback && duration > 8) {
                 animationCallbackOutliers.push({
@@ -3752,6 +4249,14 @@ function timelinePerformanceStressPrepareExpression() {
                 mountedCount,
                 phase: phaseLabel,
                 scrollTop: timeline.scrollTop,
+                range: [list.dataset.virtualActivityStart, list.dataset.virtualActivityEnd],
+                windowTransform: list.querySelector('.agent-activity-virtual-window')?.style.transform,
+                items: [...list.querySelectorAll('.agent-activity-virtual-item')].slice(0, 6).map((item) => ({
+                  key: item.dataset.virtualActivityKey,
+                  top: item.getBoundingClientRect().top,
+                  bottom: item.getBoundingClientRect().bottom,
+                  transform: item.style.transform,
+                })),
                 total,
                 visibleBottom,
                 visibleTop,
@@ -3835,13 +4340,14 @@ function timelinePerformanceStressPrepareExpression() {
           requestAnimationFrame(tick);
         });
         window.requestAnimationFrame = nativeRequestAnimationFrame;
+        scrollWork.dispose();
         observer?.disconnect();
         const rapidElapsed = performance.now() - rapidStarted;
         const sortedFrames = frameIntervals.slice(1).sort((left, right) => left - right);
         const sortedAnimationWork = [...animationWorkByFrame.values()]
           .map((measurement) => measurement.duration)
           .sort((left, right) => left - right);
-        const sortedApplicationAnimationWork = [...animationWorkByFrame.values()]
+        const sortedApplicationWork = [...animationWorkByFrame.values()]
           .map((measurement) => measurement.applicationDuration)
           .sort((left, right) => left - right);
         const sortedAuditAnimationWork = [...animationWorkByFrame.values()]
@@ -3988,7 +4494,8 @@ function timelinePerformanceStressPrepareExpression() {
           );
         }
         const timelineTop = restoredTimeline.getBoundingClientRect().top;
-        const topWrappers = [...document.querySelectorAll(".agent-activity-virtual-item")];
+        const topWrappers = [...document.querySelectorAll(".agent-activity-virtual-item")]
+          .sort((left, right) => left.getBoundingClientRect().top - right.getBoundingClientRect().top);
         const sourceAtTop = topWrappers.find(
           (element) => element.querySelector("details[open] > summary") !== null,
         );
@@ -4062,6 +4569,7 @@ function timelinePerformanceStressPrepareExpression() {
             const rowTops = rows.map((row) => row.getBoundingClientRect().top);
             const canvas = viewport.querySelector(".diff-virtual-canvas");
             return {
+              active: viewport.closest('.agent-activity-render-slot')?.classList.contains('agent-activity-virtual-item') === true,
               canvasConnected:
                 canvas instanceof HTMLElement &&
                 canvas.isConnected &&
@@ -4081,6 +4589,7 @@ function timelinePerformanceStressPrepareExpression() {
         );
 
         window.__timelinePerformanceStressMetrics = {
+          scrollCommit,
           visitedItems: visited.size,
           expansionBoundaryPasses: boundaryPasses,
           expansionIterations: iterations,
@@ -4097,15 +4606,15 @@ function timelinePerformanceStressPrepareExpression() {
             (total, measurement) => total + measurement.callbacks,
             0,
           ),
-          rapidMedianAnimationWorkMs: percentile(sortedAnimationWork, 0.5),
-          rapidP95AnimationWorkMs: percentile(sortedAnimationWork, 0.95),
-          rapidP99AnimationWorkMs: percentile(sortedAnimationWork, 0.99),
-          rapidMaximumAnimationWorkMs: sortedAnimationWork.at(-1) ?? 0,
-          rapidP95ApplicationAnimationWorkMs: percentile(sortedApplicationAnimationWork, 0.95),
-          rapidP99ApplicationAnimationWorkMs: percentile(sortedApplicationAnimationWork, 0.99),
-          rapidMaximumApplicationAnimationWorkMs: sortedApplicationAnimationWork.at(-1) ?? 0,
+          rapidMedianFrameWorkMs: percentile(sortedAnimationWork, 0.5),
+          rapidP95FrameWorkMs: percentile(sortedAnimationWork, 0.95),
+          rapidP99FrameWorkMs: percentile(sortedAnimationWork, 0.99),
+          rapidMaximumFrameWorkMs: sortedAnimationWork.at(-1) ?? 0,
+          rapidP95ApplicationWorkMs: percentile(sortedApplicationWork, 0.95),
+          rapidP99ApplicationWorkMs: percentile(sortedApplicationWork, 0.99),
+          rapidMaximumApplicationWorkMs: sortedApplicationWork.at(-1) ?? 0,
           rapidAnimationCallbackOutliers: animationCallbackOutliers,
-          rapidP95AuditAnimationWorkMs: percentile(sortedAuditAnimationWork, 0.95),
+          rapidP95AuditFrameWorkMs: percentile(sortedAuditAnimationWork, 0.95),
           rapidP95AnimationCallbackRanksMs: animationCallbackRanks.map((durations) =>
             percentile(durations, 0.95),
           ),
@@ -4378,6 +4887,7 @@ function activityReconciliationAuditExpression() {
       started: Number(root.dataset.activityReconciliationStarted ?? Number.NaN),
       completed: Number(root.dataset.activityReconciliationCompleted ?? Number.NaN),
       commentaryState: root.dataset.activityReconciliationCommentary ?? null,
+      commentaryPrefixRetained: root.dataset.activityReconciliationCommentaryPrefixRetained === "true",
       durationMs: Number(root.dataset.activityReconciliationDurationMs ?? Number.NaN),
       identityComparisons: Number(
         root.dataset.activityReconciliationIdentityComparisons ?? Number.NaN,
@@ -4446,6 +4956,7 @@ function composerFastModeVisualAuditExpression() {
       indicator,
       button,
       name,
+      modelName: nameElement?.textContent?.trim() ?? null,
       indicatorCount: document.querySelectorAll(".model-speed-indicator").length,
       accessibleLabel: buttonElement?.textContent?.includes("Modo rápido ativo") === true,
       fullAccessColor:
@@ -4511,6 +5022,41 @@ function composerContextWindowVisualAuditExpression() {
   return composerModelSubmenuVisualAuditExpression(".model-submenu-contextWindow");
 }
 
+function composerContextUsageVisualAuditExpression() {
+  return `(() => {
+    const normalize = (value) => value?.replace(/\\s+/gu, " ").trim() ?? null;
+    const indicator = document.querySelector(".composer-context-ring-anchor");
+    const progress = document.querySelector(".composer-context-ring-progress");
+    const popover = document.querySelector(".context-window-popover");
+    if (
+      !(indicator instanceof HTMLElement) ||
+      !(progress instanceof SVGCircleElement) ||
+      !(popover instanceof HTMLElement)
+    ) {
+      throw new Error("The context usage presentation is incomplete.");
+    }
+    const bounds = popover.getBoundingClientRect();
+    const style = getComputedStyle(popover);
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      accessibleLabel: indicator.getAttribute("aria-label"),
+      title: normalize(popover.querySelector(".context-window-popover-title")?.textContent),
+      status: normalize(popover.querySelector(".context-window-popover-percent")?.textContent),
+      tokens: normalize(popover.querySelector(".context-window-popover-tokens")?.textContent),
+      dashOffset: Number(progress.getAttribute("stroke-dashoffset")),
+      popover: {
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        left: bounds.left,
+        opacity: Number(style.opacity),
+        visibility: style.visibility,
+      },
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
 function composerServiceTierVisualAuditExpression() {
   return composerModelSubmenuVisualAuditExpression(".model-submenu-serviceTier");
 }
@@ -4541,6 +5087,10 @@ function activeActivityReflectionVisualAuditExpression() {
         ? null
         : item.getBoundingClientRect().top - previous.getBoundingClientRect().bottom;
     });
+    const sidebar = document.querySelector(".sidebar");
+    const accountPopoverReserveCard = document.querySelector(
+      "#account-popover > .luna-reserve-card",
+    );
     const selectedThread = document.querySelector(".thread-row.active");
     const selectedThreadStyle =
       selectedThread instanceof HTMLElement ? getComputedStyle(selectedThread) : null;
@@ -4635,6 +5185,10 @@ function activeActivityReflectionVisualAuditExpression() {
       pausePositions,
       alignmentError,
       sidebarItemGaps,
+      sidebarWidth: sidebar instanceof HTMLElement ? sidebar.getBoundingClientRect().width : null,
+      accountPopoverReserveCard: accountPopoverReserveCard instanceof HTMLElement,
+      accountMenuReserveCardCount: document.querySelectorAll("#account-menu .luna-reserve-card")
+        .length,
       selectedThreadBackground: selectedThreadStyle?.backgroundColor ?? null,
       selectedThreadBoxShadow: selectedThreadStyle?.boxShadow ?? null,
       planExplanationCount: document.querySelectorAll(".plan-progress-explanation").length,
@@ -4642,12 +5196,11 @@ function activeActivityReflectionVisualAuditExpression() {
       runningGroupedChildCount: document.querySelectorAll(
         ".grouped-activity-item .activity-title.is-running",
       ).length,
-      completedTokenText:
-        document.querySelector('.conversation-turn[data-status="completed"] .turn-token-usage')
-          ?.textContent?.trim() ?? null,
-      activeTokenText:
-        document.querySelector('.conversation-turn[data-status="inProgress"] .turn-token-usage')
-          ?.textContent?.trim() ?? null,
+      turnHeadersContainOnlyDuration: [
+        ...document.querySelectorAll(".turn-header-button, .turn-active-status"),
+      ].every((header) =>
+        header.textContent?.trim() === header.querySelector(".turn-duration-label")?.textContent?.trim(),
+      ),
       reasoningHeadlineSequence: JSON.parse(
         document.documentElement.dataset.reasoningHeadlineSequence ?? "[]",
       ),
@@ -4658,47 +5211,6 @@ function activeActivityReflectionVisualAuditExpression() {
   })()`;
 }
 
-function userMessageNavigationVisualAuditExpression() {
-  return `(() => {
-    const timeline = document.querySelector(".timeline");
-    const target = document.getElementById("user-message-preview-image-user-message");
-    const targetTurn = target?.closest(".timeline-virtual-item");
-    const marker = document.querySelectorAll(".user-message-navigator button")[2];
-    const activeTurn = [...document.querySelectorAll(".conversation-turn")].at(-1);
-    if (
-      !(timeline instanceof HTMLElement) ||
-      !(target instanceof HTMLElement) ||
-      !(targetTurn instanceof HTMLElement) ||
-      !(marker instanceof HTMLButtonElement) ||
-      !(activeTurn instanceof HTMLElement)
-    ) {
-      throw new Error("The third user-message anchor is missing.");
-    }
-    return {
-      viewport: { width: innerWidth, height: innerHeight },
-      targetGap:
-        target.getBoundingClientRect().top - timeline.getBoundingClientRect().top,
-      targetOffsetWithinTurn:
-        target.getBoundingClientRect().top - targetTurn.getBoundingClientRect().top,
-      markerCurrent: marker.getAttribute("aria-current"),
-      expandedGroupCount: activeTurn.querySelectorAll(".agent-activity-group[open]").length,
-      scrollTop: timeline.scrollTop,
-      maximumScroll: timeline.scrollHeight - timeline.clientHeight,
-      expectedTargetGap: (() => {
-        const targetOffset =
-          timeline.scrollTop +
-          target.getBoundingClientRect().top -
-          timeline.getBoundingClientRect().top;
-        const expectedScroll = Math.min(
-          timeline.scrollHeight - timeline.clientHeight,
-          Math.max(0, targetOffset - 32),
-        );
-        return targetOffset - expectedScroll;
-      })(),
-      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
-    };
-  })()`;
-}
 
 function manualScrollOwnershipVisualAuditExpression() {
   return `(() => {
@@ -4804,10 +5316,19 @@ function nestedScrollFollowingVisualAuditExpression() {
   })()`;
 }
 
-function timelineExtremeFilesPrepareExpression() {
+async function prepareExpandedTimeline(client, viewport) {
+  const metrics = { width: viewport.width, deviceScaleFactor: 1, mobile: false };
+  await client.send("Emulation.setDeviceMetricsOverride", { ...metrics, height: 8192 });
+  await client.evaluate(timelineExtremeFilesPrepareExpression(true, viewport), false);
+  await waitForPreview(client, "window.__timelineExtremeFilesExpanded === true || window.__timelineExtremeFilesError !== undefined", "expanded file preparation", 620_000);
+  await client.send("Emulation.setDeviceMetricsOverride", { ...metrics, height: viewport.height });
+}
+
+function timelineExtremeFilesPrepareExpression(expanded = false, measuredViewport = null) {
   return `(() => {
     void (async () => {
       try {
+        const compareRetainedIdentities = ${compareRetainedIdentities.toString()};
         const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
         const waitUntil = async (label, predicate, timeoutMs) => {
           const deadline = performance.now() + timeoutMs;
@@ -4845,6 +5366,49 @@ function timelineExtremeFilesPrepareExpression() {
           throw new Error("The extreme timeline is missing.");
         }
 
+        const expansion = ${expanded ? `await (await import("/src/tooling/timelineExpansionAudit.ts")).expandTimelineFileDetails(timeline, 100000)` : "null"};
+        ${measuredViewport === null ? "" : `window.__timelineExtremeFilesExpanded = true;
+        await waitUntil("the measured viewport", () => innerWidth === ${measuredViewport.width} && innerHeight === ${measuredViewport.height}, 10_000);
+        await frame();
+        await frame();` }
+
+        const scrollCommit = await (${probeTimelineScrollCommit.toString()})(timeline);
+        const readMountedIdentities = () => {
+          const summaries = new Map();
+          const wrappers = new Map();
+          for (const wrapper of document.querySelectorAll(".agent-activity-virtual-item")) {
+            const key = wrapper.getAttribute("data-virtual-activity-key");
+            const summary = wrapper.querySelector("summary");
+            if (key !== null && summary instanceof HTMLElement) {
+              summaries.set(key, summary);
+              wrappers.set(key, wrapper);
+            }
+          }
+          return { summaries, wrappers };
+        };
+        const probeMaximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+        const probeStep = Math.max(1, Math.min(timeline.clientHeight / 4, probeMaximum / 8));
+        timeline.scrollTop = probeMaximum / 4;
+        await frame();
+        await frame();
+        let previousProbe = readMountedIdentities();
+        let retainedProbeComparisons = 0;
+        let retainedProbeSummaryChanges = 0;
+        let retainedProbeWrapperChanges = 0;
+        for (let index = 0; index < 6; index += 1) {
+          timeline.scrollTop = Math.min(probeMaximum, timeline.scrollTop + probeStep);
+          await frame();
+          await frame();
+          const current = readMountedIdentities();
+          const summaries = compareRetainedIdentities(previousProbe.summaries, current.summaries);
+          const wrappers = compareRetainedIdentities(previousProbe.wrappers, current.wrappers);
+          retainedProbeComparisons += summaries.retainedCount;
+          retainedProbeSummaryChanges += summaries.replacementCount;
+          retainedProbeWrapperChanges += wrappers.replacementCount;
+          previousProbe = current;
+        }
+
+        const scrollWork = (${observeTimelineScrollWork.toString()})(timeline);
         const frameIntervals = [];
         const animationWorkByFrame = new Map();
         const animationCallbackOutliers = [];
@@ -4862,9 +5426,10 @@ function timelineExtremeFilesPrepareExpression() {
                 measurement = { applicationDuration: 0, duration: 0 };
                 animationWorkByFrame.set(timestamp, measurement);
               }
+              const scrollDuration = scrollWork.takeDuration();
               measurement.applicationDuration +=
-                callback === auditAnimationCallback ? 0 : duration;
-              measurement.duration += duration;
+                scrollDuration + (callback === auditAnimationCallback ? 0 : duration);
+              measurement.duration += duration + scrollDuration;
               if (callback !== auditAnimationCallback && duration > 8) {
                 animationCallbackOutliers.push({
                   duration,
@@ -4884,6 +5449,11 @@ function timelineExtremeFilesPrepareExpression() {
         let legacyPlaceholderFrames = 0;
         let maximumMountedItems = 0;
         let missingSummaryFrames = 0;
+        let expandedItemFailures = 0;
+        let expandedItemComparisons = 0;
+        let maximumVisibleGapPx = 0;
+        let visibleCoverageComparisons = 0;
+        const visibleGapSamples = [];
         let consecutiveSummaryComparisons = 0;
         let summaryIdentityChanges = 0;
         let wrapperIdentityChanges = 0;
@@ -4929,6 +5499,7 @@ function timelineExtremeFilesPrepareExpression() {
           requestAnimationFrame(tick);
         });
         window.requestAnimationFrame = nativeRequestAnimationFrame;
+        scrollWork.dispose();
         observer?.disconnect();
         const rapidElapsed = performance.now() - rapidStarted;
         await frame();
@@ -4992,6 +5563,40 @@ function timelineExtremeFilesPrepareExpression() {
               '[data-activity-content="deferred"]',
             );
             const timelineBounds = timeline.getBoundingClientRect();
+            if (${expanded}) {
+              for (const wrapper of mountedWrappers) {
+                const bounds = wrapper.getBoundingClientRect();
+                if (bounds.bottom <= timelineBounds.top || bounds.top >= timelineBounds.bottom) continue;
+                expandedItemComparisons += 1;
+                const details = wrapper.querySelector("details");
+                if (details?.open !== true || wrapper.querySelectorAll(".diff-virtual-row").length !== 2) expandedItemFailures += 1;
+              }
+            }
+            const listBounds = virtualList.getBoundingClientRect();
+            const visibleTop = Math.max(timelineBounds.top, listBounds.top);
+            const visibleBottom = Math.min(
+              timelineBounds.bottom, listBounds.bottom,
+              document.querySelector('.chat-dock').getBoundingClientRect().top,
+            );
+            if (visibleBottom > visibleTop) {
+              visibleCoverageComparisons++;
+              let coveredThrough = visibleTop;
+              let gap = 0;
+              const bounds = [...mountedWrappers].map((wrapper) => wrapper.getBoundingClientRect())
+                .filter((bounds) => bounds.bottom > visibleTop && bounds.top < visibleBottom)
+                .sort((left, right) => left.top - right.top);
+              for (const item of bounds) {
+                gap = Math.max(gap, item.top - coveredThrough);
+                coveredThrough = Math.max(coveredThrough, item.bottom);
+              }
+              gap = Math.max(gap, visibleBottom - coveredThrough);
+              maximumVisibleGapPx = Math.max(maximumVisibleGapPx, gap);
+              if (gap > 1 && visibleGapSamples.length < 6) visibleGapSamples.push({
+                gap, scrollTop: timeline.scrollTop, mountedRange,
+                listTop: listBounds.top, visibleTop, visibleBottom,
+                items: bounds.map(({top, bottom}) => ({top, bottom})),
+              });
+            }
             const visibleDeferredBodies = [...deferredBodyElements].filter((element) => {
               const bounds = element.getBoundingClientRect();
               return bounds.bottom > timelineBounds.top && bounds.top < timelineBounds.bottom;
@@ -5070,13 +5675,23 @@ function timelineExtremeFilesPrepareExpression() {
         const sortedAnimationWork = [...animationWorkByFrame.values()]
           .map((measurement) => measurement.duration)
           .sort((left, right) => left - right);
-        const sortedApplicationAnimationWork = [...animationWorkByFrame.values()]
+        const sortedApplicationWork = [...animationWorkByFrame.values()]
           .map((measurement) => measurement.applicationDuration)
           .sort((left, right) => left - right);
         const percentile = (values, percentileValue) =>
           values[Math.min(values.length - 1, Math.floor(values.length * percentileValue))] ?? 0;
         const list = document.querySelector(".agent-activity-virtual-list");
         window.__timelineExtremeFilesMetrics = {
+          expansion,
+          expandedItemComparisons,
+          expandedItemFailures,
+          maximumVisibleGapPx,
+          visibleCoverageComparisons,
+          visibleGapSamples,
+          scrollCommit,
+          retainedProbeComparisons,
+          retainedProbeSummaryChanges,
+          retainedProbeWrapperChanges,
           totalActivities: Number(list?.getAttribute("data-virtual-activity-total") ?? 0),
           physicalListHeight: list?.getBoundingClientRect().height ?? 0,
           rapidFrames: sortedFrames.length,
@@ -5087,18 +5702,18 @@ function timelineExtremeFilesPrepareExpression() {
           rapidP99FrameMs: percentile(sortedFrames, 0.99),
           rapidMaximumFrameMs: sortedFrames.at(-1) ?? 0,
           rapidAnimationWorkFrames: sortedAnimationWork.length,
-          rapidP95AnimationWorkMs: percentile(sortedAnimationWork, 0.95),
-          rapidP99AnimationWorkMs: percentile(sortedAnimationWork, 0.99),
-          rapidP95ApplicationAnimationWorkMs: percentile(
-            sortedApplicationAnimationWork,
+          rapidP95FrameWorkMs: percentile(sortedAnimationWork, 0.95),
+          rapidP99FrameWorkMs: percentile(sortedAnimationWork, 0.99),
+          rapidP95ApplicationWorkMs: percentile(
+            sortedApplicationWork,
             0.95,
           ),
-          rapidP99ApplicationAnimationWorkMs: percentile(
-            sortedApplicationAnimationWork,
+          rapidP99ApplicationWorkMs: percentile(
+            sortedApplicationWork,
             0.99,
           ),
-          rapidMaximumApplicationAnimationWorkMs:
-            sortedApplicationAnimationWork.at(-1) ?? 0,
+          rapidMaximumApplicationWorkMs:
+            sortedApplicationWork.at(-1) ?? 0,
           rapidAnimationCallbackOutliers: animationCallbackOutliers,
           rapidLongTasks: longTasks.length,
           rapidLongTaskTotalMs: longTasks.reduce((total, value) => total + value, 0),
@@ -5331,6 +5946,7 @@ function syntaxHighlightedDiffVisualAuditExpression() {
     const rootStyle = getComputedStyle(document.documentElement);
     return {
       viewport: { width: innerWidth, height: innerHeight },
+      diffFill: window.__previewDiffFill,
       tokenKinds,
       tokenColorCount: tokenColors.length,
       tokenCount: tokens.length,
@@ -5683,6 +6299,177 @@ function highlightedToolOutputVisualAuditExpression() {
   })()`;
 }
 
+async function exerciseDiffFill(client) {
+  const originalZoom = await client.evaluate('document.documentElement.style.zoom', false);
+  const samples = [];
+  try {
+    for (const zoom of [1, 1.125]) {
+      const geometry = await client.evaluate(`(async () => {
+        document.documentElement.style.zoom = ${zoom};
+        const file = [...document.querySelectorAll('.diff-file-identity code')].find(
+          (element) => element.textContent?.trim() === 'engine.rs',
+        );
+        const block = file?.closest('.file-change-diff');
+        block.scrollIntoView({ behavior: 'instant', block: 'start' });
+        for (let index = 0; index < 4; index++) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        const viewport = block.querySelector('.diff-viewport');
+        const bounds = viewport.getBoundingClientRect();
+        const points = [];
+        for (const [kind, selector] of [
+          ['addition', '.unified-diff-row.is-addition'],
+          ['deletion', '.unified-diff-row.is-deletion'],
+        ]) {
+          const rows = [...viewport.querySelectorAll(selector)].slice(0, 2);
+          if (rows.length !== 2) throw new Error('The diff paint probe requires consecutive changed rows.');
+          const first = rows[0].getBoundingClientRect();
+          const last = rows[1].getBoundingClientRect();
+          for (let y = Math.ceil(first.top) + 1; y < Math.floor(last.bottom) - 1; y++) {
+            points.push({ kind, x: bounds.right - 2, y });
+          }
+        }
+        return {
+          points,
+          unusedGutter: viewport.offsetWidth - viewport.clientWidth,
+          verticalOverflow: viewport.scrollHeight - viewport.clientHeight,
+          stripedRows: [...viewport.querySelectorAll('.unified-diff-row.is-deletion')].filter(
+            (row) => getComputedStyle(row).backgroundImage !== 'none',
+          ).length,
+        };
+      })()`, true);
+      const screenshot = await client.send('Page.captureScreenshot', {
+        format: 'png', fromSurface: true, captureBeyondViewport: false,
+      });
+      const paint = await client.evaluate(`(async () => {
+        const image = new Image();
+        image.src = ${JSON.stringify(`data:image/png;base64,${screenshot.data}`)};
+        await image.decode();
+        const canvas = document.createElement('canvas');
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        const expected = {};
+        for (const [kind, color] of [['addition', '#5ecc71'], ['deletion', '#ff6762']]) {
+          context.fillStyle = 'color-mix(in lab, #181818 80%, ' + color + ')';
+          context.fillRect(0, 0, 1, 1);
+          expected[kind] = [...context.getImageData(0, 0, 1, 1).data];
+        }
+        context.drawImage(image, 0, 0);
+        let mismatches = 0;
+        const mismatchSamples = [];
+        for (const point of ${JSON.stringify(geometry.points)}) {
+          const actual = [...context.getImageData(
+            Math.floor(point.x * image.width / innerWidth),
+            Math.floor(point.y * image.height / innerHeight), 1, 1,
+          ).data];
+          if (actual.some((value, index) => Math.abs(value - expected[point.kind][index]) > 1)) {
+            mismatches++;
+            if (mismatchSamples.length < 4) mismatchSamples.push({ ...point, actual });
+          }
+        }
+        return { expected, mismatches, mismatchSamples };
+      })()`, true);
+      samples.push({ zoom, comparisons: geometry.points.length,
+        unusedGutter: geometry.unusedGutter, verticalOverflow: geometry.verticalOverflow,
+        stripedRows: geometry.stripedRows, ...paint });
+    }
+    await client.evaluate(`window.__previewDiffFill = ${JSON.stringify(samples)}`, false);
+  } finally {
+    await client.evaluate(`(async () => {
+      document.documentElement.style.zoom = ${JSON.stringify(originalZoom)};
+      for (let index = 0; index < 4; index++) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    })()`, true);
+  }
+}
+
+
+async function exerciseComposerFooterOcclusion(client) {
+  const initial = await client.evaluate(`(() => ({
+    draft: document.querySelector(".composer textarea").value,
+    background: document.querySelector(".timeline").style.backgroundColor,
+  }))()`, false);
+  const samples = [];
+  try {
+    for (const [name, draft] of [
+      ["default", initial.draft],
+      ["expanded", Array.from({ length: 12 }, (_, index) => "Draft line " + index).join("\n")],
+    ]) {
+      const geometry = await client.evaluate(`(async () => {
+        const textarea = document.querySelector(".composer textarea");
+        document.querySelector(".timeline").style.backgroundColor = "#ff00ff";
+        textarea.value = ${JSON.stringify(draft)};
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        for (let frame = 0; frame < 4; frame++) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        const page = document.querySelector(".chat-page").getBoundingClientRect();
+        const dock = document.querySelector(".chat-dock").getBoundingClientRect();
+        const composer = document.querySelector(".composer").getBoundingClientRect();
+        const arrow = document.querySelector(".surface-scrollbar-arrow.down .surface-scrollbar-arrow-glyph").getBoundingClientRect();
+        const x = page.left + 2;
+        return {
+          dockHeight: dock.height,
+          composerHeight: composer.height,
+          background: getComputedStyle(document.querySelector(".main-panel")).backgroundColor,
+          points: [
+            { name: "above", x, y: dock.top - 4 },
+            { name: "fade", x, y: dock.top + dock.height / 4 },
+            { name: "lowerSide", x, y: dock.top + dock.height * 3 / 4 },
+            { name: "scrollbar", x: arrow.left + arrow.width / 2, y: arrow.top + arrow.height / 2 },
+            ...[0.1, 0.5, 0.9].map((fraction) => ({
+              name: "footer",
+              x: page.left + page.width * fraction,
+              y: (composer.bottom + page.bottom) / 2,
+            })),
+          ],
+        };
+      })()`, true);
+      const screenshot = await client.send("Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: false,
+      });
+      const paint = await client.evaluate(`(async () => {
+        const geometry = ${JSON.stringify(geometry)};
+        const image = new Image();
+        image.src = ${JSON.stringify(`data:image/png;base64,${screenshot.data}`)};
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        context.fillStyle = geometry.background;
+        context.fillRect(0, 0, 1, 1);
+        const background = [...context.getImageData(0, 0, 1, 1).data];
+        context.drawImage(image, 0, 0);
+        const points = geometry.points.map(({ name, x, y }) => ({
+          name,
+          color: [...context.getImageData(
+            Math.floor(x * image.width / innerWidth),
+            Math.floor(y * image.height / innerHeight), 1, 1,
+          ).data],
+        }));
+        return { background, points };
+      })()`, true);
+      samples.push({ name, dockHeight: geometry.dockHeight, composerHeight: geometry.composerHeight, ...paint });
+    }
+    await client.evaluate(`window.__previewComposerPopoverLayeringMetrics.footerOcclusion = ${JSON.stringify(samples)}`, false);
+  } finally {
+    await client.evaluate(`(async () => {
+      document.querySelector(".timeline").style.backgroundColor = ${JSON.stringify(initial.background)};
+      const textarea = document.querySelector(".composer textarea");
+      textarea.value = ${JSON.stringify(initial.draft)};
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      for (let frame = 0; frame < 4; frame++) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    })()`, true);
+  }
+}
+
 function composerPopoverLayeringVisualAuditExpression() {
   return `(() => {
     if (window.__previewComposerPopoverLayeringError !== undefined) {
@@ -5781,7 +6568,9 @@ function chatReferenceVisualAuditExpression() {
     const finalAnswer = rectangle(finalAnswerElement, "final answer");
     return {
       viewport: { width: innerWidth, height: innerHeight },
+      chatPage: rectangle(document.querySelector(".chat-page"), ".chat-page"),
       timelineInner: rectangle(timelineInnerElement, ".timeline-inner"),
+      composer: rectangle(document.querySelector(".composer"), ".composer"),
       userBubble,
       userBubbleStyle: styles(userBubbleElement, ".user-message-bubble"),
       duration,
@@ -5791,6 +6580,10 @@ function chatReferenceVisualAuditExpression() {
       firstCommentary,
       commentaryStyle: styles(firstCommentaryElement, "first commentary"),
       firstCommand,
+      firstCommandCard: rectangle(
+        firstCommandElement?.closest(".command-activity-card"),
+        "command card",
+      ),
       firstCommandText: firstCommandElement?.textContent?.trim() ?? null,
       activityStyle: styles(firstCommandElement, "first command"),
       terminalRead,
@@ -5901,9 +6694,11 @@ function settingsVisualAuditExpression() {
     const chrome = rectangle(".window-chrome");
     const content = rectangle(".application-frame-content");
     const controls = rectangle(".window-chrome-controls");
+    const dragRegion = rectangle(".window-chrome-drag-region");
     const overlay = rectangle(".settings-overlay");
     const navigation = rectangle(".settings-nav");
     const back = rectangle(".settings-back");
+    const backSlot = rectangle(".settings-titlebar-slot");
     const main = rectangle(".settings-main");
     const scrollbar = rectangle(".settings-scrollbar");
     const scrollbarThumb = rectangle(".settings-scrollbar .surface-scrollbar-thumb");
@@ -5948,9 +6743,11 @@ function settingsVisualAuditExpression() {
       chrome,
       content,
       controls,
+      dragRegion,
       overlay,
       navigation,
       back,
+      backSlot,
       main,
       scrollbar,
       scrollbarThumb,
@@ -5993,6 +6790,97 @@ function settingsVisualAuditExpression() {
         const bounds = element.getBoundingClientRect();
         return bounds.bottom > content.top && bounds.top < innerHeight;
       }).length,
+    };
+  })()`;
+}
+
+function notificationSettingsVisualAuditExpression() {
+  return `(() => {
+    const page = document.querySelector(".notification-settings-page");
+    const slider = document.querySelector('.notification-duration-control input[type="range"]');
+    const duration = document.querySelector(".notification-duration-control span");
+    const rows = [...document.querySelectorAll(".notification-event-row")];
+    const buttons = [...document.querySelectorAll(".notification-test-button")];
+    if (!(page instanceof HTMLElement) || !(slider instanceof HTMLInputElement)) {
+      throw new Error("Notification settings did not render completely.");
+    }
+    const pageBounds = page.getBoundingClientRect();
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      sliderValue: slider.value,
+      durationText: duration?.textContent?.trim() ?? null,
+      durationDuringInput: window.__notificationDurationDuringInput ?? null,
+      rowCount: rows.length,
+      testButtonCount: buttons.length,
+      testButtonLabels: buttons.map((button) => button.getAttribute("aria-label")),
+      minimumTestButtonHeight: Math.min(
+        ...buttons.map((button) => button.getBoundingClientRect().height),
+      ),
+      rowsInsidePage: rows.every((row) => {
+        const bounds = row.getBoundingClientRect();
+        return bounds.left >= pageBounds.left && bounds.right <= pageBounds.right;
+      }),
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      pageHorizontalOverflow: page.scrollWidth - page.clientWidth,
+    };
+  })()`;
+}
+
+function notificationOverlayVisualAuditExpression() {
+  return `(() => {
+    const surface = document.querySelector(".notification-overlay-surface");
+    const card = document.querySelector(".notification-card");
+    if (!(surface instanceof HTMLElement) || !(card instanceof HTMLElement)) {
+      throw new Error("The notification overlay is incomplete.");
+    }
+    const rectangle = (element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        bottom: bounds.bottom,
+        height: bounds.height,
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+        width: bounds.width,
+      };
+    };
+    const cardStyle = getComputedStyle(card);
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      surface: rectangle(surface),
+      card: rectangle(card),
+      bodyBackground: getComputedStyle(document.body).backgroundColor,
+      cardBackground: cardStyle.backgroundColor,
+      cardBackdropFilter: cardStyle.backdropFilter,
+      cardType: card.classList.contains("priority") ? "priority" : "transient",
+      standardFooterCount: card.querySelectorAll(".notification-card-footer").length,
+      approvalCount: card.querySelectorAll(".notification-approval").length,
+      decisionLabels: [...card.querySelectorAll(".notification-decision")].map(
+        (button) => button.textContent?.trim() ?? "",
+      ),
+      progressCount: card.querySelectorAll(".notification-progress").length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  })()`;
+}
+
+function personalizationSaveFeedbackVisualAuditExpression() {
+  return `(() => {
+    const page = document.querySelector(".settings-page");
+    const button = document.querySelector(".settings-save-confirmed");
+    if (!(page instanceof HTMLElement) || !(button instanceof HTMLButtonElement)) {
+      throw new Error("The saved-state button is missing.");
+    }
+    const style = getComputedStyle(button);
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      buttonText: button.textContent?.trim() ?? null,
+      buttonBusy: button.getAttribute("aria-busy"),
+      buttonDisabled: button.disabled,
+      animationName: style.animationName,
+      checkIconCount: button.querySelectorAll("svg").length,
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      pageHorizontalOverflow: page.scrollWidth - page.clientWidth,
     };
   })()`;
 }
@@ -6045,8 +6933,31 @@ function usageSettingsVisualAuditExpression() {
   })()`;
 }
 
+function emptyUsageResetsVisualAuditExpression() {
+  return `(() => {
+    const state = document.querySelector(".usage-reset-empty");
+    const card = state?.closest(".settings-card");
+    if (!(state instanceof HTMLElement) || !(card instanceof HTMLElement)) {
+      throw new Error("The empty reset state is missing.");
+    }
+    const stateBounds = state.getBoundingClientRect();
+    const cardBounds = card.getBoundingClientRect();
+    return {
+      text: state.textContent?.trim() ?? null,
+      textAlign: getComputedStyle(state).textAlign,
+      centerDelta: Math.abs(
+        stateBounds.left + stateBounds.width / 2 - (cardBounds.left + cardBounds.width / 2),
+      ),
+      horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
+      resetRowCount: card.querySelectorAll(".usage-reset-row").length,
+    };
+  })()`;
+}
+
 function usageSettingsInteractionVisualAuditExpression() {
   return `(() => ({
+    limitsBeforeReset: window.__usageLimitsBeforeReset,
+    limitsAfterReset: [...document.querySelectorAll(".usage-limit-meter")].map((meter) => meter.value),
     resetRows: document.querySelectorAll(".usage-reset-row").length,
     successText: document.querySelector(".usage-inline-success")?.textContent?.trim() ?? null,
     switchAriaChecked: document.querySelector(".usage-switch")?.getAttribute("aria-checked") ?? null,
@@ -6324,6 +7235,11 @@ function automationEditorVisualAuditExpression() {
     const heading = rectangle(".automation-editor h2");
     const prompt = rectangle(".automation-editor textarea");
     const editorElement = document.querySelector(".automation-editor");
+    const backdropElement = document.querySelector(".automation-editor-backdrop");
+    if (!(backdropElement instanceof HTMLElement)) throw new Error("The Automation editor backdrop is missing.");
+    const backdropStyle = getComputedStyle(backdropElement);
+    const availableEditorWidth = backdropElement.clientWidth -
+      Number.parseFloat(backdropStyle.paddingLeft) - Number.parseFloat(backdropStyle.paddingRight);
     const switchElement = document.querySelector('.automation-enabled-field input[role="switch"]');
     if (!(editorElement instanceof HTMLElement) || !(switchElement instanceof HTMLInputElement)) {
       throw new Error("The Automation editor controls are missing.");
@@ -6339,6 +7255,7 @@ function automationEditorVisualAuditExpression() {
       prompt,
       horizontalOverflow: document.documentElement.scrollWidth - innerWidth,
       editorHorizontalOverflow: editorElement.scrollWidth - editorElement.clientWidth,
+      availableEditorWidth,
       dialogCount: document.querySelectorAll('.automation-editor[role="dialog"][aria-modal="true"]').length,
       namedFields: document.querySelectorAll(".automation-editor input, .automation-editor textarea, .automation-editor select").length,
       footerButtons: document.querySelectorAll(".automation-editor footer button").length,
@@ -6349,6 +7266,7 @@ function automationEditorVisualAuditExpression() {
 
 function validateChatReferenceMetrics(metrics, viewport) {
   const tolerance = 1;
+  const expectedContentWidth = Math.min(768, metrics.chatPage.width - 32);
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
     `unexpected chat viewport at ${viewport.width}x${viewport.height}`,
@@ -6368,8 +7286,25 @@ function validateChatReferenceMetrics(metrics, viewport) {
     "the canonical physical width equivalent to 48rem changed",
   );
   assert(
-    metrics.timelineInner.width <= 768 + tolerance && metrics.timelineInner.width >= 560,
+    Math.abs(metrics.timelineInner.width - expectedContentWidth) <= tolerance,
     "the conversation column left the canonical responsive width",
+  );
+  for (const [label, bounds] of [
+    ["conversation", metrics.timelineInner],
+    ["commentary", metrics.firstCommentary],
+    ["command card", metrics.firstCommandCard],
+    ["turn divider", metrics.divider],
+    ["final answer", metrics.finalAnswer],
+  ]) {
+    assert(
+      Math.abs(bounds.left - metrics.composer.left) <= tolerance &&
+        Math.abs(bounds.right - metrics.composer.right) <= tolerance,
+      `the ${label} edges do not align with the composer border`,
+    );
+  }
+  assert(
+    Math.abs(metrics.userBubble.right - metrics.composer.right) <= tolerance,
+    "the user message does not align with the composer right border",
   );
   assert(
     metrics.userBubbleStyle.backgroundColor === "rgb(34, 34, 34)",
@@ -6442,6 +7377,7 @@ function validateComposerFastModeMetrics(metrics, viewport) {
   validateChromeMetrics(metrics, viewport);
   assert(metrics.horizontalOverflow <= tolerance, "the composer created horizontal overflow");
   assert(metrics.buttonHorizontalOverflow <= tolerance, "the model selector clips its content");
+  assert(metrics.modelName === "GPT-5.6 Luna", "the model selector changed the canonical model name");
   assert(metrics.indicatorCount === 1, "fast mode does not display exactly one indicator");
   assert(metrics.accessibleLabel === true, "the fast indicator has no accessible description");
   assert(
@@ -6462,8 +7398,8 @@ function validateComposerFastModeMetrics(metrics, viewport) {
   assert(metrics.indicator.width >= 12, "the bolt became too small");
   assert(metrics.fullAccessColor === "rgb(251, 106, 34)", "Full access lost its orange color");
   assert(metrics.projectIconColor === "rgb(74, 222, 128)", "the project icon color was not applied");
-  assert(metrics.diffAddedColor === "#4ade80", "additions do not use semantic lime green");
-  assert(metrics.diffDeletedColor === "#ff6764", "deletions do not use semantic red");
+  assert(metrics.diffAddedColor === "#5ecc71", "additions do not use the audited diff green");
+  assert(metrics.diffDeletedColor === "#ff6762", "deletions do not use the audited diff red");
 }
 
 function validateComposerContextWindowMetrics(metrics, viewport) {
@@ -6485,6 +7421,7 @@ function validateComposerContextWindowMetrics(metrics, viewport) {
       JSON.stringify(["Modelo", "Esforço", "Janela de contexto", "Velocidade"]),
     `the model-control order changed: ${JSON.stringify(metrics.rowLabels)}`,
   );
+  assert(metrics.rowValues[0] === "GPT-5.6 Luna", "the model row changed the canonical model name");
   assert(metrics.rowValues[2] === "272 mil", "the persisted catalog window is not visible");
   assert(metrics.rowValues[3] === "Rápido", "the active speed tier is not localized");
   assert(
@@ -6500,6 +7437,31 @@ function validateComposerContextWindowMetrics(metrics, viewport) {
     `the context-window options are incomplete: ${JSON.stringify(metrics.options)}`,
   );
   validateComposerModelSubmenuPlacement(metrics, viewport, "context-window");
+}
+
+function validateComposerContextUsageMetrics(metrics, viewport) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "the context indicator created page overflow");
+  assert(metrics.accessibleLabel === "Uso de contexto: 95%", "the context percentage is stale");
+  assert(metrics.title === "Janela de contexto:", "the context tooltip title changed");
+  assert(metrics.status === "95% cheia", "the pre-compaction status is inaccurate");
+  assert(
+    metrics.tokens === "245k / 258k tokens usados",
+    `the context tooltip does not use the usable execution window: ${metrics.tokens}`,
+  );
+  assert(
+    Number.isFinite(metrics.dashOffset) && metrics.dashOffset > 1.5 && metrics.dashOffset < 1.8,
+    `the context donut geometry is inaccurate: ${metrics.dashOffset}`,
+  );
+  assert(metrics.popover.opacity === 1, "the hovered context tooltip is transparent");
+  assert(metrics.popover.visibility === "visible", "the hovered context tooltip is hidden");
+  assert(metrics.popover.top >= -tolerance, "the context tooltip escapes above the viewport");
+  assert(
+    metrics.popover.right <= viewport.width + tolerance &&
+      metrics.popover.bottom <= viewport.height + tolerance &&
+      metrics.popover.left >= -tolerance,
+    "the context tooltip escapes from the viewport",
+  );
 }
 
 function validateComposerServiceTierMetrics(metrics, viewport) {
@@ -6521,6 +7483,7 @@ function validateComposerServiceTierMetrics(metrics, viewport) {
       JSON.stringify(["Modelo", "Esforço", "Janela de contexto", "Velocidade"]),
     `the model-control order changed: ${JSON.stringify(metrics.rowLabels)}`,
   );
+  assert(metrics.rowValues[0] === "GPT-5.6 Luna", "the model row changed the canonical model name");
   assert(metrics.rowValues[3] === "Rápido", "the active speed tier is not localized");
   assert(
     JSON.stringify(metrics.options) ===
@@ -6579,7 +7542,7 @@ function validateComposerUltraEffortMetrics(metrics) {
 
 function validateComposerRuntimeRestrictionsMetrics(metrics) {
   assert(metrics.horizontalOverflow <= 1, "the contextual notice created horizontal overflow");
-  assert(metrics.selectedModel === "5.6 Luna", "the configured Code Mode model was replaced");
+  assert(metrics.selectedModel === "GPT-5.6 Luna", "the configured Code Mode model was replaced");
   assert(
     metrics.persistentCompatibilityNoticeCount === 0,
     "the runtime requirement remained visible outside the selector",
@@ -6609,6 +7572,72 @@ function validateModelCatalogWarmupMetrics(metrics, viewport) {
   assert(metrics.draft === "Preparar catálogo antes do envio", "catalog warmup changed the draft");
 }
 
+function validateSidebarLayoutMetrics(metrics, viewport) {
+  const tolerance = 1;
+  const interaction = metrics.interaction;
+  assert(
+    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
+    `unexpected sidebar-layout viewport at ${viewport.width}x${viewport.height}`,
+  );
+  assert(metrics.horizontalOverflow <= tolerance, "the sidebar layout created horizontal overflow");
+  assert(metrics.cardDisplay !== "none", "the Luna Reserve panel is hidden");
+  assert(metrics.cardVisible === true, "the Luna Reserve panel is covered");
+  assert(
+    metrics.accountPopoverReserveCardCount === 1,
+    "the Luna Reserve panel is duplicated or missing from the account popover stack",
+  );
+  assert(
+    metrics.accountMenuReserveCardCount === 0,
+    "the Luna Reserve panel is nested inside the profile menu",
+  );
+  assert(metrics.reserveAboveMenu === true, "the profile menu is rendered above the Luna Reserve panel");
+  assert(metrics.accountMenuVisible === true, "the account popover did not open for its action check");
+  assert(metrics.splitterDisplay !== "none", "the sidebar splitter is hidden");
+  assert(Math.abs(metrics.splitter.width - 8) <= tolerance, "the sidebar splitter lost its 8px target");
+  assert(metrics.sidebar.width >= 360 - tolerance, "the default sidebar is too narrow");
+  assert(metrics.card.width >= 320 - tolerance, "the Luna Reserve card remains too narrow");
+  assert(
+    metrics.accountMenu !== null && metrics.accountMenu.top - metrics.card.bottom >= 6,
+    "the Luna Reserve panel is not visually separated from the profile menu",
+  );
+  assert(
+    Math.abs(metrics.sidebar.right - metrics.splitter.left) <= tolerance &&
+      Math.abs(metrics.splitter.right - metrics.main.left) <= tolerance &&
+      Math.abs(metrics.main.right - metrics.root.right) <= tolerance,
+    "the sidebar, splitter, and main panel do not fill the application grid",
+  );
+  assert(metrics.main.width >= 430 - tolerance, "resizing the sidebar squeezed the main panel");
+  assert(metrics.role === "separator", "the sidebar splitter lacks an accessible separator role");
+  assert(
+    metrics.ariaOrientation === "vertical" &&
+      metrics.ariaMinimum <= metrics.ariaNow &&
+      metrics.ariaNow <= metrics.ariaMaximum,
+    "the sidebar splitter exposes invalid accessible bounds",
+  );
+  assert(
+    typeof metrics.ariaText === "string" && metrics.ariaText.includes("Largura da barra lateral"),
+    "the sidebar splitter does not describe its current width",
+  );
+  assert(
+    interaction?.supported === true,
+    "the sidebar splitter interaction did not run",
+  );
+  assert(
+    interaction.dragged.sidebar.width > interaction.initial.sidebar.width + 40,
+    "pointer dragging did not expand the sidebar",
+  );
+  assert(
+    interaction.keyboard.sidebar.width > interaction.dragged.sidebar.width,
+    "the keyboard did not adjust the sidebar width",
+  );
+  assert(
+    Math.abs(interaction.restored.sidebar.width - 360) <= tolerance &&
+      Number(interaction.restored.persistedWidth) === 360 &&
+      metrics.sidebar.width === 360,
+    "double-click did not restore and persist the default sidebar width",
+  );
+}
+
 function validateActiveActivityReflectionMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
@@ -6624,12 +7653,8 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
   assert(metrics.baseText === metrics.highlightText, "the reflection does not replicate the active title");
   assert(metrics.baseText === "Executando comando", "the parent header duplicated command timing");
   assert(
-    metrics.completedTokenText?.includes("10.000 tokens") === true,
-    `persisted tokens disappeared from the completed turn (${JSON.stringify(metrics.completedTokenText)})`,
-  );
-  assert(
-    metrics.activeTokenText?.includes("62 tokens") === true,
-    `confirmed tokens disappeared from the active turn (${JSON.stringify(metrics.activeTokenText)})`,
+    metrics.turnHeadersContainOnlyDuration === true,
+    "turn headers must display elapsed time without a token-spend counter",
   );
   assert(
     metrics.sweepLayerCount === 1 && metrics.highlightLayerCount === 1,
@@ -6696,6 +7721,14 @@ function validateActiveActivityReflectionMetrics(metrics, viewport) {
     metrics.sidebarItemGaps.length > 0 &&
       metrics.sidebarItemGaps.every((gap) => gap !== null && gap >= 3.5),
     `sidebar items remain visually crowded: ${JSON.stringify(metrics.sidebarItemGaps)}`,
+  );
+  assert(
+    metrics.accountPopoverReserveCard === false && metrics.accountMenuReserveCardCount === 0,
+    "the Luna Reserve card is rendered outside the closed account popover",
+  );
+  assert(
+    metrics.sidebarWidth !== null && metrics.sidebarWidth >= 360 - tolerance,
+    `the default sidebar is too narrow for the Luna Reserve summary: ${metrics.sidebarWidth}`,
   );
   assert(
     metrics.selectedThreadBackground === "rgba(255, 255, 255, 0.12)",
@@ -6767,25 +7800,15 @@ function validateReasoningActivityReflectionMetrics(metrics, viewport) {
 }
 
 function validateUserMessageNavigationMetrics(metrics, viewport) {
-  const tolerance = 2;
-  assert(
-    metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
-    `unexpected message-navigation viewport at ${viewport.width}x${viewport.height}`,
-  );
-  assert(
-    metrics.horizontalOverflow <= tolerance,
-    "message navigation created horizontal overflow",
-  );
-  assert(
-    Math.abs(metrics.targetGap - metrics.expectedTargetGap) <= tolerance,
-    `the marker did not navigate to the message's currently reachable position: ${JSON.stringify(metrics)}`,
-  );
-  assert(
-    metrics.targetOffsetWithinTurn > 500,
-    "the scenario did not validate a later message within the same turn",
-  );
-  assert(metrics.markerCurrent === "true", "the selected marker did not remain active");
-  assert(metrics.expandedGroupCount >= 1, "the turn did not remain expanded during navigation");
+  assert(metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height, "message-navigation viewport changed");
+  assert(metrics.cancellationDriftPx <= 1, "message navigation continued after manual scrolling");
+  assert(metrics.liveMarkerCount === 4 && metrics.samples.length === 5, "the marker index omitted live or existing messages");
+  for (const sample of metrics.samples) {
+    assert(sample.visible && sample.hit, "a message marker is hidden or obstructed");
+    assert(sample.errorPx <= 1 && sample.current, "message navigation missed its precise target");
+    if (sample.distance > 100 && !metrics.reducedMotion) assert(sample.intermediatePositions >= 3, "message navigation jumped instead of scrolling smoothly");
+    if (metrics.reducedMotion) assert(sample.intermediatePositions <= 1, "message navigation ignored reduced motion");
+  }
 }
 
 function validateManualScrollOwnershipMetrics(metrics, viewport) {
@@ -7252,12 +8275,14 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
   assert(metrics.tokenColorCount >= 7, "the syntax palette does not contain enough distinct colors");
   assert(metrics.contextHasSyntax === true, "context lines did not receive syntax highlighting");
   assert(
-    metrics.additionBackground === "rgb(31, 73, 50)",
-    "the semantic addition background is not solid and crisp",
+    metrics.diffFill.length === 2 && metrics.diffFill.every((sample) =>
+      sample.verticalOverflow <= tolerance && sample.unusedGutter === 0),
+    `the short diff reserves an unused scrollbar gutter: ${JSON.stringify(metrics.diffFill)}`,
   );
   assert(
-    metrics.deletionBackground === "rgb(82, 39, 37)",
-    "the semantic deletion background is not solid and crisp",
+    metrics.diffFill.every((sample) => sample.comparisons >= 70 &&
+      sample.mismatches === 0 && sample.stripedRows === 0),
+    `diff fill diverges from the official palette or has gaps/stripes: ${JSON.stringify(metrics.diffFill)}`,
   );
   assert(
     metrics.additionBackground !== metrics.deletionBackground,
@@ -7373,8 +8398,9 @@ function validateSyntaxHighlightedDiffMetrics(metrics, viewport) {
   assert(
     metrics.diffCanvasHeight !== null &&
       metrics.diffCanvasHeight >= metrics.diffRowTopOffsets.length * 20 &&
-      metrics.diffViewportHeight === metrics.diffViewportClientHeight &&
-      metrics.diffViewportScrollHeight >= metrics.diffViewportClientHeight,
+      metrics.diffViewportHeight > metrics.diffViewportClientHeight &&
+      metrics.diffViewportClientHeight === metrics.diffCanvasHeight &&
+      metrics.diffViewportScrollHeight === metrics.diffViewportClientHeight,
     "the diff's virtual canvas does not represent the document's scrollable geometry",
   );
   assert(metrics.viewportHorizontalOverflow > 0, "the regression did not exercise horizontal scrolling");
@@ -7466,7 +8492,9 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
   );
   assert(
     metrics.sourceCanvasHeight >= metrics.sourceViewportScrollHeight - tolerance &&
-      metrics.sourceViewportClientHeight === 205,
+      metrics.sourceViewportHeight === 205 &&
+      metrics.sourceViewportClientHeight > 0 &&
+      metrics.sourceViewportClientHeight <= metrics.sourceViewportHeight,
     "the file-read canvas does not fully represent its virtual range",
   );
   const virtualizationCycle = metrics.sourceVirtualizationCycle;
@@ -7481,7 +8509,8 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
       (phase) =>
         phase !== undefined &&
         Math.abs(phase.canvasHeight - 56 * 22) <= tolerance &&
-        phase.clientHeight === 205 &&
+        phase.outerHeight === 205 &&
+        phase.clientHeight > 0 && phase.clientHeight <= phase.outerHeight &&
         Math.abs(phase.scrollHeight - 56 * 22) <= tolerance &&
         phase.rowGaps.length === 9 &&
         phase.rowGaps.every((gap) => Math.abs(gap - 22) <= tolerance) &&
@@ -7537,6 +8566,38 @@ function validateHighlightedToolOutputMetrics(metrics, viewport) {
   validateIntrinsicActivityInteraction(metrics.readInteraction, "file read", tolerance);
 }
 
+function validateComposerSizing(metrics) {
+  const defaultHeight = 64;
+  for (const sample of [metrics.empty, metrics.singleLine, metrics.cleared, metrics.switched, metrics.submitted]) {
+    assert(Math.abs(sample.height - defaultHeight) <= 1, "an empty or single-line draft is not compact");
+    assert(!sample.overflowing, "a compact draft has an unnecessary scrollbar");
+  }
+  assert(metrics.multiline.height > metrics.singleLine.height + 30, "line breaks do not grow the editor");
+  assert(metrics.narrow.height > metrics.wide.height, "the editor does not reflow after narrowing");
+  assert(Math.abs(metrics.widened.height - metrics.wide.height) <= 1, "the editor retains stale height after widening");
+  assert(Math.abs(metrics.largePaste.height - metrics.maximumHeight) <= 1 && metrics.largePaste.overflowing,
+    "a large paste does not use the bounded, internally scrollable editor");
+  assert(metrics.restoredDraftMatches && metrics.restored.height === metrics.saved.height,
+    "switching tasks does not restore the draft and its natural height");
+  assert(metrics.submitted.characters === 0, "submission did not clear the draft");
+  assert(metrics.focusLoss.expandedHeight > defaultHeight + 40 && metrics.focusLoss.background.unfocused && metrics.focusLoss.focused,
+    "the composer audit did not exercise an expanded draft across focus loss and return");
+  assert(Math.abs(metrics.focusLoss.background.height - defaultHeight) <= 1 && Math.abs(metrics.focusLoss.restoredHeight - defaultHeight) <= 1,
+    "a draft cleared in the background retained an expanded empty editor");
+}
+
+function validateTimelineDockResize(metrics) {
+  assert(metrics.expanded.maximum > metrics.initial.maximum + 40, "the dock audit did not exercise editor growth");
+  assert(metrics.detachedDrift <= 1, "editor growth moved the history being read");
+  for (const [name, sample] of Object.entries(metrics)) {
+    if (name === "detachedDrift") continue;
+    assert(Math.abs(sample.bottomGap) <= 1, `${name}: the timeline did not reach its physical end`);
+    assert(Math.abs(sample.scrollbarMaximum - sample.maximum) <= 1, `${name}: scrollbar geometry is stale`);
+    assert(Math.abs(sample.thumbGap) <= 1, `${name}: the scrollbar thumb cannot reach the bottom`);
+    assert(!sample.endButtonVisible && sample.downDisabled, `${name}: end controls disagree with the viewport`);
+  }
+}
+
 function validateComposerPopoverLayeringMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(
@@ -7544,6 +8605,30 @@ function validateComposerPopoverLayeringMetrics(metrics, viewport) {
     `unexpected composer-layer viewport at ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.horizontalOverflow <= tolerance, "the panels created horizontal overflow");
+  assert(
+    metrics.footerOcclusion.length === 2 &&
+      metrics.footerOcclusion[1].composerHeight > metrics.footerOcclusion[0].composerHeight + 40,
+    "the footer audit did not exercise composer growth",
+  );
+  for (const sample of metrics.footerOcclusion) {
+    const sameColor = (left, right) => left.every((value, index) => value === right[index]);
+    const point = (name) => sample.points.find((candidate) => candidate.name === name).color;
+    const sentinel = [255, 0, 255, 255];
+    assert(sameColor(point("above"), sentinel), "the visible timeline paint probe is missing");
+    assert(
+      !sameColor(point("fade"), sentinel) && !sameColor(point("fade"), sample.background),
+      "the dock does not fade the conversation at its upper edge",
+    );
+    assert(
+      sample.points.filter(({ name }) => name === "lowerSide" || name === "footer")
+        .every(({ color }) => sameColor(color, sample.background)),
+      "timeline content is visible beside or below the lower composer",
+    );
+    assert(
+      !sameColor(point("scrollbar"), sentinel) && !sameColor(point("scrollbar"), sample.background),
+      "the footer backdrop hides the scrollbar's lower arrow",
+    );
+  }
   assert(
     metrics.chatPageDisplay === "block" &&
       metrics.timelinePosition === "absolute" &&
@@ -7688,7 +8773,27 @@ function validateSettingsMetrics(metrics, viewport) {
     Math.abs(metrics.main.top - metrics.content.top) <= tolerance,
     "the main settings surface does not reach the top",
   );
-  assert(metrics.back.top >= metrics.chrome.bottom, "the back action intrudes into the drag region");
+  assert(
+    metrics.back.top >= -tolerance && metrics.back.bottom <= metrics.chrome.bottom + tolerance,
+    "the back action is not confined to the window-chrome strip",
+  );
+  assert(
+    metrics.back.right <= metrics.navigation.right + tolerance,
+    "the back action exceeds the settings navigation column",
+  );
+  assert(
+    metrics.back.right <= metrics.controls.left + tolerance,
+    "the back action collides with window controls",
+  );
+  assert(
+    metrics.backSlot.top >= -tolerance &&
+      metrics.backSlot.bottom <= metrics.chrome.bottom + tolerance,
+    "the settings titlebar slot left the window-chrome strip",
+  );
+  assert(
+    metrics.dragRegion.left >= metrics.back.right - tolerance,
+    "the window drag region still covers the settings back action",
+  );
   assert(metrics.heading.top >= metrics.chrome.bottom, "the settings title intrudes into window chrome");
   assert(
     Math.abs(metrics.scrollbar.top - metrics.chrome.bottom) <= tolerance,
@@ -7763,6 +8868,97 @@ function validateSettingsMetrics(metrics, viewport) {
   );
 }
 
+function validateNotificationSettingsMetrics(metrics) {
+  const tolerance = 1;
+  assert(
+    metrics.horizontalOverflow <= tolerance && metrics.pageHorizontalOverflow <= tolerance,
+    "notification settings created horizontal overflow",
+  );
+  assert(metrics.sliderValue === "17", "the duration slider did not retain live input");
+  assert(
+    metrics.durationDuringInput === "17s" && metrics.durationText === "17s",
+    "the duration label did not update during the input event",
+  );
+  assert(metrics.rowCount === 6, "one or more configurable notification events are missing");
+  assert(metrics.testButtonCount === 6, "each configurable event must expose one test action");
+  assert(
+    metrics.testButtonLabels.every((label) => typeof label === "string" && label.startsWith("Testar ")),
+    "notification test actions are not named accessibly",
+  );
+  assert(metrics.minimumTestButtonHeight >= 27, "notification test actions became too small");
+  assert(metrics.rowsInsidePage === true, "a notification event row exceeds its page");
+}
+
+function validatePriorityNotificationOverlayMetrics(metrics, viewport) {
+  validateNotificationOverlaySurface(metrics, viewport);
+  assert(metrics.cardType === "priority", "the priority notification lost its presentation type");
+  assert(metrics.approvalCount === 1, "the priority approval details are missing");
+  assert(metrics.standardFooterCount === 0, "approval controls retained a redundant footer");
+  assert(metrics.progressCount === 0, "a priority notification received a transient timer");
+  assert(
+    JSON.stringify(metrics.decisionLabels) ===
+      JSON.stringify(["Cancelar turno", "Recusar", "Permitir nesta tarefa", "Executar uma vez"]),
+    `the overlay approval commands diverged from the chat: ${JSON.stringify(metrics.decisionLabels)}`,
+  );
+}
+
+function validateTransientNotificationOverlayMetrics(metrics, viewport) {
+  validateNotificationOverlaySurface(metrics, viewport);
+  assert(metrics.cardType === "transient", "the transient notification lost its presentation type");
+  assert(metrics.approvalCount === 0, "a basic transient notification exposed approval content");
+  assert(metrics.standardFooterCount === 0, "an empty transient footer still consumes space");
+  assert(metrics.progressCount === 1, "the transient lifetime indicator is missing");
+  assert(
+    metrics.surface.height < viewport.height / 2,
+    `the transient notification still reserves excess height: ${metrics.surface.height}px`,
+  );
+}
+
+function validateNotificationOverlaySurface(metrics, viewport) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "the notification overlay overflows horizontally");
+  assert(
+    Math.abs(metrics.surface.width - viewport.width) <= tolerance,
+    "the notification surface does not match its dedicated window",
+  );
+  assert(
+    Math.abs(metrics.surface.height - (metrics.card.height + 12)) <= tolerance,
+    `the notification surface does not follow intrinsic card height: ${metrics.surface.height}px / ${metrics.card.height}px`,
+  );
+  assert(
+    metrics.surface.height < viewport.height,
+    "the notification surface stretches to the available window height",
+  );
+  assert(
+    metrics.bodyBackground === "rgba(0, 0, 0, 0)",
+    `the isolated overlay body is not transparent: ${metrics.bodyBackground}`,
+  );
+  assert(
+    metrics.cardBackground === "rgb(24, 24, 24)",
+    `the notification card is not an opaque semantic surface: ${metrics.cardBackground}`,
+  );
+  assert(
+    metrics.cardBackdropFilter === "none",
+    `background content can still bleed through the card: ${metrics.cardBackdropFilter}`,
+  );
+}
+
+function validatePersonalizationSaveFeedbackMetrics(metrics) {
+  const tolerance = 1;
+  assert(
+    metrics.horizontalOverflow <= tolerance && metrics.pageHorizontalOverflow <= tolerance,
+    "personalization save feedback created horizontal overflow",
+  );
+  assert(metrics.buttonText === "Salvo", "the save action did not expose its confirmed state");
+  assert(metrics.buttonBusy === "false", "the confirmed save action remains marked as busy");
+  assert(metrics.buttonDisabled === false, "the confirmed save action remains disabled");
+  assert(
+    metrics.animationName === "settings-save-confirmation",
+    "the save action lost its confirmation animation",
+  );
+  assert(metrics.checkIconCount === 1, "the save action lost its confirmation icon");
+}
+
 function validateUsageSettingsMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(metrics.horizontalOverflow <= tolerance, "Usage and billing created horizontal overflow");
@@ -7798,8 +8994,25 @@ function validateUsageSettingsMetrics(metrics, viewport) {
   );
 }
 
+function validateEmptyUsageResetsMetrics(metrics) {
+  const tolerance = 1;
+  assert(metrics.horizontalOverflow <= tolerance, "the empty reset state created overflow");
+  assert(metrics.text === "Nenhuma redefinição disponível.", "the empty reset copy changed");
+  assert(metrics.textAlign === "center", "the empty reset copy is not centered");
+  assert(metrics.centerDelta <= tolerance, "the empty reset state is not centered in its card");
+  assert(metrics.resetRowCount === 0, "an unavailable reset still renders an action row");
+}
+
 function validateUsageSettingsInteractionMetrics(metrics) {
   const tolerance = 1;
+  assert(
+    JSON.stringify(metrics.limitsBeforeReset) === JSON.stringify([57, 7, 100, 0, 86]),
+    "the simulation did not start with the expected general, Spark, and reserve limits",
+  );
+  assert(
+    JSON.stringify(metrics.limitsAfterReset) === JSON.stringify([100, 100, 100, 100, 86]),
+    "the confirmed reset did not refresh the general and Spark limits",
+  );
   assert(
     metrics.horizontalOverflow <= tolerance,
     "Usage and billing interaction created horizontal overflow",
@@ -7924,9 +9137,17 @@ function validateAutomationsMetrics(metrics, viewport) {
     "sidebar navigation intrudes into the drag region",
   );
   assert(
-    metrics.sidebarBrand.top >= metrics.chrome.bottom &&
-      metrics.sidebarBrand.top - metrics.chrome.bottom <= 6 + tolerance,
-    "the Codex brand is not aligned near window chrome",
+    metrics.sidebarBrand.top >= -tolerance &&
+      metrics.sidebarBrand.bottom <= metrics.chrome.bottom + tolerance,
+    "the Codex brand is not confined to the window-chrome strip",
+  );
+  assert(
+    metrics.sidebarBrand.left >= 0 && metrics.sidebarBrand.right <= metrics.sidebar.right,
+    "the Codex brand exceeds the sidebar column",
+  );
+  assert(
+    metrics.sidebarBrand.right <= metrics.controls.left + tolerance,
+    "the Codex brand collides with window controls",
   );
   assert(
     Math.abs(metrics.sidebarTitlebar.bottom - metrics.primaryNavigation.top) <= tolerance,
@@ -7964,7 +9185,10 @@ function validateAutomationEditorMetrics(metrics, viewport) {
   );
   assert(metrics.editor.top >= metrics.chrome.bottom, "the editor is positioned above the content");
   assert(metrics.editor.bottom <= viewport.height + tolerance, "the editor exceeds the viewport");
-  assert(metrics.editor.width >= 500, "the editor became excessively narrow");
+  assert(
+    Math.abs(metrics.editor.width - Math.min(680, metrics.availableEditorWidth)) <= tolerance,
+    "the editor does not fill its available width up to its 680px limit",
+  );
   assert(Number.parseFloat(metrics.heading.fontSize) >= 17, "the editor title became too small");
   assert(metrics.prompt.height >= 150, "the instruction field became too short");
   assert(metrics.dialogCount === 1, "the editor does not expose exactly one modal dialog");
@@ -8002,7 +9226,13 @@ function validateBrowserPanelMetrics(metrics, viewport) {
   assert(metrics.address.width >= 180, "the address bar became too narrow");
   assert(metrics.tabCount >= 1, "the browser did not create its initial tab");
   assert(metrics.selectedTabs === 1, "the browser does not have exactly one active tab");
-  assert(metrics.navigationButtons === 6, "navigation or viewport controls are missing from the toolbar");
+  assert(metrics.navigationButtons === 5, "the browser toolbar controls do not match the native set");
+  assert(metrics.toggleCount === 1, "the workspace does not have exactly one permanent toggle");
+  assert(metrics.toggleExpanded === "true", "the workspace toggle does not expose its open state");
+  assert(
+    metrics.toggle.right <= viewport.width + tolerance && metrics.toggle.top >= 34 - tolerance,
+    "the permanent workspace toggle escaped the usable window",
+  );
   assert(metrics.addressInputs === 1, "the address bar does not contain exactly one field");
   assert(metrics.previewPages === 1, "the preview does not expose the native-webview substitute surface");
 }
@@ -8063,10 +9293,15 @@ function validateWorkspaceSplitMetrics(metrics, label, interaction = null) {
     Math.abs(interaction.initial.chat.width - interaction.initial.workspace.width) <= tolerance,
     `${label} did not start at 50/50 before dragging`,
   );
+  const availableRedistribution = Math.max(0, interaction.initial.workspace.width - 420);
+  const expectedRedistribution = Math.min(40, availableRedistribution);
   assert(
-    interaction.dragged.chat.width >= interaction.initial.chat.width + 40 &&
-      interaction.dragged.workspace.width <= interaction.initial.workspace.width - 40,
-    `dragging the ${label} divider did not redistribute space between panels`,
+    expectedRedistribution >= 20 &&
+      interaction.dragged.chat.width >=
+        interaction.initial.chat.width + expectedRedistribution - tolerance &&
+      interaction.dragged.workspace.width <=
+        interaction.initial.workspace.width - expectedRedistribution + tolerance,
+    `dragging the ${label} divider did not reach the available bounded position`,
   );
   assert(
     Math.abs(metrics.chat.width - interaction.dragged.chat.width) <= tolerance &&
@@ -8137,6 +9372,9 @@ function validateBrowserPanelLifecycleMetrics(metrics, viewport) {
     `unexpected browser-lifecycle viewport at ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.panelCount === 0, "the browser panel remained mounted after closing");
+  assert(metrics.toggleCount === 1, "the workspace toggle disappeared while the panel was closed");
+  assert(metrics.toggleExpanded === "false", "the workspace toggle does not expose its closed state");
+  assert(metrics.reopened === true, "the workspace toggle could not reopen the browser panel");
   assert(metrics.failureCount === 0, "closing the browser produced a render failure");
   assert(metrics.chatVisible === true, "chat did not return after closing the browser");
   assert(metrics.horizontalOverflow <= tolerance, "closing the browser created horizontal overflow");
@@ -8158,6 +9396,8 @@ function validateImageViewGroupMetrics(metrics, viewport) {
 }
 
 function validateTimelinePerformanceStressMetrics(metrics, viewport) {
+  assert(metrics.scrollCommit.geometryReadsAfterMutation === 0, "the scroll event read layout after mutating activity DOM");
+  assert(metrics.scrollCommit.rangeChanged, "the scheduled frame did not update the activity range");
   const tolerance = 1;
   const exceptionalApplicationCallbacks = metrics.rapidAnimationCallbackOutliers.filter(
     (outlier) => outlier.duration > 10,
@@ -8214,21 +9454,21 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
     "instrumentation did not cover every rapid-scroll frame",
   );
   assert(
-    metrics.rapidP95ApplicationAnimationWorkMs <= 10,
-    `P95 application work was ${metrics.rapidP95ApplicationAnimationWorkMs.toFixed(2)} ms`,
+    metrics.rapidP95ApplicationWorkMs <= 10,
+    `P95 application work was ${metrics.rapidP95ApplicationWorkMs.toFixed(2)} ms`,
   );
   assert(
-    metrics.rapidP99AnimationWorkMs <= 20,
-    `total P99 work was ${metrics.rapidP99AnimationWorkMs.toFixed(2)} ms`,
+    metrics.rapidP99FrameWorkMs <= 20,
+    `total P99 work was ${metrics.rapidP99FrameWorkMs.toFixed(2)} ms`,
   );
   assert(
-    metrics.rapidP99ApplicationAnimationWorkMs <= 10,
-    `P99 application work was ${metrics.rapidP99ApplicationAnimationWorkMs.toFixed(2)} ms`,
+    metrics.rapidP99ApplicationWorkMs <= 10,
+    `P99 application work was ${metrics.rapidP99ApplicationWorkMs.toFixed(2)} ms`,
   );
   assert(
-    metrics.rapidMaximumApplicationAnimationWorkMs <= 12 &&
+    metrics.rapidMaximumApplicationWorkMs <= 12 &&
       exceptionalApplicationCallbacks.length <= 1,
-    `exceptional application work exceeded the contract: maximum ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms across ${exceptionalApplicationCallbacks.length} callbacks`,
+    `exceptional application work exceeded the contract: maximum ${metrics.rapidMaximumApplicationWorkMs.toFixed(2)} ms across ${exceptionalApplicationCallbacks.length} callbacks`,
   );
   assert(
     metrics.rapidP95FrameMs <= 25,
@@ -8258,16 +9498,17 @@ function validateTimelinePerformanceStressMetrics(metrics, viewport) {
   assert(metrics.mountedSourceRows <= 800, "too many tool rows remained mounted");
   assert(metrics.mountedDiffRows <= 500, "too many diff rows remained mounted");
   assert(
-    metrics.diffViewportIntegrity.length > 0 &&
+    metrics.diffViewportIntegrity.some((entry) => entry.active) &&
       metrics.diffViewportIntegrity.every(
-        (entry) =>
+        (entry) => entry.active ?
           entry.canvasConnected === true &&
           entry.canvasHeight !== null &&
           entry.canvasHeight >= entry.clientHeight &&
           entry.scrollHeight >= entry.clientHeight &&
           entry.declaredRows > 0 &&
           entry.mountedRows > 0 &&
-          entry.rowGaps.every((gap) => Math.abs(gap - 20) <= tolerance),
+          entry.rowGaps.every((gap) => Math.abs(gap - 20) <= tolerance) :
+          entry.canvasConnected === false && entry.clientHeight === 0 && entry.mountedRows === 0,
       ),
     `diff canvases lost rows or geometry after recycling: ${JSON.stringify(metrics.diffViewportIntegrity)}`,
   );
@@ -8292,6 +9533,7 @@ function validateActivityReconciliationMetrics(metrics, viewport) {
   assert(metrics.started === 64, `only ${metrics.started} commands were started`);
   assert(metrics.completed === 64, `only ${metrics.completed} commands completed`);
   assert(metrics.commentaryState === "emitted", "the newest commentary was not emitted");
+  assert(metrics.commentaryPrefixRetained, "streamed commentary replaced its committed Markdown prefix");
   assert(metrics.commentaryCount === 1, "the newest commentary was lost or duplicated");
   assert(
     metrics.startedPresentation?.completedAtCapture === 0,
@@ -8363,13 +9605,30 @@ function validateActivityShimmerMetrics(metrics, viewport) {
   assert(metrics.horizontalOverflow <= tolerance, "shimmer created horizontal overflow");
 }
 
+function validateTimelineExpandedFilesMetrics(metrics, viewport) {
+  assert(metrics.expansion?.expandedCount === 100_000, "the extreme test did not open every file");
+  assert(metrics.expandedItemComparisons > 0 && metrics.expandedItemFailures === 0, "expanded scrolling lost open details or actual diff rows");
+  validateTimelineExtremeFilesMetrics(metrics, viewport);
+}
+
 function validateTimelineExtremeFilesMetrics(metrics, viewport) {
+  assert(metrics.scrollCommit.geometryReadsAfterMutation === 0, "the scroll event read layout after mutating activity DOM");
+  assert(metrics.scrollCommit.rangeChanged, "the scheduled frame did not update the activity range");
   const tolerance = 1;
   assert(
     metrics.viewport.width === viewport.width && metrics.viewport.height === viewport.height,
     `unexpected 100,000-file viewport at ${viewport.width}x${viewport.height}`,
   );
   assert(metrics.totalActivities === 100_000, "the extreme projection lost files");
+  assert(
+    metrics.visibleCoverageComparisons >= 60 && metrics.maximumVisibleGapPx <= 1,
+    `the extreme timeline left visible gaps: ${JSON.stringify(metrics.visibleGapSamples)}`,
+  );
+  assert(metrics.retainedProbeComparisons > 0, "the extreme probe did not compare retained file identities");
+  assert(
+    metrics.retainedProbeSummaryChanges === 0 && metrics.retainedProbeWrapperChanges === 0,
+    `the extreme probe replaced ${metrics.retainedProbeSummaryChanges} summaries and ${metrics.retainedProbeWrapperChanges} wrappers that remained mounted`,
+  );
   assert(
     metrics.physicalListHeight > 2_000_000 && metrics.physicalListHeight <= 8_000_000,
     `the extreme physical height became invalid (${metrics.physicalListHeight}px)`,
@@ -8380,20 +9639,20 @@ function validateTimelineExtremeFilesMetrics(metrics, viewport) {
     "instrumentation did not cover the 100,000-file frames",
   );
   assert(
-    metrics.rapidP95ApplicationAnimationWorkMs <= 8,
-    `application work for 100,000 files was ${metrics.rapidP95ApplicationAnimationWorkMs.toFixed(2)} ms at P95`,
+    metrics.rapidP95ApplicationWorkMs <= 8,
+    `application work for 100,000 files was ${metrics.rapidP95ApplicationWorkMs.toFixed(2)} ms at P95`,
   );
   assert(
-    metrics.rapidP99AnimationWorkMs <= 10,
-    `total work for 100,000 files was ${metrics.rapidP99AnimationWorkMs.toFixed(2)} ms at P99`,
+    metrics.rapidP99FrameWorkMs <= 10,
+    `total work for 100,000 files was ${metrics.rapidP99FrameWorkMs.toFixed(2)} ms at P99`,
   );
   assert(
-    metrics.rapidP99ApplicationAnimationWorkMs <= 8,
-    `application work for 100,000 files was ${metrics.rapidP99ApplicationAnimationWorkMs.toFixed(2)} ms at P99`,
+    metrics.rapidP99ApplicationWorkMs <= 8,
+    `application work for 100,000 files was ${metrics.rapidP99ApplicationWorkMs.toFixed(2)} ms at P99`,
   );
   assert(
-    metrics.rapidMaximumApplicationAnimationWorkMs <= 10,
-    `maximum application work for 100,000 files was ${metrics.rapidMaximumApplicationAnimationWorkMs.toFixed(2)} ms`,
+    metrics.rapidMaximumApplicationWorkMs <= 10,
+    `maximum application work for 100,000 files was ${metrics.rapidMaximumApplicationWorkMs.toFixed(2)} ms`,
   );
   assert(metrics.rapidP95FrameMs <= 20, "100,000-file P95 exceeded 20ms");
   assert(metrics.rapidP99FrameMs <= 34, "100,000-file P99 exceeded 34ms");
@@ -8516,14 +9775,6 @@ function resolveBrowserPath() {
   return resolved;
 }
 
-async function fetchJson(url, init) {
-  const response = await fetch(url, init);
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} while accessing ${url}`);
-  }
-  return response.json();
-}
-
 async function terminate(child, options = {}) {
   if (child === undefined || child.exitCode !== null) {
     return;
@@ -8571,33 +9822,47 @@ class CdpClient {
     socket.addEventListener("message", (event) => this.handleMessage(event));
   }
 
-  send(method, params = {}) {
+  async attachToTarget(targetId) {
+    const result = await this.send("Target.attachToTarget", { targetId, flatten: true });
+    const sessionId = result?.sessionId;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      throw new Error("Target.attachToTarget did not return a session id.");
+    }
+    return new CdpSession(this, sessionId);
+  }
+
+  send(method, params = {}, sessionId = undefined) {
     this.nextId += 1;
     const id = this.nextId;
     const response = new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
     });
-    this.socket.send(JSON.stringify({ id, method, params }));
+    const request = { id, method, params };
+    if (sessionId !== undefined) {
+      request.sessionId = sessionId;
+    }
+    this.socket.send(JSON.stringify(request));
     return response;
   }
 
-  waitForEvent(method) {
+  waitForEvent(method, sessionId = undefined) {
+    const eventKey = this.eventKey(method, sessionId);
     return new Promise((resolve, reject) => {
-      const listeners = this.events.get(method) ?? [];
+      const listeners = this.events.get(eventKey) ?? [];
       const settle = (value) => {
         clearTimeout(deadline);
         resolve(value);
       };
       listeners.push(settle);
-      this.events.set(method, listeners);
+      this.events.set(eventKey, listeners);
       const deadline = setTimeout(() => {
-        const pending = this.events.get(method) ?? [];
+        const pending = this.events.get(eventKey) ?? [];
         const listenerIndex = pending.indexOf(settle);
         if (listenerIndex >= 0) {
           pending.splice(listenerIndex, 1);
         }
-        if ((this.events.get(method) ?? []).length === 0) {
-          this.events.delete(method);
+        if ((this.events.get(eventKey) ?? []).length === 0) {
+          this.events.delete(eventKey);
         }
         reject(
           new Error(
@@ -8608,25 +9873,12 @@ class CdpClient {
     });
   }
 
-  async evaluate(expression, awaitPromise) {
-    const response = await this.send("Runtime.evaluate", {
-      expression,
-      awaitPromise,
-      returnByValue: true,
-    });
-    if (response.exceptionDetails !== undefined) {
-      const description =
-        response.exceptionDetails.exception?.description ??
-        response.exceptionDetails.exception?.value ??
-        response.exceptionDetails.text ??
-        "Preview evaluation failed.";
-      throw new Error(String(description));
-    }
-    return response.result.value;
-  }
-
   close() {
     this.socket.close();
+  }
+
+  eventKey(method, sessionId) {
+    return `${sessionId ?? ""}\u0000${method}`;
   }
 
   handleMessage(event) {
@@ -8644,13 +9896,46 @@ class CdpClient {
       }
       return;
     }
-    const listeners = this.events.get(message.method);
+    const eventKey = this.eventKey(message.method, message.sessionId);
+    const listeners = this.events.get(eventKey);
     if (listeners !== undefined) {
-      this.events.delete(message.method);
+      this.events.delete(eventKey);
       for (const listener of listeners) {
         listener(message.params);
       }
     }
+  }
+}
+
+class CdpSession {
+  constructor(client, sessionId) {
+    this.client = client;
+    this.sessionId = sessionId;
+  }
+
+  send(method, params = {}) {
+    return this.client.send(method, params, this.sessionId);
+  }
+
+  waitForEvent(method) {
+    return this.client.waitForEvent(method, this.sessionId);
+  }
+
+  async evaluate(expression, awaitPromise) {
+    const response = await this.send("Runtime.evaluate", {
+      expression,
+      awaitPromise,
+      returnByValue: true,
+    });
+    if (response.exceptionDetails !== undefined) {
+      const description =
+        response.exceptionDetails.exception?.description ??
+        response.exceptionDetails.exception?.value ??
+        response.exceptionDetails.text ??
+        "Preview evaluation failed.";
+      throw new Error(String(description));
+    }
+    return response.result.value;
   }
 }
 

@@ -2,7 +2,6 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show }
 import type { BrowserActionMetric } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
-import { openExternalUrl } from "../infrastructure/codexClient";
 import { isBrowserPreview } from "../platform/desktopRuntime";
 import type { BrowserController } from "../state/browserController";
 import {
@@ -252,20 +251,6 @@ export function BrowserPanel(props: {
           type="button"
         >
           <Icon name="bug" size={14} />
-        </button>
-        <button
-          aria-label={i18n.messages().browser.openDefaultBrowser}
-          class="browser-toolbar-button"
-          disabled={activeTab() === null || activeTab()?.url === "about:blank"}
-          onClick={() => {
-            const url = activeTab()?.url;
-            if (url !== undefined) {
-              void openExternalUrl(url);
-            }
-          }}
-          type="button"
-        >
-          <Icon name="externalLink" size={14} />
         </button>
       </div>
       <Show when={responsiveViewport() !== null}>

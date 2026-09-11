@@ -22,7 +22,7 @@ use crate::engine::CommandOutputStream;
 use crate::error::AppError;
 #[cfg(windows)]
 use crate::process::WindowsProcessJob;
-use crate::process::headless_shell_command;
+use crate::process::{ShellProfile, headless_shell_command};
 
 const TERMINATED_CHILD_REAP_TIME_LIMIT: Duration = Duration::from_secs(5);
 
@@ -115,7 +115,14 @@ pub(super) async fn spawn_command(
     }
     let command_timeout = command_timeout(args)?;
     let cwd = resolve_existing_directory(workspace, &args.cwd).await?;
-    let mut command = headless_shell_command(&args.command);
+    let profile = if args.login.unwrap_or(true) {
+        ShellProfile::Load
+    } else {
+        ShellProfile::Skip
+    };
+    let mut command = headless_shell_command(&args.command, profile).map_err(|error| {
+        AppError::Tool(format!("could not prepare command environment: {error}"))
+    })?;
     configure_plain_terminal(&mut command);
     ripgrep.configure_child_command(&mut command)?;
     #[cfg(windows)]
@@ -436,6 +443,75 @@ mod tests {
     use crate::engine::native::tools::command_output_stream::CommandTranscript;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn powershell_partial_output_keeps_exit_status_and_is_executed_once() {
+        let _exclusive_command = EXCLUSIVE_COMMAND_TEST_LOCK.lock().await;
+        let workspace = TempDir::new().expect("workspace should exist");
+        let workspace_path = tokio::fs::canonicalize(workspace.path())
+            .await
+            .expect("workspace should canonicalize");
+        for (script, expected_exit, expected_stdout, expected_stderr) in [
+            (
+                "Add-Content -LiteralPath 'attempts.txt' -Value 'one'; Get-Process -Id $PID,2147483647 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName",
+                1,
+                "pwsh",
+                "",
+            ),
+            (
+                "Get-Item -LiteralPath 'attempts.txt','absent-file.txt' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name",
+                1,
+                "attempts.txt",
+                "",
+            ),
+            (
+                "Get-Process | Where-Object { $_.Id -eq $PID -or $_.Id -eq 2147483647 } | Select-Object -ExpandProperty ProcessName",
+                0,
+                "pwsh",
+                "",
+            ),
+            (
+                "[Console]::Error.WriteLine('diagnostic'); Write-Output 'completed'",
+                0,
+                "completed",
+                "diagnostic",
+            ),
+            ("Write-Output 'partial'; exit 17", 17, "partial", ""),
+            (
+                "Write-Error 'expected-command-error'",
+                1,
+                "",
+                "expected-command-error",
+            ),
+        ] {
+            let (_cancellation, mut receiver) = watch::channel(false);
+            let output = execute_command(
+                &workspace_path,
+                &command_args(script, 30),
+                &Ripgrep::for_project_tests(),
+                CommandOutputEmitter::without_notifications(CommandTranscript::default()),
+                &mut receiver,
+            )
+            .await
+            .expect("a command outcome is not a transport failure");
+            assert_eq!(output.exit_code(), Some(expected_exit), "{script}");
+            let stdout = read_file(output.stdout);
+            let stderr = read_file(output.stderr);
+            assert!(stdout.contains(expected_stdout), "{script}: {stdout}");
+            if expected_stderr.is_empty() {
+                assert!(
+                    stderr.is_empty(),
+                    "suppressed errors must stay suppressed: {stderr}"
+                );
+            } else {
+                assert!(stderr.contains(expected_stderr), "{script}: {stderr}");
+            }
+        }
+        let attempts = tokio::fs::read_to_string(workspace_path.join("attempts.txt"))
+            .await
+            .expect("attempt marker should exist");
+        assert_eq!(attempts.lines().collect::<Vec<_>>(), ["one"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn timeout_terminates_the_tree_and_preserves_captured_output() {
         let _exclusive_command = EXCLUSIVE_COMMAND_TEST_LOCK.lock().await;
         let workspace = TempDir::new().expect("workspace should exist");
@@ -535,6 +611,7 @@ mod tests {
             cwd: ".".into(),
             reason: "test command lifecycle".into(),
             parallel_safe: false,
+            login: Some(false),
             yield_time_ms: Some(250),
             timeout_seconds: Some(timeout_seconds),
         }

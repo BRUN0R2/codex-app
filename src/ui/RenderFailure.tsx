@@ -1,6 +1,6 @@
 import { onMount } from "solid-js";
+import { describeError } from "../errorDescription";
 import { useI18n } from "../i18n/context";
-import { describeError } from "../infrastructure/errorDescription";
 
 import { CodexGlyph } from "./CodexGlyph";
 

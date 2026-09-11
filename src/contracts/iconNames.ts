@@ -4,6 +4,7 @@ export const ICON_NAMES = [
   "arrowLeft",
   "arrowUp",
   "barChart",
+  "bell",
   "book",
   "bot",
   "bolt",

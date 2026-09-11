@@ -91,6 +91,9 @@ impl ReadToolCache {
             match state.slots.get(&key) {
                 Some(slot) => Arc::clone(&slot.entry),
                 None => {
+                    while state.slots.len() >= READ_CACHE_MAXIMUM_ENTRIES {
+                        state.evict_oldest();
+                    }
                     let slot = ReadCacheSlot {
                         entry: Arc::new(OnceCell::new()),
                         accounted: false,
@@ -103,43 +106,53 @@ impl ReadToolCache {
             }
         };
         let result = entry.get_or_init(execute).await.clone();
-        self.account_completed_entry(&key, &result).await;
+        self.account_completed_entry(&key, &entry, &result).await;
         result
     }
 
     async fn account_completed_entry(
         &self,
         key: &ReadToolCacheKey,
+        entry: &Arc<CacheEntry>,
         result: &Result<CachedReadOutput, AppError>,
     ) {
-        let Ok(output) = result else {
-            return;
-        };
         let mut state = self.state.lock().await;
         let Some(slot) = state.slots.get_mut(key) else {
             return;
         };
-        if slot.accounted {
+        if !Arc::ptr_eq(&slot.entry, entry) || slot.accounted {
+            return;
+        }
+        let Ok(output) = result else {
+            state.remove(key);
+            return;
+        };
+        if output.byte_len() > READ_CACHE_MAXIMUM_BYTES {
+            state.remove(key);
             return;
         }
         slot.accounted = true;
         state.cached_bytes = state.cached_bytes.saturating_add(output.byte_len());
-        while state.slots.len() > READ_CACHE_MAXIMUM_ENTRIES
-            || state.cached_bytes > READ_CACHE_MAXIMUM_BYTES
+        while state.cached_bytes > READ_CACHE_MAXIMUM_BYTES {
+            state.evict_oldest();
+        }
+    }
+}
+
+impl ReadCacheState {
+    fn remove(&mut self, key: &ReadToolCacheKey) {
+        if let Some(slot) = self.slots.remove(key)
+            && slot.accounted
+            && let Some(Ok(output)) = slot.entry.get()
         {
-            let Some(oldest) = state.insertion_order.pop_front() else {
-                break;
-            };
-            if oldest == *key {
-                state.insertion_order.push_front(oldest);
-                break;
-            }
-            let Some(evicted) = state.slots.remove(&oldest) else {
-                continue;
-            };
-            if let Some(Ok(cached)) = evicted.entry.get() {
-                state.cached_bytes = state.cached_bytes.saturating_sub(cached.byte_len());
-            }
+            self.cached_bytes -= output.byte_len();
+        }
+        self.insertion_order.retain(|candidate| candidate != key);
+    }
+
+    fn evict_oldest(&mut self) {
+        if let Some(key) = self.insertion_order.front().cloned() {
+            self.remove(&key);
         }
     }
 }
@@ -247,7 +260,10 @@ mod tests {
 
     use futures_util::future::join_all;
 
-    use super::{CachedReadOutput, READ_CACHE_MAXIMUM_ENTRIES, ReadToolCache, ReadToolCacheKey};
+    use super::{
+        CachedReadOutput, READ_CACHE_MAXIMUM_BYTES, READ_CACHE_MAXIMUM_ENTRIES, ReadToolCache,
+        ReadToolCacheKey,
+    };
     use crate::engine::native::output_compaction::{ProviderOutputBudget, TextOutputKind};
     use crate::engine::native::tools::ToolRegistry;
     use crate::error::AppError;
@@ -439,6 +455,7 @@ mod tests {
                 cache
                     .get_or_execute(key, || async {
                         executions.fetch_add(1, Ordering::Relaxed);
+                        tokio::task::yield_now().await;
                         Err(AppError::Timeout {
                             operation: "text search",
                         })
@@ -455,6 +472,117 @@ mod tests {
                 operation: "text search"
             })
         )));
+        let retried = cache
+            .get_or_execute(key, || async {
+                executions.fetch_add(1, Ordering::Relaxed);
+                Ok(CachedReadOutput::text(
+                    "recovered".into(),
+                    TextOutputKind::SearchText,
+                ))
+            })
+            .await
+            .expect("a new observation must retry a transient failure");
+        assert_eq!(retried.byte_len(), "recovered".len());
+        assert_eq!(executions.load(Ordering::Relaxed), 2);
+    }
+
+    fn read_key(index: usize) -> ReadToolCacheKey {
+        ReadToolCacheKey::from_operation(
+            Path::new("C:\\workspace"),
+            "thread-bounds",
+            &super::ToolOperation::ReadFile(super::ReadFileArgs {
+                path: format!("source-{index}.rs"),
+                start_line: None,
+                end_line: None,
+            }),
+        )
+        .expect("file reads have a cache identity")
+    }
+
+    #[tokio::test]
+    async fn failed_and_cancelled_reads_do_not_accumulate_or_poison_retries() {
+        let cache = ReadToolCache::default();
+        for index in 0..READ_CACHE_MAXIMUM_ENTRIES * 2 {
+            let result = cache
+                .get_or_execute(read_key(index), || async {
+                    Err(AppError::Cancelled("read cancelled".into()))
+                })
+                .await;
+            assert!(matches!(result, Err(AppError::Cancelled(_))));
+        }
+        let state = cache.state.lock().await;
+        assert!(state.slots.is_empty());
+        assert!(state.insertion_order.is_empty());
+        assert_eq!(state.cached_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_success_is_returned_without_exceeding_the_cache_budget() {
+        let cache = ReadToolCache::default();
+        let output = cache
+            .get_or_execute(read_key(0), || async {
+                Ok(CachedReadOutput::text(
+                    "x".repeat(READ_CACHE_MAXIMUM_BYTES + 1),
+                    TextOutputKind::ReadFile,
+                ))
+            })
+            .await
+            .expect("a valid output can exceed the cache retention budget");
+        assert_eq!(output.byte_len(), READ_CACHE_MAXIMUM_BYTES + 1);
+        let state = cache.state.lock().await;
+        assert!(state.slots.is_empty());
+        assert_eq!(state.cached_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn in_flight_entries_are_bounded_and_evicted_completions_cannot_replace_newer_reads() {
+        use tokio::sync::Notify;
+
+        let cache = Arc::new(ReadToolCache::default());
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let old_read = {
+            let cache = Arc::clone(&cache);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                cache
+                    .get_or_execute(read_key(0), || async {
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(CachedReadOutput::text(
+                            "old".into(),
+                            TextOutputKind::ReadFile,
+                        ))
+                    })
+                    .await
+            })
+        };
+        entered.notified().await;
+        for index in 1..=READ_CACHE_MAXIMUM_ENTRIES {
+            let pending = cache.get_or_execute(read_key(index), std::future::pending);
+            tokio::pin!(pending);
+            assert!(futures_util::poll!(pending.as_mut()).is_pending());
+            assert!(cache.state.lock().await.slots.len() <= READ_CACHE_MAXIMUM_ENTRIES);
+        }
+        cache
+            .get_or_execute(read_key(0), || async {
+                Ok(CachedReadOutput::text(
+                    "newer output".into(),
+                    TextOutputKind::ReadFile,
+                ))
+            })
+            .await
+            .expect("eviction permits a fresh read of the same identity");
+        release.notify_one();
+        old_read
+            .await
+            .expect("old reader joins")
+            .expect("old reader finishes for its caller");
+        let state = cache.state.lock().await;
+        assert_eq!(state.cached_bytes, "newer output".len());
+        assert_eq!(state.slots.len(), READ_CACHE_MAXIMUM_ENTRIES);
+        assert_eq!(state.insertion_order.len(), READ_CACHE_MAXIMUM_ENTRIES);
     }
 
     #[tokio::test]

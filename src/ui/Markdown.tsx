@@ -1,7 +1,8 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { useI18n } from "../i18n/context";
-import { openExternalUrl } from "../infrastructure/codexClient";
+import { useContentResourceReader } from "./ContentResourceReader";
 import { presentAssistantText } from "./contentReferenceMarkers";
+import { useExternalNavigation } from "./ExternalNavigation";
 import { frontendFailureMessage, useFrontendFailureReporter } from "./frontendFailure";
 import { useImageViewer } from "./ImageViewer";
 import { resolveImageSource } from "./imageSource";
@@ -22,6 +23,8 @@ export interface MarkdownProps {
 
 export function Markdown(props: MarkdownProps) {
   const i18n = useI18n();
+  const openExternalUrl = useExternalNavigation();
+  const resources = useContentResourceReader();
   let element: HTMLDivElement | undefined;
   let tailStart: Comment | undefined;
   let tailEnd: Comment | undefined;
@@ -130,9 +133,7 @@ export function Markdown(props: MarkdownProps) {
     event.preventDefault();
     const url = safeExternalUrl(href);
     if (url !== null) {
-      void openExternalUrl(url).catch((error: unknown) => {
-        reportFailure(frontendFailureMessage("Failed to open the external link", error));
-      });
+      void openExternalUrl(url);
     }
   }
 
@@ -176,7 +177,7 @@ export function Markdown(props: MarkdownProps) {
         continue;
       }
       image.setAttribute("data-image-loading", "true");
-      void resolveImageSource(source)
+      void resolveImageSource(source, resources.readAttachmentImage)
         .then((resolved) => {
           if (image.isConnected && image.getAttribute("data-image-source") === source) {
             image.src = resolved;

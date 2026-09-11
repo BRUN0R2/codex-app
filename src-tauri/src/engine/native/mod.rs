@@ -46,7 +46,7 @@ use self::code_mode::CodeModeSessionRegistry;
 use self::diagnostics::RuntimeDiagnostics;
 use self::multi_agent::{AgentStatus, MultiAgentManager};
 use self::provider::{ChatGptCodexProvider, SelectedModel};
-use self::storage::NativeStorage;
+use self::storage::{NativeStorage, ThreadDeletion};
 use self::tools::{CommandSessionManager, Ripgrep, ToolRegistry};
 use crate::engine::{
     AccountRateLimitsResponse, AppConfig, AutoTopUpSettingsSnapshot, Automation,
@@ -65,7 +65,7 @@ use crate::engine::{
 };
 use crate::error::AppError;
 
-pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 21;
+pub(super) const CONTRACT_SCHEMA_VERSION: u32 = 23;
 const PROJECTLESS_WORKSPACE_DIRECTORY: &str = "projectless-workspace";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTOMATION_SCHEDULER_MAX_SLEEP: Duration = Duration::from_secs(15 * 60);
@@ -428,9 +428,7 @@ impl NativeEngine {
                 engine.inner.emit_diagnostic(
                     &app_handle,
                     DiagnosticStream::Runtime,
-                    format!(
-                        "could not prewarm Responses transport for thread `{thread_id}`: {error}"
-                    ),
+                    response_prewarm_diagnostic(&thread_id, &error),
                 );
             }
         });
@@ -912,13 +910,17 @@ impl NativeEngine {
         thread_id: String,
     ) -> Result<ThreadResumeResponse, AppError> {
         self.ensure_started()?;
-        let page = self.inner.storage.read_thread_page(thread_id, None).await?;
+        let (page, agent_threads) = tokio::try_join!(
+            self.inner.storage.read_thread_page(thread_id.clone(), None),
+            self.inner.storage.list_agent_thread_summaries(thread_id)
+        )?;
         self.spawn_response_session_prewarm(app, page.thread.id.clone(), page.thread.mode)
             .await;
         Ok(ThreadResumeResponse {
             cwd: page.thread.cwd.clone(),
             thread: page.thread,
             next_cursor: page.next_cursor,
+            agent_threads,
         })
     }
 
@@ -928,14 +930,16 @@ impl NativeEngine {
         cursor: Option<String>,
     ) -> Result<ThreadReadResponse, AppError> {
         self.ensure_started()?;
-        let page = self
-            .inner
-            .storage
-            .read_thread_page(thread_id, cursor)
-            .await?;
+        let (page, agent_threads) = tokio::try_join!(
+            self.inner
+                .storage
+                .read_thread_page(thread_id.clone(), cursor),
+            self.inner.storage.list_agent_thread_summaries(thread_id)
+        )?;
         Ok(ThreadReadResponse {
             thread: page.thread,
             next_cursor: page.next_cursor,
+            agent_threads,
         })
     }
 
@@ -1048,16 +1052,9 @@ impl NativeEngine {
                         ),
                     );
                 }
-                let response = self.inner.storage.delete_thread(thread_id.clone()).await?;
-                self.inner.code_mode_sessions.close(&thread_id).await;
-                self.inner.provider.close_response_session(&thread_id);
-                self.inner.multi_agents.forget_tree(&thread_id).await;
+                let deletion = self.inner.storage.delete_thread(thread_id).await?;
                 drop(lifecycle_guard);
-                self.inner.emit_notification(
-                    app,
-                    EngineNotification::ThreadDeleted(ThreadDeletedNotification { thread_id }),
-                )?;
-                return Ok(response);
+                return self.inner.finish_thread_deletion(app, deletion).await;
             };
             pending
         };
@@ -1728,6 +1725,33 @@ impl NativeEngineInner {
             .map_err(|error| AppError::State(format!("notification delivery failed: {error}")))
     }
 
+    async fn finish_thread_deletion(
+        &self,
+        app: &AppHandle,
+        deletion: ThreadDeletion,
+    ) -> Result<OperationAck, AppError> {
+        for thread_id in &deletion.thread_ids {
+            self.code_mode_sessions.close(thread_id).await;
+            self.provider.close_response_session(thread_id);
+        }
+        self.multi_agents.forget_threads(&deletion.thread_ids).await;
+
+        let mut notification_error = None;
+        for thread_id in deletion.thread_ids {
+            if let Err(error) = self.emit_notification(
+                app,
+                EngineNotification::ThreadDeleted(ThreadDeletedNotification { thread_id }),
+            ) && notification_error.is_none()
+            {
+                notification_error = Some(error);
+            }
+        }
+        match notification_error {
+            Some(error) => Err(error),
+            None => Ok(OperationAck { applied: true }),
+        }
+    }
+
     fn emit_status(
         &self,
         app: &AppHandle,
@@ -1912,10 +1936,7 @@ impl NativeEngineInner {
             self.multi_agents.notify_turn_settled(&thread_id).await;
             drop(lifecycle_guard);
             match deletion {
-                Ok(response) => {
-                    self.code_mode_sessions.close(&thread_id).await;
-                    self.provider.close_response_session(&thread_id);
-                    self.multi_agents.forget_tree(&thread_id).await;
+                Ok(deletion) => {
                     if let Ok(settlement) = &completion
                         && let Some(run) = settlement.automation_run.clone()
                     {
@@ -1929,14 +1950,7 @@ impl NativeEngineInner {
                         }
                         self.automation_wake.notify_one();
                     }
-                    let result = self
-                        .emit_notification(
-                            app,
-                            EngineNotification::ThreadDeleted(ThreadDeletedNotification {
-                                thread_id: thread_id.clone(),
-                            }),
-                        )
-                        .map(|()| response);
+                    let result = self.finish_thread_deletion(app, deletion).await;
                     if let Err(error) = &result {
                         self.emit_diagnostic(app, DiagnosticStream::Runtime, error.to_string());
                     }
@@ -2184,6 +2198,12 @@ fn current_unix_timestamp() -> Result<i64, AppError> {
     i64::try_from(seconds).map_err(|error| AppError::State(error.to_string()))
 }
 
+fn response_prewarm_diagnostic(thread_id: &str, error: &AppError) -> String {
+    format!(
+        "optional Responses transport prewarm was unavailable for thread `{thread_id}`; no model generation was requested: {error}"
+    )
+}
+
 fn descriptor() -> EngineDescriptor {
     EngineDescriptor {
         id: "native-engine",
@@ -2208,8 +2228,9 @@ fn descriptor() -> EngineDescriptor {
 mod tests {
     use tokio::sync::watch;
 
-    use super::{ActiveTurn, NativeEngine, TurnContinuation};
+    use super::{ActiveTurn, NativeEngine, TurnContinuation, response_prewarm_diagnostic};
     use crate::engine::OperationAck;
+    use crate::error::AppError;
 
     fn active_turn() -> ActiveTurn {
         let (cancellation, _receiver) = watch::channel(false);
@@ -2226,6 +2247,19 @@ mod tests {
     #[test]
     fn a_fresh_engine_does_not_block_normal_window_close() {
         assert!(!NativeEngine::default().has_active_turns());
+    }
+
+    #[test]
+    fn response_prewarm_failures_state_that_generation_was_not_requested() {
+        let diagnostic = response_prewarm_diagnostic(
+            "thread-1",
+            &AppError::Provider("usage limit reached".into()),
+        );
+
+        assert_eq!(
+            diagnostic,
+            "optional Responses transport prewarm was unavailable for thread `thread-1`; no model generation was requested: provider request failed: usage limit reached"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 
 import { useI18n } from "../i18n/context";
 import { calculateFixedRowVirtualRange } from "./fixedRowVirtualization";
+import { MONOSPACE_TAB_COLUMNS } from "./monospace";
 import { readSourceVirtualRows } from "./sourceVirtualRows";
 import type { SourceOutputProjection } from "./toolOutputProjection";
 import {
@@ -84,7 +85,9 @@ export function VirtualizedSourceOutput(props: { readonly projection: SourceOutp
       onScroll={updateViewportScroll}
       ref={viewportElement}
       style={{
-        height: `${viewportHeight()}px`,
+        "contain-intrinsic-block-size": `${viewportHeight()}px`,
+        "max-height": `${SOURCE_VIEWPORT_HEIGHT_PX}px`,
+        "tab-size": MONOSPACE_TAB_COLUMNS,
       }}
       // biome-ignore lint/a11y/noNoninteractiveTabindex: the virtual source viewport must remain keyboard-scrollable without mounting the full document.
       tabIndex={0}
