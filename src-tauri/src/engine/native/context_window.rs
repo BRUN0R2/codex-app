@@ -9,9 +9,10 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-#[cfg(test)]
-use super::provider::FunctionCallOutputPayload;
-use super::provider::{FunctionCallOutputContent, ResponseContent, ResponseItem};
+use super::provider::{
+    FunctionCallOutputContent, FunctionCallOutputPayload, ResponseContent, ResponseInputRole,
+    ResponseItem,
+};
 use super::text::truncate_utf8;
 use crate::engine::{ImageDetail, ModelContextWindow, TokenUsage};
 
@@ -40,6 +41,13 @@ const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 const COMPACTION_OUTPUT_TRUNCATION: &str =
     "Output exceeded the available model context and was truncated";
 const MESSAGE_TRUNCATION_MARKER: &str = "\n[message truncated for context compaction]";
+const SOFT_TRIM_MIN_TEXT_BYTES: usize = 2_048;
+const SOFT_TRIM_KEEP_HEAD_BYTES: usize = 768;
+const SOFT_TRIM_KEEP_TAIL_BYTES: usize = 768;
+const SOFT_TRIM_MARKER: &str =
+    "\n\n[… soft-trimmed for the context budget; re-run the tool if the middle is required …]\n\n";
+const FILE_MANIFEST_LIMIT: usize = 8;
+const FILE_MANIFEST_CONTENT_KIND: &str = "filesTouched";
 
 #[derive(Clone, Copy)]
 struct OriginalImageEstimate {
@@ -130,6 +138,21 @@ pub(super) fn prepare_compaction_history<'a>(
         estimate_request_tokens(base_instructions, prompt_context, &prepared, tools)
             .saturating_add(trigger_tokens);
 
+    // Prefer a lossless-for-structure soft trim of oversized tool text before
+    // replacing entire outputs with a truncation marker.
+    for index in (0..prepared.len()).rev() {
+        if add_request_estimate_headroom(estimated_tokens) <= hard_limit {
+            break;
+        }
+        let Some(soft_trimmed) = soft_trim_tool_output(&prepared[index]) else {
+            continue;
+        };
+        estimated_tokens = estimated_tokens
+            .saturating_sub(estimate_item_tokens(&prepared[index]))
+            .saturating_add(estimate_item_tokens(&soft_trimmed));
+        prepared.to_mut()[index] = soft_trimmed;
+    }
+
     for index in (0..prepared.len()).rev() {
         if add_request_estimate_headroom(estimated_tokens) <= hard_limit {
             break;
@@ -177,8 +200,155 @@ pub(super) fn build_compacted_history(
         }
     }
     retained_reversed.reverse();
+    let files_touched = collect_touched_file_paths(prompt_input);
+    if !files_touched.is_empty() {
+        retained_reversed.push(build_files_touched_message(&files_touched));
+    }
     retained_reversed.push(checkpoint);
     retained_reversed
+}
+
+fn soft_trim_tool_output(item: &ResponseItem) -> Option<ResponseItem> {
+    match item {
+        ResponseItem::FunctionCallOutput {
+            call_id,
+            output: FunctionCallOutputPayload::Text(text),
+            ..
+        } => {
+            if text.len() <= SOFT_TRIM_MIN_TEXT_BYTES {
+                return None;
+            }
+            let trimmed = soft_trim_text(text);
+            if trimmed.len() >= text.len() {
+                return None;
+            }
+            Some(ResponseItem::function_output(call_id.clone(), trimmed))
+        }
+        ResponseItem::CustomToolCallOutput {
+            call_id,
+            output: FunctionCallOutputPayload::Text(text),
+            ..
+        } => {
+            if text.len() <= SOFT_TRIM_MIN_TEXT_BYTES {
+                return None;
+            }
+            let trimmed = soft_trim_text(text);
+            if trimmed.len() >= text.len() {
+                return None;
+            }
+            Some(ResponseItem::custom_output(call_id.clone(), trimmed))
+        }
+        _ => None,
+    }
+}
+
+fn soft_trim_text(text: &str) -> String {
+    let head_end = byte_boundary(text, SOFT_TRIM_KEEP_HEAD_BYTES);
+    let tail_start = byte_boundary_from_end(text, SOFT_TRIM_KEEP_TAIL_BYTES);
+    if head_end >= tail_start {
+        return text.to_string();
+    }
+    let mut result =
+        String::with_capacity(head_end + SOFT_TRIM_MARKER.len() + (text.len() - tail_start));
+    result.push_str(&text[..head_end]);
+    result.push_str(SOFT_TRIM_MARKER);
+    result.push_str(&text[tail_start..]);
+    result
+}
+
+fn byte_boundary(text: &str, preferred: usize) -> usize {
+    let mut index = preferred.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn byte_boundary_from_end(text: &str, preferred: usize) -> usize {
+    let mut index = text.len().saturating_sub(preferred);
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+fn collect_touched_file_paths(history: &[ResponseItem]) -> Vec<String> {
+    const PATH_KEYS: [&str; 4] = ["path", "file_path", "filePath", "notebook_path"];
+    let mut seen = std::collections::HashSet::new();
+    let mut files = Vec::new();
+    for item in history {
+        let raw = match item {
+            ResponseItem::FunctionCall { arguments, .. } => Some(arguments.as_str()),
+            ResponseItem::CustomToolCall { input, .. } => Some(input.as_str()),
+            _ => None,
+        };
+        let Some(raw) = raw else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(raw) else {
+            continue;
+        };
+        collect_path_values(&value, &PATH_KEYS, &mut seen, &mut files);
+        if files.len() >= FILE_MANIFEST_LIMIT {
+            break;
+        }
+    }
+    files.truncate(FILE_MANIFEST_LIMIT);
+    files
+}
+
+fn collect_path_values(
+    value: &Value,
+    path_keys: &[&str],
+    seen: &mut std::collections::HashSet<String>,
+    files: &mut Vec<String>,
+) {
+    if files.len() >= FILE_MANIFEST_LIMIT {
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                if path_keys.contains(&key.as_str()) {
+                    if let Some(path) = nested.as_str() {
+                        let path = path.trim();
+                        if looks_like_file_path(path) && seen.insert(path.to_string()) {
+                            files.push(path.to_string());
+                        }
+                    }
+                } else {
+                    collect_path_values(nested, path_keys, seen, files);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_path_values(item, path_keys, seen, files);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn looks_like_file_path(value: &str) -> bool {
+    if value.is_empty() || value.len() > 512 || value.contains('\n') {
+        return false;
+    }
+    if !(value.contains('/') || value.contains('\\')) {
+        return false;
+    }
+    let file_name = value.rsplit(['/', '\\']).next().unwrap_or(value);
+    file_name.contains('.') && !file_name.starts_with('.')
+}
+
+fn build_files_touched_message(files: &[String]) -> ResponseItem {
+    let mut text = String::from(
+        "Files touched earlier in this session. Their contents were compacted from the model context. Re-read any file before editing it.\n",
+    );
+    for file in files {
+        text.push_str("- ");
+        text.push_str(file);
+        text.push('\n');
+    }
+    ResponseItem::context_text(ResponseInputRole::User, text, FILE_MANIFEST_CONTENT_KIND)
 }
 
 fn estimate_request_tokens(
@@ -977,6 +1147,74 @@ mod tests {
             Some(ResponseItem::Message { content, .. })
                 if content.iter().any(|part| matches!(part, ResponseContent::InputText { text } if text.starts_with('n')))
         ));
+        assert!(matches!(
+            compacted.last(),
+            Some(ResponseItem::Compaction { .. })
+        ));
+    }
+
+    #[test]
+    fn soft_trims_oversized_tool_text_before_full_truncation() {
+        let oversized = "a".repeat(SOFT_TRIM_MIN_TEXT_BYTES + 4_096);
+        let history = vec![
+            ResponseItem::FunctionCall {
+                id: Some("call-item-soft".into()),
+                namespace: None,
+                name: "shell".into(),
+                arguments: "{}".into(),
+                call_id: "call-soft".into(),
+            },
+            ResponseItem::function_output("call-soft".into(), oversized.clone()),
+        ];
+        let hard_limit = estimate_request_tokens("", &[], &history, &[])
+            .saturating_add(estimate_item_tokens(&ResponseItem::compaction_trigger()));
+        let prepared = prepare_compaction_history("", &[], &history, &[], Some(hard_limit), None);
+
+        let ResponseItem::FunctionCallOutput { output, .. } = &prepared[1] else {
+            panic!("soft trim should keep the tool output item");
+        };
+        let FunctionCallOutputPayload::Text(trimmed) = output else {
+            panic!("soft trim should keep a text payload");
+        };
+        assert!(trimmed.len() < oversized.len());
+        assert!(trimmed.contains(SOFT_TRIM_MARKER.trim()));
+        assert!(trimmed.starts_with("aaa"));
+        assert!(trimmed.ends_with("aaa"));
+    }
+
+    #[test]
+    fn compacted_history_lists_touched_files_before_the_checkpoint() {
+        let history = [
+            ResponseItem::FunctionCall {
+                id: Some("call-item-file".into()),
+                namespace: None,
+                name: "read".into(),
+                arguments: r#"{"path":"src/engine/native/mod.rs"}"#.into(),
+                call_id: "call-file".into(),
+            },
+            text("user", "keep me"),
+        ];
+        let checkpoint = ResponseItem::Compaction {
+            id: Some("checkpoint-files".into()),
+            encrypted_content: "encrypted".into(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let compacted = build_compacted_history(&history, checkpoint);
+
+        assert!(matches!(
+            compacted.first(),
+            Some(ResponseItem::Message { content, .. })
+                if content.iter().any(|part| matches!(part, ResponseContent::InputText { text } if text == "keep me"))
+        ));
+        let Some(ResponseItem::Message { content, .. }) = compacted.get(1) else {
+            panic!("expected a files-touched message before the checkpoint");
+        };
+        assert!(content.iter().any(|part| matches!(
+            part,
+            ResponseContent::InputText { text }
+                if text.contains("src/engine/native/mod.rs")
+                    && text.contains("Re-read any file before editing it.")
+        )));
         assert!(matches!(
             compacted.last(),
             Some(ResponseItem::Compaction { .. })

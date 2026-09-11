@@ -277,7 +277,8 @@
       "window": "Janela de contexto:",
       "fullStatus": "{percent}% cheia",
       "usedStatus": "{percent}% usado ({remaining}% restante)",
-      "tokensUsed": "{used} / {total} tokens usados"
+      "tokensUsed": "{used} / {total} tokens usados",
+      "cacheHit": "cache {percent}% · {cached}"
     },
     "imagePreview": {
       "image": "imagem",

@@ -15,6 +15,8 @@ describe("context window metrics", () => {
       usedPercent: (174_000 / 258_400) * 100,
       remainingPercent: 33,
       usedTokens: 174_000,
+      cachedInputTokens: 0,
+      cachedPercent: 0,
     });
   });
 
@@ -24,6 +26,8 @@ describe("context window metrics", () => {
       usedPercent: (244_800 / 258_400) * 100,
       remainingPercent: 5,
       usedTokens: 244_800,
+      cachedInputTokens: 0,
+      cachedPercent: 0,
     });
   });
 
@@ -33,7 +37,15 @@ describe("context window metrics", () => {
       usedPercent: 100,
       remainingPercent: 0,
       usedTokens: 258_400,
+      cachedInputTokens: 0,
+      cachedPercent: 0,
     });
+  });
+
+  it("computes cache hit rate from provider cached input tokens", () => {
+    const metrics = calculateContextWindowMetrics(usage(174_000, 272_000, 258_400, 120_000));
+    expect(metrics?.cachedInputTokens).toBe(120_000);
+    expect(metrics?.cachedPercent).toBeCloseTo((120_000 / 174_000) * 100, 10);
   });
 
   it("keeps useful precision for small token totals without cluttering the model limit", () => {
@@ -46,6 +58,7 @@ function usage(
   totalTokens: number,
   tokens: number | null,
   usableTokens = tokens ?? 0,
+  cachedInputTokens = 0,
 ): ContextUsageItem {
   return {
     type: "contextUsage",
@@ -53,7 +66,7 @@ function usage(
     model: "test-model",
     usage: {
       inputTokens: totalTokens,
-      cachedInputTokens: 0,
+      cachedInputTokens,
       outputTokens: 0,
       reasoningOutputTokens: 0,
       totalTokens,

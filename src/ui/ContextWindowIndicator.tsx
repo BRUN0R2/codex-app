@@ -72,6 +72,14 @@ export function ContextWindowIndicator(props: ContextWindowIndicatorProps): JSX.
                 total: formatContextTokens(current().usableContextWindow),
               })}
             </div>
+            <Show when={current().cachedInputTokens > 0}>
+              <div class="context-window-popover-cache">
+                {formatMessage(messages().cacheHit, {
+                  percent: Math.round(current().cachedPercent),
+                  cached: formatContextTokens(current().cachedInputTokens),
+                })}
+              </div>
+            </Show>
           </div>
         </div>
       )}

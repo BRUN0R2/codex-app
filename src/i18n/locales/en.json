@@ -277,7 +277,8 @@
       "window": "Context window:",
       "fullStatus": "{percent}% full",
       "usedStatus": "{percent}% used ({remaining}% remaining)",
-      "tokensUsed": "{used} / {total} tokens used"
+      "tokensUsed": "{used} / {total} tokens used",
+      "cacheHit": "cache {percent}% · {cached}"
     },
     "imagePreview": {
       "image": "image",
