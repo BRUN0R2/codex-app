@@ -9137,9 +9137,17 @@ function validateAutomationsMetrics(metrics, viewport) {
     "sidebar navigation intrudes into the drag region",
   );
   assert(
-    metrics.sidebarBrand.top >= metrics.chrome.bottom &&
-      metrics.sidebarBrand.top - metrics.chrome.bottom <= 6 + tolerance,
-    "the Codex brand is not aligned near window chrome",
+    metrics.sidebarBrand.top >= -tolerance &&
+      metrics.sidebarBrand.bottom <= metrics.chrome.bottom + tolerance,
+    "the Codex brand is not confined to the window-chrome strip",
+  );
+  assert(
+    metrics.sidebarBrand.left >= 0 && metrics.sidebarBrand.right <= metrics.sidebar.right,
+    "the Codex brand exceeds the sidebar column",
+  );
+  assert(
+    metrics.sidebarBrand.right <= metrics.controls.left + tolerance,
+    "the Codex brand collides with window controls",
   );
   assert(
     Math.abs(metrics.sidebarTitlebar.bottom - metrics.primaryNavigation.top) <= tolerance,
