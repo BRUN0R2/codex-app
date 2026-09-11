@@ -1,4 +1,8 @@
 import { exceedsUtf8ByteLength, utf8ByteLength } from "../utf8";
+import {
+  TRANSIENT_NOTIFICATION_MAXIMUM_DURATION_SECONDS,
+  TRANSIENT_NOTIFICATION_MINIMUM_DURATION_SECONDS,
+} from "./notificationPolicy";
 import type {
   AccountPlanType,
   AccountProfileInvocation,
@@ -70,6 +74,7 @@ import type {
   RuntimeStatus,
   SandboxMode,
   SpendControlLimitSnapshot,
+  ThreadAgentSummary,
   ThreadForkResponse,
   ThreadItem,
   ThreadListResponse,
@@ -208,7 +213,7 @@ export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
     "storage",
     "transport",
   ]);
-  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [21] as const);
+  const schemaVersion = literal(object.schemaVersion, "$.schemaVersion", [23] as const);
   return {
     config: decodeConfigReadResponse(object.config),
     diagnosticLogPath: text(object.diagnosticLogPath, "$.diagnosticLogPath"),
@@ -530,23 +535,27 @@ export function decodeThreadListResponse(value: unknown): ThreadListResponse {
 }
 
 export function decodeThreadReadResponse(value: unknown): ThreadReadResponse {
-  const object = exactRecord(value, "$", ["nextCursor", "thread"]);
-  return decodeThreadPage(object);
+  const object = exactRecord(value, "$", ["agentThreads", "nextCursor", "thread"]);
+  return {
+    ...decodeThreadPage(object),
+    agentThreads: array(object.agentThreads, "$.agentThreads", decodeThreadSummary),
+  };
 }
 
 export function decodeThreadResumeResponse(value: unknown): ThreadResumeResponse {
-  const object = exactRecord(value, "$", ["cwd", "nextCursor", "thread"]);
+  const object = exactRecord(value, "$", ["agentThreads", "cwd", "nextCursor", "thread"]);
   return {
     thread: decodeThread(object.thread, "$.thread"),
     cwd: text(object.cwd, "$.cwd"),
     nextCursor: nullableThreadHistoryCursor(object.nextCursor, "$.nextCursor"),
+    agentThreads: array(object.agentThreads, "$.agentThreads", decodeThreadSummary),
   };
 }
 
 function decodeThreadPage(value: {
   readonly nextCursor: unknown;
   readonly thread: unknown;
-}): ThreadReadResponse {
+}): ThreadStartResponse {
   return {
     thread: decodeThread(value.thread, "$.thread"),
     nextCursor: nullableThreadHistoryCursor(value.nextCursor, "$.nextCursor"),
@@ -833,15 +842,17 @@ export function decodeOutputReadResponse(value: unknown): OutputReadResponse {
 export function decodeApplicationPreferences(value: unknown): ApplicationPreferences {
   const object = exactRecord(value, "$", [
     "closeToTray",
+    "notifications",
     "schemaVersion",
     "startMinimized",
     "startWithWindows",
   ]);
   const preferences: ApplicationPreferences = {
-    schemaVersion: literal(object.schemaVersion, "$.schemaVersion", [1] as const),
+    schemaVersion: literal(object.schemaVersion, "$.schemaVersion", [2] as const),
     startWithWindows: booleanValue(object.startWithWindows, "$.startWithWindows"),
     startMinimized: booleanValue(object.startMinimized, "$.startMinimized"),
     closeToTray: booleanValue(object.closeToTray, "$.closeToTray"),
+    notifications: decodeNotificationPreferences(object.notifications, "$.notifications"),
   };
   if (preferences.startMinimized && !preferences.startWithWindows) {
     throw new ContractError(
@@ -850,6 +861,72 @@ export function decodeApplicationPreferences(value: unknown): ApplicationPrefere
     );
   }
   return preferences;
+}
+
+function decodeNotificationPreferences(
+  value: unknown,
+  path: string,
+): ApplicationPreferences["notifications"] {
+  const object = exactRecord(value, path, [
+    "enabled",
+    "events",
+    "transientDurationSeconds",
+    "transientPosition",
+  ]);
+  const events = exactRecord(object.events, `${path}.events`, [
+    "approvalRequired",
+    "lunaReserveAvailable",
+    "taskCompleted",
+    "taskFailed",
+    "usageLimitReset",
+    "usageResetAvailable",
+  ]);
+  return {
+    enabled: booleanValue(object.enabled, `${path}.enabled`),
+    transientPosition: literal(object.transientPosition, `${path}.transientPosition`, [
+      "bottomLeft",
+      "bottomRight",
+      "topLeft",
+      "topRight",
+    ] as const),
+    transientDurationSeconds: integer(
+      object.transientDurationSeconds,
+      `${path}.transientDurationSeconds`,
+      TRANSIENT_NOTIFICATION_MINIMUM_DURATION_SECONDS,
+      TRANSIENT_NOTIFICATION_MAXIMUM_DURATION_SECONDS,
+    ),
+    events: {
+      approvalRequired: decodeNotificationRule(
+        events.approvalRequired,
+        `${path}.events.approvalRequired`,
+      ),
+      taskCompleted: decodeNotificationRule(events.taskCompleted, `${path}.events.taskCompleted`),
+      taskFailed: decodeNotificationRule(events.taskFailed, `${path}.events.taskFailed`),
+      usageLimitReset: decodeNotificationRule(
+        events.usageLimitReset,
+        `${path}.events.usageLimitReset`,
+      ),
+      usageResetAvailable: decodeNotificationRule(
+        events.usageResetAvailable,
+        `${path}.events.usageResetAvailable`,
+      ),
+      lunaReserveAvailable: decodeNotificationRule(
+        events.lunaReserveAvailable,
+        `${path}.events.lunaReserveAvailable`,
+      ),
+    },
+  };
+}
+
+function decodeNotificationRule(
+  value: unknown,
+  path: string,
+): ApplicationPreferences["notifications"]["events"]["approvalRequired"] {
+  const object = exactRecord(value, path, ["enabled", "priority"]);
+  return {
+    enabled: booleanValue(object.enabled, `${path}.enabled`),
+    priority: booleanValue(object.priority, `${path}.priority`),
+  };
 }
 
 export function decodeConfigReadResponse(value: unknown): ConfigReadResponse {
@@ -928,18 +1005,38 @@ export function decodeConfigUpdate(value: unknown): ConfigUpdate {
 }
 
 export function decodeAccountRateLimitsResponse(value: unknown): AccountRateLimitsResponse {
-  const object = exactRecord(value, "$", ["planPrice", "rateLimits", "rateLimitsByLimitId"]);
-  const byId = record(object.rateLimitsByLimitId, "$.rateLimitsByLimitId");
-  const decodedById: Record<string, RateLimitSnapshot> = {};
+  const object = exactRecord(value, "$", [
+    "additionalRateLimitsByLimitId",
+    "generalRateLimit",
+    "lunaReserveAvailable",
+    "planPrice",
+  ]);
+  const byId = record(object.additionalRateLimitsByLimitId, "$.additionalRateLimitsByLimitId");
+  const additionalRateLimitsByLimitId: Record<string, RateLimitSnapshot> = {};
   for (const [key, entry] of Object.entries(byId)) {
     if (key.length === 0 || key.length > 128) {
-      throw new ContractError("$.rateLimitsByLimitId", "contains an invalid bucket id");
+      throw new ContractError("$.additionalRateLimitsByLimitId", "contains an invalid bucket id");
     }
-    decodedById[key] = decodeRateLimitSnapshot(entry, `$.rateLimitsByLimitId.${key}`);
+    const snapshot = decodeRateLimitSnapshot(entry, `$.additionalRateLimitsByLimitId.${key}`);
+    if (key === "codex" || snapshot.limitId !== key) {
+      throw new ContractError(
+        `$.additionalRateLimitsByLimitId.${key}.limitId`,
+        "must identify its additional bucket",
+      );
+    }
+    additionalRateLimitsByLimitId[key] = snapshot;
+  }
+  const generalRateLimit = decodeRateLimitSnapshot(object.generalRateLimit, "$.generalRateLimit");
+  if (generalRateLimit.limitId !== "codex") {
+    throw new ContractError(
+      "$.generalRateLimit.limitId",
+      "must identify the canonical codex bucket",
+    );
   }
   return {
-    rateLimits: decodeRateLimitSnapshot(object.rateLimits, "$.rateLimits"),
-    rateLimitsByLimitId: decodedById,
+    generalRateLimit,
+    additionalRateLimitsByLimitId,
+    lunaReserveAvailable: booleanValue(object.lunaReserveAvailable, "$.lunaReserveAvailable"),
     planPrice:
       object.planPrice === null ? null : decodePlanPriceSnapshot(object.planPrice, "$.planPrice"),
   };
@@ -1639,6 +1736,7 @@ function decodeAutomationRunAt(value: unknown, path: string): AutomationRun {
 }
 
 const THREAD_SUMMARY_KEYS = [
+  "agent",
   "createdAt",
   "cwd",
   "id",
@@ -1690,6 +1788,31 @@ function decodeThreadSummaryRecord(
     updatedAt,
     recencyAt,
     status: decodeThreadStatus(object.status, `${path}.status`),
+    agent: object.agent === null ? null : decodeThreadAgentSummary(object.agent, `${path}.agent`),
+  };
+}
+
+function decodeThreadAgentSummary(value: unknown, path: string): ThreadAgentSummary {
+  const object = exactRecord(value, path, [
+    "model",
+    "parentThreadId",
+    "path",
+    "reasoningEffort",
+    "rootThreadId",
+    "serviceTier",
+    "taskName",
+  ]);
+  return {
+    rootThreadId: identifier(object.rootThreadId, `${path}.rootThreadId`),
+    parentThreadId: identifier(object.parentThreadId, `${path}.parentThreadId`),
+    path: text(object.path, `${path}.path`, 4_096),
+    taskName: text(object.taskName, `${path}.taskName`, 256),
+    model: text(object.model, `${path}.model`, 256),
+    reasoningEffort:
+      object.reasoningEffort === null
+        ? null
+        : literal(object.reasoningEffort, `${path}.reasoningEffort`, REASONING_EFFORTS),
+    serviceTier: nullableText(object.serviceTier, `${path}.serviceTier`),
   };
 }
 

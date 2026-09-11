@@ -11,21 +11,29 @@ import {
 import type { BrowserAgentActivityNotification } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
-import { openExternalUrl, openWorkspaceDirectory } from "../infrastructure/codexClient";
-import { subscribeToMenuEvents } from "../infrastructure/desktopClient";
 import { isBrowserPreview } from "../platform/desktopRuntime";
 import type { AppController } from "../state/appController";
 import { createBrowserController } from "../state/browserController";
-
+import { generalRateLimitSnapshot } from "../state/rateLimits";
+import { AgentTabs } from "./AgentTabs";
 import { ApprovalCard } from "./ApprovalCard";
 import { applyDesktopAppearance } from "./appearance";
 import { Composer, type ComposerDraftRequest } from "./Composer";
 import { formatShortDate } from "./dateFormat";
+import { useExternalNavigation } from "./ExternalNavigation";
 import { HomeComposerModeToggle } from "./HomeComposerModeToggle";
 import { Icon } from "./Icon";
+import { ProductBrand } from "./ProductBrand";
 import { LatestTurnFileChangeStore } from "./reviewChanges";
 import type { SettingsPage } from "./SettingsDialog";
 import { Sidebar } from "./Sidebar";
+import {
+  readSidebarWidth,
+  resolveSidebarWidthMetrics,
+  SIDEBAR_WIDTH_DEFAULT_PX,
+  sidebarWidthFromPointer,
+  writeSidebarWidth,
+} from "./sidebarWidth";
 import { Timeline } from "./Timeline";
 import { TurnProgress } from "./TurnProgress";
 import { shouldShowTurnProgress } from "./turnProgressVisibility";
@@ -45,6 +53,7 @@ import {
   reconcileBrowserWorkspaceTabs,
   removeReviewWorkspaceTab,
   showBrowserWorkspaceTab,
+  showEmptyWorkspace,
   showReviewWorkspaceTab,
   showWorkspaceTab,
   type WorkspaceTab,
@@ -72,6 +81,11 @@ export function AppShell(props: { readonly controller: AppController }) {
   const reviewChangeStore = new LatestTurnFileChangeStore();
   const browserController = createBrowserController(props.controller.reportError);
   const [workspaceTabs, setWorkspaceTabs] = createSignal(emptyWorkspaceTabsState());
+  const [sidebarWidth, setSidebarWidth] = createSignal(readSidebarWidth());
+  const [sidebarWidthMetrics, setSidebarWidthMetrics] = createSignal(
+    resolveSidebarWidthMetrics(sidebarWidth(), 0),
+  );
+  const [sidebarResizing, setSidebarResizing] = createSignal(false);
   const [workspaceSplitRatio, setWorkspaceSplitRatio] = createSignal(readWorkspaceSplitRatio());
   const [workspaceSplitMetrics, setWorkspaceSplitMetrics] = createSignal(
     resolveWorkspaceSplitMetrics(workspaceSplitRatio(), 0),
@@ -79,6 +93,9 @@ export function AppShell(props: { readonly controller: AppController }) {
   const [workspaceSplitDragging, setWorkspaceSplitDragging] = createSignal(false);
   let previewBrowserPending = readPreviewBrowserOpen();
   let observedBrowserAgentActivity: BrowserAgentActivityNotification | null = null;
+  let observedNotificationSettingsRequest = props.controller.notificationUsageSettingsRequest();
+  let observedApplicationShellActionSequence =
+    props.controller.applicationShellActionRequest()?.sequence ?? 0;
   const reviewChanges = createMemo(() =>
     reviewChangeStore.project(props.controller.turns(), props.controller.activeTurnId()),
   );
@@ -92,19 +109,45 @@ export function AppShell(props: { readonly controller: AppController }) {
     setSettingsPage(page ?? null);
     setSettingsOpen(true);
   }
+
+  createEffect(() => {
+    const request = props.controller.notificationUsageSettingsRequest();
+    if (request === observedNotificationSettingsRequest) return;
+    observedNotificationSettingsRequest = request;
+    openSettings("usage");
+  });
+
+  createEffect(() => {
+    const request = props.controller.applicationShellActionRequest();
+    if (request === null || request.sequence === observedApplicationShellActionSequence) return;
+    observedApplicationShellActionSequence = request.sequence;
+    switch (request.type) {
+      case "newThread":
+        setActiveSurface("chat");
+        props.controller.newThread();
+        return;
+      case "toggleSettings":
+        openSettings();
+        return;
+      case "toggleSidebar":
+        setSidebarCollapsed((value) => !value);
+    }
+  });
   const [draftRequest, setDraftRequest] = createSignal<ComposerDraftRequest | null>(null);
   const [chatDockHeight, setChatDockHeight] = createSignal(0);
   let nextDraftRequestId = 0;
   let chatPageElement: HTMLElement | undefined;
   let chatDockElement: HTMLDivElement | undefined;
+  let appShellElement: HTMLDivElement | undefined;
   let mainPanelContentElement: HTMLDivElement | undefined;
+  let sidebarSplitterElement: HTMLHRElement | undefined;
   let workspaceSplitterElement: HTMLHRElement | undefined;
   let chatDockResizeObserver: ResizeObserver | undefined;
+  let sidebarWidthResizeObserver: ResizeObserver | undefined;
   let workspaceSplitResizeObserver: ResizeObserver | undefined;
   let chatDockResizeFrame: number | undefined;
   let workspaceSplitPointerId: number | undefined;
-  let disposed = false;
-  const eventUnlisteners: Array<() => void> = [];
+  let sidebarWidthPointerId: number | undefined;
 
   function handleKeyboardShortcut(event: KeyboardEvent): void {
     if (event.key === "Escape" && workspaceTabs().visible) {
@@ -114,14 +157,7 @@ export function AppShell(props: { readonly controller: AppController }) {
     }
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "b") {
       event.preventDefault();
-      const conversationId = props.controller.currentThread()?.id;
-      if (conversationId !== undefined) {
-        if (workspaceTabs().visible && activeWorkspaceSurface()?.kind === "browser") {
-          setWorkspaceTabs(hideWorkspaceTabs);
-        } else {
-          void openBrowserWorkspace(conversationId);
-        }
-      }
+      toggleWorkspacePanel();
       return;
     }
     if (event.ctrlKey && event.key === ",") {
@@ -138,7 +174,7 @@ export function AppShell(props: { readonly controller: AppController }) {
   });
 
   createEffect(() => {
-    const conversationId = props.controller.currentThread()?.id ?? null;
+    const conversationId = props.controller.activeTaskRootId();
     const tabs = conversationId === null ? [] : browserController.tabs(conversationId);
     const activeBrowserTabId =
       conversationId === null
@@ -157,7 +193,7 @@ export function AppShell(props: { readonly controller: AppController }) {
     if (!previewBrowserPending) {
       return;
     }
-    const conversationId = props.controller.currentThread()?.id;
+    const conversationId = props.controller.activeTaskRootId() ?? undefined;
     if (conversationId === undefined) {
       return;
     }
@@ -178,7 +214,7 @@ export function AppShell(props: { readonly controller: AppController }) {
       return;
     }
     observedBrowserAgentActivity = activity;
-    if (props.controller.currentThread()?.id !== activity.conversationId) {
+    if (props.controller.activeTaskRootId() !== activity.conversationId) {
       return;
     }
     if (activity.panel === "close") {
@@ -213,6 +249,9 @@ export function AppShell(props: { readonly controller: AppController }) {
     if (!(await browserController.ensureConversation(conversationId))) {
       return;
     }
+    if (browserController.activeTab(conversationId) === null) {
+      if (!(await browserController.newTab(conversationId))) return;
+    }
     const browserTabId =
       requestedBrowserTabId ?? browserController.activeTab(conversationId)?.browserTabId;
     if (browserTabId === undefined) {
@@ -231,12 +270,28 @@ export function AppShell(props: { readonly controller: AppController }) {
     );
   }
 
+  function toggleWorkspacePanel(): void {
+    if (workspaceTabs().visible) {
+      setWorkspaceTabs(hideWorkspaceTabs);
+      return;
+    }
+    const activeTab = activeWorkspaceSurface();
+    if (activeTab !== null) {
+      setWorkspaceTabs((current) => showWorkspaceTab(current, activeTab.id));
+      return;
+    }
+    const conversationId = props.controller.activeTaskRootId() ?? undefined;
+    if (conversationId !== undefined) {
+      setWorkspaceTabs((current) => showEmptyWorkspace(current, conversationId));
+    }
+  }
+
   function activateWorkspaceSurface(tab: WorkspaceTab): void {
     if (tab.kind === "review") {
       setWorkspaceTabs((current) => showWorkspaceTab(current, tab.id));
       return;
     }
-    const conversationId = props.controller.currentThread()?.id;
+    const conversationId = props.controller.activeTaskRootId() ?? undefined;
     if (conversationId === undefined) {
       return;
     }
@@ -252,7 +307,7 @@ export function AppShell(props: { readonly controller: AppController }) {
       setWorkspaceTabs((current) => closeWorkspaceTab(current, tab.id));
       return;
     }
-    const conversationId = props.controller.currentThread()?.id;
+    const conversationId = props.controller.activeTaskRootId() ?? undefined;
     if (conversationId === undefined) {
       return;
     }
@@ -275,7 +330,7 @@ export function AppShell(props: { readonly controller: AppController }) {
   }
 
   function openNewBrowserTab(): void {
-    const conversationId = props.controller.currentThread()?.id;
+    const conversationId = props.controller.activeTaskRootId() ?? undefined;
     if (conversationId === undefined) {
       return;
     }
@@ -305,11 +360,7 @@ export function AppShell(props: { readonly controller: AppController }) {
   }
 
   async function openWorkspace(path: string): Promise<void> {
-    try {
-      await openWorkspaceDirectory(path);
-    } catch (reason) {
-      props.controller.reportError(reason);
-    }
+    await props.controller.openWorkspaceDirectory(path);
   }
 
   function synchronizeChatDockInset(): void {
@@ -329,6 +380,105 @@ export function AppShell(props: { readonly controller: AppController }) {
       chatDockResizeFrame = undefined;
       synchronizeChatDockInset();
     });
+  }
+
+  function synchronizeSidebarWidthGeometry(requestedWidth = sidebarWidth()): void {
+    if (appShellElement === undefined) {
+      return;
+    }
+    if (sidebarCollapsed()) {
+      appShellElement.style.removeProperty("--sidebar-width");
+      return;
+    }
+    const metrics = resolveSidebarWidthMetrics(
+      requestedWidth,
+      appShellElement.getBoundingClientRect().width,
+    );
+    setSidebarWidthMetrics(metrics);
+    appShellElement.style.setProperty("--sidebar-width", `${metrics.width}px`);
+  }
+
+  function commitSidebarWidth(requestedWidth: number, persist: boolean): void {
+    if (appShellElement === undefined) {
+      return;
+    }
+    const metrics = resolveSidebarWidthMetrics(
+      requestedWidth,
+      appShellElement.getBoundingClientRect().width,
+    );
+    setSidebarWidth(metrics.width);
+    setSidebarWidthMetrics(metrics);
+    appShellElement.style.setProperty("--sidebar-width", `${metrics.width}px`);
+    if (persist) {
+      writeSidebarWidth(metrics.width);
+    }
+  }
+
+  function updateSidebarWidthFromPointer(event: PointerEvent): void {
+    if (sidebarWidthPointerId !== event.pointerId || appShellElement === undefined) {
+      return;
+    }
+    const bounds = appShellElement.getBoundingClientRect();
+    commitSidebarWidth(sidebarWidthFromPointer(event.clientX, bounds.left, bounds.width), false);
+  }
+
+  function handleSidebarWidthPointerDown(event: PointerEvent): void {
+    if (event.button !== 0 || sidebarWidthPointerId !== undefined || settingsOpen()) {
+      return;
+    }
+    event.preventDefault();
+    sidebarWidthPointerId = event.pointerId;
+    setSidebarResizing(true);
+    sidebarSplitterElement?.setPointerCapture(event.pointerId);
+    updateSidebarWidthFromPointer(event);
+  }
+
+  function endSidebarWidthPointerDrag(event: PointerEvent, releaseCapture: boolean): void {
+    if (sidebarWidthPointerId !== event.pointerId) {
+      return;
+    }
+    sidebarWidthPointerId = undefined;
+    setSidebarResizing(false);
+    writeSidebarWidth(sidebarWidth());
+    if (releaseCapture && sidebarSplitterElement?.hasPointerCapture(event.pointerId) === true) {
+      sidebarSplitterElement.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function cancelSidebarWidthPointerDrag(): void {
+    const pointerId = sidebarWidthPointerId;
+    sidebarWidthPointerId = undefined;
+    setSidebarResizing(false);
+    if (pointerId !== undefined && sidebarSplitterElement?.hasPointerCapture(pointerId) === true) {
+      sidebarSplitterElement.releasePointerCapture(pointerId);
+    }
+  }
+
+  function handleSidebarWidthKeyDown(event: KeyboardEvent): void {
+    if (settingsOpen()) {
+      return;
+    }
+    const metrics = sidebarWidthMetrics();
+    const step = event.shiftKey ? 64 : 16;
+    let requestedWidth: number;
+    switch (event.key) {
+      case "ArrowLeft":
+        requestedWidth = metrics.width - step;
+        break;
+      case "ArrowRight":
+        requestedWidth = metrics.width + step;
+        break;
+      case "Home":
+        requestedWidth = metrics.minimumWidth;
+        break;
+      case "End":
+        requestedWidth = metrics.maximumWidth;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    commitSidebarWidth(requestedWidth, true);
   }
 
   function synchronizeWorkspaceSplitGeometry(requestedRatio = workspaceSplitRatio()): void {
@@ -424,6 +574,16 @@ export function AppShell(props: { readonly controller: AppController }) {
   }
 
   createEffect(() => {
+    const collapsed = sidebarCollapsed();
+    if (collapsed) {
+      cancelSidebarWidthPointerDrag();
+      appShellElement?.style.removeProperty("--sidebar-width");
+      return;
+    }
+    queueMicrotask(() => synchronizeSidebarWidthGeometry());
+  });
+
+  createEffect(() => {
     if (activeSurface() !== "chat" || !workspaceTabs().visible) {
       const pointerId = workspaceSplitPointerId;
       workspaceSplitPointerId = undefined;
@@ -447,35 +607,24 @@ export function AppShell(props: { readonly controller: AppController }) {
       chatDockResizeObserver.observe(chatDockElement);
       scheduleChatDockInset();
     }
+    if (appShellElement !== undefined) {
+      sidebarWidthResizeObserver = new ResizeObserver(() => synchronizeSidebarWidthGeometry());
+      sidebarWidthResizeObserver.observe(appShellElement);
+      synchronizeSidebarWidthGeometry();
+    }
     if (mainPanelContentElement !== undefined) {
       workspaceSplitResizeObserver = new ResizeObserver(() => synchronizeWorkspaceSplitGeometry());
       workspaceSplitResizeObserver.observe(mainPanelContentElement);
       synchronizeWorkspaceSplitGeometry();
     }
-    void subscribeToMenuEvents({
-      onNewThread: () => {
-        setActiveSurface("chat");
-        props.controller.newThread();
-      },
-      onToggleSettings: () => openSettings(),
-      onToggleSidebar: () => setSidebarCollapsed((value) => !value),
-    }).then((unlisten) => {
-      if (disposed) {
-        unlisten();
-        return;
-      }
-      eventUnlisteners.push(unlisten);
-    });
   });
   onCleanup(() => {
     browserController.dispose();
-    disposed = true;
-    for (const unlisten of eventUnlisteners) {
-      unlisten();
-    }
     window.removeEventListener("keydown", handleKeyboardShortcut);
     chatDockResizeObserver?.disconnect();
+    sidebarWidthResizeObserver?.disconnect();
     workspaceSplitResizeObserver?.disconnect();
+    cancelSidebarWidthPointerDrag();
     if (chatDockResizeFrame !== undefined) {
       cancelAnimationFrame(chatDockResizeFrame);
     }
@@ -485,10 +634,25 @@ export function AppShell(props: { readonly controller: AppController }) {
       class="app-shell"
       classList={{
         "sidebar-collapsed": sidebarCollapsed(),
+        "sidebar-resizing": sidebarResizing(),
       }}
+      ref={appShellElement}
     >
+      <Show when={!settingsOpen()}>
+        <div class="shell-brand-slot">
+          <ProductBrand
+            product={props.controller.product}
+            selectProduct={props.controller.selectProduct}
+            onProductSelected={() => {
+              setWorkspaceTabs(hideWorkspaceTabs);
+              setActiveSurface("chat");
+            }}
+          />
+        </div>
+      </Show>
       <Sidebar
         automationsActive={activeSurface() === "automations"}
+        chromeOwnsBrand
         collapsed={sidebarCollapsed()}
         controller={props.controller}
         inert={settingsOpen()}
@@ -503,6 +667,30 @@ export function AppShell(props: { readonly controller: AppController }) {
           setActiveSurface("chat");
         }}
       />
+      <Show when={!sidebarCollapsed()}>
+        <hr
+          aria-disabled={settingsOpen()}
+          aria-label={messages().resizeSidebar}
+          aria-orientation="vertical"
+          aria-valuemax={Math.round(sidebarWidthMetrics().maximumWidth)}
+          aria-valuemin={Math.round(sidebarWidthMetrics().minimumWidth)}
+          aria-valuenow={Math.round(sidebarWidthMetrics().width)}
+          aria-valuetext={formatMessage(messages().sidebarWidth, {
+            width: Math.round(sidebarWidthMetrics().width),
+          })}
+          class="sidebar-splitter"
+          onDblClick={() => commitSidebarWidth(SIDEBAR_WIDTH_DEFAULT_PX, true)}
+          onKeyDown={handleSidebarWidthKeyDown}
+          onLostPointerCapture={(event) => endSidebarWidthPointerDrag(event, false)}
+          onPointerCancel={(event) => endSidebarWidthPointerDrag(event, true)}
+          onPointerDown={handleSidebarWidthPointerDown}
+          onPointerMove={updateSidebarWidthFromPointer}
+          onPointerUp={(event) => endSidebarWidthPointerDrag(event, true)}
+          ref={sidebarSplitterElement}
+          tabIndex={settingsOpen() ? -1 : 0}
+          title={messages().resizeSidebarTitle}
+        />
+      </Show>
       <main class="main-panel" inert={settingsOpen()}>
         <Show when={activeSurface() === "chat" && props.controller.product() === "chatgpt"}>
           <HomeComposerModeToggle
@@ -518,26 +706,19 @@ export function AppShell(props: { readonly controller: AppController }) {
           }}
           ref={mainPanelContentElement}
         >
-          <Show
-            when={
-              activeSurface() === "chat" &&
-              !workspaceTabs().visible &&
-              props.controller.currentThread() !== null
-            }
-          >
+          <Show when={activeSurface() === "chat" && props.controller.currentThread() !== null}>
             <button
-              aria-label={messages().openBrowser}
-              class="browser-panel-toggle"
-              onClick={() => {
-                const conversationId = props.controller.currentThread()?.id;
-                if (conversationId !== undefined) {
-                  void openBrowserWorkspace(conversationId);
-                }
-              }}
-              title={messages().openBrowserShortcut}
+              aria-controls="workspace-panel"
+              aria-expanded={workspaceTabs().visible}
+              aria-label={
+                workspaceTabs().visible ? messages().closeWorkspace : messages().openWorkspace
+              }
+              class="workspace-panel-toggle"
+              onClick={toggleWorkspacePanel}
+              title={messages().toggleWorkspaceShortcut}
               type="button"
             >
-              <Icon name="globe" size={15} />
+              <Icon name="panel" size={15} />
             </button>
           </Show>
           <section
@@ -552,6 +733,7 @@ export function AppShell(props: { readonly controller: AppController }) {
             hidden={activeSurface() !== "chat"}
             ref={chatPageElement}
           >
+            <AgentTabs controller={props.controller} />
             <Timeline
               bottomOcclusion={chatDockHeight()}
               controller={props.controller}
@@ -619,7 +801,7 @@ export function AppShell(props: { readonly controller: AppController }) {
             keyed
             when={
               activeSurface() === "chat" && workspaceTabs().visible
-                ? props.controller.currentThread()?.id
+                ? props.controller.activeTaskRootId()
                 : null
             }
           >
@@ -632,7 +814,6 @@ export function AppShell(props: { readonly controller: AppController }) {
                   mode={props.controller.config()?.config.desktop.diffDisplay ?? "unified"}
                   onActivate={activateWorkspaceSurface}
                   onClose={closeWorkspaceSurface}
-                  onHide={() => setWorkspaceTabs(hideWorkspaceTabs)}
                   onNewBrowserTab={openNewBrowserTab}
                   state={workspaceTabs()}
                 />
@@ -684,6 +865,7 @@ const SETTINGS_PAGES = new Set<SettingsPage>([
   "archived",
   "diagnostics",
   "general",
+  "notifications",
   "personalization",
   "profile",
   "shortcuts",
@@ -718,11 +900,12 @@ function readPreviewBrowserOpen(): boolean {
 
 function UsageLimitBanner(props: { readonly controller: AppController }) {
   const i18n = useI18n();
+  const openExternalUrl = useExternalNavigation();
   const messages = () => i18n.messages().shell;
-  const snapshot = () => props.controller.rateLimits()?.rateLimits;
+  const snapshot = () => generalRateLimitSnapshot(props.controller.rateLimits());
   const exhausted = () => {
     const current = snapshot();
-    if (current === undefined) {
+    if (current === null) {
       return false;
     }
     return (

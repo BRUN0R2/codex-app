@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use chrono::{FixedOffset, Utc};
 
 use super::multi_agent::MultiAgentPromptContext;
-use super::provider::{ResponseItem, SelectedModel};
-use crate::engine::{AppConfig, ApprovalPolicy, ConversationMode, Personality, SandboxMode};
+use super::provider::{ResponseInputRole, ResponseItem, SelectedModel};
+use crate::engine::{AppConfig, ApprovalPolicy, ConversationMode, SandboxMode};
 use crate::error::AppError;
 
 const PROJECT_INSTRUCTIONS_MAX_BYTES: u64 = 32 * 1_024;
@@ -41,24 +41,14 @@ pub(super) async fn compose_prompt_context(
         .filter(|instructions| !instructions.is_empty())
     {
         builder.push(
-            "developer",
+            ResponseInputRole::Developer,
             instructions.to_string(),
             "generic.developer_instructions",
         )?;
     }
-    let personality = (!model.personality_is_baked())
-        .then(|| {
-            model.personality_context(config.personality).or_else(|| {
-                model
-                    .uses_legacy_instruction_contract()
-                    .then(|| personality_instruction(config.personality))
-                    .flatten()
-            })
-        })
-        .flatten();
-    if let Some(personality) = personality {
+    if let Some(personality) = model.personality_context(config.personality) {
         builder.push(
-            "developer",
+            ResponseInputRole::Developer,
             format!(
                 "<personality_spec>\n The user has requested a new communication style. Future messages should adhere to the following personality: \n{personality} \n</personality_spec>"
             ),
@@ -67,7 +57,7 @@ pub(super) async fn compose_prompt_context(
     }
     if let Some(project_instructions) = load_project_instructions(workspace).await? {
         builder.push(
-            "user",
+            ResponseInputRole::User,
             format!(
                 "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\n{}\n</INSTRUCTIONS>",
                 workspace.display(),
@@ -78,14 +68,14 @@ pub(super) async fn compose_prompt_context(
     }
     if let Some(permissions) = model.permissions_context(config.permission_profile) {
         builder.push(
-            "developer",
+            ResponseInputRole::Developer,
             format!("<permissions instructions>\n{permissions}\n</permissions instructions>"),
             "permissions.instructions",
         )?;
     }
     if let Some(collaboration) = model.collaboration_context(mode) {
         builder.push(
-            "developer",
+            ResponseInputRole::Developer,
             format!("<collaboration_mode>\n{collaboration}\n</collaboration_mode>"),
             "collaboration_mode.instructions",
         )?;
@@ -93,14 +83,14 @@ pub(super) async fn compose_prompt_context(
     if let Some(multi_agent) = multi_agent {
         if let Some(role_instructions) = multi_agent.rendered_role_instructions() {
             builder.push(
-                "developer",
+                ResponseInputRole::Developer,
                 role_instructions,
                 "multi_agent.role_instructions",
             )?;
         }
         if let Some(mode_instructions) = multi_agent.mode_instructions.as_ref() {
             builder.push(
-                "developer",
+                ResponseInputRole::Developer,
                 format!("<multi_agent_mode>{mode_instructions}</multi_agent_mode>"),
                 "multi_agent.mode_instructions",
             )?;
@@ -108,7 +98,7 @@ pub(super) async fn compose_prompt_context(
     }
     let shell_version = crate::process::shell_version().await;
     builder.push(
-        "user",
+        ResponseInputRole::User,
         environment_context(
             workspace,
             config,
@@ -132,7 +122,12 @@ struct PromptContextBuilder {
 }
 
 impl PromptContextBuilder {
-    fn push(&mut self, role: &str, text: String, content_kind: &str) -> Result<(), AppError> {
+    fn push(
+        &mut self,
+        role: ResponseInputRole,
+        text: String,
+        content_kind: &str,
+    ) -> Result<(), AppError> {
         self.bytes = self
             .bytes
             .checked_add(text.len())
@@ -250,16 +245,6 @@ fn file_error(operation: &str, path: &Path, error: std::io::Error) -> AppError {
     ))
 }
 
-const fn personality_instruction(personality: Personality) -> Option<&'static str> {
-    match personality {
-        Personality::Friendly => Some(
-            "You optimize for team morale and being a supportive teammate as much as code quality.",
-        ),
-        Personality::Pragmatic => Some("You are a deeply pragmatic, effective software engineer."),
-        Personality::None => None,
-    }
-}
-
 fn environment_context(
     workspace: &Path,
     config: &AppConfig,
@@ -343,7 +328,7 @@ mod tests {
         .expect("model fixture should decode");
         super::super::provider::ModelCatalog::from_wire(wire, 1)
             .expect("model fixture should validate")
-            .select(None)
+            .select_for_account(None, true)
             .expect("default model should resolve")
     }
 
@@ -373,7 +358,7 @@ mod tests {
         .expect("modern model fixture should decode");
         super::super::provider::ModelCatalog::from_wire(wire, 1)
             .expect("modern model fixture should validate")
-            .select(None)
+            .select_for_account(None, true)
             .expect("default model should resolve")
     }
 
@@ -507,8 +492,10 @@ mod tests {
         assert!(!encoded.contains("Work execution protocol"));
         assert!(!encoded.contains("built-in browser tools"));
         assert!(encoded.contains("environments.environment_context"));
-        assert!(encoded.contains("personality.spec_instructions"));
-        assert!(encoded.contains("deeply pragmatic"));
+        assert!(!encoded.contains("personality.spec_instructions"));
+        assert!(!encoded.contains("deeply pragmatic"));
+        assert!(encoded.contains("permissions.instructions"));
+        assert!(encoded.contains("collaboration_mode.instructions"));
     }
 
     #[tokio::test]

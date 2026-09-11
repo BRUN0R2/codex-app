@@ -19,7 +19,7 @@ export interface RateLimitRefreshCoordinator {
   readonly start: () => void;
   readonly refresh: () => Promise<boolean>;
   readonly refreshIfStale: () => Promise<boolean>;
-  readonly invalidateSession: () => void;
+  readonly invalidate: () => void;
   readonly dispose: () => void;
 }
 
@@ -28,7 +28,7 @@ export function createRateLimitRefreshCoordinator<T>(
 ): RateLimitRefreshCoordinator {
   let disposed = false;
   let started = false;
-  let sessionRevision = 0;
+  let revision = 0;
   let removeFocusListener: (() => void) | null = null;
   let removeVisibilityListener: (() => void) | null = null;
   let lastSuccessfulRequest: { readonly key: string; readonly completedAt: number } | null = null;
@@ -36,7 +36,7 @@ export function createRateLimitRefreshCoordinator<T>(
 
   function currentRequestKey(): string | null {
     const sessionKey = options.getSessionKey();
-    return sessionKey === null ? null : `${sessionRevision}\u0000${sessionKey}`;
+    return sessionKey === null ? null : `${revision}\u0000${sessionKey}`;
   }
 
   function run(force: boolean): Promise<boolean> {
@@ -102,8 +102,8 @@ export function createRateLimitRefreshCoordinator<T>(
     },
     refresh: () => run(true),
     refreshIfStale: () => run(false),
-    invalidateSession() {
-      sessionRevision += 1;
+    invalidate() {
+      revision += 1;
       lastSuccessfulRequest = null;
     },
     dispose() {

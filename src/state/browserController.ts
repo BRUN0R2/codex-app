@@ -237,7 +237,7 @@ export function createBrowserController(reportError: (reason: unknown) => void):
     const initialization = (async () => {
       const current = states().get(conversationId);
       if (current === undefined) {
-        return newTab(conversationId);
+        return true;
       }
       const selected = activeTab(conversationId);
       if (selected === null) {
@@ -321,13 +321,13 @@ export function createBrowserController(reportError: (reason: unknown) => void):
     }
     const current = states().get(conversationId);
     if (current === undefined) {
-      return newTab(conversationId);
+      return true;
     }
     const closedIndex = current.tabs.findIndex((tab) => tab.browserTabId === browserTabId);
     const remaining = current.tabs.filter((tab) => tab.browserTabId !== browserTabId);
     if (remaining.length === 0) {
       updateConversation(conversationId, () => null);
-      return newTab(conversationId);
+      return true;
     }
     const successorIndex = Math.min(Math.max(0, closedIndex), remaining.length - 1);
     const successor = remaining[successorIndex];
@@ -408,14 +408,10 @@ export function createBrowserController(reportError: (reason: unknown) => void):
     readonly conversationId: string | null;
     readonly visible: boolean;
   }): Promise<boolean> {
-    if (
-      input.visible &&
-      input.conversationId !== null &&
-      !(await ensureConversation(input.conversationId))
-    ) {
+    const selected = input.conversationId === null ? null : activeTab(input.conversationId);
+    if (input.visible && selected !== null && !(await ensureNativeTab(selected))) {
       return false;
     }
-    const selected = input.conversationId === null ? null : activeTab(input.conversationId);
     try {
       await synchronizeBrowserSurface({
         activeBrowserTabId: selected?.browserTabId ?? null,

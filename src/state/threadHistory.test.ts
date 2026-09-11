@@ -24,6 +24,7 @@ describe("thread history", () => {
 function fixture(turns: readonly ThreadTurn[]): CodexThread {
   return {
     id: "thread",
+    agent: null,
     mode: "codex",
     preview: "History",
     name: null,

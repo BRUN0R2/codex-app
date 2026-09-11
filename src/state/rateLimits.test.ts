@@ -5,7 +5,7 @@ import type {
   RateLimitSnapshot,
   RateLimitUpdateSnapshot,
 } from "../contracts/types";
-import { mergeRateLimitUpdate } from "./rateLimits";
+import { generalRateLimitSnapshot, mergeRateLimitUpdate } from "./rateLimits";
 
 const primary: RateLimitSnapshot = {
   limitId: "codex",
@@ -21,14 +21,15 @@ const primary: RateLimitSnapshot = {
 
 function response(): AccountRateLimitsResponse {
   return {
-    rateLimits: primary,
-    rateLimitsByLimitId: { codex: primary },
+    generalRateLimit: primary,
+    additionalRateLimitsByLimitId: {},
     planPrice: { amount: 2000, currency: "USD", minorUnitExponent: 2 },
+    lunaReserveAvailable: false,
   };
 }
 
 function bucket(value: AccountRateLimitsResponse, limitId: string): RateLimitSnapshot | undefined {
-  return value.rateLimitsByLimitId[limitId];
+  return value.additionalRateLimitsByLimitId[limitId];
 }
 
 describe("atualizações incrementais de limite de uso", () => {
@@ -47,11 +48,10 @@ describe("atualizações incrementais de limite de uso", () => {
 
     const merged = mergeRateLimitUpdate(response(), update);
 
-    expect(merged.rateLimits).toEqual({
+    expect(merged.generalRateLimit).toEqual({
       ...primary,
       primary: update.primary,
     });
-    expect(bucket(merged, "codex")).toEqual(merged.rateLimits);
     expect(merged.planPrice).toEqual(response().planPrice);
   });
 
@@ -70,7 +70,32 @@ describe("atualizações incrementais de limite de uso", () => {
 
     const merged = mergeRateLimitUpdate(response(), update);
 
-    expect(merged.rateLimits).toBe(primary);
+    expect(merged.generalRateLimit).toBe(primary);
     expect(bucket(merged, "codex_bengalfox")).toEqual(update);
+  });
+
+  it("atualiza o reserva sem substituir o limite geral", () => {
+    const reserve: RateLimitSnapshot = {
+      ...primary,
+      limitId: "base_model_inference",
+      limitName: "gpt-reserve",
+      primary: { usedPercent: 1, windowDurationMins: 10_080, resetsAt: 6_000 },
+      secondary: null,
+    };
+    const current: AccountRateLimitsResponse = {
+      ...response(),
+      additionalRateLimitsByLimitId: { base_model_inference: reserve },
+    };
+    const update: RateLimitUpdateSnapshot = {
+      ...reserve,
+      limitId: "base_model_inference",
+      primary: { usedPercent: 2, windowDurationMins: 10_080, resetsAt: 7_000 },
+    };
+
+    const merged = mergeRateLimitUpdate(current, update);
+
+    expect(generalRateLimitSnapshot(merged)).toBe(primary);
+    expect(merged.generalRateLimit).toBe(primary);
+    expect(bucket(merged, "base_model_inference")).toEqual(update);
   });
 });

@@ -27,9 +27,10 @@ function response(
   additional: Readonly<Record<string, RateLimitSnapshot>> = {},
 ): AccountRateLimitsResponse {
   return {
-    rateLimits: primary,
-    rateLimitsByLimitId: { codex: primary, ...additional },
+    generalRateLimit: primary,
+    additionalRateLimitsByLimitId: additional,
     planPrice: null,
+    lunaReserveAvailable: false,
   };
 }
 
@@ -111,5 +112,26 @@ describe("usage limit presentation", () => {
         ],
       },
     ]);
+  });
+
+  it("renders the general bucket separately from the reserve bucket", () => {
+    const general = snapshot({
+      primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 1_800_000_000_000 },
+    });
+    const reserve = snapshot({
+      limitId: "base_model_inference",
+      limitName: "gpt-reserve",
+      primary: { usedPercent: 1, windowDurationMins: 10_080, resetsAt: 1_800_000_000_000 },
+    });
+
+    const groups = presentUsageLimits(
+      response(general, { base_model_inference: reserve }),
+      english,
+      "en",
+    );
+
+    expect(groups[0]?.id).toBe("codex");
+    expect(groups[0]?.limits[0]).toMatchObject({ usedPercent: 12, remainingPercent: 88 });
+    expect(groups[1]?.label).toBe("gpt-reserve");
   });
 });

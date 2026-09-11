@@ -22,7 +22,6 @@ interface WorkspacePanelProps {
   readonly mode: DiffDisplayMode;
   readonly onActivate: (tab: WorkspaceTab) => void;
   readonly onClose: (tab: WorkspaceTab) => void;
-  readonly onHide: () => void;
   readonly onNewBrowserTab: () => void;
   readonly state: WorkspaceTabsState;
 }
@@ -33,7 +32,11 @@ export function WorkspacePanel(props: WorkspacePanelProps) {
   const panelId = (tabId: WorkspaceTabId): string => `workspace-surface-${tabId}`;
 
   return (
-    <section aria-label={i18n.messages().workspace.label} class="workspace-panel">
+    <section
+      aria-label={i18n.messages().workspace.label}
+      class="workspace-panel"
+      id="workspace-panel"
+    >
       <header class="workspace-tab-bar">
         <div
           aria-label={i18n.messages().workspace.tabs}
@@ -104,16 +107,6 @@ export function WorkspacePanel(props: WorkspacePanelProps) {
           type="button"
         >
           <Icon name="plus" size={15} />
-        </button>
-        <span aria-hidden="true" class="workspace-bar-spacer" />
-        <button
-          aria-label={i18n.messages().workspace.closeWorkspace}
-          class="workspace-bar-button workspace-panel-close"
-          onClick={props.onHide}
-          title={i18n.messages().workspace.backToChat}
-          type="button"
-        >
-          <Icon name="panel" size={15} />
         </button>
       </header>
 

@@ -41,6 +41,7 @@ function threadFixture(
 ): CodexThread {
   return {
     id,
+    agent: null,
     mode: "codex",
     preview: id,
     name: null,

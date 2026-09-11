@@ -60,6 +60,7 @@ function page(id: string, updatedAt: number) {
 function summary(id: string, updatedAt: number): ThreadSummary {
   return {
     id,
+    agent: null,
     mode: "codex",
     preview: id,
     name: null,

@@ -587,7 +587,7 @@ fn message_item(message: &InterAgentMessage) -> ResponseItem {
             "multi_agent.inter_agent_message"
         }
     };
-    ResponseItem::context_text_with_seed("assistant", message.render(), content_kind, &seed)
+    ResponseItem::assistant_context_text_with_seed(message.render(), content_kind, &seed)
 }
 
 fn validate_message(message: String) -> Result<String, AppError> {

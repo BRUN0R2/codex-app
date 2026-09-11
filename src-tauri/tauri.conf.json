@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Codex App",
-  "version": "0.0.1-alpha.1",
+  "version": "0.0.2-alpha.1",
   "identifier": "dev.codexapp.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -21,6 +21,36 @@
         "decorations": false,
         "center": true,
         "backgroundColor": "#111111"
+      },
+      {
+        "label": "notification-priority-overlay",
+        "url": "index.html?surface=notification-overlay&channel=priority",
+        "title": "",
+        "width": 460,
+        "height": 320,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "focus": false,
+        "shadow": false
+      },
+      {
+        "label": "notification-transient-overlay",
+        "url": "index.html?surface=notification-overlay&channel=transient",
+        "title": "",
+        "width": 390,
+        "height": 140,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "focus": false,
+        "shadow": false
       }
     ],
     "security": {

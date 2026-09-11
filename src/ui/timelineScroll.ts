@@ -193,9 +193,10 @@ export function findTimelineAnchorIndex(
   return activeIndex;
 }
 
-export function resolveTimelineMessageOffset(
+export function resolveTimelineMessageLogicalOffset(
   mountedMessageOffset: number | null,
   estimatedTurnOffset: number,
+  renderedViewport: BoundedVirtualViewport,
 ): number {
   if (!Number.isFinite(estimatedTurnOffset) || estimatedTurnOffset < 0) {
     throw new Error("Timeline turn offset must be a non-negative finite number.");
@@ -203,8 +204,14 @@ export function resolveTimelineMessageOffset(
   if (mountedMessageOffset === null) {
     return estimatedTurnOffset;
   }
-  if (!Number.isFinite(mountedMessageOffset) || mountedMessageOffset < 0) {
-    throw new Error("Mounted timeline message offset must be a non-negative finite number.");
+  if (!Number.isFinite(mountedMessageOffset)) {
+    throw new Error("Mounted timeline message offset must be finite.");
   }
-  return mountedMessageOffset;
+  // A mounted turn may project above the physical canvas in a compressed history.
+  return Math.max(
+    0,
+    mountedMessageOffset - (renderedViewport.physicalOffset - renderedViewport.logicalOffset),
+  );
 }
+
+import type { BoundedVirtualViewport } from "./boundedVirtualViewport";

@@ -4,6 +4,7 @@ import type { ActivityVirtualizerStore } from "./activityVirtualization";
 
 export interface TimelineActivityViewportSnapshot {
   readonly element: HTMLElement;
+  readonly contentTranslation: number;
   readonly scrollTop: number;
   readonly size: number;
 }

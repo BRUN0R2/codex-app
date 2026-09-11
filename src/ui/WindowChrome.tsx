@@ -1,16 +1,10 @@
-import { createSignal, onCleanup, onMount } from "solid-js";
+import { createEffect, onCleanup, onMount } from "solid-js";
 import { useI18n } from "../i18n/context";
-import {
-  closeMainWindow,
-  isMainWindowMaximized,
-  minimizeMainWindow,
-  onMainWindowFocusChanged,
-  toggleMainWindowMaximize,
-} from "../infrastructure/desktopClient";
 import { isBrowserPreview, isDesktopRuntime } from "../platform/desktopRuntime";
+import type { ApplicationWindowController } from "../state/applicationWindowController";
 
 interface WindowChromeProps {
-  readonly onError?: ((reason: unknown) => void) | undefined;
+  readonly controller: ApplicationWindowController;
 }
 
 interface WindowChromeLayoutProps {
@@ -24,7 +18,7 @@ interface WindowChromeLayoutProps {
 
 export function WindowChrome(props: WindowChromeProps) {
   if (isDesktopRuntime()) {
-    return <DesktopWindowChrome onError={props.onError} />;
+    return <DesktopWindowChrome controller={props.controller} />;
   }
   if (isBrowserPreview()) {
     return <WindowChromeLayout interactive={false} maximized={false} />;
@@ -33,28 +27,11 @@ export function WindowChrome(props: WindowChromeProps) {
 }
 
 function DesktopWindowChrome(props: WindowChromeProps) {
-  const [maximized, setMaximized] = createSignal(false);
   let controlsReference: HTMLDivElement | undefined;
   let hoverResetFrame: number | undefined;
   let resizeFrame: number | undefined;
-  let unlistenFocusChanged: (() => void) | undefined;
   let disposed = false;
-
-  function reportControlFailure(operation: string, reason: unknown): void {
-    const detail = reason instanceof Error ? reason.message : String(reason);
-    props.onError?.(new Error(`Could not ${operation}: ${detail}`));
-  }
-
-  async function synchronizeMaximizedState(): Promise<void> {
-    try {
-      const nextMaximized = await isMainWindowMaximized();
-      if (!disposed) {
-        setMaximized(nextMaximized);
-      }
-    } catch (reason: unknown) {
-      reportControlFailure("read the window state", reason);
-    }
-  }
+  let observedFocusSequence = props.controller.focusSequence();
 
   function scheduleMaximizedStateSynchronization(): void {
     if (resizeFrame !== undefined) {
@@ -62,7 +39,7 @@ function DesktopWindowChrome(props: WindowChromeProps) {
     }
     resizeFrame = window.requestAnimationFrame(() => {
       resizeFrame = undefined;
-      void synchronizeMaximizedState();
+      void props.controller.refreshMaximized();
     });
   }
 
@@ -100,44 +77,26 @@ function DesktopWindowChrome(props: WindowChromeProps) {
     scheduleControlHoverRestoration();
   }
 
-  function runControlAction(
-    operation: string,
-    action: () => Promise<void>,
-    refreshMaximizedState = false,
-  ): void {
+  function runControlAction(action: () => Promise<boolean>): void {
     suppressControlHover();
-    void action()
-      .then(() => {
-        if (refreshMaximizedState) {
-          return synchronizeMaximizedState();
-        }
-        return undefined;
-      })
-      .catch((reason: unknown) => reportControlFailure(operation, reason))
-      .finally(scheduleControlHoverRestoration);
+    void action().finally(scheduleControlHoverRestoration);
   }
 
+  createEffect(() => {
+    const sequence = props.controller.focusSequence();
+    if (sequence === observedFocusSequence) return;
+    observedFocusSequence = sequence;
+    clearStuckControlHover();
+  });
+
   onMount(() => {
-    void synchronizeMaximizedState();
+    props.controller.start();
     window.addEventListener("resize", scheduleMaximizedStateSynchronization);
-    void onMainWindowFocusChanged((focused) => {
-      if (focused) {
-        clearStuckControlHover();
-      }
-    })
-      .then((unlisten) => {
-        if (disposed) {
-          unlisten();
-        } else {
-          unlistenFocusChanged = unlisten;
-        }
-      })
-      .catch((reason: unknown) => reportControlFailure("track window focus", reason));
   });
 
   onCleanup(() => {
     disposed = true;
-    unlistenFocusChanged?.();
+    props.controller.dispose();
     window.removeEventListener("resize", scheduleMaximizedStateSynchronization);
     if (hoverResetFrame !== undefined) {
       window.cancelAnimationFrame(hoverResetFrame);
@@ -150,16 +109,10 @@ function DesktopWindowChrome(props: WindowChromeProps) {
   return (
     <WindowChromeLayout
       interactive={true}
-      maximized={maximized()}
-      onClose={() => runControlAction("close the window", closeMainWindow)}
-      onMinimize={() => runControlAction("minimize the window", minimizeMainWindow)}
-      onToggleMaximize={() =>
-        runControlAction(
-          maximized() ? "restore the window" : "maximize the window",
-          toggleMainWindowMaximize,
-          true,
-        )
-      }
+      maximized={props.controller.maximized()}
+      onClose={() => runControlAction(props.controller.close)}
+      onMinimize={() => runControlAction(props.controller.minimize)}
+      onToggleMaximize={() => runControlAction(props.controller.toggleMaximize)}
       setControlsReference={(element) => {
         controlsReference = element;
       }}

@@ -179,9 +179,9 @@ impl CommandOutputEmitter {
         Ok(())
     }
 
-    pub(super) async fn flush(&self) -> Result<(), AppError> {
+    pub(super) async fn finish(&self) -> Result<(), AppError> {
         match &self.inner.batcher {
-            Some(batcher) => batcher.flush().await,
+            Some(batcher) => batcher.finish_item(&self.inner.item_id).await,
             None => Ok(()),
         }
     }

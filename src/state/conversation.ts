@@ -27,21 +27,6 @@ export function readLatestContextUsage(thread: CodexThread): ContextUsageItem | 
   return contextUsage;
 }
 
-export function readTurnOutputTokens(turn: Pick<ThreadTurn, "items">): number {
-  let outputTokens = 0;
-  for (const item of turn.items) {
-    if (item.type !== "contextUsage") {
-      continue;
-    }
-    const next = outputTokens + item.usage.outputTokens;
-    if (!Number.isSafeInteger(next)) {
-      throw new Error("The turn output-token sum exceeded the safe numeric limit.");
-    }
-    outputTokens = next;
-  }
-  return outputTokens;
-}
-
 export function upsertItem(
   items: readonly VisibleThreadItem[],
   incoming: VisibleThreadItem,

@@ -6,8 +6,8 @@ data.
 
 | Contract | Current value |
 | --- | --- |
-| IPC schema | `21` |
-| SQLite schema | `5` |
+| IPC schema | `23` |
+| SQLite schema | `7` |
 | Codex provider | ChatGPT Codex Responses |
 | Transport | persistent Responses WebSocket; HTTPS/SSE on explicit 426 |
 | Sidecar | hash-validated `rg.exe` 15.2.0 |
@@ -38,6 +38,11 @@ directory. The WebView cannot open paths directly.
 application and tray menus. The application menu is rolled back if tray menu
 synchronization fails.
 
+Every state extracted by a command is registered on the Tauri builder before
+any WebView can invoke it. Commands that require desktop setup await one
+explicit lifecycle transition; setup publishes either readiness or its original
+structured failure after preferences, tray, and initial window state finish.
+
 ## Events
 
 | Channel | Content |
@@ -50,6 +55,10 @@ synchronization fails.
 | `browser://new-window` | Validated HTTP(S) URL for a controlled new tab |
 | `browser://agent-activity` | Conversation, action, and panel-open state |
 | `browser://metric` | Bounded QA and latency sample |
+| `notification-overlay:{priority\|transient}:presentation` | One strictly decoded projection delivered only to its owning overlay lane |
+| `notification-overlay:action` | Channel- and identity-bound dismiss, activate, approval decision, or failure response from an isolated overlay |
+| `notification-overlay:{priority\|transient}:approval-result` | Identity-bound approval acknowledgement delivered only to its originating lane |
+| `notification-overlay:ready` | Exact schema-version and channel handshake before each lane's first projection |
 
 Accepted notifications are `account.rateLimitsUpdated`, `auth.loginCompleted`,
 `auth.sessionChanged`, `thread.created`, `thread.updated`, `thread.archived`,
@@ -70,6 +79,40 @@ Regenerate them only intentionally:
 ```powershell
 cargo test --locked --manifest-path src-tauri/Cargo.toml engine::contracts_fixtures::tests::regenerate_golden_contract_fixtures -- --ignored
 ```
+
+Account usage preserves the provider's additional limit buckets. The
+`generalRateLimit` field is exclusively the canonical `codex` bucket;
+`additionalRateLimitsByLimitId` contains only additional buckets such as
+`gpt-reserve`. Their identities are validated at the Rust and TypeScript
+boundaries, so an additional bucket can never replace the general limit.
+When the server supplies `gpt-reserve` while Luna Reserve is explicitly active,
+the sidebar account popover presents its balance using the longest available
+quota window and links to the official plan and credit pages. The reserve card is
+a separate panel above the profile menu. It remains hidden when only a historical
+bucket exists and never infers or silently switches the active model from
+percentages.
+
+Manual usage resets send a provider credit ID and a stable redemption request ID.
+After `reset` or `already_redeemed`, the controller invalidates earlier limit and
+credit reads and starts fresh reads before announcing success. Late responses
+cannot restore consumed credits or pre-reset limits; failed refreshes remain
+visible. Percentages always come from the provider. The browser preview models
+credit consumption and updated general/Spark windows for local integration tests.
+
+The sidebar width is a local layout preference, bounded so the main panel
+retains its minimum width and adjustable with the keyboard or pointer divider.
+
+Usage reads advertise the official Luna Reserve client capability with
+`x-openai-codex-luna-reserve: 1`. Reserve becomes account-selectable only when
+the authenticated account identity matches, ordinary usage is explicitly
+blocked, and the backend returns the `luna_reserve` eligibility banner. The
+hidden `gpt-reserve` catalog entry is then exposed in the picker and guarded by
+the same account state during turn creation. Percentages and the presence of an
+additional quota bucket never imply eligibility. A change in eligibility
+invalidates and reloads the frontend catalog so the model appears without an
+application restart. Responses requests still send the selected model and
+service tier in `x-codex-routing-hint` on HTTP, WebSocket, and prewarmed
+sessions.
 
 ## Models, instructions, and context
 
@@ -93,6 +136,9 @@ Base instructions come from `model_messages.instructions_template`, with
 `base_instructions` reserved for legacy catalogs. The runtime adds separate,
 bounded repository, permission, collaboration, and environment items. It does
 not maintain a universal prompt that duplicates model protocol.
+Missing permission and collaboration sections select native runtime defaults;
+an explicit empty catalog section suppresses that section. Personality comes
+only from the model's template or typed variables, without a local substitute.
 
 Unknown `tool_mode` values fail at the boundary. A future unknown
 `multi_agent_version` remains decodable but disables MultiAgent and Ultra until
@@ -101,15 +147,27 @@ distinct contracts. Ultra requires multi-agent v2 and is never sent as the
 literal `ultra`; catalog capabilities determine effective effort, service tier,
 modalities, image detail, and context window.
 
+The catalog request advertises compatibility version `0.153.2`, audited against
+the official `openai/codex` `rust-v0.153.2` contract. This admits server-listed
+GPT-6-Astra entries whose minimum client version is `0.153.0`; it does not force
+an account or rollout-hidden model into the picker. A catalog contract test
+executes Astra's current requirements through the native runtime: Responses
+Lite, Code Mode only, multimodal image input and original detail, text-and-image
+web search, Multi-Agent v2, Ultra reasoning, output truncation, and its extended
+context metadata.
+
 Before compatible provider telemetry exists, the engine estimates the real
 request and applies a 12% margin. After `response.completed`, provider totals
-are authoritative and receive only the local cost of items added after the last
-model output. A full estimate never inflates that confirmed value again. At the
-catalog limit, Remote Compaction V2 sends only the verified incremental
-`compaction_trigger` when a response chain exists and installs one valid
-checkpoint transactionally. History remains borrowed unless a tool output must
-be rewritten to fit. `context_length_exceeded` permits one compaction recovery
-before becoming terminal.
+are authoritative and receive only the local cost of items added after that
+response's persisted history boundary. Later partial model output does not move
+the boundary. A full estimate never inflates that confirmed value again. The
+automatic trigger and hard boundary retain distinct catalog semantics: the
+former uses `autoCompactTokenLimit`, while the latter uses the effective
+`usableTokens` window. At the first reached boundary, Remote Compaction V2 sends
+only the verified incremental `compaction_trigger` when a response chain exists
+and installs one valid checkpoint transactionally. History remains borrowed
+unless a tool output must be rewritten to fit. `context_length_exceeded` permits
+one compaction recovery before becoming terminal.
 
 Initial history and latest compatible usage come from one SQLite read
 transaction. Prompt composition, that snapshot, Code Mode session acquisition,
@@ -117,10 +175,16 @@ model/tool resolution, and transport preconnection run concurrently. This keeps
 the first request and the first request after compaction off avoidable local
 serial work while preserving one canonical snapshot.
 
-Each confirmed usage sample is persisted as `contextUsage`. During a turn, the
-UI sums provider-confirmed `output_tokens` and shows the total next to elapsed
-time. Text deltas are not tokenized or extrapolated locally. The projection is
-derived from persisted items, so the total survives completion and reload.
+Each confirmed usage sample is persisted as `contextUsage` together with the
+effective model and context metadata for that exact execution. The composer
+projects `totalTokens` against that item's `usableTokens`; it never combines an
+old measurement with the currently selected model or the catalog's raw window.
+This matches the Desktop protocol boundary and keeps a reroute or a selection
+for the next turn from relabeling active usage. Turn headers show elapsed time.
+Context telemetry remains persisted for the context indicator and compaction;
+the timeline does not calculate or display token spending.
+When cached input tokens are present, the context popover shows their confirmed
+count and share of input tokens from the same provider sample.
 
 ## Agent loop
 
@@ -135,9 +199,10 @@ derived from persisted items, so the total survives completion and reload.
    `codex.response.metadata` updates the effective model, model-catalog ETag,
    and response-local safety treatment; `codex.rate_limits` publishes validated
    sparse account telemetry.
-5. Persist complete items; deltas and `item.started` remain transient
-   projections.
-6. Execute tools, persist outputs in original call order, and continue.
+5. Persist complete model items and dispatch each completed tool call while
+   the response is still streaming; deltas and `item.started` remain transient.
+6. Drain every admitted tool, persist outputs in original call order after the
+   model items, and continue for tool results or pending user input.
 7. Complete, interrupt, or fail the turn transactionally.
 
 The WebSocket upgrade validates status, `Connection`, `Upgrade`, and
@@ -153,10 +218,22 @@ immediate cancellation. A lost incremental response resets the chain and
 retries from complete canonical input. Invalid protocol is terminal. Rate
 limiting follows the provider deadline without an arbitrary local retry
 counter.
+Only a completed response resets transient backoff. A failed stream drains
+admitted calls and commits their results before retrying, so a connection loss
+does not turn an executed operation into an orphan call or discard its result.
+Partial responses retain the last confirmed boundary and count subsequent items
+as local additions before the next request.
 
 Consecutive read-only calls may overlap. A mutation, approval, or exclusive
-command creates a barrier. A local batch contains at most eight calls, and
-results return to the provider in call order.
+command creates a FIFO barrier. At most eight tools run concurrently, and one
+response admits at most 128 calls. Servicing tool completions preserves the
+pending provider read and its semantic deadline.
+
+Streaming metadata belongs to active items: completion releases its channel
+keys, and a response boundary releases unfinished model keys while preserving
+live background-command channels. Admission is bounded to 128 active items and
+128 channels per item. Commentary and final answers both render incrementally;
+completed Markdown blocks retain their DOM identity until authoritative completion.
 
 ## Tools
 
@@ -194,8 +271,23 @@ subject to provider compaction and becomes paginated output when over budget.
 
 Paths are normalized inside the workspace. Writes are UTF-8 and atomic.
 `apply_patch` uses a dedicated Lark grammar without a shell or `git apply`.
-It plans every file in memory, rejects escapes, symlinks, and overlaps,
-revalidates snapshots, and commits or rolls back the complete transaction.
+It prepares up to 256 file hunks in one blocking task, with a 2 MiB per-file
+limit and 64 MiB for retained original and final content. Preparation has no
+filesystem effects. It rejects escapes, reparse points, ambiguous Windows
+names, aliases, and file/directory overlaps. Unchanged text and context line
+terminators remain exact; addition-only update blocks append at EOF.
+
+Commit stages missing parent directories and temporary files, revalidates
+content byte-for-byte with bounded buffers, and records each applied effect.
+Cancellation or failure restores recorded files and removes only directories
+created by that transaction. A newer concurrent edit is preserved and reported
+as an integrity conflict if rollback can no longer restore the original
+safely. Patches remain exclusive within the tool scheduler; related file edits
+belong in one patch, followed by awaited dependent work.
+
+Staging files stay writable until persistence. Permissions are applied to the
+persisted handle because Windows persistence clears temporary-file attributes;
+commit and rollback preserve the original read-only attribute.
 
 `search_text` executes bundled ripgrep by absolute path without a shell or
 `PATH` dependency. The engine applies ignore rules, limits, timeout,
@@ -206,6 +298,19 @@ cancellation, and incremental reads.
 `exec_command` uses hidden, colorless PowerShell 7 in UTF-8. On Windows, each
 tree enters a Job Object with `KILL_ON_JOB_CLOSE`; launch fails if ownership
 cannot be established.
+
+Every command composes its inherited launch `PATH` with the current registered
+Windows user/system paths, preserving launch precedence and removing duplicate
+entries. Windows expands registered environment references. Bundled ripgrep is
+prepended to that prepared child path. The parent environment and registry are
+never changed; new installations become discoverable without restarting the app.
+Environment acquisition and size failures are explicit command preparation errors.
+
+The `login` argument loads PowerShell profiles by default; `false` selects a clean
+session. Internal shell discovery and controlled command fixtures skip profiles.
+Exit codes remain authoritative even when stdout contains partial results or
+`SilentlyContinue` hides cmdlet errors. The tool contract distinguishes these
+outcomes from transport errors and directs yielded work through `poll_command`.
 
 | Limit | Value |
 | --- | ---: |
@@ -254,6 +359,19 @@ cancellation signals the session and drains callbacks that own visual items;
 those futures are never aborted after `item.started`. Mutations serialize the
 cell and invalidate its read cache before the next call.
 
+Independent command polls share the execution gate with reads. Cache
+invalidation is a separate scope that starts before the operation and ends even
+when its future is cancelled. Read-cache admission limits pending and completed
+entries to 64 and retained outputs to 64 MiB. Failures are shared only with
+existing observers; the next attempt executes again. Late completions cannot
+replace a newer entry with the same key.
+
+Code Mode distributes its output budget across content items in their original
+order. Small results and terminal errors survive a preceding large result;
+large text items retain their own head, tail, and explicit truncation marker.
+Text and media omission markers consume the same bounded budget. Outputs that
+fit are preserved exactly.
+
 ### Multi-agent v2
 
 Six collaboration tools operate on a persistent tree. A tree allows four active
@@ -292,8 +410,11 @@ Screenshots enter tool output as multimodal content. A new origin requires
 SQLite uses WAL and transactions for compound changes. Interrupted calls without
 outputs receive `aborted`; orphan outputs are removed. Active turns at startup
 recover to an explicit terminal state, and old commands are never reactivated.
-Schema 5 adds multi-agent identities and mailboxes with cumulative migration and
-exact table and column validation.
+Schema 6 persists the provider-history boundary of each confirmed usage sample
+atomically with its timeline item. Migration preserves older telemetry and leaves
+its unknown boundary unset until a new sample. Rewriting provider history
+invalidates the boundary; reopening and forking preserve valid boundaries.
+Cumulative migrations validate identity, tables, and columns before use.
 
 `engine_turn_steer` persists the message and causal input atomically. A queued
 message is promoted only after the response that could not observe it, preserving

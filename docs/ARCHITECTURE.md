@@ -25,6 +25,7 @@ Rust NativeEngine
 | --- | --- | --- |
 | `src/ui` | Rendering and interaction | Access IPC or decide domain policy |
 | `src/state` | Reactive ownership and transitions | Accept undecoded external payloads |
+| `src/state` domain sessions | Account usage, automations, preferences, and model catalogs | Own engine lifecycle or thread orchestration |
 | `src/infrastructure` | Commands, events, and Tauri adaptation | Retain business rules |
 | `src/contracts` | Boundary types and strict decoders | Infer or repair invalid payloads |
 | `src/i18n` | Catalog discovery, validation, locale resolution, and formatting | Translate operational diagnostics or accept incomplete catalogs |
@@ -34,6 +35,8 @@ Rust NativeEngine
 
 Invalid contracts fail at their boundary. Components never call native commands
 directly, and approximate payload formats are never accepted as fallbacks.
+An architecture regression test scans every presentation module and both UI
+entrypoints so an infrastructure import cannot reintroduce direct IPC access.
 
 ## Initialization
 
@@ -121,6 +124,12 @@ model capabilities. Tools never choose or elevate their own permissions.
 - long-running processes yield and are read incrementally by cursor;
 - large results are compacted or stored for targeted reads.
 
+Before a compaction request exceeds its budget, oversized tool text is
+soft-trimmed to a bounded head and tail. Full truncation remains the final
+fallback. After compaction, the retained history includes a files-touched
+manifest of at most eight unique file paths found in JSON tool arguments, so the
+model can re-read relevant files before editing.
+
 See [ENGINE.md](ENGINE.md) for the complete contract.
 
 ## Images and browser
@@ -134,7 +143,17 @@ Browser Use runs in a visible child WebView2 separate from the main interface.
 The backend owns tabs, navigation, viewport, snapshots, screenshots, pointer,
 keyboard, waits, and metrics. Sensitive navigation and actions respect origin
 approval and the permission profile. The agent receives structured results or
-images, never arbitrary access to the application DOM.
+images, never arbitrary access to the application DOM. One permanent shell
+control opens or closes the active right-hand workspace surface; individual
+tabs own only selection and disposal, so browser and review surfaces never
+introduce competing panel toggles.
+Closing the last review or browser tab also hides the workspace panel and its
+splitter. Native removal of the final browser tab follows the same transition;
+the shell control can still explicitly open an empty workspace.
+
+Main-window restoration performs unminimize, show, and focus on the runtime
+event loop. Tray and application-menu callbacks schedule the operation without
+blocking that loop; failures become window diagnostics.
 
 ## Persistence and secrets
 
@@ -156,6 +175,93 @@ Controllers own account, project, task, browser, automation, and preference
 state. Expensive projections are memoized and large lists are virtualized.
 Markdown, syntax highlighting, diffs, and large outputs use incremental work to
 avoid blocking the main thread.
+
+The timeline and composer share one centered responsive column. Message content
+and activity cards align with the composer's outer borders; the column adds no
+inner horizontal inset.
+
+The composer uses native content sizing with a stable minimum writing area.
+Wrapped text and pasted lines grow within the mode's bounded viewport height,
+and overflow scrolls inside the editor. Content, width, and font
+changes reflow together without stored inline heights or imperative measurements.
+
+The timeline retains its full-height scroll viewport beneath the dock. Its
+non-interactive backdrop uses the measured dock height, fades to the chat surface
+at its midpoint, and remains opaque through the footer. Composer growth, notices,
+and progress controls resize that same layer without another measurement loop.
+The scrollbar and conversation navigation remain above the backdrop.
+Timeline geometry observes the content border box, including the measured dock
+padding, so editor growth and contraction update the physical end and scrollbar
+range together. Following the latest message stays pinned across these changes;
+reading older messages preserves the user's position.
+End navigation cancels any previous message destination before moving to the
+current physical end.
+
+Scroll events publish one measured viewport snapshot in a batch. Nested activity
+lists measure their origin against the same live DOM scroll position and account
+for the parent canvas's translation when history exceeds the physical scroll
+limit. Geometry reads precede render mutations. Render slots retain the active
+window, explicitly guarded identities, and at most one spare window; contraction
+releases the former peak. A materialized body stops tracking viewport eligibility
+until its slot changes identity.
+
+Message navigation indexes the visible history, including the live overlay.
+Markers reserve their own gutter at every supported width while message and
+composer borders remain aligned. Logical message anchors map to physical scroll
+destinations with the leading and footer space preserved. Native smooth scrolling
+settles against the selected anchor, honors reduced motion, and yields to manual
+input or task changes.
+Disclosure layout reads are coalesced within a microtask and cancelled when
+the timeline changes or is disposed.
+
+Diff rows use the audited Desktop dark palette, mixed with the surface in Lab.
+Code and line-number backgrounds remain solid across consecutive changed rows.
+Only an actual scrollbar reserves width; short diffs fill the panel through its
+right edge. Intrinsic diff panels declare their content block size while retaining
+strict layout and size containment. Native horizontal scrollbars add their own
+space; large panels remain capped at 360 pixels.
+Browser checks retain native scrollbars and cover normal and fractional zoom.
+Unified code cells divide the precomputed canvas width from a zero flex basis,
+avoiding a second intrinsic text-width measurement for each mounted line.
+
+Diffs, file reads, and search matches preserve source whitespace and share the
+four-column tab stops used by width projection. Short file reads also declare
+their intrinsic content size so horizontal scrollbars cannot clip the first line.
+Split projections are computed only when the selected diff mode needs them;
+the document owns their cached result.
+
+Desktop notifications use the same ownership boundary. The main controller
+detects account and task transitions, resolves the per-event rule once, and
+places each bounded, deduplicated notification in its presentation lane. A
+strict Tauri event bridge projects the active priority and transient items into
+separate isolated webviews, so a centered priority request never blocks a corner
+notification. Each lane has its own FIFO capacity, readiness handshake,
+publication queue, channel-specific event names, and lifecycle. Priority items
+are persistent and draggable; transient items are dismissed by an identity-bound
+timer whose progress animation does not restart when that lane's pending count
+changes. Both windows
+derive their height from intrinsic content, and their opaque cards prevent the
+application beneath them from becoming competing text. Overlay actions carry
+the channel and notification identity back to state before anything is
+dismissed or activated.
+
+Approval notifications carry the already-decoded pending request and reuse the
+chat card's canonical decision set. The isolated surface sends only the channel,
+notification identity, request identity, and typed decision to the main
+controller. That controller verifies all identities and valid decisions before
+using the existing server-request response path. A failed response is
+acknowledged back to the originating lane and leaves the request actionable;
+success removes the notification only after the backend accepts the decision.
+
+Application preference schema 2 persists the global switch, transient position
+and duration, plus the enabled/priority rule for every notification event. Rust
+validates and writes the complete schema atomically; TypeScript decodes it with
+exact keys and serializes optimistic updates against the last confirmed value.
+The settings preview path bypasses delivery filters but resolves the same live
+presentation rule, so every event can be tested without mutating preferences.
+Successful preference and configuration writes enqueue a basic transient
+confirmation only after persistence succeeds; manual saves expose the same
+confirmed state on their action control.
 
 Events may arrive while another task is visible. Every reduction carries task
 and turn identity to prevent state leaking between sessions.

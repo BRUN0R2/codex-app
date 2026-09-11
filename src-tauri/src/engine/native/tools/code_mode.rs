@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tauri::AppHandle;
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{RwLock, watch};
 use uuid::Uuid;
 
 use super::{
@@ -13,19 +14,22 @@ use super::{
 use crate::engine::native::NativeEngineInner;
 use crate::engine::native::agent::{emit_item_notification, item_remains_in_progress};
 use crate::engine::native::code_mode::{
-    CellId, DelegateFuture, ExecuteRequest, NestedToolCall, RuntimeResponse, ToolDelegate, ToolKind,
+    CellId, DelegateFuture, ExecuteRequest, NestedToolCall, ToolDelegate, ToolKind,
 };
 use crate::engine::native::multi_agent::AgentInvocationContext;
 use crate::engine::native::output::OutputSource;
 use crate::engine::native::output_compaction::ProviderOutputBudget;
-use crate::engine::native::provider::FunctionCallOutputContent;
 use crate::engine::native::stream_notifications::StreamNotificationBatcher;
-use crate::engine::{ActivityStatus, ImageDetail, PermissionProfile};
+use crate::engine::{ImageDetail, PermissionProfile};
 use crate::error::AppError;
 
-const ESTIMATED_BYTES_PER_TOKEN: usize = 4;
-const ESTIMATED_IMAGE_TOKENS: usize = 1_024;
-const MAX_TRUNCATION_MARKER_BYTES: usize = 160;
+mod output;
+
+#[cfg(test)]
+#[path = "code_mode/patch_tests.rs"]
+mod patch_tests;
+
+use output::{adapt_response, content_text};
 
 #[derive(Default)]
 struct NestedToolExecutionGate {
@@ -37,13 +41,16 @@ struct NestedReadCache {
     current: Mutex<Arc<ReadToolCache>>,
 }
 
+struct ReadCacheInvalidation<'a>(&'a NestedReadCache);
+
 impl NestedToolExecutionGate {
     async fn run<T>(
         &self,
-        supports_parallel_execution: bool,
+        prepared: &PreparedTool,
+        permissions: PermissionProfile,
         operation: impl std::future::Future<Output = T>,
     ) -> T {
-        if supports_parallel_execution {
+        if prepared.supports_parallel_execution(permissions) {
             let _guard = self.lock.read().await;
             operation.await
         } else {
@@ -54,12 +61,23 @@ impl NestedToolExecutionGate {
 }
 
 impl NestedReadCache {
-    async fn snapshot(&self) -> Arc<ReadToolCache> {
-        self.current.lock().await.clone()
+    fn snapshot(&self) -> Arc<ReadToolCache> {
+        Arc::clone(&self.current.lock())
     }
 
-    async fn invalidate(&self) {
-        *self.current.lock().await = Arc::new(ReadToolCache::default());
+    fn invalidate(&self) {
+        *self.current.lock() = Arc::new(ReadToolCache::default());
+    }
+
+    fn invalidation_scope(&self) -> ReadCacheInvalidation<'_> {
+        self.invalidate();
+        ReadCacheInvalidation(self)
+    }
+}
+
+impl Drop for ReadCacheInvalidation<'_> {
+    fn drop(&mut self) {
+        self.0.invalidate();
     }
 }
 
@@ -159,43 +177,37 @@ impl CodeModeToolDelegate {
             self.thread_id.clone(),
             self.turn_id.clone(),
         );
-        let supports_parallel_execution = prepared.supports_parallel_execution(self.permissions);
         let invalidates_read_cache = prepared.invalidates_read_cache(self.permissions);
         let execution = self
             .execution_gate
-            .run(
-                supports_parallel_execution && !invalidates_read_cache,
-                async {
-                    let read_cache = self.read_cache.snapshot().await;
-                    let context = ToolExecutionContext {
-                        engine: Arc::downgrade(&self.inner),
-                        app: &self.app,
-                        workspace: &self.workspace,
-                        permissions: self.permissions,
-                        thread_id: &self.thread_id,
-                        turn_id: &self.turn_id,
-                        provider_call_id: &call.runtime_call_id,
-                        agent: &self.agent,
-                        approvals: &self.inner.approvals,
-                        storage: &self.inner.storage,
-                        ripgrep: &self.inner.ripgrep,
-                        command_sessions: &self.inner.command_sessions,
-                        stream_deltas: &stream_deltas,
-                        read_cache: read_cache.as_ref(),
-                        supports_image_input: self.supports_image_input,
-                        supports_original_image_detail: self.supports_original_image_detail,
-                        provider_output_budget: self.provider_output_budget,
-                        code_mode: None,
-                        code_mode_delegate: None,
-                        code_mode_tools: &[],
-                    };
-                    let result = prepared.execute(context, &mut cancellation).await;
-                    if invalidates_read_cache {
-                        self.read_cache.invalidate().await;
-                    }
-                    result
-                },
-            )
+            .run(&prepared, self.permissions, async {
+                let _invalidation =
+                    invalidates_read_cache.then(|| self.read_cache.invalidation_scope());
+                let read_cache = self.read_cache.snapshot();
+                let context = ToolExecutionContext {
+                    engine: Arc::downgrade(&self.inner),
+                    app: &self.app,
+                    workspace: &self.workspace,
+                    permissions: self.permissions,
+                    thread_id: &self.thread_id,
+                    turn_id: &self.turn_id,
+                    provider_call_id: &call.runtime_call_id,
+                    agent: &self.agent,
+                    approvals: &self.inner.approvals,
+                    storage: &self.inner.storage,
+                    ripgrep: &self.inner.ripgrep,
+                    command_sessions: &self.inner.command_sessions,
+                    stream_deltas: &stream_deltas,
+                    read_cache: read_cache.as_ref(),
+                    supports_image_input: self.supports_image_input,
+                    supports_original_image_detail: self.supports_original_image_detail,
+                    provider_output_budget: self.provider_output_budget,
+                    code_mode: None,
+                    code_mode_delegate: None,
+                    code_mode_tools: &[],
+                };
+                prepared.execute(context, &mut cancellation).await
+            })
             .await;
         let NestedExecutionSettlement {
             mut result,
@@ -410,145 +422,6 @@ fn image_detail_name(detail: ImageDetail) -> &'static str {
     }
 }
 
-fn adapt_response(
-    response: RuntimeResponse,
-    max_tokens: usize,
-    wall_time: std::time::Duration,
-) -> (ActivityStatus, Vec<FunctionCallOutputContent>) {
-    let response_cell_id = response.cell_id().to_string();
-    let (status_text, status, mut content, error) = match response {
-        RuntimeResponse::Yielded { cell_id, content } => (
-            format!("Script running with cell ID {cell_id}"),
-            ActivityStatus::InProgress,
-            content,
-            None,
-        ),
-        RuntimeResponse::Terminated { content, .. } => (
-            format!("Script {response_cell_id} terminated"),
-            ActivityStatus::Completed,
-            content,
-            None,
-        ),
-        RuntimeResponse::Completed { content, error, .. } => (
-            if error.is_some() {
-                format!("Script {response_cell_id} failed")
-            } else {
-                format!("Script {response_cell_id} completed")
-            },
-            if error.is_some() {
-                ActivityStatus::Failed
-            } else {
-                ActivityStatus::Completed
-            },
-            content,
-            error,
-        ),
-    };
-    if let Some(error) = error {
-        content.push(FunctionCallOutputContent::InputText {
-            text: format!("Script error:\n{error}"),
-        });
-    }
-    let mut content = truncate_content(content, max_tokens);
-    let seconds = ((wall_time.as_secs_f32() * 10.0).round()) / 10.0;
-    content.insert(
-        0,
-        FunctionCallOutputContent::InputText {
-            text: format!("{status_text}\nWall time {seconds:.1} seconds\nOutput:\n"),
-        },
-    );
-    (status, content)
-}
-
-fn truncate_content(
-    content: Vec<FunctionCallOutputContent>,
-    max_tokens: usize,
-) -> Vec<FunctionCallOutputContent> {
-    let mut remaining = max_tokens.saturating_mul(ESTIMATED_BYTES_PER_TOKEN);
-    let mut output = Vec::with_capacity(content.len());
-    for item in content {
-        match item {
-            FunctionCallOutputContent::InputText { text } => {
-                if text.len() <= remaining {
-                    remaining -= text.len();
-                    output.push(FunctionCallOutputContent::InputText { text });
-                } else {
-                    output.push(FunctionCallOutputContent::InputText {
-                        text: truncate_text(&text, remaining),
-                    });
-                    break;
-                }
-            }
-            image @ FunctionCallOutputContent::InputImage { .. } => {
-                let cost = ESTIMATED_IMAGE_TOKENS.saturating_mul(ESTIMATED_BYTES_PER_TOKEN);
-                if cost <= remaining {
-                    remaining -= cost;
-                    output.push(image);
-                } else {
-                    output.push(FunctionCallOutputContent::InputText {
-                        text: "[omitted image output: token budget exhausted]".into(),
-                    });
-                }
-            }
-            FunctionCallOutputContent::InputAudio { audio_url } => {
-                let cost = audio_url.len().max(ESTIMATED_BYTES_PER_TOKEN);
-                if cost <= remaining {
-                    remaining -= cost;
-                    output.push(FunctionCallOutputContent::InputAudio { audio_url });
-                } else {
-                    output.push(FunctionCallOutputContent::InputText {
-                        text: "[omitted audio output: token budget exhausted]".into(),
-                    });
-                }
-            }
-        }
-    }
-    output
-}
-
-fn truncate_text(text: &str, maximum_bytes: usize) -> String {
-    let original_tokens = text.len().div_ceil(ESTIMATED_BYTES_PER_TOKEN);
-    let marker =
-        format!("\n[truncated Code Mode output; approximately {original_tokens} tokens total]\n");
-    if maximum_bytes <= marker.len().min(MAX_TRUNCATION_MARKER_BYTES) {
-        return marker.chars().take(maximum_bytes).collect();
-    }
-    let available = maximum_bytes - marker.len();
-    let head_bytes = available / 2;
-    let tail_bytes = available - head_bytes;
-    let head_end = floor_char_boundary(text, head_bytes);
-    let tail_start = ceil_char_boundary(text, text.len().saturating_sub(tail_bytes));
-    format!("{}{}{}", &text[..head_end], marker, &text[tail_start..])
-}
-
-fn floor_char_boundary(text: &str, mut index: usize) -> usize {
-    index = index.min(text.len());
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
-    index = index.min(text.len());
-    while index < text.len() && !text.is_char_boundary(index) {
-        index += 1;
-    }
-    index
-}
-
-fn content_text(content: &[FunctionCallOutputContent]) -> String {
-    content
-        .iter()
-        .map(|item| match item {
-            FunctionCallOutputContent::InputText { text } => text.as_str(),
-            FunctionCallOutputContent::InputImage { .. } => "[image output]",
-            FunctionCallOutputContent::InputAudio { .. } => "[audio output]",
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn elapsed(started_at: Instant) -> Result<Option<u64>, AppError> {
     u64::try_from(started_at.elapsed().as_millis())
         .map(Some)
@@ -563,8 +436,38 @@ mod tests {
     use tokio::sync::{Barrier, Notify};
 
     use super::*;
-    use crate::engine::ThreadItem;
     use crate::engine::native::tools::ToolRegistry;
+    use crate::engine::{ActivityStatus, ThreadItem};
+
+    fn prepared_read() -> PreparedTool {
+        ToolRegistry
+            .prepare(
+                "read".into(),
+                "read_file",
+                r#"{"path":"source.rs","start_line":null,"end_line":null}"#,
+            )
+            .expect("read should prepare")
+    }
+
+    fn prepared_mutation() -> PreparedTool {
+        ToolRegistry
+            .prepare(
+                "write".into(),
+                "write_file",
+                r#"{"path":"source.rs","content":"updated","overwrite":true}"#,
+            )
+            .expect("write should prepare")
+    }
+
+    fn prepared_poll(index: usize) -> PreparedTool {
+        ToolRegistry
+            .prepare(
+                format!("poll-{index}"),
+                "poll_command",
+                &format!(r#"{{"session_id":"process-{index}","cursor":null,"wait_seconds":10}}"#),
+            )
+            .expect("poll should prepare")
+    }
 
     #[test]
     fn nested_function_tools_reject_non_object_arguments() {
@@ -601,15 +504,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn truncation_preserves_utf8_boundaries_and_both_ends() {
-        let text = format!("começo-{}-fim", "á".repeat(100));
-        let truncated = truncate_text(&text, 80);
-        assert!(truncated.starts_with("começo"));
-        assert!(truncated.ends_with("fim"));
-        assert!(truncated.contains("truncated Code Mode output"));
-    }
-
     #[tokio::test]
     async fn parallel_safe_nested_tools_can_overlap() {
         let gate = Arc::new(NestedToolExecutionGate::default());
@@ -619,7 +513,12 @@ mod tests {
             let gate = Arc::clone(&gate);
             let barrier = Arc::clone(&barrier);
             tasks.push(tokio::spawn(async move {
-                gate.run(true, barrier.wait()).await;
+                gate.run(
+                    &prepared_read(),
+                    PermissionProfile::full_access(),
+                    barrier.wait(),
+                )
+                .await;
             }));
         }
 
@@ -643,10 +542,14 @@ mod tests {
             let entered_mutation = Arc::clone(&entered_mutation);
             let release_mutation = Arc::clone(&release_mutation);
             tokio::spawn(async move {
-                gate.run(false, async move {
-                    entered_mutation.notify_one();
-                    release_mutation.notified().await;
-                })
+                gate.run(
+                    &prepared_mutation(),
+                    PermissionProfile::full_access(),
+                    async move {
+                        entered_mutation.notify_one();
+                        release_mutation.notified().await;
+                    },
+                )
                 .await;
             })
         };
@@ -656,9 +559,13 @@ mod tests {
             let gate = Arc::clone(&gate);
             let entered_reader = Arc::clone(&entered_reader);
             tokio::spawn(async move {
-                gate.run(true, async move {
-                    entered_reader.notify_one();
-                })
+                gate.run(
+                    &prepared_read(),
+                    PermissionProfile::full_access(),
+                    async move {
+                        entered_reader.notify_one();
+                    },
+                )
                 .await;
             })
         };
@@ -677,15 +584,99 @@ mod tests {
         reader.await.expect("reader task should not panic");
     }
 
-    #[tokio::test]
-    async fn nested_read_cache_invalidation_advances_the_cache_epoch() {
+    #[test]
+    fn nested_read_cache_invalidation_advances_the_cache_epoch() {
         let cache = NestedReadCache::default();
-        let first = cache.snapshot().await;
-        assert!(Arc::ptr_eq(&first, &cache.snapshot().await));
+        let first = cache.snapshot();
+        assert!(Arc::ptr_eq(&first, &cache.snapshot()));
 
-        cache.invalidate().await;
-        let second = cache.snapshot().await;
+        cache.invalidate();
+        let second = cache.snapshot();
         assert!(!Arc::ptr_eq(&first, &second));
-        assert!(Arc::ptr_eq(&second, &cache.snapshot().await));
+        assert!(Arc::ptr_eq(&second, &cache.snapshot()));
+    }
+
+    #[tokio::test]
+    async fn independent_polls_and_reads_overlap_without_changing_mutation_policy() {
+        let gate = NestedToolExecutionGate::default();
+        let barrier = Barrier::new(3);
+        let first_poll = prepared_poll(1);
+        let second_poll = prepared_poll(2);
+        let read = prepared_read();
+        let permissions = PermissionProfile::workspace_write();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(
+                gate.run(&first_poll, permissions, barrier.wait()),
+                gate.run(&second_poll, permissions, barrier.wait()),
+                gate.run(&read, permissions, barrier.wait()),
+            );
+        })
+        .await
+        .expect("poll waits must not serialize independent tools");
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_invalidation_scope_cannot_leave_a_reusable_read() {
+        let cache = Arc::new(NestedReadCache::default());
+        let before = cache.snapshot();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let task = {
+            let cache = Arc::clone(&cache);
+            tokio::spawn(async move {
+                let _scope = cache.invalidation_scope();
+                assert!(entered.send(cache.snapshot()).is_ok(), "observer exists");
+                std::future::pending::<()>().await;
+            })
+        };
+        let during = started.await.expect("scope entered");
+        assert!(!Arc::ptr_eq(&before, &during));
+        task.abort();
+        assert!(task.await.expect_err("task was cancelled").is_cancelled());
+        let after = cache.snapshot();
+        assert!(!Arc::ptr_eq(&during, &after));
+        assert!(Arc::ptr_eq(&after, &cache.snapshot()));
+    }
+
+    #[tokio::test]
+    #[ignore = "performance benchmark; run through `pnpm measure:nested-polls`"]
+    async fn benchmark_independent_nested_polls() {
+        use futures_util::future::join_all;
+
+        const POLLS: usize = 4;
+        const WAIT: Duration = Duration::from_millis(100);
+        const SAMPLES: usize = 5;
+        let gate = NestedToolExecutionGate::default();
+        let cache = NestedReadCache::default();
+        let tools: Vec<_> = (0..POLLS).map(prepared_poll).collect();
+        let mut previous = Duration::ZERO;
+        let mut current = Duration::ZERO;
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let serial = join_all(tools.iter().map(|_| async {
+                let _guard = gate.lock.write().await;
+                let _scope = cache.invalidation_scope();
+                tokio::time::sleep(WAIT).await;
+            }))
+            .await;
+            previous += started.elapsed();
+
+            let started = Instant::now();
+            let parallel = join_all(tools.iter().map(|tool| {
+                gate.run(tool, PermissionProfile::full_access(), async {
+                    let _scope = cache.invalidation_scope();
+                    tokio::time::sleep(WAIT).await;
+                })
+            }))
+            .await;
+            current += started.elapsed();
+            assert_eq!(serial.len(), parallel.len());
+        }
+        let speedup = previous.as_secs_f64() / current.as_secs_f64();
+        assert!(speedup > 2.5, "independent polls regressed: {speedup:.2}x");
+        println!(
+            "nested_polls polls={POLLS} samples={SAMPLES} serial_ms={:.3} parallel_ms={:.3} speedup={speedup:.3}x",
+            previous.as_secs_f64() * 1_000.0 / SAMPLES as f64,
+            current.as_secs_f64() * 1_000.0 / SAMPLES as f64
+        );
     }
 }

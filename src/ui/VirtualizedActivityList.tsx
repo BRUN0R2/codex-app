@@ -1,4 +1,5 @@
 import {
+  batch,
   createEffect,
   createMemo,
   createSignal,
@@ -10,6 +11,7 @@ import {
   untrack,
 } from "solid-js";
 
+import { createActivityBodyMaterialization } from "./activityBodyMaterialization";
 import {
   type ActivityMeasurementVersion,
   includeRetainedActivityAnchor,
@@ -71,7 +73,6 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
 }) {
   let listElement: HTMLDivElement | undefined;
   let intersectionObserver: IntersectionObserver | undefined;
-  let listContentTop: number | undefined;
   let geometrySynchronizationGeneration = 0;
   let scheduledGeometrySynchronization: number | undefined;
   let measurementGeneration = 0;
@@ -79,6 +80,7 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
   let anchorRetentionFrame: number | undefined;
   const pendingMeasurements = new Map<string, PendingActivityMeasurement>();
   const context = useTimelineActivityContext();
+  const [listOrigin, setListOrigin] = createSignal<number>();
   const [nearViewport, setNearViewport] = createSignal(false);
   const [retainedAnchorIndex, setRetainedAnchorIndex] = createSignal<number | null>(null);
   const [revision, setRevision] = createSignal(0);
@@ -166,17 +168,7 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
     },
   );
   const renderSlotStore = createKeyedVirtualRenderSlotStore<TItemSource>();
-  const uniformRenderSlots = createMemo<readonly number[]>((previousSlots) => {
-    const current = mountedRange();
-    const slotCount = current.end - current.start;
-    return previousSlots !== undefined && previousSlots.length === slotCount
-      ? previousSlots
-      : Array.from({ length: slotCount }, (_, index) => index);
-  });
   createEffect(() => {
-    if (usesUniformCollapsedEstimates()) {
-      return;
-    }
     const source = props.itemSource;
     const current = mountedRange();
     renderSlotStore.reconcileRange(
@@ -185,7 +177,7 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
       current.end,
       readVirtualItemKey,
       props.reuseGroupForItem,
-      3,
+      usesUniformCollapsedEstimates() ? 0 : 3,
     );
   });
   const physicalTotalSize = createMemo(() => {
@@ -211,27 +203,35 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
   function synchronizeIntersection(): void {
     const viewport = context.viewport();
     if (viewport === null || listElement === undefined) {
-      listContentTop = undefined;
-      setNearViewport(false);
+      batch(() => {
+        setListOrigin(undefined);
+        setNearViewport(false);
+      });
       return;
     }
     const viewportRect = viewport.element.getBoundingClientRect();
     const listRect = listElement.getBoundingClientRect();
-    listContentTop = viewport.scrollTop + listRect.top - viewportRect.top;
-    synchronizeCachedIntersection(viewport, physicalTotalSize());
+    // DOM geometry and its scroll origin must belong to the same measurement.
+    const origin =
+      viewport.element.scrollTop + listRect.top - viewportRect.top - viewport.contentTranslation;
+    batch(() => {
+      setListOrigin(origin);
+      synchronizeCachedIntersection(viewport, physicalTotalSize());
+    });
   }
 
   function synchronizeCachedIntersection(
     viewport: NonNullable<ReturnType<typeof context.viewport>>,
     listSize: number,
   ): void {
-    if (listContentTop === undefined) {
+    const origin = listOrigin();
+    if (origin === undefined) {
       return;
     }
     setNearViewport(
       isActivityListNearViewport({
         listSize,
-        listTop: listContentTop,
+        listTop: origin + viewport.contentTranslation,
         overscanViewports: ACTIVITY_INTERSECTION_OVERSCAN_VIEWPORTS,
         scrollTop: viewport.scrollTop,
         viewportSize: viewport.size,
@@ -241,14 +241,12 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
 
   function readLocalViewportOffset(): number | null {
     const viewport = context.viewport();
-    if (viewport === null || listElement === undefined) {
+    const origin = listOrigin();
+    if (viewport === null || origin === undefined) {
       return null;
     }
-    if (listContentTop === undefined) {
-      synchronizeIntersection();
-    }
     return resolveActivityViewport({
-      listTop: listContentTop ?? 0,
+      listTop: origin + viewport.contentTranslation,
       scrollTop: viewport.scrollTop,
       viewportSize: viewport.size,
     }).offset;
@@ -526,7 +524,7 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
       setNearViewport(false);
       return;
     }
-    if (listContentTop === undefined) {
+    if (listOrigin() === undefined) {
       scheduleGeometrySynchronization();
       return;
     }
@@ -608,18 +606,22 @@ export function VirtualizedActivityList<TItemSource extends VirtualItemSource>(p
             </For>
           }
         >
-          <For each={uniformRenderSlots()}>
-            {(slotIndex) => {
-              const itemIndex = createMemo(() => mountedRange().start + slotIndex);
-              const itemSource = () => props.itemSource;
-              const itemKey = createMemo(() => itemSource().keyAt(itemIndex()));
+          <For each={renderSlotStore.renderSlots()}>
+            {(slot) => {
+              const active = () => slot.position().active;
+              const itemIndex = () => slot.position().index;
+              const itemSource = () => slot.position().source;
+              const itemKey = () => slot.position().key;
               return (
                 <div
-                  class="agent-activity-render-slot agent-activity-virtual-item"
-                  data-activity-content="materialized"
-                  data-virtual-activity-key={itemKey()}
+                  aria-hidden={active() ? undefined : "true"}
+                  class="agent-activity-render-slot"
+                  classList={{ "agent-activity-virtual-item": active() }}
+                  data-activity-content={active() ? "materialized" : undefined}
+                  data-virtual-activity-key={active() ? itemKey() : undefined}
                   style={{
-                    transform: `translateY(${Math.round(slotIndex * uniformItemSize())}px)`,
+                    display: active() ? undefined : "none",
+                    transform: `translateY(${Math.round((itemIndex() - mountedRange().start) * uniformItemSize())}px)`,
                   }}
                 >
                   {renderUniformItem(itemSource, itemKey, itemIndex)}
@@ -658,11 +660,10 @@ function VirtualizedActivityItem<TItemSource extends VirtualItemSource>(props: {
 }) {
   let element: HTMLDivElement | undefined;
   let releaseResizeObservation: (() => void) | undefined;
-  const [materializedKey, setMaterializedKey] = createSignal<string | null>(
-    props.shouldMaterializeBody() ? props.itemKey() : null,
+  const materializeBody = createActivityBodyMaterialization(
+    props.itemKey,
+    props.shouldMaterializeBody,
   );
-  const materializeBody = () =>
-    props.shouldMaterializeBody() || materializedKey() === props.itemKey();
   const shouldObserveSize = createMemo(() => props.active() && materializeBody());
 
   function measure(entry?: ResizeObserverEntry): void {
@@ -676,12 +677,6 @@ function VirtualizedActivityItem<TItemSource extends VirtualItemSource>(props: {
     }
   }
 
-  createEffect(() => {
-    const key = props.itemKey();
-    if (props.shouldMaterializeBody()) {
-      setMaterializedKey(key);
-    }
-  });
   createEffect(() => {
     if (!shouldObserveSize() || element === undefined) {
       releaseResizeObservation?.();

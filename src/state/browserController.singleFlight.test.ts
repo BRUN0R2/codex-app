@@ -146,6 +146,41 @@ describe("browser native-tab single flight", () => {
     expect(errors).toEqual([]);
   });
 
+  it("keeps an explicitly opened empty workspace free of implicit browser tabs", async () => {
+    browserMocks.createBrowserTab.mockImplementation(
+      (identity: { browserTabId: string; conversationId: string }, url: string) =>
+        Promise.resolve(browserSnapshot(identity.browserTabId, identity.conversationId, url)),
+    );
+    const errors: unknown[] = [];
+    const controller = createBrowserController((reason) => errors.push(reason));
+
+    await expect(controller.ensureConversation("conversation-a")).resolves.toBe(true);
+    await expect(
+      controller.synchronizeSurface({
+        bounds: { x: 0, y: 0, width: 800, height: 600 },
+        conversationId: "conversation-a",
+        visible: true,
+      }),
+    ).resolves.toBe(true);
+    expect(browserMocks.createBrowserTab).not.toHaveBeenCalled();
+    expect(browserMocks.synchronizeBrowserSurface).toHaveBeenLastCalledWith({
+      activeBrowserTabId: null,
+      bounds: { x: 0, y: 0, width: 800, height: 600 },
+      conversationId: "conversation-a",
+      visible: false,
+    });
+
+    await expect(controller.newTab("conversation-a")).resolves.toBe(true);
+    const tab = controller.activeTab("conversation-a");
+    expect(tab).not.toBeNull();
+    await expect(
+      controller.closeTab("conversation-a", tab?.browserTabId ?? "missing"),
+    ).resolves.toBe(true);
+    expect(controller.tabs("conversation-a")).toEqual([]);
+    expect(browserMocks.createBrowserTab).toHaveBeenCalledTimes(1);
+    expect(errors).toEqual([]);
+  });
+
   it("releases native tabs and persisted topology when its task is deleted", async () => {
     savePersistedBrowserConversations([
       {

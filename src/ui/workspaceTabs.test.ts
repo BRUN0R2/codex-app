@@ -9,6 +9,7 @@ import {
   reconcileBrowserWorkspaceTabs,
   removeReviewWorkspaceTab,
   showBrowserWorkspaceTab,
+  showEmptyWorkspace,
   showReviewWorkspaceTab,
 } from "./workspaceTabs";
 
@@ -99,5 +100,74 @@ describe("workspace tabs", () => {
 
     expect(showBrowserWorkspaceTab(state, "missing")).toBe(state);
     expect(closeWorkspaceTab(state, browserWorkspaceTabId("missing"))).toBe(state);
+  });
+
+  it.each(["browser", "review"] as const)("hides the panel when its last %s tab closes", (kind) => {
+    const initial = reconcileBrowserWorkspaceTabs(emptyWorkspaceTabsState(), {
+      activeBrowserTabId: kind === "browser" ? "one" : null,
+      browserTabIds: kind === "browser" ? ["one"] : [],
+      conversationId: "thread-1",
+    });
+    const opened =
+      kind === "browser"
+        ? showBrowserWorkspaceTab(initial, "one")
+        : showReviewWorkspaceTab(initial);
+    const closed = closeWorkspaceTab(
+      opened,
+      kind === "browser" ? browserWorkspaceTabId("one") : "review",
+    );
+
+    expect(closed).toEqual({
+      activeTabId: null,
+      conversationId: "thread-1",
+      tabs: [],
+      visible: false,
+    });
+  });
+
+  it("hides the panel when the native browser removes its last tab", () => {
+    const opened = showBrowserWorkspaceTab(
+      reconcileBrowserWorkspaceTabs(emptyWorkspaceTabsState(), {
+        activeBrowserTabId: "one",
+        browserTabIds: ["one"],
+        conversationId: "thread-1",
+      }),
+      "one",
+    );
+    const reconciled = reconcileBrowserWorkspaceTabs(opened, {
+      activeBrowserTabId: null,
+      browserTabIds: [],
+      conversationId: "thread-1",
+    });
+
+    expect(reconciled).toEqual({
+      activeTabId: null,
+      conversationId: "thread-1",
+      tabs: [],
+      visible: false,
+    });
+    expect(
+      reconcileBrowserWorkspaceTabs(reconciled, {
+        activeBrowserTabId: null,
+        browserTabIds: [],
+        conversationId: "thread-1",
+      }),
+    ).toBe(reconciled);
+  });
+
+  it("opens and preserves a clean workspace without creating a browser tab", () => {
+    const opened = showEmptyWorkspace(emptyWorkspaceTabsState(), "thread-1");
+    const reconciled = reconcileBrowserWorkspaceTabs(opened, {
+      activeBrowserTabId: null,
+      browserTabIds: [],
+      conversationId: "thread-1",
+    });
+
+    expect(reconciled).toEqual({
+      activeTabId: null,
+      conversationId: "thread-1",
+      tabs: [],
+      visible: true,
+    });
   });
 });

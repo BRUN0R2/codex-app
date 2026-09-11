@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::future::join_all;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
@@ -42,8 +43,49 @@ async fn benchmark_code_mode_runtime_warmup() {
         elapsed.as_secs_f64() * 1_000.0
     );
     assert!(
-        elapsed <= Duration::from_secs(2),
-        "Code Mode runtime warmup exceeded two seconds: {elapsed:?}"
+        elapsed <= Duration::from_millis(25),
+        "Code Mode runtime warmup exceeded 25 ms: {elapsed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "performance benchmark"]
+async fn benchmark_parallel_code_mode_execution() {
+    super::warm_runtime()
+        .await
+        .expect("Code Mode runtime should warm successfully");
+    let delegate = Arc::new(RecordingDelegate::default());
+    let (session, _cancellation) = session(delegate);
+    let started_at = std::time::Instant::now();
+    let executions = (0..super::types::MAX_ACTIVE_CELLS).map(|index| {
+        let session = session.clone();
+        async move {
+            let response = session
+                .execute_for(
+                    &format!("benchmark-turn-{index}"),
+                    request(
+                        "let total = 0; for (let index = 0; index < 10_000; index += 1) total += index; text(total);",
+                    ),
+                )
+                .await
+                .expect("parallel Code Mode execution should start");
+            let (content, error) = completed(response);
+            assert_eq!(error, None);
+            assert!(!content.is_empty());
+        }
+    });
+    join_all(executions).await;
+    let elapsed = started_at.elapsed();
+    shutdown(&session).await;
+
+    println!(
+        "Code Mode parallel execution ({} cells): {:.3} ms",
+        super::types::MAX_ACTIVE_CELLS,
+        elapsed.as_secs_f64() * 1_000.0
+    );
+    assert!(
+        elapsed <= Duration::from_millis(250),
+        "parallel Code Mode execution exceeded 250 ms: {elapsed:?}"
     );
 }
 

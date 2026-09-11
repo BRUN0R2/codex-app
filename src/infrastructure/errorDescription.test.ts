@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { describeDiagnosticError, describeError } from "./errorDescription";
+import { describeDiagnosticError, describeError } from "../errorDescription";
 
 describe("error descriptions", () => {
   it("keeps the concise command error for the interface", () => {
