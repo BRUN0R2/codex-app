@@ -215,6 +215,76 @@ describe("conversation reducer", () => {
       ]),
     ).toBe(thread);
   });
+
+  it("discards command deltas that arrive after live output closed", () => {
+    const closedCommand = {
+      type: "commandExecution" as const,
+      id: "command-a",
+      command: "build",
+      cwd: ".",
+      processId: null,
+      startedAt: 1,
+      source: "agent" as const,
+      status: "completed" as const,
+      aggregatedOutput: null,
+      liveOutput: null,
+      exitCode: 0,
+      durationMs: 10,
+    };
+    expect(
+      applyStreamDeltas(
+        [closedCommand],
+        [commandDelta("stdout", { type: "append", delta: "late" })],
+      ),
+    ).toEqual([closedCommand]);
+  });
+
+  it("skips persisted thread command deltas for an inactive live output", () => {
+    const thread = {
+      id: "thread-a",
+      agent: null,
+      mode: "codex" as const,
+      preview: "Build",
+      name: null,
+      cwd: ".",
+      projectPath: ".",
+      createdAt: 1,
+      updatedAt: 2,
+      recencyAt: 2,
+      status: { type: "idle" as const },
+      turns: [
+        {
+          id: "turn-a",
+          status: "completed" as const,
+          error: null,
+          createdAt: 1,
+          updatedAt: 2,
+          items: [
+            {
+              type: "commandExecution" as const,
+              id: "command-a",
+              command: "build",
+              cwd: ".",
+              processId: null,
+              startedAt: 1,
+              source: "agent" as const,
+              status: "completed" as const,
+              aggregatedOutput: null,
+              liveOutput: null,
+              exitCode: 0,
+              durationMs: 10,
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(
+      applyCommandStreamDeltasToThread(thread, [
+        commandDelta("stdout", { type: "append", delta: "late" }),
+      ]),
+    ).toBe(thread);
+  });
 });
 
 function commandDelta(

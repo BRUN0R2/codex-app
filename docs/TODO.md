@@ -1,5 +1,14 @@
 # TODO
 
+- [ ] Add native Responses API authentication and provider selection for the
+  requested [Burn API setup](https://docs.google.com/document/d/1lA0QNNTEmw_bYmqhqSH5JHEFZaoBNkgiH53Y53E_lzE/edit?tab=t.6dyc7xfd1fu),
+  using `https://burnapi.burnapi-ai.workers.dev/v1` and the application's vault.
+  Resolve the live generation blocker before activation: on 2026-09-11, one
+  supplied key listed models but both Astra and Sol generation returned HTTP 503;
+  the other keys returned `INVALID_API_KEY` and `API_KEY_QUOTA_EXHAUSTED`.
+  Confirm a successful Responses tool round trip and explicit model capabilities;
+  `/models` lists identifiers without the Codex capability metadata required by
+  the current engine. Do not import `.codex` configuration or credentials.
 - [ ] Validate an authenticated usage-reset redemption with before/after provider
   limits and remaining reset credits, including a delayed post-reset read with no
   intervening task turn. Local reset simulation covers the authoritative success
