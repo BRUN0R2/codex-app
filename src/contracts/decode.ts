@@ -1,4 +1,70 @@
-import { exceedsUtf8ByteLength, utf8ByteLength } from "../utf8";
+import { utf8ByteLength } from "../utf8";
+import {
+  ACTIVITY_STATUSES,
+  APPROVAL_POLICIES,
+  CHAT_MODEL_LANES,
+  CHAT_THINKING_EFFORTS,
+  CONVERSATION_MODES,
+  DIFF_DISPLAYS,
+  ENGINE_CAPABILITIES,
+  ENGINE_STORAGES,
+  ENGINE_TRANSPORTS,
+  IMAGE_DETAILS,
+  MESSAGE_PHASES,
+  MODEL_CONTEXT_WINDOW_PREFERENCES,
+  MODEL_REROUTE_REASONS,
+  MODEL_RUNTIME_CAPABILITIES,
+  MODEL_VERBOSITIES,
+  MODEL_VERIFICATIONS,
+  MOTION_PREFERENCES,
+  PERSONALITIES,
+  PLAN_STEP_STATUSES,
+  PLAN_TYPES,
+  RATE_LIMIT_REACHED_TYPES,
+  REASONING_EFFORTS,
+  RUNTIME_STATES,
+  SANDBOX_MODES,
+  STORED_MODEL_CONTEXT_WINDOW_PREFERENCES,
+  TERMINAL_TURN_STATUSES,
+  TURN_STATUSES,
+  WEB_SEARCH_MODES,
+} from "./decode/constants";
+import {
+  ACCOUNT_PROFILE_DAILY_USAGE_MAXIMUM_ENTRIES,
+  AUTOMATION_INTERVAL_MAXIMUM_MINUTES,
+  AUTOMATION_INTERVAL_MINIMUM_MINUTES,
+  array,
+  booleanValue,
+  browserOrigin,
+  browserUrl,
+  ContractError,
+  decodeCommandLiveOutput,
+  decodeOperationFailure,
+  decodeStreamDeltaPayload,
+  exactKeys,
+  exactRecord,
+  field,
+  finiteNumber,
+  identifier,
+  integer,
+  isoDate,
+  literal,
+  MAX_OUTPUT_CHUNK_BYTES,
+  MAX_STRING_BYTES,
+  nullableDecimalCursor,
+  nullableFiniteNumber,
+  nullableSafeInteger,
+  nullableText,
+  nullableThreadHistoryCursor,
+  nullableThreadOutput,
+  record,
+  TIMEZONE_OFFSET_MAXIMUM_MINUTES,
+  TIMEZONE_OFFSET_MINIMUM_MINUTES,
+  text,
+  UI_FONT_SIZE_MAXIMUM,
+  UI_FONT_SIZE_MINIMUM,
+  urlText,
+} from "./decode/primitives";
 import {
   TRANSIENT_NOTIFICATION_MAXIMUM_DURATION_SECONDS,
   TRANSIENT_NOTIFICATION_MINIMUM_DURATION_SECONDS,
@@ -31,8 +97,6 @@ import type {
   ChatModelOption,
   CodexModel,
   CodexThread,
-  CommandError,
-  CommandLiveOutput,
   ConfigReadResponse,
   ConfigUpdate,
   ConfigUpdateResponse,
@@ -78,7 +142,6 @@ import type {
   ThreadForkResponse,
   ThreadItem,
   ThreadListResponse,
-  ThreadOutput,
   ThreadReadResponse,
   ThreadResumeResponse,
   ThreadStartResponse,
@@ -96,105 +159,6 @@ import type {
   UserContent,
   WebSearchMode,
 } from "./types";
-
-type UnknownRecord = Record<string, unknown>;
-
-const MAX_STRING_BYTES = 4 * 1_048_576;
-const MAX_COLLECTION_LENGTH = 10_000;
-const MAX_OUTPUT_CHUNK_BYTES = 64 * 1_024;
-const DECIMAL_CURSOR_MAXIMUM_CHARACTERS = 20;
-const THREAD_HISTORY_CURSOR_MAXIMUM_CHARACTERS = 1_024;
-const ACCOUNT_PROFILE_DAILY_USAGE_MAXIMUM_ENTRIES = 800;
-const AUTOMATION_INTERVAL_MINIMUM_MINUTES = 5;
-const AUTOMATION_INTERVAL_MAXIMUM_MINUTES = 10_080;
-const TIMEZONE_OFFSET_MINIMUM_MINUTES = -840;
-const TIMEZONE_OFFSET_MAXIMUM_MINUTES = 840;
-const UI_FONT_SIZE_MINIMUM = 12;
-const UI_FONT_SIZE_MAXIMUM = 24;
-
-const RUNTIME_STATES = ["failed", "ready", "starting", "stopped"] as const;
-const CONVERSATION_MODES = ["chat", "work", "codex"] as const;
-const ENGINE_TRANSPORTS = ["httpsSse"] as const;
-const ENGINE_STORAGES = ["sqlite"] as const;
-const ENGINE_CAPABILITIES = [
-  "browserUse",
-  "chatGptOauth",
-  "explicitApprovals",
-  "localThreads",
-  "modelStreaming",
-  "nativeTools",
-  "scheduledAutomations",
-] as const;
-const SANDBOX_MODES = ["danger-full-access", "read-only", "workspace-write"] as const;
-const APPROVAL_POLICIES = ["never", "on-request", "untrusted"] as const;
-const REASONING_EFFORTS = [
-  "high",
-  "low",
-  "max",
-  "medium",
-  "minimal",
-  "none",
-  "ultra",
-  "xhigh",
-] as const;
-const MODEL_RUNTIME_CAPABILITIES = ["multiAgent"] as const;
-const CHAT_THINKING_EFFORTS = [
-  "extended",
-  "max",
-  "min",
-  "standard",
-  "ultra",
-  "xhigh",
-  "zero",
-] as const;
-const CHAT_MODEL_LANES = ["auto", "instant", "pro", "thinking", "thinking_mini"] as const;
-const TURN_STATUSES = ["completed", "failed", "inProgress", "interrupted"] as const;
-const TERMINAL_TURN_STATUSES = ["completed", "failed", "interrupted"] as const;
-const ACTIVITY_STATUSES = ["completed", "declined", "failed", "inProgress"] as const;
-const PLAN_STEP_STATUSES = ["completed", "inProgress", "pending"] as const;
-const MESSAGE_PHASES = ["commentary", "finalAnswer"] as const;
-const IMAGE_DETAILS = ["auto", "high", "low", "original"] as const;
-const WEB_SEARCH_MODES = ["disabled", "live"] as const;
-const MODEL_VERBOSITIES = ["high", "low", "medium"] as const;
-const STORED_MODEL_CONTEXT_WINDOW_PREFERENCES = ["maximum"] as const;
-const PERSONALITIES = ["friendly", "none", "pragmatic"] as const;
-const MOTION_PREFERENCES = ["full", "reduced"] as const;
-const DIFF_DISPLAYS = ["split", "unified"] as const;
-const PLAN_TYPES = [
-  "business",
-  "edu",
-  "ent26",
-  "enterprise",
-  "enterprise_cbp_usage_based",
-  "free",
-  "go",
-  "plus",
-  "pro",
-  "prolite",
-  "self_serve_business_prolite",
-  "self_serve_business_usage_based",
-  "team",
-] as const;
-const RATE_LIMIT_REACHED_TYPES = [
-  "rate_limit_reached",
-  "workspace_member_credits_depleted",
-  "workspace_member_usage_limit_reached",
-  "workspace_owner_credits_depleted",
-  "workspace_owner_usage_limit_reached",
-] as const;
-const MODEL_REROUTE_REASONS = ["highRiskCyberActivity"] as const;
-const MODEL_VERIFICATIONS = ["trustedAccessForCyber"] as const;
-const MODEL_CONTEXT_WINDOW_PREFERENCES = ["default", "maximum"] as const;
-
-export class ContractError extends Error {
-  public readonly path: string;
-
-  public constructor(path: string, message: string) {
-    super(`${path}: ${message}`);
-    this.name = "ContractError";
-    this.path = path;
-  }
-}
 
 export function decodeEngineStartResponse(value: unknown): EngineStartResponse {
   const object = exactRecord(value, "$", [
@@ -1360,19 +1324,6 @@ export function decodeEngineServerRequest(value: unknown): EngineServerRequest {
   }
 }
 
-export function decodeCommandError(value: unknown): CommandError | null {
-  try {
-    const object = exactRecord(value, "$", ["code", "message", "retryable"]);
-    return {
-      code: text(object.code, "$.code", 128),
-      message: text(object.message, "$.message"),
-      retryable: booleanValue(object.retryable, "$.retryable"),
-    };
-  } catch {
-    return null;
-  }
-}
-
 function decodePermissionProfile(value: unknown, path: string): PermissionProfile {
   const object = exactRecord(value, path, ["approvals", "sandbox"]);
   const profile = {
@@ -2404,330 +2355,7 @@ function decodeAttachmentAt(value: unknown, path: string): Attachment {
   };
 }
 
-function decodeOperationFailure(value: unknown, path: string) {
-  const object = exactRecord(value, path, ["code", "message"]);
-  return {
-    code: text(object.code, `${path}.code`, 128),
-    message: text(object.message, `${path}.message`),
-  };
-}
-
-function decodeStreamDeltaPayload(value: unknown, path: string) {
-  const object = record(value, path);
-  const kind = text(field(object, "kind"), `${path}.kind`, 32);
-  switch (kind) {
-    case "agentText": {
-      const delta = exactRecord(object, path, ["delta", "itemId", "kind"]);
-      return {
-        kind,
-        itemId: identifier(delta.itemId, `${path}.itemId`),
-        delta: text(delta.delta, `${path}.delta`, 262_144, true),
-      };
-    }
-    case "reasoningSummary":
-    case "reasoningText": {
-      const delta = exactRecord(object, path, ["delta", "index", "itemId", "kind"]);
-      return {
-        kind,
-        itemId: identifier(delta.itemId, `${path}.itemId`),
-        index: integer(delta.index, `${path}.index`, 0, 1_024),
-        delta: text(delta.delta, `${path}.delta`, 262_144, true),
-      };
-    }
-    case "commandOutput": {
-      const delta = exactRecord(object, path, ["itemId", "kind", "operation", "stream"]);
-      const operationPath = `${path}.operation`;
-      const operationRecord = record(delta.operation, operationPath);
-      const operationType = text(field(operationRecord, "type"), `${operationPath}.type`, 32);
-      const operation =
-        operationType === "append"
-          ? (() => {
-              const append = exactRecord(operationRecord, operationPath, ["delta", "type"]);
-              return {
-                type: "append" as const,
-                delta: text(append.delta, `${operationPath}.delta`, 8 * 1_024, true),
-              };
-            })()
-          : {
-              type: literal(operationType, `${operationPath}.type`, [
-                "backspace",
-                "clearCurrentLine",
-                "truncated",
-              ] as const),
-            };
-      exactKeys(
-        operationRecord,
-        operationPath,
-        operation.type === "append" ? ["delta", "type"] : ["type"],
-      );
-      return {
-        kind,
-        itemId: identifier(delta.itemId, `${path}.itemId`),
-        stream: literal(delta.stream, `${path}.stream`, ["stderr", "stdout"] as const),
-        operation,
-      };
-    }
-    default:
-      throw new ContractError(`${path}.kind`, `unsupported stream delta ${JSON.stringify(kind)}`);
-  }
-}
-
-function exactRecord<const Keys extends readonly string[]>(
-  value: unknown,
-  path: string,
-  keys: Keys,
-): Record<Keys[number], unknown> {
-  const object = record(value, path);
-  exactKeys(object, path, keys);
-  return object as Record<Keys[number], unknown>;
-}
-
-function field(object: UnknownRecord, key: string): unknown {
-  return object[key];
-}
-
-function record(value: unknown, path: string): UnknownRecord {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new ContractError(path, "expected an object");
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new ContractError(path, "expected a plain object");
-  }
-  return value as UnknownRecord;
-}
-
-function exactKeys(object: UnknownRecord, path: string, expected: readonly string[]): void {
-  let actualKeyCount = 0;
-  let unexpectedKey = false;
-  for (const key in object) {
-    if (!Object.hasOwn(object, key)) {
-      continue;
-    }
-    actualKeyCount += 1;
-    unexpectedKey ||= !expected.includes(key);
-  }
-  if (actualKeyCount !== expected.length || unexpectedKey) {
-    const actual = Object.keys(object).sort();
-    const sortedExpected = [...expected].sort();
-    throw new ContractError(
-      path,
-      `expected keys ${sortedExpected.join(", ")}; received ${actual.join(", ")}`,
-    );
-  }
-}
-
-function array<T>(
-  value: unknown,
-  path: string,
-  decode: (entry: unknown, path: string) => T,
-  maximumLength = MAX_COLLECTION_LENGTH,
-): readonly T[] {
-  if (!Array.isArray(value)) {
-    throw new ContractError(path, "expected an array");
-  }
-  if (value.length > maximumLength) {
-    throw new ContractError(path, `array exceeds ${maximumLength} entries`);
-  }
-  return value.map((entry, index) => decode(entry, `${path}[${index}]`));
-}
-
-function text(
-  value: unknown,
-  path: string,
-  maximumBytes = MAX_STRING_BYTES,
-  allowEmpty = false,
-): string {
-  if (typeof value !== "string") {
-    throw new ContractError(path, "expected a string");
-  }
-  if ((!allowEmpty && value.length === 0) || exceedsUtf8ByteLength(value, maximumBytes)) {
-    throw new ContractError(path, `string must contain at most ${maximumBytes} UTF-8 bytes`);
-  }
-  return value;
-}
-
-function identifier(value: unknown, path: string): string {
-  const decoded = text(value, path, 256);
-  if (/\p{Cc}/u.test(decoded)) {
-    throw new ContractError(path, "identifier contains control characters");
-  }
-  return decoded;
-}
-
-function nullableText(
-  value: unknown,
-  path: string,
-  maximumBytes = MAX_STRING_BYTES,
-): string | null {
-  return value === null ? null : text(value, path, maximumBytes);
-}
-
-function nullableDecimalCursor(value: unknown, path: string, label: string): string | null {
-  const nextCursor = nullableText(value, path, DECIMAL_CURSOR_MAXIMUM_CHARACTERS);
-  if (nextCursor !== null && !/^\d+$/u.test(nextCursor)) {
-    throw new ContractError(path, `expected a numeric ${label} cursor`);
-  }
-  return nextCursor;
-}
-
-function nullableThreadHistoryCursor(value: unknown, path: string): string | null {
-  const nextCursor = nullableText(value, path, THREAD_HISTORY_CURSOR_MAXIMUM_CHARACTERS);
-  if (nextCursor !== null && !/^[A-Za-z0-9_-]+$/u.test(nextCursor)) {
-    throw new ContractError(path, "expected a Base64URL thread history cursor");
-  }
-  return nextCursor;
-}
-
-function decodeCommandLiveOutput(value: unknown, path: string): CommandLiveOutput {
-  const object = exactRecord(value, path, ["stderr", "stdout", "truncated"]);
-  const stderr = text(object.stderr, `${path}.stderr`, 256 * 1_024, true);
-  const stdout = text(object.stdout, `${path}.stdout`, 256 * 1_024, true);
-  if (utf8ByteLength(stderr) + utf8ByteLength(stdout) > 256 * 1_024) {
-    throw new ContractError(path, "combined live command output exceeds 262144 bytes");
-  }
-  return {
-    stderr,
-    stdout,
-    truncated: booleanValue(object.truncated, `${path}.truncated`),
-  };
-}
-
-function nullableThreadOutput(value: unknown, path: string): ThreadOutput | null {
-  if (value === null) {
-    return null;
-  }
-  const object = exactRecord(value, path, ["byteLength", "id", "nextCursor", "preview"]);
-  const preview = text(object.preview, `${path}.preview`, MAX_OUTPUT_CHUNK_BYTES, true);
-  const previewBytes = utf8ByteLength(preview);
-  const byteLength = integer(
-    object.byteLength,
-    `${path}.byteLength`,
-    previewBytes,
-    Number.MAX_SAFE_INTEGER,
-  );
-  if (byteLength <= MAX_OUTPUT_CHUNK_BYTES && previewBytes !== byteLength) {
-    throw new ContractError(path, "small output resources must include their complete preview");
-  }
-  const nextCursor = nullableDecimalCursor(object.nextCursor, `${path}.nextCursor`, "output");
-  if ((previewBytes === byteLength) !== (nextCursor === null)) {
-    throw new ContractError(path, "output preview and continuation cursor are inconsistent");
-  }
-  return {
-    id: identifier(object.id, `${path}.id`),
-    preview,
-    byteLength,
-    nextCursor,
-  };
-}
-
-function urlText(value: unknown, path: string, protocols: readonly string[]): string {
-  const decoded = text(value, path, 8_192);
-  let url: URL;
-  try {
-    url = new URL(decoded);
-  } catch {
-    throw new ContractError(path, "expected an absolute URL");
-  }
-  if (!protocols.includes(url.protocol)) {
-    throw new ContractError(path, `URL protocol ${url.protocol} is not allowed`);
-  }
-  return decoded;
-}
-
-function browserUrl(value: unknown, path: string): string {
-  const decoded = text(value, path, 16_384);
-  let url: URL;
-  try {
-    url = new URL(decoded);
-  } catch {
-    throw new ContractError(path, "expected an absolute browser URL");
-  }
-  if (
-    (url.protocol !== "http:" && url.protocol !== "https:" && decoded !== "about:blank") ||
-    url.username.length > 0 ||
-    url.password.length > 0
-  ) {
-    throw new ContractError(path, "browser URL is not allowed");
-  }
-  return decoded;
-}
-
-function browserOrigin(value: unknown, path: string): string {
-  const decoded = text(value, path, 2_048);
-  let url: URL;
-  try {
-    url = new URL(decoded);
-  } catch {
-    throw new ContractError(path, "expected an absolute browser origin");
-  }
-  if (
-    (url.protocol !== "http:" && url.protocol !== "https:") ||
-    url.username.length > 0 ||
-    url.password.length > 0 ||
-    url.origin !== decoded
-  ) {
-    throw new ContractError(path, "browser origin is not allowed");
-  }
-  return decoded;
-}
-
-function booleanValue(value: unknown, path: string): boolean {
-  if (typeof value !== "boolean") {
-    throw new ContractError(path, "expected a boolean");
-  }
-  return value;
-}
-
-function finiteNumber(value: unknown, path: string, minimum: number, maximum: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) {
-    throw new ContractError(path, `expected a finite number between ${minimum} and ${maximum}`);
-  }
-  return value;
-}
-
-function integer(value: unknown, path: string, minimum: number, maximum: number): number {
-  const decoded = finiteNumber(value, path, minimum, maximum);
-  if (!Number.isSafeInteger(decoded)) {
-    throw new ContractError(path, "expected a safe integer");
-  }
-  return decoded;
-}
-
-function nullableFiniteNumber(
-  value: unknown,
-  path: string,
-  minimum: number,
-  maximum: number,
-): number | null {
-  return value === null ? null : finiteNumber(value, path, minimum, maximum);
-}
-
-function nullableSafeInteger(value: unknown, path: string, maximum: number): number | null {
-  return value === null ? null : integer(value, path, 0, maximum);
-}
-
-function isoDate(value: unknown, path: string): string {
-  const decoded = text(value, path, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/u.test(decoded)) {
-    throw new ContractError(path, "expected an ISO calendar date");
-  }
-  const timestamp = Date.parse(`${decoded}T00:00:00.000Z`);
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== decoded) {
-    throw new ContractError(path, "expected a valid ISO calendar date");
-  }
-  return decoded;
-}
-
-function literal<const T>(value: unknown, path: string, values: readonly T[]): T {
-  for (const candidate of values) {
-    if (value === candidate) {
-      return candidate;
-    }
-  }
-  throw new ContractError(path, `expected one of ${values.map(String).join(", ")}`);
-}
-
+export { decodeCommandError } from "./decode/primitives";
 export type {
   AccountPlanType,
   ActivityStatus,
@@ -2747,3 +2375,4 @@ export type {
   TurnStatus,
   WebSearchMode,
 };
+export { ContractError };
