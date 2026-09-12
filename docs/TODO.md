@@ -32,8 +32,13 @@
   the final message and while reading older messages;
   record retained memory, task correctness, recovery, and cancellation.
   Bounded synthetic soak coverage does not establish multi-day live parity.
-- [ ] Configure the four signing secrets in `RELEASE.md` before the first stable
-  release when the Authenticode certificate becomes available.
+- [ ] Register the prepared maintainer SSH signing key on GitHub as described
+  in `RELEASE.md`; publish the release signature gate and
+  restrict release-tag creation/updates with a GitHub tag ruleset. Obtain approval
+  before replacing historical tag objects, preserving their exact commits and
+  existing assets, then confirm GitHub reports each tag signature as verified.
+- [ ] Configure the four Windows signing secrets in `RELEASE.md` before the first
+  stable release when the Authenticode certificate becomes available.
 - [ ] Re-evaluate the stable Solid compiler pipeline when Solid 2 and its
   supported OXC-based Vite integration are stable; migrate only after a
   reproducible build benchmark and full compatibility verification.
