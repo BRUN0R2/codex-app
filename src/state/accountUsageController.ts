@@ -23,16 +23,14 @@ import {
   updateAutoTopUp as updateAutoTopUpCommand,
 } from "../infrastructure/codexClient";
 import { createAccountProfileRefreshCoordinator } from "./accountProfileRefresh";
+import {
+  createAccountUsageRefreshCoordinator,
+  createBrowserAccountUsageRefreshHost,
+} from "./accountUsageRefresh";
 import type { AppNotificationInput } from "./appNotifications";
 import type { SessionControllerHost } from "./controllerSupport";
 import { findUsageLimitReset } from "./notificationTransitions";
-import {
-  createBrowserRateLimitRefreshHost,
-  createRateLimitRefreshCoordinator,
-} from "./rateLimitRefresh";
 import { mergeRateLimitUpdate } from "./rateLimits";
-
-const USAGE_RESET_REFRESH_STALE_MS = 5 * 60 * 1_000;
 
 export interface AccountUsageController {
   readonly accountProfile: Accessor<AccountProfileResponse | null>;
@@ -121,9 +119,6 @@ export function createAccountUsageController(
   const [autoTopUpLoading, setAutoTopUpLoading] = createSignal(false);
 
   let pendingAccountProfileReads = 0;
-  let pendingRateLimitReads = 0;
-  let lastUsageResetReadAt = 0;
-  let usageResetReadRevision = 0;
   let accountUsageSessionRevision = 0;
   let manualUsageResetNotificationPending = false;
 
@@ -136,22 +131,42 @@ export function createAccountUsageController(
       setUsageResetsError(null);
       setUsageResetsLoading(false);
       setUsageResetRedeemingId(null);
-      lastUsageResetReadAt = 0;
       setAutoTopUpSettings(null);
       setAutoTopUpError(null);
       setAutoTopUpLoading(false);
     });
   });
 
-  const rateLimitRefresh = createRateLimitRefreshCoordinator({
+  const refreshHost = createBrowserAccountUsageRefreshHost();
+  const rateLimitRefresh = createAccountUsageRefreshCoordinator({
     getSessionKey: () => accountSessionKey(account()),
-    read: readRateLimitsWithStatus,
+    read: () => {
+      setRateLimitsError(null);
+      return readRateLimits();
+    },
     apply: applyRateLimits,
+    setLoading: setRateLimitsLoading,
     reportError: (reason) => {
       setRateLimitsError(describeError(reason));
       addDiagnostic({ stream: "runtime", message: describeError(reason) });
     },
-    host: createBrowserRateLimitRefreshHost(),
+    host: refreshHost,
+  });
+
+  const usageResetRefresh = createAccountUsageRefreshCoordinator({
+    getSessionKey: () => accountSessionKey(account()),
+    read: () => {
+      setUsageResetsError(null);
+      return readUsageResets();
+    },
+    apply: applyUsageResets,
+    setLoading: setUsageResetsLoading,
+    reportError: (reason) => {
+      const message = describeError(reason);
+      setUsageResetsError(message);
+      addDiagnostic({ stream: "runtime", message });
+    },
+    host: refreshHost,
   });
 
   const accountProfileRefresh = createAccountProfileRefreshCoordinator({
@@ -169,16 +184,10 @@ export function createAccountUsageController(
     },
   });
 
-  function invalidateUsageResetReads(): void {
-    usageResetReadRevision += 1;
-    lastUsageResetReadAt = 0;
-    setUsageResetsLoading(false);
-  }
-
   function invalidateUsageSession(): void {
     accountUsageSessionRevision += 1;
     manualUsageResetNotificationPending = false;
-    invalidateUsageResetReads();
+    usageResetRefresh.invalidate();
     rateLimitRefresh.invalidate();
     setUsageResetRedeemingId(null);
   }
@@ -231,7 +240,7 @@ export function createAccountUsageController(
     if (previousAvailability !== value.lunaReserveAvailable) {
       onLunaReserveChanged();
     }
-    void refreshUsageResetsIfStale();
+    void usageResetRefresh.refreshIfStale();
   }
 
   function applyRateLimitNotification(update: RateLimitUpdateSnapshot): void {
@@ -248,20 +257,6 @@ export function createAccountUsageController(
     setRateLimitsError(null);
   }
 
-  async function readRateLimitsWithStatus(): Promise<AccountRateLimitsResponse> {
-    pendingRateLimitReads += 1;
-    batch(() => {
-      setRateLimitsLoading(true);
-      setRateLimitsError(null);
-    });
-    try {
-      return await readRateLimits();
-    } finally {
-      pendingRateLimitReads = Math.max(0, pendingRateLimitReads - 1);
-      setRateLimitsLoading(pendingRateLimitReads > 0);
-    }
-  }
-
   async function readAccountProfileWithStatus(): Promise<AccountProfileResponse> {
     pendingAccountProfileReads += 1;
     batch(() => {
@@ -276,52 +271,6 @@ export function createAccountUsageController(
     }
   }
 
-  function refreshUsageResets(): Promise<boolean> {
-    const revision = usageResetReadRevision;
-    const sessionKey = accountSessionKey(account());
-    if (sessionKey === null || host.isDisposed()) return Promise.resolve(false);
-    return host.singleFlight.run(`account:usage-resets:${revision}:${sessionKey}`, () =>
-      refreshUsageResetsOnce(revision, sessionKey),
-    );
-  }
-
-  function refreshUsageResetsIfStale(): Promise<boolean> {
-    if (Date.now() - lastUsageResetReadAt < USAGE_RESET_REFRESH_STALE_MS) {
-      return Promise.resolve(true);
-    }
-    return refreshUsageResets();
-  }
-
-  function isCurrentUsageResetRead(revision: number, sessionKey: string): boolean {
-    return (
-      !host.isDisposed() &&
-      revision === usageResetReadRevision &&
-      sessionKey === accountSessionKey(account())
-    );
-  }
-
-  async function refreshUsageResetsOnce(revision: number, sessionKey: string): Promise<boolean> {
-    if (!isCurrentUsageResetRead(revision, sessionKey)) {
-      return false;
-    }
-    setUsageResetsLoading(true);
-    setUsageResetsError(null);
-    try {
-      const value = await readUsageResets();
-      if (!isCurrentUsageResetRead(revision, sessionKey)) return false;
-      applyUsageResets(value);
-      return true;
-    } catch (reason) {
-      if (!isCurrentUsageResetRead(revision, sessionKey)) return false;
-      const message = describeError(reason);
-      setUsageResetsError(message);
-      addDiagnostic({ stream: "runtime", message });
-      return false;
-    } finally {
-      if (isCurrentUsageResetRead(revision, sessionKey)) setUsageResetsLoading(false);
-    }
-  }
-
   function applyUsageResets(value: UsageResetCreditsResponse): void {
     const previous = usageResets();
     const previousAvailableIds = new Set(
@@ -332,7 +281,6 @@ export function createAccountUsageController(
     const available = value.credits.filter((credit) => credit.status === "available");
     const added = available.filter((credit) => !previousAvailableIds.has(credit.id));
     const countIncreased = value.availableCount > (previous?.availableCount ?? 0);
-    lastUsageResetReadAt = Date.now();
     setUsageResets(value);
     const identity = added[0]?.id ?? (countIncreased ? `count-${value.availableCount}` : null);
     if (value.availableCount === 0 || identity === null) return;
@@ -382,9 +330,12 @@ export function createAccountUsageController(
           message: localization.notifications().usageResetRedeemedMessage,
           target: { type: "settings", page: "usage" },
         });
-        invalidateUsageResetReads();
+        usageResetRefresh.invalidate();
         rateLimitRefresh.invalidate();
-        const synchronization = Promise.all([refreshUsageResets(), rateLimitRefresh.refresh()]);
+        const synchronization = Promise.all([
+          usageResetRefresh.refresh(),
+          rateLimitRefresh.refresh(),
+        ]);
         synchronizationContinues = true;
         void synchronization.then(
           () => {
@@ -496,6 +447,7 @@ export function createAccountUsageController(
     dispose: () => {
       accountProfileRefresh.dispose();
       rateLimitRefresh.dispose();
+      usageResetRefresh.dispose();
     },
     enableAutoTopUp,
     invalidateProfileSession,
@@ -505,9 +457,12 @@ export function createAccountUsageController(
     refreshAutoTopUpSettings,
     refreshRateLimits: () => rateLimitRefresh.refresh(),
     refreshRateLimitsIfStale: () => rateLimitRefresh.refreshIfStale(),
-    refreshUsageResets,
-    refreshUsageResetsIfStale,
-    start: () => rateLimitRefresh.start(),
+    refreshUsageResets: () => usageResetRefresh.refresh(),
+    refreshUsageResetsIfStale: () => usageResetRefresh.refreshIfStale(),
+    start: () => {
+      rateLimitRefresh.start();
+      usageResetRefresh.start();
+    },
     updateAutoTopUp,
   };
 }

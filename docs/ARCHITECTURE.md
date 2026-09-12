@@ -248,11 +248,27 @@ notification. Each lane has its own FIFO capacity, readiness handshake,
 publication queue, channel-specific event names, and lifecycle. Priority items
 are persistent and draggable; transient items are dismissed by an identity-bound
 timer whose progress animation does not restart when that lane's pending count
-changes. Both windows
-derive their height from intrinsic content, and their opaque cards prevent the
-application beneath them from becoming competing text. Overlay actions carry
-the channel and notification identity back to state before anything is
-dismissed or activated.
+changes. Both windows derive their height from intrinsic content, and their
+opaque cards prevent the application beneath them from becoming competing text.
+Each presentation reads Tauri's native `current_monitor` with the explicit
+`main` window label and validates the monitor response before changing the
+overlay. On Windows, `MonitorFromWindow` uses the pre-minimize window rectangle
+for minimized windows and selects the nearest monitor for off-screen windows.
+Monitor selection never depends on separately sampled window position and size,
+the overlay's own monitor, or a cached display. An unavailable monitor or failed
+native query remains an explicit error. Overlay actions carry the channel and
+notification identity back to state before anything is dismissed or activated.
+
+While the signed-in application is running, account usage owns independent
+five-minute refresh cycles for rate limits and reset credits, including when
+the main window stays open or is hidden. Each resource uses the same refresh
+coordinator for timed, focus, visibility, and manual reads, coalesces requests
+within a session, and invalidates old responses after account changes or reset
+redemption. Completion schedules the next read; failures remain observable and
+are retried at the next interval. Disposal cancels timers and event listeners.
+Credit discovery does not depend on a successful limits read. Notifications
+are emitted from decoded provider changes and honor the configured event rule;
+local deadlines do not imply that the provider has granted a reset.
 
 Approval notifications carry the already-decoded pending request and reuse the
 chat card's canonical decision set. The isolated surface sends only the channel,
