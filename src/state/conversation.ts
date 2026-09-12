@@ -119,7 +119,11 @@ export function applyCommandStreamDeltasToThread(
       throw new Error("The persisted command delta item became inconsistent.");
     }
     if (item.type !== "commandExecution") {
-      throw new Error(`O delta de comando persistido aponta para um item ${item.type}.`);
+      throw new Error(`The persisted command delta points to an item of type ${item.type}.`);
+    }
+    if (item.liveOutput === null) {
+      // The command already closed; late stream output is discarded.
+      continue;
     }
     if (item.liveOutput === null) {
       // The command already closed; late stream output is discarded.
@@ -158,7 +162,7 @@ function applyStreamDelta(current: VisibleThreadItem, delta: StreamDelta): Visib
   switch (delta.kind) {
     case "agentText":
       if (current.type !== "agentMessage") {
-        throw new Error(`O delta de texto aponta para um item ${current.type}.`);
+        throw new Error(`The text delta points to an item of type ${current.type}.`);
       }
       return { ...current, text: current.text + delta.delta };
     case "commandOutput": {

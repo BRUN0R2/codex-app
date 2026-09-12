@@ -25,7 +25,7 @@ Rust NativeEngine
 | --- | --- | --- |
 | `src/ui` | Rendering and interaction | Access IPC or decide domain policy |
 | `src/state` | Reactive ownership and transitions | Accept undecoded external payloads |
-| `src/state` domain sessions | Account usage, automations, preferences, and model catalogs | Own engine lifecycle or thread orchestration |
+| `src/state` domain sessions | Account usage, automations, preferences, model catalogs, navigation/projects, notifications, and tasks/turns | Own engine lifecycle |
 | `src/infrastructure` | Commands, events, and Tauri adaptation | Retain business rules |
 | `src/contracts` | Boundary types and strict decoders | Infer or repair invalid payloads |
 | `src/i18n` | Catalog discovery, validation, locale resolution, and formatting | Translate operational diagnostics or accept incomplete catalogs |
@@ -37,6 +37,15 @@ Invalid contracts fail at their boundary. Components never call native commands
 directly, and approximate payload formats are never accepted as fallbacks.
 An architecture regression test scans every presentation module and both UI
 entrypoints so an infrastructure import cannot reintroduce direct IPC access.
+
+`createAppController` is the composition root: it wires the domain controllers,
+owns engine and authentication state, routes engine events, and orchestrates
+cross-domain flows. `taskSessionController` owns tasks, turns, history, runtime
+overlays, approvals, and message queues; `navigationSessionController` owns
+product flow, workspace, projects, and pins; `notificationSessionController`
+owns the notification lanes. Presentation components consume narrow `Pick`
+contracts instead of the full controller whenever they do not compose other
+surfaces.
 
 ## Initialization
 
@@ -239,11 +248,27 @@ notification. Each lane has its own FIFO capacity, readiness handshake,
 publication queue, channel-specific event names, and lifecycle. Priority items
 are persistent and draggable; transient items are dismissed by an identity-bound
 timer whose progress animation does not restart when that lane's pending count
-changes. Both windows
-derive their height from intrinsic content, and their opaque cards prevent the
-application beneath them from becoming competing text. Overlay actions carry
-the channel and notification identity back to state before anything is
-dismissed or activated.
+changes. Both windows derive their height from intrinsic content, and their
+opaque cards prevent the application beneath them from becoming competing text.
+Each presentation reads Tauri's native `current_monitor` with the explicit
+`main` window label and validates the monitor response before changing the
+overlay. On Windows, `MonitorFromWindow` uses the pre-minimize window rectangle
+for minimized windows and selects the nearest monitor for off-screen windows.
+Monitor selection never depends on separately sampled window position and size,
+the overlay's own monitor, or a cached display. An unavailable monitor or failed
+native query remains an explicit error. Overlay actions carry the channel and
+notification identity back to state before anything is dismissed or activated.
+
+While the signed-in application is running, account usage owns independent
+five-minute refresh cycles for rate limits and reset credits, including when
+the main window stays open or is hidden. Each resource uses the same refresh
+coordinator for timed, focus, visibility, and manual reads, coalesces requests
+within a session, and invalidates old responses after account changes or reset
+redemption. Completion schedules the next read; failures remain observable and
+are retried at the next interval. Disposal cancels timers and event listeners.
+Credit discovery does not depend on a successful limits read. Notifications
+are emitted from decoded provider changes and honor the configured event rule;
+local deadlines do not imply that the provider has granted a reset.
 
 Approval notifications carry the already-decoded pending request and reuse the
 chat card's canonical decision set. The isolated surface sends only the channel,

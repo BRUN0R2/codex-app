@@ -319,16 +319,20 @@ outcomes from transport errors and directs yielded work through `poll_command`.
 | `yield_time_ms` | 250 ms to 30 s |
 | `poll_command` wait | 0 to 30 s |
 | live preview | 256 KiB per stream |
-| cooperative shutdown | 6 s |
+| user interruption | immediate execution abort |
+| owner-scoped cooperative shutdown | 6 s |
 | shutdown after forced abort | 2 s |
 
 After yielding, the session remains owned by its task and returns cursor-based
 deltas. The full transcript is persisted in chunks and read through
 `read_output` or `engine_output_read`. Turn completion, deletion, and shutdown
-cancel and drain sessions before the terminal event. Interruption records
-idempotent cancellation and returns immediately; the finalizer alone owns the
-drain. A non-cooperative execution is aborted by the task that owns its Job
-Object without blocking the terminal turn transaction.
+cancel and drain sessions before the terminal event. User interruption records
+idempotent cancellation and immediately aborts the active execution task. That
+task owns the child process and its Job Object, so dropping it terminates the
+process tree; the worker and finalizer remain responsible for publishing the
+terminal session state and completing persistence. Owner-scoped shutdown keeps
+the graceful budget and uses the forced-abort budget only for executions that
+remain non-cooperative.
 
 ### Code Mode
 

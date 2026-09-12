@@ -62,7 +62,7 @@ function decodePins(value: unknown): StoredPins {
     throw new Error("The pinned-task list version is unsupported.");
   }
   if (object.threadIds.length > MAX_PINNED_THREADS) {
-    throw new Error(`A lista excede ${MAX_PINNED_THREADS} tarefas fixadas.`);
+    throw new Error(`The pinned-task list exceeds ${MAX_PINNED_THREADS} entries.`);
   }
   const seen = new Set<string>();
   const threadIds = object.threadIds.map((entry, index) => {

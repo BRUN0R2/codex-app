@@ -174,7 +174,7 @@ pub(super) async fn prepare_user_input(
                         }
                     })
                 })?;
-                if validated_media_type != media_type {
+                if validated_media_type.mime() != media_type {
                     return Err(AppError::InvalidAttachment(
                         "image contents changed after attachment validation".into(),
                     ));
