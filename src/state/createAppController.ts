@@ -8,7 +8,6 @@ import {
   onMount,
 } from "solid-js";
 
-import type { ConfigurableNotificationEventKind } from "../contracts/notificationOverlay";
 import type {
   AccountProfileResponse,
   AccountReadResponse,
@@ -24,7 +23,6 @@ import type {
   EngineServerRequest,
   EngineStartResponse,
   OutputReadResponse,
-  ProjectRecord,
   RuntimeDiagnostic,
   RuntimeStatus,
   ThreadSummary,
@@ -76,7 +74,6 @@ import type {
   SendMessageInput,
 } from "./appController";
 import { createApplicationPreferencesController } from "./applicationPreferencesController";
-import { type AppNotificationInput, createAppNotificationCenter } from "./appNotifications";
 import { createAutomationSessionController } from "./automationSessionController";
 import {
   captureInitialization,
@@ -102,51 +99,17 @@ import {
   saveMessageQueue,
 } from "./messageQueue";
 import { createModelCatalogController } from "./modelCatalogController";
+import { createNavigationSessionController } from "./navigationSessionController";
 import { createNotificationOverlayBridge } from "./notificationOverlayBridge";
-import { createNotificationPreview } from "./notificationPreview";
-import { notificationTaskLabel } from "./notificationTransitions";
-import {
-  loadPinnedThreadIds,
-  removePinnedThreadId,
-  savePinnedThreadIds,
-  togglePinnedThreadId,
-} from "./pins";
+import { createNotificationSessionController } from "./notificationSessionController";
 import {
   activeConversationMode,
-  defaultProductFlowState,
-  loadProductFlowState,
   type ProductFlowState,
   selectChatGptMode as reduceSelectChatGptMode,
   selectProduct as reduceSelectProduct,
   rememberConversationDestination,
-  saveProductFlowState,
 } from "./productFlow";
-import {
-  loadPinnedProjectPaths,
-  removePinnedProjectPath,
-  savePinnedProjectPaths,
-  togglePinnedProjectPath,
-} from "./projectPins";
-import {
-  defaultProjectSidebarState,
-  loadProjectSidebarState,
-  type ProjectSidebarState,
-  projectExpanded as readProjectExpanded,
-  projectThreadListExpanded as readProjectThreadListExpanded,
-  removeProjectSidebarState,
-  saveProjectSidebarState,
-  toggleProjectSectionExpanded,
-  toggleProjectExpanded as toggleStoredProjectExpanded,
-  toggleProjectThreadListExpanded as toggleStoredProjectThreadListExpanded,
-} from "./projectSidebarState";
-import {
-  addProject,
-  loadProjects,
-  pathsEqual,
-  removeProject,
-  saveProjects,
-  updateProject as updateProjectsList,
-} from "./projects";
+import { pathsEqual } from "./projects";
 import { SingleFlightOperations } from "./singleFlightOperations";
 import {
   createBrowserStreamDeltaScheduler,
@@ -198,13 +161,6 @@ interface AppControllerLocalization {
 }
 
 export function createAppController(localization: AppControllerLocalization): AppController {
-  const capturedProductFlow = captureInitialization(() => loadProductFlowState());
-  const initialProductFlow =
-    capturedProductFlow.failure === undefined
-      ? capturedProductFlow.value
-      : defaultProductFlowState();
-  const productFlowLoadError = capturedProductFlow.failure ?? null;
-  const [productFlow, setProductFlow] = createSignal<ProductFlowState>(initialProductFlow);
   const [runtimeStatus, setRuntimeStatus] = createSignal<RuntimeStatus>({
     state: "starting",
     message: null,
@@ -214,100 +170,12 @@ export function createAppController(localization: AppControllerLocalization): Ap
   const [config, setConfig] = createSignal<ConfigReadResponse | null>(null);
   const [applicationShellActionRequest, setApplicationShellActionRequest] =
     createSignal<ApplicationShellActionRequest | null>(null);
-  const [threads, setThreads] = createSignal<readonly ThreadSummary[]>([]);
-  const [threadsNextCursor, setThreadsNextCursor] = createSignal<string | null>(null);
-  const [archivedThreads, setArchivedThreads] = createSignal<readonly ThreadSummary[]>([]);
-  const [archivedThreadsLoaded, setArchivedThreadsLoaded] = createSignal(false);
-  const [archivedThreadsLoading, setArchivedThreadsLoading] = createSignal(false);
-  const [archivedThreadsNextCursor, setArchivedThreadsNextCursor] = createSignal<string | null>(
-    null,
-  );
-  const [currentThread, setCurrentThread] = createSignal<CodexThread | null>(null);
-  const [allAgentThreads, setAllAgentThreads] = createSignal<readonly ThreadSummary[]>([]);
-  const activeTaskRootId = createMemo(
-    () => currentThread()?.agent?.rootThreadId ?? currentThread()?.id ?? null,
-  );
-  const agentThreads = createMemo(() => {
-    const rootThreadId = activeTaskRootId();
-    return rootThreadId === null
-      ? []
-      : allAgentThreads().filter((thread) => thread.agent?.rootThreadId === rootThreadId);
-  });
-  const [historyCursor, setHistoryCursor] = createSignal<string | null>(null);
-  const [historyLoading, setHistoryLoading] = createSignal(false);
-  const threadPages = new ThreadPageCache(THREAD_PAGE_CACHE_CAPACITY);
-  const persistedVisibleTurnsBySource: PersistedVisibleTurnsBySource = new WeakMap();
-  const capturedPinnedThreadIds = captureInitialization(loadPinnedThreadIds);
-  const initialPinnedThreadIds =
-    capturedPinnedThreadIds.failure === undefined ? capturedPinnedThreadIds.value : [];
-  const pinLoadError = capturedPinnedThreadIds.failure ?? null;
-  const [pinnedThreadIds, setPinnedThreadIds] = createSignal(initialPinnedThreadIds);
-  const capturedProjectPins = captureInitialization(loadPinnedProjectPaths);
-  const initialPinnedProjectPaths =
-    capturedProjectPins.failure === undefined ? capturedProjectPins.value : [];
-  const projectPinLoadError = capturedProjectPins.failure ?? null;
-  const [pinnedProjectPaths, setPinnedProjectPaths] = createSignal(initialPinnedProjectPaths);
-  const [threadRuntime, setThreadRuntime] = createSignal<ReadonlyMap<string, ThreadRuntimeState>>(
-    new Map(),
-  );
-  const streamDeltas = createStreamDeltaBatcher({
-    apply: (deltas) =>
-      setThreadRuntime((current) => applyThreadRuntimeStreamDeltas(current, deltas)),
-    reportError,
-    scheduler: createBrowserStreamDeltaScheduler(),
-  });
-  const capturedMessageQueues = captureInitialization(loadMessageQueues);
-  let initialMessageQueues: MessageQueueMap = new Map();
-  let messageQueueLoadWarnings: readonly string[] = [];
-  if (capturedMessageQueues.failure === undefined) {
-    initialMessageQueues = capturedMessageQueues.value.queues;
-    messageQueueLoadWarnings = capturedMessageQueues.value.warnings;
-  } else {
-    messageQueueLoadWarnings = [capturedMessageQueues.failure.message];
-  }
-  const [messageQueues, setMessageQueues] = createSignal<MessageQueueMap>(initialMessageQueues);
-  const [pendingApprovals, setPendingApprovals] = createSignal<readonly EngineServerRequest[]>([]);
   const [diagnostics, setDiagnostics] = createSignal<readonly DiagnosticEntry[]>([]);
   const [error, setError] = createSignal<string | null>(null);
   const [pendingOperations, setPendingOperations] = createSignal(0);
-  const [notificationUsageSettingsRequest, setNotificationUsageSettingsRequest] = createSignal(0);
-  const [loginPending, setLoginPending] = createSignal(false);
-  const [workspace, setWorkspace] = createSignal<string | null>(null);
-  let loginId: string | null = null;
   let diagnosticSequence = 0;
   let disposed = false;
-  let unsubscribe: (() => void) | null = null;
-  let unsubscribeFromMenu: (() => void) | null = null;
-  let applicationShellActionSequence = 0;
-  let notificationSequence = 0;
-  let initializationRevision = 0;
-  let initializationRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  let configQueue: Promise<void> = Promise.resolve();
-  const queuedDispatchTails = new Map<string, Promise<void>>();
   const singleFlightOperations = new SingleFlightOperations<string, boolean>();
-  let authenticationSync: {
-    readonly expectedSignedIn: boolean;
-    readonly promise: Promise<void>;
-  } | null = null;
-  let authenticatedStateLoaded = false;
-  let authenticatedStateRequest: Promise<void> | null = null;
-  let persistedQueuesResumed = false;
-  const capturedProjects = captureInitialization(loadProjects);
-  const initialProjects = capturedProjects.failure === undefined ? capturedProjects.value : [];
-  const projectLoadError = capturedProjects.failure ?? null;
-  const [projects, setProjects] = createSignal(initialProjects);
-  const capturedProjectSidebarState = captureInitialization(loadProjectSidebarState);
-  const initialProjectSidebarState =
-    capturedProjectSidebarState.failure === undefined
-      ? capturedProjectSidebarState.value
-      : defaultProjectSidebarState();
-  const projectSidebarStateLoadError = capturedProjectSidebarState.failure ?? null;
-  const [projectSidebarState, setProjectSidebarState] = createSignal<ProjectSidebarState>(
-    initialProjectSidebarState,
-  );
-  setWorkspace(
-    initialProductFlow.destinations[activeConversationMode(initialProductFlow)].workspace,
-  );
 
   function addDiagnostic(diagnostic: RuntimeDiagnostic): void {
     diagnosticSequence += 1;
@@ -351,14 +219,89 @@ export function createAppController(localization: AppControllerLocalization): Ap
     withPending,
   };
 
+  const navigation = createNavigationSessionController({ host: sessionHost });
+
+  const [threads, setThreads] = createSignal<readonly ThreadSummary[]>([]);
+  const [threadsNextCursor, setThreadsNextCursor] = createSignal<string | null>(null);
+  const [archivedThreads, setArchivedThreads] = createSignal<readonly ThreadSummary[]>([]);
+  const [archivedThreadsLoaded, setArchivedThreadsLoaded] = createSignal(false);
+  const [archivedThreadsLoading, setArchivedThreadsLoading] = createSignal(false);
+  const [archivedThreadsNextCursor, setArchivedThreadsNextCursor] = createSignal<string | null>(
+    null,
+  );
+  const [currentThread, setCurrentThread] = createSignal<CodexThread | null>(null);
+  const [allAgentThreads, setAllAgentThreads] = createSignal<readonly ThreadSummary[]>([]);
+  const activeTaskRootId = createMemo(
+    () => currentThread()?.agent?.rootThreadId ?? currentThread()?.id ?? null,
+  );
+  const agentThreads = createMemo(() => {
+    const rootThreadId = activeTaskRootId();
+    return rootThreadId === null
+      ? []
+      : allAgentThreads().filter((thread) => thread.agent?.rootThreadId === rootThreadId);
+  });
+  const [historyCursor, setHistoryCursor] = createSignal<string | null>(null);
+  const [historyLoading, setHistoryLoading] = createSignal(false);
+  const threadPages = new ThreadPageCache(THREAD_PAGE_CACHE_CAPACITY);
+  const persistedVisibleTurnsBySource: PersistedVisibleTurnsBySource = new WeakMap();
+  const [threadRuntime, setThreadRuntime] = createSignal<ReadonlyMap<string, ThreadRuntimeState>>(
+    new Map(),
+  );
+  const streamDeltas = createStreamDeltaBatcher({
+    apply: (deltas) =>
+      setThreadRuntime((current) => applyThreadRuntimeStreamDeltas(current, deltas)),
+    reportError,
+    scheduler: createBrowserStreamDeltaScheduler(),
+  });
+  const capturedMessageQueues = captureInitialization(loadMessageQueues);
+  let initialMessageQueues: MessageQueueMap = new Map();
+  let messageQueueLoadWarnings: readonly string[] = [];
+  if (capturedMessageQueues.failure === undefined) {
+    initialMessageQueues = capturedMessageQueues.value.queues;
+    messageQueueLoadWarnings = capturedMessageQueues.value.warnings;
+  } else {
+    messageQueueLoadWarnings = [capturedMessageQueues.failure.message];
+  }
+  const [messageQueues, setMessageQueues] = createSignal<MessageQueueMap>(initialMessageQueues);
+  const [pendingApprovals, setPendingApprovals] = createSignal<readonly EngineServerRequest[]>([]);
+  const [notificationUsageSettingsRequest, setNotificationUsageSettingsRequest] = createSignal(0);
+  const [loginPending, setLoginPending] = createSignal(false);
+  let loginId: string | null = null;
+  let unsubscribe: (() => void) | null = null;
+  let unsubscribeFromMenu: (() => void) | null = null;
+  let applicationShellActionSequence = 0;
+  let initializationRevision = 0;
+  let initializationRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let configQueue: Promise<void> = Promise.resolve();
+  const queuedDispatchTails = new Map<string, Promise<void>>();
+  let authenticationSync: {
+    readonly expectedSignedIn: boolean;
+    readonly promise: Promise<void>;
+  } | null = null;
+  let authenticatedStateLoaded = false;
+  let authenticatedStateRequest: Promise<void> | null = null;
+  let persistedQueuesResumed = false;
   const modelCatalog = createModelCatalogController({
     host: sessionHost,
     isSignedIn: () => signedIn(),
   });
 
-  function enqueueNotification(input: AppNotificationInput): boolean {
-    return preferences.applicationPreferencesLoaded() && notificationCenter.enqueue(input);
+  function notifySettingsSaved(): void {
+    notifications.notifySettingsSaved();
   }
+
+  const preferences = createApplicationPreferencesController({
+    isDisposed: () => disposed,
+    onSaved: notifySettingsSaved,
+    reportError,
+  });
+
+  const notifications = createNotificationSessionController({
+    applicationPreferences: preferences.applicationPreferences,
+    applicationPreferencesLoaded: preferences.applicationPreferencesLoaded,
+    localization: { notifications: localization.notifications },
+    taskLabels: () => [...threads(), ...allAgentThreads()],
+  });
 
   const accountUsage = createAccountUsageController({
     account,
@@ -366,13 +309,13 @@ export function createAppController(localization: AppControllerLocalization): Ap
     applyAccountProfile: (profile: AccountProfileResponse) => {
       setAccount((current) => mergeAccountProfile(current, profile));
     },
-    enqueueNotification,
+    enqueueNotification: notifications.enqueue,
     host: sessionHost,
     isSignedIn: () => signedIn(),
     localization: { notifications: localization.notifications },
     onLunaReserveChanged: () => {
       modelCatalog.invalidateCatalogs();
-      void modelCatalog.ensureModelsForMode(conversationMode());
+      void modelCatalog.ensureModelsForMode(navigation.conversationMode());
     },
   });
 
@@ -382,27 +325,14 @@ export function createAppController(localization: AppControllerLocalization): Ap
     isSignedIn: () => signedIn(),
   });
 
-  const preferences = createApplicationPreferencesController({
-    isDisposed: () => disposed,
-    onSaved: notifySettingsSaved,
-    reportError,
-  });
-
-  const notificationCenter = createAppNotificationCenter(
-    () => preferences.applicationPreferences().notifications,
-  );
-
-  const product = createMemo(() => productFlow().product);
-  const chatGptMode = createMemo(() => productFlow().chatGptMode);
-  const conversationMode = createMemo(() => activeConversationMode(productFlow()));
   const visibleThreads = createMemo(() =>
     threads().filter((thread) =>
-      product() === "codex" ? thread.mode === "codex" : thread.mode !== "codex",
+      navigation.product() === "codex" ? thread.mode === "codex" : thread.mode !== "codex",
     ),
   );
   const visibleArchivedThreads = createMemo(() =>
     archivedThreads().filter((thread) =>
-      product() === "codex" ? thread.mode === "codex" : thread.mode !== "codex",
+      navigation.product() === "codex" ? thread.mode === "codex" : thread.mode !== "codex",
     ),
   );
   const signedIn = createMemo(() => account()?.account !== null && account() !== undefined);
@@ -450,7 +380,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
     return threadId === undefined ? [] : readQueuedMessages(messageQueues(), threadId);
   });
   const busy = createMemo(() => turnBusy() || pendingOperations() > 0);
-  const projectSectionExpanded = createMemo(() => projectSidebarState().projectsExpanded);
   const lastTurnFailure = createMemo(() => {
     const thread = currentThread();
     return thread === null ? null : readLatestTurnFailure(thread);
@@ -465,7 +394,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   });
 
   createEffect(() => {
-    const mode = conversationMode();
+    const mode = navigation.conversationMode();
     if (signedIn()) {
       void modelCatalog.ensureModelsForMode(mode);
     }
@@ -476,63 +405,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
     if (isDesktopRuntime()) void synchronizeApplicationMenu(translation).catch(reportError);
   });
 
-  createEffect(() => {
-    if (!preferences.applicationPreferences().notifications.enabled) notificationCenter.clear();
-  });
-
   function publishApplicationShellAction(type: ApplicationShellActionRequest["type"]): void {
     applicationShellActionSequence += 1;
     setApplicationShellActionRequest({ sequence: applicationShellActionSequence, type });
-  }
-
-  function notifySettingsSaved(): void {
-    notificationSequence += 1;
-    enqueueNotification({
-      approval: null,
-      id: `settings-saved:${notificationSequence}`,
-      event: "settingsSaved",
-      tone: "success",
-      title: localization.notifications().settingsSavedTitle,
-      message: localization.notifications().settingsSavedMessage,
-      target: null,
-    });
-  }
-
-  function previewNotification(event: ConfigurableNotificationEventKind): boolean {
-    if (!preferences.applicationPreferencesLoaded()) return false;
-    notificationSequence += 1;
-    return notificationCenter.preview(
-      createNotificationPreview(event, localization.notifications(), notificationSequence),
-    );
-  }
-
-  function notifyTurnCompletion(
-    notification: Extract<EngineNotification, { readonly method: "turn.completed" }>,
-  ): void {
-    if (notification.params.turn.status === "interrupted") return;
-    const task = notificationTaskLabel(
-      notification.params.threadId,
-      [...threads(), ...allAgentThreads()],
-      localization.notifications().untitledTask,
-    );
-    const failed =
-      notification.params.turn.status === "failed" || notification.params.error !== null;
-    enqueueNotification({
-      approval: null,
-      id: `task-${failed ? "failed" : "completed"}:${notification.params.turn.id}`,
-      event: failed ? "taskFailed" : "taskCompleted",
-      tone: failed ? "error" : "success",
-      title: failed
-        ? localization.notifications().taskFailedTitle
-        : localization.notifications().taskCompletedTitle,
-      message: formatMessage(
-        failed
-          ? localization.notifications().taskFailedMessage
-          : localization.notifications().taskCompletedMessage,
-        { task },
-      ),
-      target: { type: "thread", threadId: notification.params.threadId },
-    });
   }
 
   function handleServerRequest(request: EngineServerRequest): void {
@@ -542,38 +417,13 @@ export function createAppController(localization: AppControllerLocalization): Ap
       }
       return [...current, request];
     });
-    const task = notificationTaskLabel(
-      request.params.threadId,
-      [...threads(), ...allAgentThreads()],
-      localization.notifications().untitledTask,
-    );
-    enqueueNotification({
-      approval: request,
-      id: `approval-required:${request.id}`,
-      event: "approvalRequired",
-      tone: "attention",
-      title: localization.notifications().approvalTitle,
-      message: formatMessage(localization.notifications().approvalMessage, { task }),
-      target: { type: "thread", threadId: request.params.threadId },
-    });
+    notifications.notifyApprovalRequired(request);
   }
 
   onMount(() => {
     accountUsage.start();
-    if (productFlowLoadError !== null) {
-      reportError(productFlowLoadError);
-    }
-    if (projectLoadError !== null) {
-      reportError(projectLoadError);
-    }
-    if (projectSidebarStateLoadError !== null) {
-      reportError(projectSidebarStateLoadError);
-    }
-    if (pinLoadError !== null) {
-      reportError(pinLoadError);
-    }
-    if (projectPinLoadError !== null) {
-      reportError(projectPinLoadError);
+    for (const failure of navigation.initializationFailures) {
+      reportError(failure);
     }
     for (const warning of messageQueueLoadWarnings) {
       reportError(new Error(warning));
@@ -809,7 +659,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
         setThreadsNextCursor(threadPage.nextCursor);
         automationSession.loadSession(automationSnapshot);
       });
-      await restoreActiveDestination(productFlow());
+      await restoreActiveDestination(navigation.productFlow());
       const loaded = !disposed && accountSessionKey(account()) === expectedSessionKey;
       if (loaded) {
         resumePersistedMessageQueues(threadPage.data);
@@ -907,7 +757,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
         {
           const selected = currentThread();
           if (selected?.id === notification.params.threadId) {
-            rememberDestination(selected.mode, null, workspace());
+            navigation.rememberDestination(selected.mode, null, navigation.workspace());
           }
         }
         {
@@ -996,7 +846,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
               void scheduleQueuedMessage(notification.params.threadId);
             });
           }
-          notifyTurnCompletion(notification);
+          notifications.notifyTurnCompletion(notification);
           void accountUsage.refreshRateLimitsIfStale();
         }
         return;
@@ -1231,7 +1081,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   }
 
   async function chooseWorkspace(): Promise<string | null> {
-    if (conversationMode() === "chat") {
+    if (navigation.conversationMode() === "chat") {
       setError("Chat conversations cannot access local projects. Switch to Work or Codex.");
       return null;
     }
@@ -1250,35 +1100,8 @@ export function createAppController(localization: AppControllerLocalization): Ap
     }
   }
 
-  function commitProductFlow(next: ProductFlowState): boolean {
-    if (next === productFlow()) {
-      return true;
-    }
-    try {
-      saveProductFlowState(next);
-      setProductFlow(next);
-      return true;
-    } catch (reason) {
-      reportError(reason);
-      return false;
-    }
-  }
-
-  function rememberDestination(
-    mode: ConversationMode,
-    threadId: string | null,
-    targetWorkspace: string | null,
-  ): boolean {
-    return commitProductFlow(
-      rememberConversationDestination(productFlow(), mode, {
-        threadId,
-        workspace: targetWorkspace,
-      }),
-    );
-  }
-
   async function selectProduct(nextProduct: AppProduct): Promise<boolean> {
-    const current = productFlow();
+    const current = navigation.productFlow();
     if (current.product === nextProduct) {
       return true;
     }
@@ -1287,18 +1110,18 @@ export function createAppController(localization: AppControllerLocalization): Ap
       activeConversationMode(current),
       {
         threadId: currentThread()?.id ?? null,
-        workspace: workspace(),
+        workspace: navigation.workspace(),
       },
     );
     const next = reduceSelectProduct(withCurrentDestination, nextProduct);
-    if (!commitProductFlow(next)) {
+    if (!navigation.commitProductFlow(next)) {
       return false;
     }
     return restoreActiveDestination(next);
   }
 
   async function selectChatGptMode(nextMode: ChatGptMode): Promise<boolean> {
-    const current = productFlow();
+    const current = navigation.productFlow();
     if (current.product === "chatgpt" && current.chatGptMode === nextMode) {
       return true;
     }
@@ -1307,11 +1130,11 @@ export function createAppController(localization: AppControllerLocalization): Ap
       activeConversationMode(current),
       {
         threadId: currentThread()?.id ?? null,
-        workspace: workspace(),
+        workspace: navigation.workspace(),
       },
     );
     const next = reduceSelectChatGptMode(withCurrentDestination, nextMode);
-    if (!commitProductFlow(next)) {
+    if (!navigation.commitProductFlow(next)) {
       return false;
     }
     return restoreActiveDestination(next);
@@ -1322,7 +1145,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     const destination = expected.destinations[mode];
     batch(() => {
       clearCurrentThread();
-      setWorkspace(mode === "chat" ? null : destination.workspace);
+      navigation.setWorkspace(mode === "chat" ? null : destination.workspace);
     });
     const threadId = destination.threadId;
     if (threadId === null) {
@@ -1339,11 +1162,11 @@ export function createAppController(localization: AppControllerLocalization): Ap
           return false;
         }
         activateThreadPage(cached.thread, cached.nextCursor);
-        rememberDestination(mode, cached.thread.id, cached.thread.projectPath);
+        navigation.rememberDestination(mode, cached.thread.id, cached.thread.projectPath);
         return true;
       }
       const response = await withPending(() => resumeThread(threadId));
-      if (!isCurrentThreadSelection(selectionRevision) || conversationMode() !== mode) {
+      if (!isCurrentThreadSelection(selectionRevision) || navigation.conversationMode() !== mode) {
         return false;
       }
       if (response.thread.mode !== mode) {
@@ -1355,13 +1178,13 @@ export function createAppController(localization: AppControllerLocalization): Ap
       activateThreadPage(response.thread, response.nextCursor);
       replaceAgentThreadFamily(response.thread, response.agentThreads);
       mergeThread(response.thread);
-      rememberDestination(mode, response.thread.id, response.thread.projectPath);
+      navigation.rememberDestination(mode, response.thread.id, response.thread.projectPath);
       return true;
     } catch (reason) {
       if (!isCurrentThreadSelection(selectionRevision)) {
         return false;
       }
-      rememberDestination(mode, null, destination.workspace);
+      navigation.rememberDestination(mode, null, destination.workspace);
       reportError(reason);
       return false;
     } finally {
@@ -1370,7 +1193,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   }
 
   function alignProductFlowToThread(mode: ConversationMode): boolean {
-    const current = productFlow();
+    const current = navigation.productFlow();
     if (mode === "codex") {
       return current.product === "codex";
     }
@@ -1385,94 +1208,30 @@ export function createAppController(localization: AppControllerLocalization): Ap
       activeConversationMode(current),
       {
         threadId: currentThread()?.id ?? null,
-        workspace: workspace(),
+        workspace: navigation.workspace(),
       },
     );
-    return commitProductFlow(reduceSelectChatGptMode(withCurrentDestination, mode));
+    return navigation.commitProductFlow(reduceSelectChatGptMode(withCurrentDestination, mode));
   }
 
   function selectProject(path: string): boolean {
-    if (conversationMode() === "chat") {
+    if (navigation.conversationMode() === "chat") {
       setError("Chat does not associate conversations with local projects.");
       return false;
     }
     const thread = currentThread();
-    try {
-      const next = addProject(projects(), path);
-      saveProjects(next);
-      const changesConversation = thread !== null && !pathsEqual(thread.projectPath, path);
-      batch(() => {
-        setProjects(next);
-        setWorkspace(path);
-        if (changesConversation) {
-          clearCurrentThread();
-        }
-      });
-      return rememberDestination(
-        conversationMode(),
-        changesConversation ? null : (thread?.id ?? null),
-        path,
-      );
-    } catch (reason) {
-      reportError(reason);
+    const changesConversation = thread !== null && !pathsEqual(thread.projectPath, path);
+    if (!navigation.addProjectPath(path)) {
       return false;
     }
-  }
-
-  function removeProjectFromSidebar(path: string): void {
-    try {
-      const next = removeProject(projects(), path);
-      saveProjects(next);
-      setProjects(next);
-    } catch (reason) {
-      reportError(reason);
-      return;
+    if (changesConversation) {
+      clearCurrentThread();
     }
-
-    removePinnedProject(path);
-
-    const nextProjectSidebarState = removeProjectSidebarState(projectSidebarState(), path);
-    if (nextProjectSidebarState === projectSidebarState()) {
-      return;
-    }
-    try {
-      saveProjectSidebarState(nextProjectSidebarState);
-      setProjectSidebarState(nextProjectSidebarState);
-    } catch (reason) {
-      reportError(reason);
-    }
-  }
-
-  function commitProjectSidebarState(next: ProjectSidebarState): void {
-    if (next === projectSidebarState()) {
-      return;
-    }
-    try {
-      saveProjectSidebarState(next);
-      setProjectSidebarState(next);
-    } catch (reason) {
-      reportError(reason);
-    }
-  }
-
-  function projectExpanded(path: string): boolean {
-    return readProjectExpanded(projectSidebarState(), path);
-  }
-
-  function projectThreadListExpanded(path: string): boolean {
-    return readProjectThreadListExpanded(projectSidebarState(), path);
-  }
-
-  function toggleProjectExpanded(path: string): void {
-    commitProjectSidebarState(toggleStoredProjectExpanded(projectSidebarState(), path));
-  }
-
-  function toggleProjectSection(): void {
-    commitProjectSidebarState(toggleProjectSectionExpanded(projectSidebarState()));
-  }
-
-  function toggleProjectThreadListExpanded(path: string): void {
-    commitProjectSidebarState(toggleStoredProjectThreadListExpanded(projectSidebarState(), path));
+    return navigation.rememberDestination(
+      navigation.conversationMode(),
+      changesConversation ? null : (thread?.id ?? null),
+      path,
+    );
   }
 
   function togglePinnedThread(threadId: string): void {
@@ -1480,92 +1239,31 @@ export function createAppController(localization: AppControllerLocalization): Ap
       setError("The task must be available before it can be pinned.");
       return;
     }
-    try {
-      const next = togglePinnedThreadId(pinnedThreadIds(), threadId);
-      savePinnedThreadIds(next);
-      setPinnedThreadIds(next);
-    } catch (reason) {
-      reportError(reason);
-    }
-  }
-
-  function removePinnedThread(threadId: string): void {
-    const next = removePinnedThreadId(pinnedThreadIds(), threadId);
-    if (next.length === pinnedThreadIds().length) {
-      return;
-    }
-    try {
-      savePinnedThreadIds(next);
-      setPinnedThreadIds(next);
-    } catch (reason) {
-      reportError(reason);
-    }
-  }
-
-  function togglePinnedProject(path: string): void {
-    if (!projects().some((project) => pathsEqual(project.path, path))) {
-      setError("The project must be available before it can be pinned.");
-      return;
-    }
-    try {
-      const next = togglePinnedProjectPath(pinnedProjectPaths(), path);
-      savePinnedProjectPaths(next);
-      setPinnedProjectPaths(next);
-    } catch (reason) {
-      reportError(reason);
-    }
-  }
-
-  function removePinnedProject(path: string): void {
-    const next = removePinnedProjectPath(pinnedProjectPaths(), path);
-    if (next.length === pinnedProjectPaths().length) {
-      return;
-    }
-    try {
-      savePinnedProjectPaths(next);
-      setPinnedProjectPaths(next);
-    } catch (reason) {
-      reportError(reason);
-    }
+    navigation.togglePinnedThread(threadId);
   }
 
   function newThread(targetWorkspace?: string): boolean {
-    const mode = conversationMode();
+    const mode = navigation.conversationMode();
     if (signedIn()) {
       void modelCatalog.ensureModelsForMode(mode);
     }
     const requestedWorkspace = mode === "chat" ? null : (targetWorkspace ?? null);
     if (requestedWorkspace === null) {
       batch(() => {
-        setWorkspace(null);
+        navigation.setWorkspace(null);
         clearCurrentThread();
       });
-      return rememberDestination(mode, null, null);
+      return navigation.rememberDestination(mode, null, null);
     }
     if (!selectProject(requestedWorkspace)) {
       return false;
     }
     clearCurrentThread();
-    return rememberDestination(mode, null, requestedWorkspace);
+    return navigation.rememberDestination(mode, null, requestedWorkspace);
   }
 
   function selectThreadProject(thread: ThreadSummary): boolean {
-    if (thread.projectPath === null) {
-      setWorkspace(null);
-      return true;
-    }
-    try {
-      const next = addProject(projects(), thread.projectPath);
-      saveProjects(next);
-      batch(() => {
-        setProjects(next);
-        setWorkspace(thread.projectPath);
-      });
-      return true;
-    } catch (reason) {
-      reportError(reason);
-      return false;
-    }
+    return navigation.selectProjectPath(thread.projectPath);
   }
 
   async function materializeThread(
@@ -1591,7 +1289,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       }
       mergeThread(response.thread);
       activateThreadPage(response.thread, response.nextCursor);
-      rememberDestination(mode, response.thread.id, response.thread.projectPath);
+      navigation.rememberDestination(mode, response.thread.id, response.thread.projectPath);
       return response.thread;
     } catch (reason) {
       reportError(reason);
@@ -1618,7 +1316,11 @@ export function createAppController(localization: AppControllerLocalization): Ap
           return false;
         }
         activateThreadPage(cached.thread, cached.nextCursor);
-        rememberDestination(cached.thread.mode, cached.thread.id, cached.thread.projectPath);
+        navigation.rememberDestination(
+          cached.thread.mode,
+          cached.thread.id,
+          cached.thread.projectPath,
+        );
         return true;
       }
       const response = await resumeThread(threadId);
@@ -1637,7 +1339,11 @@ export function createAppController(localization: AppControllerLocalization): Ap
       activateThreadPage(response.thread, response.nextCursor);
       replaceAgentThreadFamily(response.thread, response.agentThreads);
       mergeThread(response.thread);
-      rememberDestination(response.thread.mode, response.thread.id, response.thread.projectPath);
+      navigation.rememberDestination(
+        response.thread.mode,
+        response.thread.id,
+        response.thread.projectPath,
+      );
       return true;
     } catch (reason) {
       if (!isCurrentThreadSelection(selectionRevision)) {
@@ -1764,7 +1470,11 @@ export function createAppController(localization: AppControllerLocalization): Ap
       }
       mergeThread(response.thread);
       activateThreadPage(response.thread, response.nextCursor);
-      rememberDestination(response.thread.mode, response.thread.id, response.thread.projectPath);
+      navigation.rememberDestination(
+        response.thread.mode,
+        response.thread.id,
+        response.thread.projectPath,
+      );
       return true;
     } catch (reason) {
       reportError(reason);
@@ -1876,8 +1586,8 @@ export function createAppController(localization: AppControllerLocalization): Ap
     }
     let thread = currentThread();
     if (thread === null) {
-      const mode = conversationMode();
-      thread = await materializeThread(mode === "chat" ? null : workspace(), mode);
+      const mode = navigation.conversationMode();
+      thread = await materializeThread(mode === "chat" ? null : navigation.workspace(), mode);
     }
     if (thread === null) {
       return false;
@@ -2052,7 +1762,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     try {
       await respondToServerRequest(requestId, decision);
       setPendingApprovals((current) => current.filter((request) => request.id !== requestId));
-      notificationCenter.remove(`approval-required:${requestId}`);
+      notifications.removeApprovalNotification(requestId);
       return true;
     } catch (reason) {
       reportError(reason);
@@ -2172,10 +1882,10 @@ export function createAppController(localization: AppControllerLocalization): Ap
         current.filter((request) => request.params.threadId !== threadId),
       );
       threadPages.delete(threadId);
-      removePinnedThread(threadId);
+      navigation.removePinnedThread(threadId);
     });
     if (selected?.id === threadId) {
-      rememberDestination(selected.mode, null, workspace());
+      navigation.rememberDestination(selected.mode, null, navigation.workspace());
     }
   }
 
@@ -2350,23 +2060,12 @@ export function createAppController(localization: AppControllerLocalization): Ap
     });
   }
 
-  function updateProject(
-    path: string,
-    updates: Partial<Pick<ProjectRecord, "color" | "icon" | "name">>,
-  ): void {
-    setProjects((current) => {
-      const next = updateProjectsList(current, path, updates);
-      saveProjects(next);
-      return next;
-    });
-  }
-
   createNotificationOverlayBridge({
-    approvalFor: notificationCenter.approvalFor,
-    priority: notificationCenter.priority,
-    transient: notificationCenter.transient,
-    dismiss: notificationCenter.dismiss,
-    targetFor: notificationCenter.targetFor,
+    approvalFor: notifications.approvalFor,
+    priority: notifications.priority,
+    transient: notifications.transient,
+    dismiss: notifications.dismiss,
+    targetFor: notifications.targetFor,
     onActivate: (target) => {
       if (target.type === "settings") {
         setNotificationUsageSettingsRequest((current) => current + 1);
@@ -2406,10 +2105,10 @@ export function createAppController(localization: AppControllerLocalization): Ap
     currentThread,
     hasOlderHistory,
     historyLoading,
-    product,
-    chatGptMode,
+    product: navigation.product,
+    chatGptMode: navigation.chatGptMode,
     chatModels: modelCatalog.chatModels,
-    conversationMode,
+    conversationMode: navigation.conversationMode,
     diagnostics,
     engine,
     error,
@@ -2419,11 +2118,11 @@ export function createAppController(localization: AppControllerLocalization): Ap
     modelReroute,
     modelVerifications,
     pendingOperations,
-    pinnedProjectPaths,
-    pinnedThreadIds,
+    pinnedProjectPaths: navigation.pinnedProjectPaths,
+    pinnedThreadIds: navigation.pinnedThreadIds,
     persistedTurns,
-    projectSectionExpanded,
-    projects,
+    projectSectionExpanded: navigation.projectSectionExpanded,
+    projects: navigation.projects,
     queuedMessages,
     rateLimits: accountUsage.rateLimits,
     rateLimitsError: accountUsage.rateLimitsError,
@@ -2444,7 +2143,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     turnBusy,
     turns,
     unreadAutomationRuns: automationSession.unreadAutomationRuns,
-    workspace,
+    workspace: navigation.workspace,
     archiveThread,
     cancelLogin,
     chooseAttachments,
@@ -2459,9 +2158,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
     forkThread,
     interrupt,
     isItemStreaming,
-    projectExpanded,
-    projectThreadListExpanded,
-    previewNotification,
+    projectExpanded: navigation.projectExpanded,
+    projectThreadListExpanded: navigation.projectThreadListExpanded,
+    previewNotification: notifications.preview,
     isThreadActive,
     loadMoreThreads,
     loadMoreArchivedThreads,
@@ -2486,7 +2185,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
     updateAutoTopUp: accountUsage.updateAutoTopUp,
     disableAutoTopUp: accountUsage.disableAutoTopUp,
     reportError,
-    removeProject: removeProjectFromSidebar,
+    removeProject: navigation.removeProject,
     renameThread,
     retryInitialization,
     respondToApproval,
@@ -2499,13 +2198,13 @@ export function createAppController(localization: AppControllerLocalization): Ap
     sendMessage,
     sendQueuedMessageNow,
     takeQueuedMessage,
-    togglePinnedProject,
+    togglePinnedProject: navigation.togglePinnedProject,
     togglePinnedThread,
-    toggleProjectExpanded,
-    toggleProjectSection,
-    toggleProjectThreadListExpanded,
+    toggleProjectExpanded: navigation.toggleProjectExpanded,
+    toggleProjectSection: navigation.toggleProjectSection,
+    toggleProjectThreadListExpanded: navigation.toggleProjectThreadListExpanded,
     updateAutomation: automationSession.updateAutomation,
-    updateProject,
+    updateProject: navigation.updateProject,
     updateSetting,
     updateApplicationPreferences: preferences.updateApplicationPreferences,
     unarchiveThread,

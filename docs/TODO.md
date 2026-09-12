@@ -1,5 +1,10 @@
 # TODO
 
+- [ ] Extract task, turn, history, runtime, and message-queue ownership from
+  `src/state/createAppController.ts` into a dedicated task session controller,
+  leaving the composition root responsible only for wiring and cross-domain
+  orchestration. Navigation/projects and notification state already have
+  dedicated controllers.
 - [ ] Add native Responses API authentication and provider selection for the
   requested [Burn API setup](https://docs.google.com/document/d/1lA0QNNTEmw_bYmqhqSH5JHEFZaoBNkgiH53Y53E_lzE/edit?tab=t.6dyc7xfd1fu),
   using `https://burnapi.burnapi-ai.workers.dev/v1` and the application's vault.

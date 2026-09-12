@@ -25,7 +25,7 @@ Rust NativeEngine
 | --- | --- | --- |
 | `src/ui` | Rendering and interaction | Access IPC or decide domain policy |
 | `src/state` | Reactive ownership and transitions | Accept undecoded external payloads |
-| `src/state` domain sessions | Account usage, automations, preferences, and model catalogs | Own engine lifecycle or thread orchestration |
+| `src/state` domain sessions | Account usage, automations, preferences, model catalogs, navigation/projects, and notifications | Own engine lifecycle or task orchestration |
 | `src/infrastructure` | Commands, events, and Tauri adaptation | Retain business rules |
 | `src/contracts` | Boundary types and strict decoders | Infer or repair invalid payloads |
 | `src/i18n` | Catalog discovery, validation, locale resolution, and formatting | Translate operational diagnostics or accept incomplete catalogs |
@@ -37,6 +37,13 @@ Invalid contracts fail at their boundary. Components never call native commands
 directly, and approximate payload formats are never accepted as fallbacks.
 An architecture regression test scans every presentation module and both UI
 entrypoints so an infrastructure import cannot reintroduce direct IPC access.
+
+`createAppController` is the composition root: it wires the domain controllers,
+owns engine and authentication state, routes engine events, and orchestrates
+cross-domain flows. Task, turn, history, and message-queue transitions still
+live there and are the remaining extraction tracked in [TODO.md](TODO.md).
+Presentation components consume narrow `Pick` contracts instead of the full
+controller whenever they do not compose other surfaces.
 
 ## Initialization
 
