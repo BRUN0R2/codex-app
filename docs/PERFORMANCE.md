@@ -156,8 +156,9 @@ actual compiler invocations, and keep the warning enabled.
 
 Measurements use Windows with 28 logical processors. Credential and encoding
 baselines date from 2026-08-31; context boundaries and streamed dispatch were
-measured on 2026-09-05; the current gate, tool catalog, and Code Mode were
-measured on 2026-09-07. These values describe local runs.
+measured on 2026-09-05; the tool catalog and Code Mode were measured on
+2026-09-07; the current gate was measured on 2026-09-11. These values describe
+local runs.
 
 ### Agent startup, continuation, and compaction
 
@@ -295,12 +296,12 @@ not alter the engine capability gate.
 
 | Check | Result |
 | --- | ---: |
-| encoding | 471 valid UTF-8 files |
-| frontend | 107 files; 549 passing tests |
-| main JavaScript bundle | 433.47 kB; 129.02 kB gzip |
-| CSS | 149.17 kB; 26.62 kB gzip |
+| encoding | 505 valid UTF-8 files |
+| frontend | 118 files; 617 passing tests |
+| main JavaScript bundle | 451.22 kB; 133.71 kB gzip |
+| CSS | 152.01 kB; 27.10 kB gzip |
 | visual QA | 153 passing scenario/viewport cases |
-| Rust | 529 passing; 17 ignored checks; no failures |
+| Rust | 540 passing; 18 ignored checks; no failures |
 | Cargo, formatting, and Clippy | passed without warnings |
 
 ## Regression protection
