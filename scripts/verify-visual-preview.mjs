@@ -66,6 +66,13 @@ const REQUESTED_SCENARIOS = new Set(
     .map((value) => value.trim())
     .filter((value) => value.length > 0),
 );
+const REQUESTED_VIEWPORTS = new Set(
+  (process.env.CODEX_VISUAL_VIEWPORTS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0),
+);
+const viewportLabel = (viewport) => `${viewport.width}x${viewport.height}`;
 const SCENARIOS = [
   {
     id: "workspace-last-tab-close",
@@ -1282,8 +1289,24 @@ async function main() {
       ...scenario,
       url: rebasePreviewUrl(scenario.url, previewOrigin),
     }));
+    if (REQUESTED_VIEWPORTS.size > 0) {
+      const knownViewports = new Set(
+        scenarios.flatMap((scenario) =>
+          (scenario.viewports ?? VIEWPORTS).map(viewportLabel),
+        ),
+      );
+      const unknownViewports = [...REQUESTED_VIEWPORTS].filter(
+        (viewport) => !knownViewports.has(viewport),
+      );
+      if (unknownViewports.length > 0) {
+        throw new Error(`Unknown visual viewports: ${unknownViewports.join(", ")}`);
+      }
+    }
     for (const scenario of scenarios) {
-      for (const viewport of scenario.viewports ?? VIEWPORTS) {
+      for (const viewport of (scenario.viewports ?? VIEWPORTS).filter(
+        (viewport) =>
+          REQUESTED_VIEWPORTS.size === 0 || REQUESTED_VIEWPORTS.has(viewportLabel(viewport)),
+      )) {
         reports.push(
           await withAuditTarget(browserController, async (targetId) => {
             const auditClient = await browserController.attachToTarget(targetId);
