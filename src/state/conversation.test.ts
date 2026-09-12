@@ -285,6 +285,70 @@ describe("conversation reducer", () => {
       ]),
     ).toBe(thread);
   });
+
+  it("reports a typed English error when a command delta targets another item type", () => {
+    const thread = {
+      id: "thread-a",
+      agent: null,
+      mode: "codex" as const,
+      preview: "Build",
+      name: null,
+      cwd: ".",
+      projectPath: ".",
+      createdAt: 1,
+      updatedAt: 2,
+      recencyAt: 2,
+      status: { type: "idle" as const },
+      turns: [
+        {
+          id: "turn-a",
+          status: "completed" as const,
+          error: null,
+          createdAt: 1,
+          updatedAt: 2,
+          items: [{ type: "agentMessage" as const, id: "command-a", text: "text", phase: null }],
+        },
+      ],
+    };
+
+    expect(() =>
+      applyCommandStreamDeltasToThread(thread, [
+        commandDelta("stdout", { type: "append", delta: "late" }),
+      ]),
+    ).toThrow("The persisted command delta points to an item of type agentMessage.");
+  });
+
+  it("reports a typed English error when a text delta targets another item type", () => {
+    expect(() =>
+      applyStreamDeltas(
+        [
+          {
+            type: "commandExecution",
+            id: "command-a",
+            command: "build",
+            cwd: ".",
+            processId: null,
+            startedAt: 1,
+            source: "agent",
+            status: "completed",
+            aggregatedOutput: null,
+            liveOutput: null,
+            exitCode: 0,
+            durationMs: 10,
+          },
+        ],
+        [
+          {
+            kind: "agentText",
+            threadId: "thread-a",
+            turnId: "turn-a",
+            itemId: "command-a",
+            delta: "late",
+          },
+        ],
+      ),
+    ).toThrow("The text delta points to an item of type commandExecution.");
+  });
 });
 
 function commandDelta(

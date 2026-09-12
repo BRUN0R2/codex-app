@@ -1,21 +1,23 @@
-export const RATE_LIMIT_STALE_TIME_MS = 5 * 60_000;
+export const ACCOUNT_USAGE_STALE_TIME_MS = 5 * 60_000;
 
-export interface RateLimitRefreshHost {
+export interface AccountUsageRefreshHost {
   readonly now: () => number;
   readonly isVisible: () => boolean;
   readonly addFocusListener: (listener: () => void) => () => void;
   readonly addVisibilityListener: (listener: () => void) => () => void;
+  readonly scheduleRefresh: (listener: () => void, delayMs: number) => () => void;
 }
 
-interface RateLimitRefreshOptions<T> {
+interface AccountUsageRefreshOptions<T> {
   readonly getSessionKey: () => string | null;
   readonly read: () => Promise<T>;
   readonly apply: (value: T) => void;
   readonly reportError: (reason: unknown) => void;
-  readonly host: RateLimitRefreshHost;
+  readonly setLoading: (loading: boolean) => void;
+  readonly host: AccountUsageRefreshHost;
 }
 
-export interface RateLimitRefreshCoordinator {
+export interface AccountUsageRefreshCoordinator {
   readonly start: () => void;
   readonly refresh: () => Promise<boolean>;
   readonly refreshIfStale: () => Promise<boolean>;
@@ -23,14 +25,15 @@ export interface RateLimitRefreshCoordinator {
   readonly dispose: () => void;
 }
 
-export function createRateLimitRefreshCoordinator<T>(
-  options: RateLimitRefreshOptions<T>,
-): RateLimitRefreshCoordinator {
+export function createAccountUsageRefreshCoordinator<T>(
+  options: AccountUsageRefreshOptions<T>,
+): AccountUsageRefreshCoordinator {
   let disposed = false;
   let started = false;
   let revision = 0;
   let removeFocusListener: (() => void) | null = null;
   let removeVisibilityListener: (() => void) | null = null;
+  let cancelRefreshTimer: (() => void) | null = null;
   let lastSuccessfulRequest: { readonly key: string; readonly completedAt: number } | null = null;
   const requests = new Map<string, Promise<boolean>>();
 
@@ -51,7 +54,7 @@ export function createRateLimitRefreshCoordinator<T>(
       !force &&
       completed?.key === requestKey &&
       elapsed >= 0 &&
-      elapsed < RATE_LIMIT_STALE_TIME_MS
+      elapsed < ACCOUNT_USAGE_STALE_TIME_MS
     ) {
       return Promise.resolve(true);
     }
@@ -60,6 +63,7 @@ export function createRateLimitRefreshCoordinator<T>(
       return activeRequest;
     }
 
+    options.setLoading(true);
     const request = options
       .read()
       .then((value) => {
@@ -80,6 +84,10 @@ export function createRateLimitRefreshCoordinator<T>(
         if (requests.get(requestKey) === request) {
           requests.delete(requestKey);
         }
+        if (!disposed && currentRequestKey() === requestKey) {
+          options.setLoading(false);
+          scheduleNextRefresh();
+        }
       });
     requests.set(requestKey, request);
     return request;
@@ -91,6 +99,17 @@ export function createRateLimitRefreshCoordinator<T>(
     }
   }
 
+  function scheduleNextRefresh(): void {
+    cancelRefreshTimer?.();
+    cancelRefreshTimer = null;
+    if (!started || disposed) return;
+    cancelRefreshTimer = options.host.scheduleRefresh(() => {
+      cancelRefreshTimer = null;
+      scheduleNextRefresh();
+      void run(false);
+    }, ACCOUNT_USAGE_STALE_TIME_MS);
+  }
+
   return {
     start() {
       if (started || disposed) {
@@ -99,18 +118,24 @@ export function createRateLimitRefreshCoordinator<T>(
       started = true;
       removeFocusListener = options.host.addFocusListener(refreshWhenVisible);
       removeVisibilityListener = options.host.addVisibilityListener(refreshWhenVisible);
+      scheduleNextRefresh();
     },
     refresh: () => run(true),
     refreshIfStale: () => run(false),
     invalidate() {
       revision += 1;
       lastSuccessfulRequest = null;
+      options.setLoading(false);
+      scheduleNextRefresh();
     },
     dispose() {
       if (disposed) {
         return;
       }
       disposed = true;
+      options.setLoading(false);
+      cancelRefreshTimer?.();
+      cancelRefreshTimer = null;
       removeFocusListener?.();
       removeVisibilityListener?.();
       removeFocusListener = null;
@@ -119,7 +144,7 @@ export function createRateLimitRefreshCoordinator<T>(
   };
 }
 
-export function createBrowserRateLimitRefreshHost(): RateLimitRefreshHost {
+export function createBrowserAccountUsageRefreshHost(): AccountUsageRefreshHost {
   return {
     now: Date.now,
     isVisible: () => document.visibilityState === "visible",
@@ -130,6 +155,10 @@ export function createBrowserRateLimitRefreshHost(): RateLimitRefreshHost {
     addVisibilityListener(listener) {
       document.addEventListener("visibilitychange", listener);
       return () => document.removeEventListener("visibilitychange", listener);
+    },
+    scheduleRefresh(listener, delayMs) {
+      const timer = setTimeout(listener, delayMs);
+      return () => clearTimeout(timer);
     },
   };
 }

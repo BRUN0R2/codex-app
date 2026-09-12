@@ -32,7 +32,7 @@ pub(crate) enum ImageContentError {
 #[derive(Debug)]
 pub(crate) struct ValidatedImageContent {
     bytes: Vec<u8>,
-    media_type: &'static str,
+    media_type: ImageMediaType,
 }
 
 impl ValidatedImageContent {
@@ -42,17 +42,7 @@ impl ValidatedImageContent {
     }
 
     pub(crate) fn data_url(&self) -> String {
-        image_data_url(self.media_type, &self.bytes)
-    }
-
-    fn extension(&self) -> &'static str {
-        match self.media_type {
-            "image/png" => "png",
-            "image/jpeg" => "jpg",
-            "image/gif" => "gif",
-            "image/webp" => "webp",
-            _ => unreachable!("validated images always use a supported media type"),
-        }
+        image_data_url(self.media_type.mime(), &self.bytes)
     }
 }
 
@@ -98,10 +88,57 @@ pub struct ReadImageResponse {
     pub data_url: String,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ImageFormat {
-    extension: &'static str,
-    media_type: &'static str,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageMediaType {
+    Gif,
+    Jpeg,
+    Png,
+    Webp,
+}
+
+impl ImageMediaType {
+    pub(crate) const fn mime(self) -> &'static str {
+        match self {
+            Self::Gif => "image/gif",
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::Webp => "image/webp",
+        }
+    }
+
+    pub(crate) const fn extension(self) -> &'static str {
+        match self {
+            Self::Gif => "gif",
+            Self::Jpeg => "jpg",
+            Self::Png => "png",
+            Self::Webp => "webp",
+        }
+    }
+
+    fn from_decoder(format: DecoderImageFormat) -> Option<Self> {
+        match format {
+            DecoderImageFormat::Gif => Some(Self::Gif),
+            DecoderImageFormat::Jpeg => Some(Self::Jpeg),
+            DecoderImageFormat::Png => Some(Self::Png),
+            DecoderImageFormat::WebP => Some(Self::Webp),
+            _ => None,
+        }
+    }
+
+    fn from_extension(path: &Path) -> Option<Self> {
+        match path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("png") => Some(Self::Png),
+            Some("jpg" | "jpeg") => Some(Self::Jpeg),
+            Some("gif") => Some(Self::Gif),
+            Some("webp") => Some(Self::Webp),
+            _ => None,
+        }
+    }
 }
 
 #[tauri::command]
@@ -162,7 +199,7 @@ pub async fn attachment_save_pasted_image(
         .into());
     }
 
-    let format = detect_image_format(&bytes).ok_or_else(|| {
+    let format = detect_image_media_type(&bytes).ok_or_else(|| {
         AppError::InvalidAttachment("clipboard image must be PNG, JPEG, GIF, or WebP".into())
     })?;
     let bytes = tokio::task::spawn_blocking(move || {
@@ -176,7 +213,7 @@ pub async fn attachment_save_pasted_image(
         )
     })?;
     let (bytes, media_type) = bytes;
-    if media_type != format.media_type {
+    if media_type != format {
         return Err(AppError::InvalidAttachment(
             "clipboard image format could not be identified consistently".into(),
         )
@@ -188,7 +225,7 @@ pub async fn attachment_save_pasted_image(
         .map_err(|error| AppError::FileSystem(error.to_string()))?
         .join(ATTACHMENT_DIRECTORY);
 
-    let name = format!("pasted-{}.{}", Uuid::now_v7(), format.extension);
+    let name = format!("pasted-{}.{}", Uuid::now_v7(), format.extension());
     let path = persist_attachment_bytes(&attachment_directory, &name, &bytes).await?;
 
     Ok(Attachment {
@@ -197,7 +234,7 @@ pub async fn attachment_save_pasted_image(
         path: path.to_string_lossy().into_owned(),
         kind: AttachmentKind::Image,
         size: bytes.len() as u64,
-        media_type: Some(format.media_type.into()),
+        media_type: Some(format.mime().into()),
     })
 }
 
@@ -257,14 +294,14 @@ pub async fn attachment_read_image(request: ReadImageRequest) -> CommandResult<R
             }
         })
     })?;
-    if attachment.media_type.as_deref() != Some(media_type) {
+    if attachment.media_type.as_deref() != Some(media_type.mime()) {
         return Err(
             AppError::InvalidAttachment("image changed while it was being read".into()).into(),
         );
     }
 
     Ok(ReadImageResponse {
-        data_url: image_data_url(media_type, &bytes),
+        data_url: image_data_url(media_type.mime(), &bytes),
     })
 }
 
@@ -298,7 +335,7 @@ pub async fn inspect_path(path: &str) -> Result<Attachment, AppError> {
         .and_then(|value| value.to_str())
         .ok_or_else(|| AppError::InvalidAttachment("file name is not valid UTF-8".into()))?
         .to_owned();
-    let media_type = media_type_from_extension(path);
+    let media_type = ImageMediaType::from_extension(path);
     if let Some(expected_media_type) = media_type {
         let mut file = tokio::fs::File::open(path)
             .await
@@ -327,7 +364,7 @@ pub async fn inspect_path(path: &str) -> Result<Attachment, AppError> {
         path: path.to_string_lossy().into_owned(),
         kind,
         size: metadata.len(),
-        media_type: media_type.map(str::to_owned),
+        media_type: media_type.map(|value| value.mime().to_owned()),
     })
 }
 
@@ -368,7 +405,7 @@ async fn persist_attachment_at(
                 "image data is invalid or exceeds the safe decode limits".into(),
             )
         })?;
-        if validated_media_type != media_type {
+        if validated_media_type.mime() != media_type {
             return Err(AppError::InvalidAttachment(
                 "image changed while its durable snapshot was being created".into(),
             ));
@@ -411,70 +448,34 @@ async fn persist_image_snapshot_at(
     attachment_directory: &Path,
     image: &ValidatedImageContent,
 ) -> Result<PathBuf, AppError> {
-    let name = format!("viewed-{}.{}", Uuid::now_v7(), image.extension());
+    let name = format!("viewed-{}.{}", Uuid::now_v7(), image.media_type.extension());
     persist_attachment_bytes(attachment_directory, &name, &image.bytes).await
 }
 
-fn media_type_from_extension(path: &Path) -> Option<&'static str> {
-    match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("png") => Some("image/png"),
-        Some("jpg" | "jpeg") => Some("image/jpeg"),
-        Some("gif") => Some("image/gif"),
-        Some("webp") => Some("image/webp"),
-        _ => None,
-    }
-}
-
-fn detect_image_format(bytes: &[u8]) -> Option<ImageFormat> {
+pub(crate) fn detect_image_media_type(bytes: &[u8]) -> Option<ImageMediaType> {
     const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
     const GIF_87_SIGNATURE: &[u8] = b"GIF87a";
     const GIF_89_SIGNATURE: &[u8] = b"GIF89a";
 
     if bytes.starts_with(PNG_SIGNATURE) {
-        return Some(ImageFormat {
-            extension: "png",
-            media_type: "image/png",
-        });
+        return Some(ImageMediaType::Png);
     }
     if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        return Some(ImageFormat {
-            extension: "jpg",
-            media_type: "image/jpeg",
-        });
+        return Some(ImageMediaType::Jpeg);
     }
     if bytes.starts_with(GIF_87_SIGNATURE) || bytes.starts_with(GIF_89_SIGNATURE) {
-        return Some(ImageFormat {
-            extension: "gif",
-            media_type: "image/gif",
-        });
+        return Some(ImageMediaType::Gif);
     }
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return Some(ImageFormat {
-            extension: "webp",
-            media_type: "image/webp",
-        });
+        return Some(ImageMediaType::Webp);
     }
     None
 }
 
-pub(crate) fn detect_image_media_type(bytes: &[u8]) -> Option<&'static str> {
-    detect_image_format(bytes).map(|format| format.media_type)
-}
-
-pub(crate) fn validate_image_content(bytes: &[u8]) -> Result<&'static str, ImageContentError> {
+pub(crate) fn validate_image_content(bytes: &[u8]) -> Result<ImageMediaType, ImageContentError> {
     let format = image::guess_format(bytes).map_err(|_| ImageContentError::UnsupportedFormat)?;
-    let media_type = match format {
-        DecoderImageFormat::Png => "image/png",
-        DecoderImageFormat::Jpeg => "image/jpeg",
-        DecoderImageFormat::Gif => "image/gif",
-        DecoderImageFormat::WebP => "image/webp",
-        _ => return Err(ImageContentError::UnsupportedFormat),
-    };
+    let media_type =
+        ImageMediaType::from_decoder(format).ok_or(ImageContentError::UnsupportedFormat)?;
     let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
@@ -531,8 +532,9 @@ mod tests {
     use image::{ImageBuffer, ImageFormat, Rgba};
 
     use super::{
-        ImageContentError, ValidatedImageContent, detect_image_format, image_data_url,
-        inspect_path, persist_attachment_at, persist_image_snapshot_at, validate_image_content,
+        ImageContentError, ImageMediaType, ValidatedImageContent, detect_image_media_type,
+        image_data_url, inspect_path, persist_attachment_at, persist_image_snapshot_at,
+        validate_image_content,
     };
 
     fn tiny_png() -> Vec<u8> {
@@ -546,13 +548,13 @@ mod tests {
 
     #[test]
     fn detects_supported_image_signatures() {
-        let png = detect_image_format(b"\x89PNG\r\n\x1a\nrest");
-        let jpeg = detect_image_format(&[0xff, 0xd8, 0xff, 0xdb]);
-        let webp = detect_image_format(b"RIFF0000WEBPrest");
+        let png = detect_image_media_type(b"\x89PNG\r\n\x1a\nrest");
+        let jpeg = detect_image_media_type(&[0xff, 0xd8, 0xff, 0xdb]);
+        let webp = detect_image_media_type(b"RIFF0000WEBPrest");
 
-        assert_eq!(png.map(|format| format.media_type), Some("image/png"));
-        assert_eq!(jpeg.map(|format| format.media_type), Some("image/jpeg"));
-        assert_eq!(webp.map(|format| format.media_type), Some("image/webp"));
+        assert_eq!(png.map(ImageMediaType::mime), Some("image/png"));
+        assert_eq!(jpeg.map(ImageMediaType::mime), Some("image/jpeg"));
+        assert_eq!(webp.map(ImageMediaType::mime), Some("image/webp"));
     }
 
     #[test]
@@ -567,7 +569,10 @@ mod tests {
     fn validates_complete_image_data_with_bounded_decoding() {
         let bytes = tiny_png();
 
-        assert_eq!(validate_image_content(&bytes), Ok("image/png"));
+        assert_eq!(
+            validate_image_content(&bytes).map(ImageMediaType::mime),
+            Ok("image/png")
+        );
         assert_eq!(
             validate_image_content(b"\x89PNG\r\n\x1a\ninvalid"),
             Err(ImageContentError::InvalidOrUnsafeData)

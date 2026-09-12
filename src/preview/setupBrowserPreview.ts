@@ -816,8 +816,8 @@ const PREVIEW_CHAT_REFERENCE_THREAD = {
   id: "preview-chat-reference-thread",
   agent: null,
   mode: "codex",
-  preview: "Audit project against RULES.md",
-  name: "Audit project against RULES.md",
+  preview: "Fix expired session renewal",
+  name: "Fix expired session renewal",
   cwd: PREVIEW_WORKSPACE,
   projectPath: PREVIEW_WORKSPACE,
   createdAt: 1_787_000_000,
@@ -838,33 +838,33 @@ const PREVIEW_CHAT_REFERENCE_THREAD = {
           content: [
             {
               type: "text",
-              text: "Estude de forma rápida e entenda esse projeto, veja se ele segue fielmente todas as regras em docs/RULES.md, de forma limpa, enxuta, moderna, robusta, tipagem extremamente forte, organizada, semântica, bem estruturada, modular, dinâmica, abstrata, elegante, totalmente previsível e com boas práticas modernas sem exceção.",
+              text: "Revise o fluxo de autenticação, encontre a causa do erro ao renovar uma sessão expirada e corrija com cobertura de regressão. Execute as verificações afetadas antes de concluir.",
             },
           ],
         },
         {
           type: "agentMessage",
           id: "preview-chat-reference-commentary-1",
-          text: "Vou fazer uma auditoria objetiva: primeiro leio `docs/RULES.md` e o mapa do projeto, depois cruzo as regras com a implementação e executo as verificações disponíveis. Entrego os achados priorizados, com evidências em arquivos/linhas e sem alterar nada.",
+          text: "Vou mapear o fluxo de autenticação, reproduzir a falha e identificar o ponto único onde a sessão expirada deve ser renovada.",
           phase: "commentary",
         },
         previewCommand(
           "preview-chat-reference-command-1",
-          "Get-Content -Raw docs/RULES.md; Write-Output \"`n---FILES---\"; rg --files -g '!node_modules/**'",
+          'rg -n "synchronizeAuthentication|sessionExpired" src src-tauri/src',
         ),
         {
           type: "agentMessage",
           id: "preview-chat-reference-commentary-2",
-          text: "O documento define um padrão alto e também algumas regras verificáveis automaticamente (edition 2024, TypeScript estrito, ausência de `unwrap` / `expect` operacional, contratos explícitos, checks e TODO). Agora vou separar conformidade objetiva de julgamento arquitetural, para não tratar estilo como violação sem evidência.",
+          text: "O fluxo se ramifica entre a restauração inicial e o evento de sessão. Vou consolidar a renovação em um único caminho com identidade verificada.",
           phase: "commentary",
         },
         previewCommand("preview-chat-reference-command-2", "pnpm typecheck", 1_240),
-        previewCommand("preview-chat-reference-command-3", "pnpm biome check src", 910),
+        previewCommand("preview-chat-reference-command-3", "pnpm lint", 910),
         previewCommand("preview-chat-reference-command-4", "cargo fmt -- --check", 420),
         {
           type: "agentMessage",
           id: "preview-chat-reference-commentary-3",
-          text: "Os checks rápidos já passaram: `typecheck`, Biome e `cargo fmt --check`. Os processos mais pesados ainda estão executando em paralelo; há contenção normal do cache/build do Cargo, então vou aguardar os resultados antes de concluir.",
+          text: "As verificações rápidas passaram. A suíte nativa e os testes de estado ainda estão executando; vou aguardar os resultados antes de concluir.",
           phase: "commentary",
         },
         {
@@ -902,13 +902,13 @@ const PREVIEW_CHAT_REFERENCE_THREAD = {
         ),
         previewCommand(
           "preview-chat-reference-command-10",
-          "$f='src-tauri/src/process.rs'; $lines=Get-Content $f; for($i=45;$i -le 90;$i++){\"$i`: $($lines[$i-1])\"}",
+          "pnpm vitest run src/state/accountProfileRefresh.test.ts --reporter=dot",
           26,
         ),
         {
           type: "agentMessage",
           id: "preview-chat-reference-answer",
-          text: "Auditoria rápida concluída. O projeto está em bom nível e os checks atuais passam, mas não segue 100% todas as regras de `docs/RULES.md`.\n\nResultados objetivos:\n\n- `typecheck`: passou.\n- Biome lint: passou em 144 arquivos.\n- Frontend: 50 arquivos de teste, 236 testes, todos passaram.\n- `cargo check --locked`: passou.\n- `cargo clippy -D warnings`: passou.",
+          text: "Correção concluída: a renovação da sessão agora ocorre em um único caminho verificado, e a regressão cobre sucesso, falha e resposta de uma sessão anterior.\n\nVerificações executadas:\n\n- `pnpm typecheck`\n- `pnpm lint`\n- `pnpm test:frontend`\n- `cargo check`, `cargo fmt --check` e `cargo clippy`",
           phase: "finalAnswer",
         },
       ],
@@ -920,8 +920,7 @@ const PREVIEW_TIMELINE_STRESS_ACTIVITY_COUNT = 180;
 const PREVIEW_TIMELINE_FILE_CHANGE_CHUNK_SIZE = 1_000;
 const PREVIEW_TIMELINE_MAX_FILE_COUNT = 100_000;
 const PREVIEW_ACTIVITY_RECONCILIATION_COMMAND_COUNT = 64;
-const PREVIEW_ACTIVITY_RECONCILIATION_COMMAND_ID =
-  "fc_0dcf3068ac8a016b016a8d7160898c87d28d89439526a8ea4b";
+const PREVIEW_ACTIVITY_RECONCILIATION_COMMAND_ID = "call_preview_activity_reconciliation";
 const PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_ID = "activity-reconciliation-newer-commentary";
 const PREVIEW_ACTIVITY_RECONCILIATION_COMMENTARY_TEXT =
   "Mensagem mais recente preservada depois dos comandos antigos.";

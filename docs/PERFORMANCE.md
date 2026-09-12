@@ -156,8 +156,9 @@ actual compiler invocations, and keep the warning enabled.
 
 Measurements use Windows with 28 logical processors. Credential and encoding
 baselines date from 2026-08-31; context boundaries and streamed dispatch were
-measured on 2026-09-05; the current gate, tool catalog, and Code Mode were
-measured on 2026-09-07. These values describe local runs.
+measured on 2026-09-05; the tool catalog and Code Mode were measured on
+2026-09-07; the current gate was measured on 2026-09-11. These values describe
+local runs.
 
 ### Agent startup, continuation, and compaction
 
@@ -295,13 +296,20 @@ not alter the engine capability gate.
 
 | Check | Result |
 | --- | ---: |
-| encoding | 471 valid UTF-8 files |
-| frontend | 107 files; 549 passing tests |
-| main JavaScript bundle | 433.47 kB; 129.02 kB gzip |
-| CSS | 149.17 kB; 26.62 kB gzip |
-| visual QA | 153 passing scenario/viewport cases |
-| Rust | 529 passing; 17 ignored checks; no failures |
+| encoding | 526 valid UTF-8 files |
+| frontend | 118 files; 617 passing tests |
+| main JavaScript bundle | 453.74 kB; 134.14 kB gzip |
+| CSS | 152.01 kB; 27.10 kB gzip |
+| visual QA | 152/153 cases; the 1920x1080 expanded 100k timeline exceeded the P99 frame-work paint guard (13.40 ms vs 12 ms) while application work stayed within contract; the pre-change baseline measured 13.60 ms under the same conditions |
+| Rust | 540 passing; 18 ignored checks; no failures |
 | Cargo, formatting, and Clippy | passed without warnings |
+
+The extreme expanded timeline isolates each case in a fresh target and treats
+application work as the product contract. On the current host, the 1920x1080
+case exceeded only the P99 total-frame-work paint guard in both the current
+build (13.40 ms) and the pre-change baseline (13.60 ms); application work P99
+was 6.70 ms, maximum application work was 8.20 ms, and scrolling produced zero
+long tasks. The guard is unchanged and the measurement stays visible.
 
 ## Regression protection
 

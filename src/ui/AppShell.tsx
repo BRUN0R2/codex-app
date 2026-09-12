@@ -898,7 +898,7 @@ function readPreviewBrowserOpen(): boolean {
   );
 }
 
-function UsageLimitBanner(props: { readonly controller: AppController }) {
+function UsageLimitBanner(props: { readonly controller: Pick<AppController, "rateLimits"> }) {
   const i18n = useI18n();
   const openExternalUrl = useExternalNavigation();
   const messages = () => i18n.messages().shell;
@@ -955,7 +955,12 @@ function formatResetDate(resetAt: number | null, locale: string, soonLabel: stri
   return formatShortDate(resetAt, locale, soonLabel);
 }
 
-function ModelSafetyNotice(props: { readonly controller: AppController }) {
+function ModelSafetyNotice(props: {
+  readonly controller: Pick<
+    AppController,
+    "modelReroute" | "modelVerifications" | "safetyBuffering"
+  >;
+}) {
   const i18n = useI18n();
   const messages = () => i18n.messages().shell;
   const visible = () =>

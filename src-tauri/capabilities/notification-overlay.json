@@ -5,12 +5,10 @@
   "webviews": ["notification-priority-overlay", "notification-transient-overlay"],
   "permissions": [
     "core:default",
+    "core:window:allow-current-monitor",
     "core:window:allow-get-all-windows",
     "core:window:allow-hide",
     "core:window:allow-is-minimized",
-    "core:window:allow-monitor-from-point",
-    "core:window:allow-outer-position",
-    "core:window:allow-outer-size",
     "core:window:allow-set-always-on-top",
     "core:window:allow-set-focus",
     "core:window:allow-set-position",

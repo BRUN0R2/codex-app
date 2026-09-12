@@ -66,6 +66,13 @@ const REQUESTED_SCENARIOS = new Set(
     .map((value) => value.trim())
     .filter((value) => value.length > 0),
 );
+const REQUESTED_VIEWPORTS = new Set(
+  (process.env.CODEX_VISUAL_VIEWPORTS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0),
+);
+const viewportLabel = (viewport) => `${viewport.width}x${viewport.height}`;
 const SCENARIOS = [
   {
     id: "workspace-last-tab-close",
@@ -732,11 +739,11 @@ const SCENARIOS = [
     id: "chat-reference",
     url: CHAT_REFERENCE_PREVIEW_URL,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
-      (button) => button.textContent?.includes("Audit project against RULES.md"),
+      (button) => button.textContent?.includes("Fix expired session renewal"),
     )`,
     prepareExpression: `(() => {
       const threadButton = [...document.querySelectorAll(".thread-main")].find(
-        (button) => button.textContent?.includes("Audit project against RULES.md"),
+        (button) => button.textContent?.includes("Fix expired session renewal"),
       );
       threadButton?.click();
       requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -1282,8 +1289,24 @@ async function main() {
       ...scenario,
       url: rebasePreviewUrl(scenario.url, previewOrigin),
     }));
+    if (REQUESTED_VIEWPORTS.size > 0) {
+      const knownViewports = new Set(
+        scenarios.flatMap((scenario) =>
+          (scenario.viewports ?? VIEWPORTS).map(viewportLabel),
+        ),
+      );
+      const unknownViewports = [...REQUESTED_VIEWPORTS].filter(
+        (viewport) => !knownViewports.has(viewport),
+      );
+      if (unknownViewports.length > 0) {
+        throw new Error(`Unknown visual viewports: ${unknownViewports.join(", ")}`);
+      }
+    }
     for (const scenario of scenarios) {
-      for (const viewport of scenario.viewports ?? VIEWPORTS) {
+      for (const viewport of (scenario.viewports ?? VIEWPORTS).filter(
+        (viewport) =>
+          REQUESTED_VIEWPORTS.size === 0 || REQUESTED_VIEWPORTS.has(viewportLabel(viewport)),
+      )) {
         reports.push(
           await withAuditTarget(browserController, async (targetId) => {
             const auditClient = await browserController.attachToTarget(targetId);
@@ -7347,7 +7370,8 @@ function validateChatReferenceMetrics(metrics, viewport) {
     "the activity does not use #909090",
   );
   assert(
-    metrics.firstCommandText?.startsWith("Executou Get-Content -Raw docs/RULES.md"),
+    metrics.firstCommandText?.startsWith('Executou rg -n "synchronizeAuthentication') &&
+      metrics.firstCommandText?.includes("src-tauri/src"),
     "the first command does not use the canonical semantics",
   );
   assert(metrics.terminalReadText === "Terminal do chat lido", "the terminal-read label is incorrect");
@@ -7367,7 +7391,7 @@ function validateChatReferenceMetrics(metrics, viewport) {
   assert(metrics.workOrderIsCorrect === true, "the visual turn order changed");
   assert(
     metrics.bodyText.includes("Trabalhou por 1 min 34 s") &&
-      metrics.bodyText.includes("Auditoria rápida concluída"),
+      metrics.bodyText.includes("Correção concluída"),
     "the reference turn became incomplete",
   );
 }

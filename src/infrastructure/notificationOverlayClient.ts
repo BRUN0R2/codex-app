@@ -4,7 +4,6 @@ import {
   getAllWindows,
   getCurrentWindow,
   type Monitor,
-  monitorFromPoint,
   type Window as TauriWindow,
 } from "@tauri-apps/api/window";
 
@@ -23,7 +22,8 @@ import {
   resolveNotificationOverlayPosition,
   resolveNotificationOverlaySize,
 } from "./notificationOverlayGeometry";
-import { listenRuntime } from "./runtimeBridge";
+import { invokeRuntime, listenRuntime } from "./runtimeBridge";
+import { decodeTauriMonitor } from "./tauriMonitor";
 
 const MAIN_WINDOW_LABEL = "main";
 const NOTIFICATION_OVERLAY_LABELS = {
@@ -183,14 +183,12 @@ export async function restoreMainApplicationWindow(): Promise<void> {
 }
 
 async function mainWindowMonitor(): Promise<Monitor> {
-  const main = await requiredWindow(MAIN_WINDOW_LABEL);
-  const [position, size] = await Promise.all([main.outerPosition(), main.outerSize()]);
-  const monitor = await monitorFromPoint(
-    position.x + Math.round(size.width / 2),
-    position.y + Math.round(size.height / 2),
-  );
+  // Target the main window explicitly: this code runs in the overlay webview.
+  const monitor = await invokeRuntime<unknown>("plugin:window|current_monitor", {
+    label: MAIN_WINDOW_LABEL,
+  });
   if (monitor === null) throw new Error("The monitor containing the main window is unavailable.");
-  return monitor;
+  return decodeTauriMonitor(monitor);
 }
 
 async function requiredWindow(label: string): Promise<TauriWindow> {

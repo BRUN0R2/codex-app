@@ -679,6 +679,7 @@ async fn complete_cell(
         {
             CompletionDelivery::Delivered => true,
             CompletionDelivery::Buffered => false,
+            CompletionDelivery::Closed => true,
             CompletionDelivery::Rejected(observer) => {
                 finish_rejected_completion(actor, observer, None);
                 true
@@ -712,14 +713,15 @@ fn finish_rejected_completion(
     observer: Option<oneshot::Sender<Result<RuntimeResponse, CodeModeError>>>,
     rejected: Option<RuntimeResponse>,
 ) {
-    let content = rejected
-        .map(|response| match response {
-            RuntimeResponse::Completed { content, .. } => content,
-            RuntimeResponse::Yielded { .. } | RuntimeResponse::Terminated { .. } => {
-                unreachable!("only completion responses enter completion arbitration")
-            }
-        })
-        .unwrap_or_default();
+    // Only completion responses enter completion arbitration. If a future
+    // refactor ever violates that invariant, settle with empty content instead
+    // of aborting the runtime.
+    let content = match rejected {
+        Some(RuntimeResponse::Completed { content, .. }) => content,
+        Some(RuntimeResponse::Yielded { .. } | RuntimeResponse::Terminated { .. }) | None => {
+            Vec::new()
+        }
+    };
     let response = terminated_response(&actor.cell_id, content);
     if let Some(response) = actor.state.finish_termination(response)
         && let Some(observer) = observer

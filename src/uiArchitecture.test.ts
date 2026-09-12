@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-const SOURCE_IMPORT = /(?:from\s+|import\s*)["'][^"']*infrastructure\//u;
+import { hasForbiddenPresentationImport } from "./tooling/presentationBoundary";
 
 describe("UI architecture", () => {
   it("keeps IPC infrastructure outside presentation modules", async () => {
@@ -17,7 +17,7 @@ describe("UI architecture", () => {
 
     for (const sourceFile of sourceFiles) {
       const source = await readFile(sourceFile, "utf8");
-      if (SOURCE_IMPORT.test(source)) {
+      if (hasForbiddenPresentationImport(source)) {
         violations.push(path.relative(process.cwd(), sourceFile));
       }
     }

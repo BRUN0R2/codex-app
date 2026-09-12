@@ -26,8 +26,26 @@ interface AutomationEditorState {
   readonly expectedVersion: number | null;
 }
 
+type AutomationsController = Pick<
+  AppController,
+  | "automationRuns"
+  | "automations"
+  | "automationsLoading"
+  | "createAutomation"
+  | "deleteAutomation"
+  | "markAutomationRunReviewed"
+  | "openThread"
+  | "pendingOperations"
+  | "projects"
+  | "refreshAutomations"
+  | "runAutomationNow"
+  | "unreadAutomationRuns"
+  | "updateAutomation"
+  | "workspace"
+>;
+
 export function AutomationsView(props: {
-  readonly controller: AppController;
+  readonly controller: AutomationsController;
   readonly onOpenSettings: () => void;
   readonly onShowChat: () => void;
 }) {
