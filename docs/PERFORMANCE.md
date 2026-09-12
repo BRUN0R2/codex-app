@@ -296,7 +296,7 @@ not alter the engine capability gate.
 
 | Check | Result |
 | --- | ---: |
-| encoding | 523 valid UTF-8 files |
+| encoding | 524 valid UTF-8 files |
 | frontend | 118 files; 617 passing tests |
 | main JavaScript bundle | 453.79 kB; 134.19 kB gzip |
 | CSS | 152.01 kB; 27.10 kB gzip |

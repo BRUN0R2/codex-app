@@ -28,8 +28,8 @@ import {
   ProfileSettings,
   SettingsNavButton,
   ShortcutsSettings,
-  UsageSettings,
 } from "./settingsSections";
+import { UsageSettings } from "./settingsUsage";
 
 interface SettingsNavigationItem {
   readonly icon: IconName;
