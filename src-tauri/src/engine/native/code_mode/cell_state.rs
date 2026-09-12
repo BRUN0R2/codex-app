@@ -34,6 +34,11 @@ pub(super) enum CompletionDelivery {
     Delivered,
     Buffered,
     Rejected(Option<oneshot::Sender<Result<RuntimeResponse, CodeModeError>>>),
+    /// The observer channel returned an error payload that completion delivery
+    /// never sends. The completion is already committed, so the cell closes
+    /// without delivering instead of aborting the runtime on a type-level
+    /// impossibility.
+    Closed,
 }
 
 pub(super) enum ObservationDelivery {
@@ -150,9 +155,7 @@ impl CellState {
                 *phase = CellPhase::Completed(response);
                 CompletionDelivery::Buffered
             }
-            Err(Err(error)) => {
-                panic!("completion delivery unexpectedly carried an actor error: {error}")
-            }
+            Err(Err(_)) => CompletionDelivery::Closed,
         }
     }
 
@@ -175,9 +178,7 @@ impl CellState {
                     *phase = CellPhase::Completed(response);
                     ObservationDelivery::Buffered
                 }
-                Err(Err(error)) => {
-                    panic!("observation delivery unexpectedly carried an actor error: {error}")
-                }
+                Err(Err(_)) => ObservationDelivery::Closed,
             },
             CellPhase::Terminating { response } => {
                 *phase = CellPhase::Terminating { response };

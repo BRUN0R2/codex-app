@@ -257,30 +257,31 @@ pub(super) struct ChatConversationRequest {
 }
 
 impl ChatConversationRequest {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        conversation_id: Option<String>,
-        parent_message_id: Option<String>,
-        message_id: String,
-        prompt: String,
-        model: String,
-        thinking_effort: Option<ChatThinkingEffort>,
-        timezone: String,
-        timezone_offset_min: i32,
-    ) -> Self {
+    pub fn new(input: ChatConversationInput) -> Self {
         Self {
             action: "next",
-            conversation_id,
-            messages: vec![ChatMessage::user(message_id, prompt)],
-            model,
-            parent_message_id,
+            conversation_id: input.conversation_id,
+            messages: vec![ChatMessage::user(input.message_id, input.prompt)],
+            model: input.model,
+            parent_message_id: input.parent_message_id,
             supported_encodings: ["v1"],
-            thinking_effort,
-            timezone,
-            timezone_offset_min,
+            thinking_effort: input.thinking_effort,
+            timezone: input.timezone,
+            timezone_offset_min: input.timezone_offset_min,
             client_prepare_state: None,
         }
     }
+}
+
+pub(super) struct ChatConversationInput {
+    pub conversation_id: Option<String>,
+    pub parent_message_id: Option<String>,
+    pub message_id: String,
+    pub prompt: String,
+    pub model: String,
+    pub thinking_effort: Option<ChatThinkingEffort>,
+    pub timezone: String,
+    pub timezone_offset_min: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -487,21 +488,21 @@ async fn read_limited(response: Response, maximum_bytes: usize) -> Result<Vec<u8
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatConversationRequest, validate_device_id};
+    use super::{ChatConversationInput, ChatConversationRequest, validate_device_id};
     use crate::engine::ChatThinkingEffort;
 
     #[test]
     fn consumer_request_uses_thinking_effort_and_never_reasoning_mode() {
-        let request = ChatConversationRequest::new(
-            Some("conv_1".into()),
-            Some("msg_parent".into()),
-            "msg_user".into(),
-            "Olá".into(),
-            "gpt-5.6-pro".into(),
-            Some(ChatThinkingEffort::Max),
-            "America/Fortaleza".into(),
-            180,
-        );
+        let request = ChatConversationRequest::new(ChatConversationInput {
+            conversation_id: Some("conv_1".into()),
+            parent_message_id: Some("msg_parent".into()),
+            message_id: "msg_user".into(),
+            prompt: "Olá".into(),
+            model: "gpt-5.6-pro".into(),
+            thinking_effort: Some(ChatThinkingEffort::Max),
+            timezone: "America/Fortaleza".into(),
+            timezone_offset_min: 180,
+        });
         let encoded = serde_json::to_value(request).expect("request should encode");
 
         assert_eq!(encoded["thinking_effort"], "max");
