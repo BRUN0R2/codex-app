@@ -60,7 +60,7 @@ if ($listeners.Count -gt 0) {
     "Port 127.0.0.1:$requestedPort is already in use.",
     "Conflicting processes:",
     ($details -join "`n"),
-    "Para liberar: $($killCommands -join ' ; ')"
+    "To release: $($killCommands -join ' ; ')"
   ) -join "`n"
   throw $message
 }

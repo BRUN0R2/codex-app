@@ -69,7 +69,7 @@ describe("tooling bootstrap contract", () => {
     expect(visualAuditRuntime).toContain('"--no-startup-window"');
     expect(visualAuditScript).toContain("chromiumAuditArguments(browserProfile)");
     expect(visualAuditScript).toMatch(
-      /for \(const viewport of scenario.viewports \?\? VIEWPORTS\) \{\s*reports\.push\(\s*await withAuditTarget\(browserController,/u,
+      /for \(const viewport of \(scenario\.viewports \?\? VIEWPORTS\)\.filter\([\s\S]*?\)\) \{\s*reports\.push\(\s*await withAuditTarget\(browserController,/u,
     );
     expect(visualAuditScript).not.toContain("/json/new");
     expect(visualAuditScript).not.toContain("/json/close");

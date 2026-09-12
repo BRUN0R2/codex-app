@@ -47,8 +47,9 @@ const DELIVERY_BACKGROUND: u8 = 1;
 const DELIVERY_CONSUMED: u8 = 2;
 const MAX_COMMAND_SESSIONS: usize = 32;
 const MAX_POLL_PREVIEW_BYTES: usize = 32 * 1_024;
-// Cooperative Windows tree termination can spend five seconds reaping the direct child.
-// The graceful owner budget strictly dominates it; forced abort then drops the Job Object.
+// Owner-scoped graceful cleanup can spend five seconds reaping the direct child.
+// Its budget is retained for shutdown paths; user interruption aborts the execution task
+// immediately so dropping its Job Object terminates the process tree without waiting here.
 const SESSION_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
 const SESSION_FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -233,6 +234,12 @@ impl CommandSessionManager {
             execute_spawned_command(command, &mut cancellation_receiver).await
         });
         *session.execution_abort.lock() = Some(execution.abort_handle());
+        // A stop request can arrive after the session is registered but before the execution
+        // handle is installed. Re-check the session-owned cancellation state so that this race
+        // cannot fall back to the graceful shutdown path.
+        if *session.cancellation.subscribe().borrow() {
+            session.abort_execution();
+        }
         let worker_session = Arc::clone(&session);
         tokio::spawn(async move {
             let execution = execution
@@ -356,6 +363,11 @@ impl CommandSessionManager {
         let sessions = self.sessions_for_turn(thread_id, turn_id).await;
         for session in sessions {
             session.cancel();
+            // Interruption is a user-visible stop operation. The execution task owns the
+            // child process and its Job Object, so aborting that task immediately closes the
+            // Job Object and terminates the complete process tree. The worker remains alive to
+            // publish the terminal session state and preserve cleanup ownership.
+            session.abort_execution();
         }
     }
 
@@ -1242,6 +1254,52 @@ mod tests {
         );
         assert!(!*other_turn.cancellation.subscribe().borrow());
         assert!(!*other_thread.cancellation.subscribe().borrow());
+    }
+
+    #[tokio::test]
+    async fn turn_cancellation_force_aborts_an_active_execution() {
+        let manager = CommandSessionManager::default();
+        let session = test_session_for_turn("session-active", "thread-a", "turn-a");
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), Arc::clone(&session));
+
+        let execution = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        *session.execution_abort.lock() = Some(execution.abort_handle());
+        let terminal_session = Arc::clone(&session);
+        let worker = tokio::spawn(async move {
+            let result = execution.await;
+            assert!(
+                result.is_err(),
+                "interruption must abort the execution task"
+            );
+            terminal_session
+                .publish_terminal(CommandTerminal {
+                    status: ActivityStatus::Failed,
+                    exit_code: None,
+                    duration_ms: 1,
+                    output: None,
+                    summary: "interrupted".into(),
+                })
+                .await;
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.request_turn_cancellation("thread-a", "turn-a"),
+        )
+        .await
+        .expect("turn cancellation must not wait for graceful command shutdown");
+        assert!(session.forced_abort_requested.load(Ordering::Acquire));
+
+        tokio::time::timeout(Duration::from_secs(1), session.wait_terminal())
+            .await
+            .expect("the command worker must still publish terminal state");
+        worker.await.expect("command worker should finish");
     }
 
     #[tokio::test]

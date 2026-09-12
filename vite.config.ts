@@ -1,18 +1,11 @@
 import { defineConfig } from "vite";
 
+import { resolveDevelopmentPort } from "./src/tooling/developmentPort.ts";
 import { createSolidTransformPlugin } from "./src/tooling/solidTransformPlugin.ts";
 
-const resolvedPort = Number(
-  // biome-ignore lint/complexity/useLiteralKeys: process.env requires bracket access under noPropertyAccessFromIndexSignature.
-  process.env["CODEX_DESKTOP_DEV_PORT"] ?? process.env["VITE_PORT"] ?? 1420,
-);
-const devPort =
-  Number.isFinite(resolvedPort) &&
-  Number.isInteger(resolvedPort) &&
-  resolvedPort > 0 &&
-  resolvedPort <= 65535
-    ? resolvedPort
-    : 1420;
+// biome-ignore lint/complexity/useLiteralKeys: process.env requires bracket access under noPropertyAccessFromIndexSignature.
+const configuredPort = process.env["CODEX_DESKTOP_DEV_PORT"] ?? process.env["VITE_PORT"];
+const devPort = resolveDevelopmentPort(configuredPort);
 
 export default defineConfig({
   // The application controller owns long-lived signals, native subscriptions, and

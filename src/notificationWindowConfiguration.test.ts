@@ -56,6 +56,14 @@ describe("notification window configuration", () => {
       "notification-transient-overlay",
     ]);
   });
+
+  it("declares native window monitor lookup instead of center-point geometry reads", () => {
+    const permissions = decodeArray(field(capability, "permissions"));
+    expect(permissions).toContain("core:window:allow-current-monitor");
+    expect(permissions).not.toContain("core:window:allow-monitor-from-point");
+    expect(permissions).not.toContain("core:window:allow-outer-position");
+    expect(permissions).not.toContain("core:window:allow-outer-size");
+  });
 });
 
 function decodeRecord(value: unknown): Record<string, unknown> {

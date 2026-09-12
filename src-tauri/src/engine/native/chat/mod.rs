@@ -10,7 +10,7 @@ use std::time::Duration;
 use tauri::AppHandle;
 use tokio::sync::{Mutex, RwLock, watch};
 
-use self::client::{ChatClient, ChatConversationRequest};
+use self::client::{ChatClient, ChatConversationInput, ChatConversationRequest};
 use self::models::{ChatModelCatalog, SelectedChatModel};
 use self::stream::{ChatStreamEvent, MAX_MESSAGE_TEXT_BYTES};
 use super::NativeEngineInner;
@@ -170,16 +170,16 @@ pub(super) async fn run_turn(
         .chat_conversation_state(run.thread_id.clone())
         .await?;
     let mut conversation_id = conversation.conversation_id.clone();
-    let request = ChatConversationRequest::new(
-        conversation.conversation_id,
-        conversation.parent_message_id,
-        run.user_message_id,
-        run.prompt,
-        run.model.model().to_string(),
-        run.model.thinking_effort(),
-        run.timezone,
-        run.timezone_offset_min,
-    );
+    let request = ChatConversationRequest::new(ChatConversationInput {
+        conversation_id: conversation.conversation_id,
+        parent_message_id: conversation.parent_message_id,
+        message_id: run.user_message_id,
+        prompt: run.prompt,
+        model: run.model.model().to_string(),
+        thinking_effort: run.model.thinking_effort(),
+        timezone: run.timezone,
+        timezone_offset_min: run.timezone_offset_min,
+    });
     let mut messages = BTreeMap::<String, String>::new();
     let mut message_order = Vec::<String>::new();
     let stream_deltas = StreamNotificationBatcher::new(

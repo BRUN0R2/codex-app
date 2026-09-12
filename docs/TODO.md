@@ -1,5 +1,10 @@
 # TODO
 
+- [ ] Validate both native notification lanes during rapid minimize/restore,
+  background/foreground, and tray hide/show on a Windows desktop with multiple
+  monitors, including a newly available reset while the app remains open.
+  Regressions cover monitor IPC and timed account notifications; they do not
+  exercise live provider changes or the Windows window manager.
 - [ ] Add native Responses API authentication and provider selection for the
   requested [Burn API setup](https://docs.google.com/document/d/1lA0QNNTEmw_bYmqhqSH5JHEFZaoBNkgiH53Y53E_lzE/edit?tab=t.6dyc7xfd1fu),
   using `https://burnapi.burnapi-ai.workers.dev/v1` and the application's vault.

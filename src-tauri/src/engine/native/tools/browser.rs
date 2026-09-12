@@ -165,6 +165,23 @@ enum BrowserManageAction {
     ListTabs,
 }
 
+impl BrowserManageAction {
+    fn simple_operation(self) -> Option<BrowserManageOperation> {
+        match self {
+            Self::Back => Some(BrowserManageOperation::Back),
+            Self::Forward => Some(BrowserManageOperation::Forward),
+            Self::Reload => Some(BrowserManageOperation::Reload),
+            Self::ListTabs => Some(BrowserManageOperation::ListTabs),
+            Self::Open
+            | Self::Navigate
+            | Self::NewTab
+            | Self::SelectTab
+            | Self::CloseTab
+            | Self::CloseBrowser => None,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrowserPointerArgs {
@@ -1570,12 +1587,8 @@ fn normalize_manage(args: BrowserManageArgs) -> Result<BrowserManageOperation, A
             require_none("url", &url)?;
             require_none("browser_tab_id", &browser_tab_id)?;
             require_none("close_tabs", &close_tabs)?;
-            Ok(match action {
-                BrowserManageAction::Back => BrowserManageOperation::Back,
-                BrowserManageAction::Forward => BrowserManageOperation::Forward,
-                BrowserManageAction::Reload => BrowserManageOperation::Reload,
-                BrowserManageAction::ListTabs => BrowserManageOperation::ListTabs,
-                _ => unreachable!("covered browser management action"),
+            action.simple_operation().ok_or_else(|| {
+                AppError::Tool("browser management action has no simple operation".into())
             })
         }
     }

@@ -60,4 +60,11 @@ describe("pinned threads", () => {
     );
     expect(() => loadPinnedThreadIds()).toThrow(/duplicated/u);
   });
+
+  it("rejects a list beyond the supported limit with an English error", () => {
+    const threadIds = Array.from({ length: 129 }, (_, index) => `thread-${index}`);
+    expect(() => savePinnedThreadIds(threadIds)).toThrow(
+      "The pinned-task list exceeds 128 entries.",
+    );
+  });
 });

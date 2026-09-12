@@ -3,7 +3,12 @@ import { For, Show } from "solid-js";
 import { useI18n } from "../i18n/context";
 import type { AppController } from "../state/appController";
 
-export function AgentTabs(props: { readonly controller: AppController }) {
+type AgentTabsController = Pick<
+  AppController,
+  "activeTaskRootId" | "agentThreads" | "currentThread" | "openThread" | "threads"
+>;
+
+export function AgentTabs(props: { readonly controller: AgentTabsController }) {
   const i18n = useI18n();
   const messages = () => i18n.messages().shell;
   const rootThread = () => {

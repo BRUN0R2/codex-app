@@ -85,7 +85,7 @@ function decodeProjectPins(value: unknown): StoredProjectPins {
     throw new Error("The pinned-project list version is unsupported.");
   }
   if (object.projectPaths.length > MAX_PINNED_PROJECTS) {
-    throw new Error(`A lista excede ${MAX_PINNED_PROJECTS} projetos fixados.`);
+    throw new Error(`The pinned-project list exceeds ${MAX_PINNED_PROJECTS} entries.`);
   }
   const seen: string[] = [];
   const projectPaths = object.projectPaths.map((entry, index) => {

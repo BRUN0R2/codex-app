@@ -106,4 +106,11 @@ describe("project pins", () => {
   it("rejects paths that are not absolute on Windows", () => {
     expect(() => togglePinnedProjectPath([], "projects/codex")).toThrow("absolute");
   });
+
+  it("rejects a list beyond the supported limit with an English error", () => {
+    const projectPaths = Array.from({ length: 33 }, (_, index) => `C:\\Projects\\Project${index}`);
+    expect(() => savePinnedProjectPaths(projectPaths)).toThrow(
+      "The pinned-project list exceeds 32 entries.",
+    );
+  });
 });
