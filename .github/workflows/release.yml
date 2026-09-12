@@ -38,6 +38,10 @@ jobs:
         with:
           node-version: 26.4.0
           cache: pnpm
+      - name: Verify GitHub tag signature
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node --experimental-strip-types src/tooling/verifyReleaseTagSignature.ts
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Resolve release metadata
