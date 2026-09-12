@@ -452,6 +452,13 @@ normal task and turn, with no special agent path.
 service tier update together; per-turn overrides do not change persisted
 defaults.
 
+Authentication currently accepts only ChatGPT OAuth. Custom Responses base URLs
+and API-key authentication are not implemented. External setup guides that write
+`openai_base_url` or `model` to `.codex/config.toml` do not configure this app.
+An API-key provider needs native credential storage, explicit provider selection,
+and its own model-capability contract; ChatGPT account and billing endpoints must
+remain bound to ChatGPT credentials.
+
 Valid combinations are:
 
 - `read-only` with `untrusted`;
