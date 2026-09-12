@@ -46,7 +46,7 @@ if (-not (Test-Path -LiteralPath $exePath)) {
 }
 
 if ($SkipLaunch) {
-  Write-Host "Build release executado com sucesso: $exePath"
+  Write-Host "Release build succeeded: $exePath"
   return
 }
 
