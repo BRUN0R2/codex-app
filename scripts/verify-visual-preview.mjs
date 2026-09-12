@@ -732,11 +732,11 @@ const SCENARIOS = [
     id: "chat-reference",
     url: CHAT_REFERENCE_PREVIEW_URL,
     initialReadyExpression: `[...document.querySelectorAll(".thread-main")].some(
-      (button) => button.textContent?.includes("Audit project against RULES.md"),
+      (button) => button.textContent?.includes("Fix expired session renewal"),
     )`,
     prepareExpression: `(() => {
       const threadButton = [...document.querySelectorAll(".thread-main")].find(
-        (button) => button.textContent?.includes("Audit project against RULES.md"),
+        (button) => button.textContent?.includes("Fix expired session renewal"),
       );
       threadButton?.click();
       requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -7347,7 +7347,8 @@ function validateChatReferenceMetrics(metrics, viewport) {
     "the activity does not use #909090",
   );
   assert(
-    metrics.firstCommandText?.startsWith("Executou Get-Content -Raw docs/RULES.md"),
+    metrics.firstCommandText?.startsWith('Executou rg -n "synchronizeAuthentication') &&
+      metrics.firstCommandText?.includes("src-tauri/src"),
     "the first command does not use the canonical semantics",
   );
   assert(metrics.terminalReadText === "Terminal do chat lido", "the terminal-read label is incorrect");
@@ -7367,7 +7368,7 @@ function validateChatReferenceMetrics(metrics, viewport) {
   assert(metrics.workOrderIsCorrect === true, "the visual turn order changed");
   assert(
     metrics.bodyText.includes("Trabalhou por 1 min 34 s") &&
-      metrics.bodyText.includes("Auditoria rápida concluída"),
+      metrics.bodyText.includes("Correção concluída"),
     "the reference turn became incomplete",
   );
 }

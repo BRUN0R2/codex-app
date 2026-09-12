@@ -10,8 +10,7 @@ interface TestSource {
 }
 
 describe("keyed virtual render slots", () => {
-  const commandKey =
-    "16:commandExecution|53:fc_0dcf3068ac8a016b016a8d7160898c87d28d89439526a8ea4b|";
+  const commandKey = "16:commandExecution|36:call_preview_activity_reconciliation|";
   const items = (source: TestSource) =>
     source.entries.map((entry) => ({ key: entry.key, reuseGroup: "commandExecution" }));
   const readKey = (source: TestSource, index: number) => {
