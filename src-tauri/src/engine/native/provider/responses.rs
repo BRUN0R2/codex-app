@@ -1055,6 +1055,25 @@ impl ResponseItem {
         }
     }
 
+    pub(crate) fn migrate_legacy_assistant_input_text(&mut self) -> bool {
+        let Self::Message { role, content, .. } = self else {
+            return false;
+        };
+        if role != "assistant" {
+            return false;
+        }
+        let mut migrated = false;
+        for item in content {
+            if let ResponseContent::InputText { text } = item {
+                *item = ResponseContent::OutputText {
+                    text: std::mem::take(text),
+                };
+                migrated = true;
+            }
+        }
+        migrated
+    }
+
     pub fn function_output(call_id: String, output: String) -> Self {
         Self::function_output_payload(call_id, FunctionCallOutputPayload::Text(output))
     }

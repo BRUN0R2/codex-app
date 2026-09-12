@@ -46,11 +46,13 @@ use self::output_search::OutputSearcher;
 pub(super) use self::output_search::{MAX_OUTPUT_SEARCH_QUERY_BYTES, OutputSearchResponse};
 
 const DATABASE_FILE_NAME: &str = "native-state-profile-v2.sqlite3";
-const DATABASE_SCHEMA_VERSION: i64 = 5;
+const DATABASE_SCHEMA_VERSION: i64 = 7;
 const FIRST_SCHEMA_VERSION: i64 = 1;
 const SCHEMA_VERSION_WITH_OUTPUT_RESOURCES: i64 = 2;
 const SCHEMA_VERSION_WITH_AUTOMATIONS: i64 = 3;
 const SCHEMA_VERSION_WITH_PENDING_TURN_INPUTS: i64 = 4;
+const SCHEMA_VERSION_WITH_MULTI_AGENT: i64 = 5;
+const SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES: i64 = 6;
 const DATABASE_APPLICATION_ID: i64 = 1_128_552_527;
 const DATABASE_TABLES: &str = "agent_messages,agent_threads,app_config,automation_runs,automations,chat_conversations,output_chunks,output_resources,pending_turn_inputs,provider_items,thread_items,threads,turns";
 // Every lineage version below DATABASE_SCHEMA_VERSION must have a cumulative
@@ -111,7 +113,44 @@ const SCHEMA_BASELINE_TABLES: &[(i64, &[&str])] = &[
             "turns",
         ],
     ),
+    (
+        SCHEMA_VERSION_WITH_MULTI_AGENT,
+        &[
+            "agent_messages",
+            "agent_threads",
+            "app_config",
+            "automation_runs",
+            "automations",
+            "chat_conversations",
+            "output_chunks",
+            "output_resources",
+            "pending_turn_inputs",
+            "provider_items",
+            "thread_items",
+            "threads",
+            "turns",
+        ],
+    ),
+    (
+        SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES,
+        &[
+            "agent_messages",
+            "agent_threads",
+            "app_config",
+            "automation_runs",
+            "automations",
+            "chat_conversations",
+            "output_chunks",
+            "output_resources",
+            "pending_turn_inputs",
+            "provider_items",
+            "thread_items",
+            "threads",
+            "turns",
+        ],
+    ),
 ];
+const THREAD_ITEM_COLUMNS: &str = "sequence,turn_id,item_id,payload,provider_item_count";
 const THREAD_COLUMNS: &str = "id,cwd,name,preview,archived,created_at,updated_at,project_path,mode";
 const TURN_COLUMNS: &str =
     "id,thread_id,owner_id,status,model,reasoning_effort,error,created_at,updated_at";
@@ -370,6 +409,14 @@ impl NativeStorage {
                 }
                 if current_version == SCHEMA_VERSION_WITH_PENDING_TURN_INPUTS {
                     migrate_database_v4_to_v5(&mut connection)?;
+                    current_version = SCHEMA_VERSION_WITH_MULTI_AGENT;
+                }
+                if current_version == SCHEMA_VERSION_WITH_MULTI_AGENT {
+                    migrate_database_v5_to_v6(&mut connection)?;
+                    current_version = SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES;
+                }
+                if current_version == SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES {
+                    migrate_database_v6_to_v7(&mut connection)?;
                 }
                 let migrated_version: i64 = connection
                     .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -4279,13 +4326,14 @@ fn initialize_database(connection: &mut Connection) -> Result<(), AppError> {
              CREATE INDEX turns_thread_created ON turns(thread_id, created_at, id);
              CREATE UNIQUE INDEX turns_one_active_per_thread
                  ON turns(thread_id) WHERE status = 'inProgress';
-             CREATE TABLE thread_items (
-                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                 turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-                 item_id TEXT NOT NULL,
-                 payload TEXT NOT NULL,
-                 UNIQUE(turn_id, item_id)
-             );
+              CREATE TABLE thread_items (
+                  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                  turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+                  item_id TEXT NOT NULL,
+                  payload TEXT NOT NULL,
+                  provider_item_count INTEGER CHECK (provider_item_count >= 0),
+                  UNIQUE(turn_id, item_id)
+              );
              CREATE INDEX thread_items_turn_sequence ON thread_items(turn_id, sequence);
              CREATE TABLE output_resources (
                  id TEXT PRIMARY KEY,
@@ -4476,6 +4524,67 @@ fn migrate_database_v4_to_v5(connection: &mut Connection) -> Result<(), AppError
         .execute_batch(MULTI_AGENT_SCHEMA_SQL)
         .map_err(storage_error)?;
     transaction
+        .pragma_update(None, "user_version", SCHEMA_VERSION_WITH_MULTI_AGENT)
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_database_v5_to_v6(connection: &mut Connection) -> Result<(), AppError> {
+    let transaction = begin_write_transaction(connection)?;
+    if database_tables(&transaction)? != DATABASE_TABLES
+        || table_columns(&transaction, "thread_items")? != "sequence,turn_id,item_id,payload"
+    {
+        return Err(AppError::Storage(
+            "schema 5 has invalid thread item columns".into(),
+        ));
+    }
+    transaction
+        .execute_batch(
+            "ALTER TABLE thread_items
+             ADD COLUMN provider_item_count INTEGER CHECK (provider_item_count >= 0);",
+        )
+        .map_err(storage_error)?;
+    // Existing usage has no durable response boundary. Preserve the telemetry,
+    // but leave its boundary unknown until a new confirmed sample is recorded.
+    transaction
+        .pragma_update(
+            None,
+            "user_version",
+            SCHEMA_VERSION_WITH_CONTEXT_USAGE_BOUNDARIES,
+        )
+        .map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
+}
+
+fn migrate_database_v6_to_v7(connection: &mut Connection) -> Result<(), AppError> {
+    let transaction = begin_write_transaction(connection)?;
+    let rows = {
+        let mut statement = transaction
+            .prepare("SELECT sequence, payload FROM provider_items ORDER BY sequence")
+            .map_err(storage_error)?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_error)?
+    };
+    for (sequence, payload) in rows {
+        let mut item = decode_provider_item(&payload, "schema 6 provider item")?;
+        if !item.migrate_legacy_assistant_input_text() {
+            continue;
+        }
+        let payload = encode_provider_item(&item, "migrated provider item")?;
+        let changed = transaction
+            .execute(
+                "UPDATE provider_items SET payload = ?1 WHERE sequence = ?2",
+                params![payload, sequence],
+            )
+            .map_err(storage_error)?;
+        require_changed(changed, "migrated provider item")?;
+    }
+    transaction
         .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
         .map_err(storage_error)?;
     transaction.commit().map_err(storage_error)
@@ -4543,6 +4652,12 @@ fn validate_database(
     if columns != TURN_COLUMNS {
         return Err(AppError::Storage(format!(
             "turn columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
+        )));
+    }
+    let columns = table_columns(connection, "thread_items")?;
+    if columns != THREAD_ITEM_COLUMNS {
+        return Err(AppError::Storage(format!(
+            "thread item columns do not match schema {DATABASE_SCHEMA_VERSION}: {columns}"
         )));
     }
     let columns = pending_turn_input_columns(connection)?;
@@ -4723,8 +4838,8 @@ mod tests {
 
     use super::{
         DATABASE_APPLICATION_ID, DATABASE_SCHEMA_VERSION, MAX_ITEM_BYTES, NativeStorage,
-        begin_write_transaction, encode_bounded, encode_provider_item, initialize_database,
-        open_database_connection,
+        THREAD_ITEM_COLUMNS, begin_write_transaction, encode_bounded, encode_provider_item,
+        initialize_database, open_database_connection,
     };
     use crate::engine::native::automation::{AutomationDraft, AutomationUpdate};
     use crate::engine::native::multi_agent::{
@@ -5669,6 +5784,7 @@ mod tests {
                  DROP TABLE pending_turn_inputs;
                  DROP TABLE agent_messages;
                  DROP TABLE agent_threads;
+                 ALTER TABLE thread_items DROP COLUMN provider_item_count;
                  PRAGMA user_version = 2;",
             )
             .expect("fixture should become schema two");
@@ -5711,9 +5827,10 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE pending_turn_inputs;
-                 DROP TABLE agent_messages;
-                 DROP TABLE agent_threads;
-                 PRAGMA user_version = 3;",
+                  DROP TABLE agent_messages;
+                  DROP TABLE agent_threads;
+                  ALTER TABLE thread_items DROP COLUMN provider_item_count;
+                  PRAGMA user_version = 3;",
             )
             .expect("fixture should become schema three");
         drop(connection);
@@ -5751,8 +5868,9 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE agent_messages;
-                 DROP TABLE agent_threads;
-                 PRAGMA user_version = 4;",
+                  DROP TABLE agent_threads;
+                  ALTER TABLE thread_items DROP COLUMN provider_item_count;
+                  PRAGMA user_version = 4;",
             )
             .expect("fixture should become schema four");
         drop(connection);
@@ -5777,6 +5895,96 @@ mod tests {
             .expect("agent tables should be readable");
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
         assert_eq!(agent_tables, 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn migrates_schema_five_to_context_usage_boundaries_transactionally() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("schema-five.sqlite3");
+        let mut connection = Connection::open(&database_path).expect("database should open");
+        initialize_database(&mut connection).expect("current fixture should initialize");
+        connection
+            .execute_batch(
+                "ALTER TABLE thread_items DROP COLUMN provider_item_count;
+                 PRAGMA user_version = 5;",
+            )
+            .expect("fixture should become schema five");
+        drop(connection);
+
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(database_path.clone())
+            .await
+            .expect("schema five should migrate");
+
+        let connection = Connection::open(database_path).expect("database should reopen");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version should be readable");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+        assert_eq!(
+            super::table_columns(&connection, "thread_items")
+                .expect("thread item columns should be readable"),
+            THREAD_ITEM_COLUMNS
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn migrates_schema_six_legacy_assistant_input_text_transactionally() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = directory.path().join("schema-six.sqlite3");
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(database_path.clone())
+            .await
+            .expect("storage should initialize");
+        let thread = storage
+            .create_thread(
+                directory.path().display().to_string(),
+                None,
+                ConversationMode::Codex,
+            )
+            .await
+            .expect("thread should persist");
+        let legacy_item: ResponseItem = serde_json::from_value(serde_json::json!({
+            "type": "message",
+            "id": "legacy-assistant",
+            "role": "assistant",
+            "content": [{"type": "input_text", "text": "legacy response"}]
+        }))
+        .expect("legacy assistant item should decode");
+        storage
+            .append_provider_item(thread.id.clone(), &legacy_item)
+            .await
+            .expect("legacy provider item should persist");
+        drop(storage);
+
+        let connection = Connection::open(&database_path).expect("database should open");
+        connection
+            .execute_batch("PRAGMA user_version = 6;")
+            .expect("fixture should become schema six");
+        drop(connection);
+
+        let storage = NativeStorage::default();
+        storage
+            .initialize_at(database_path.clone())
+            .await
+            .expect("schema six should migrate");
+        let history = storage
+            .provider_history(thread.id.clone())
+            .await
+            .expect("migrated provider history should load");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].assistant_text().as_deref(),
+            Some("legacy response")
+        );
+
+        let connection = Connection::open(database_path).expect("database should reopen");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version should be readable");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5870,6 +6078,7 @@ mod tests {
                  DROP TABLE agent_threads;
                  DROP TABLE output_chunks;
                  DROP TABLE output_resources;
+                 ALTER TABLE thread_items DROP COLUMN provider_item_count;
                  PRAGMA user_version = 1;",
             )
             .expect("fixture should become schema one");

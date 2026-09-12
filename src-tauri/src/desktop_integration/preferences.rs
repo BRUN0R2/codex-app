@@ -1,8 +1,9 @@
 use std::{
     fs,
-    io::Write,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use crate::{
 
 const APPLICATION_PREFERENCES_FILE_NAME: &str = "application-preferences.json";
 const APPLICATION_PREFERENCES_SCHEMA_VERSION: u8 = 1;
+const LEGACY_APPLICATION_PREFERENCES_SCHEMA_VERSION: u8 = 2;
 const MAX_APPLICATION_PREFERENCES_BYTES: u64 = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -25,6 +27,30 @@ pub struct ApplicationPreferences {
     pub start_with_windows: bool,
     pub start_minimized: bool,
     pub close_to_tray: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplicationPreferencesVersion {
+    schema_version: u8,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyApplicationPreferences {
+    #[serde(rename = "schemaVersion")]
+    _schema_version: u8,
+    start_with_windows: bool,
+    start_minimized: bool,
+    close_to_tray: bool,
+    #[serde(default, rename = "notifications")]
+    _notifications: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LoadedApplicationPreferences {
+    preferences: ApplicationPreferences,
+    should_persist: bool,
 }
 
 impl Default for ApplicationPreferences {
@@ -55,6 +81,18 @@ impl ApplicationPreferences {
     }
 }
 
+impl LegacyApplicationPreferences {
+    fn migrate(self) -> Result<ApplicationPreferences, AppError> {
+        ApplicationPreferences {
+            schema_version: APPLICATION_PREFERENCES_SCHEMA_VERSION,
+            start_with_windows: self.start_with_windows,
+            start_minimized: self.start_minimized,
+            close_to_tray: self.close_to_tray,
+        }
+        .validate()
+    }
+}
+
 #[derive(Debug)]
 pub struct ApplicationPreferencesState {
     preferences: Mutex<ApplicationPreferences>,
@@ -63,7 +101,36 @@ pub struct ApplicationPreferencesState {
 impl ApplicationPreferencesState {
     pub fn load(app: &AppHandle) -> Result<Self, AppError> {
         let path = application_preferences_path(app)?;
-        let preferences = read(&path)?;
+        let loaded = match read(&path) {
+            Ok(loaded) => loaded,
+            Err(error @ AppError::Protocol(_)) => {
+                eprintln!(
+                    "application preferences are invalid; using defaults and preserving the original file: {error}"
+                );
+                let should_persist = match quarantine_invalid_preferences(&path) {
+                    Ok(()) => true,
+                    Err(quarantine_error) => {
+                        eprintln!(
+                            "could not preserve invalid application preferences: {quarantine_error}"
+                        );
+                        false
+                    }
+                };
+                LoadedApplicationPreferences {
+                    preferences: ApplicationPreferences::default(),
+                    should_persist,
+                }
+            }
+            Err(error) => return Err(error),
+        };
+
+        if loaded.should_persist {
+            if let Err(error) = persist(&path, &loaded.preferences) {
+                eprintln!("could not persist migrated application preferences: {error}");
+            }
+        }
+
+        let preferences = loaded.preferences;
         startup::synchronize(app, preferences.start_with_windows)?;
 
         Ok(Self {
@@ -119,9 +186,12 @@ pub fn application_preferences_update(
     Ok(preferences)
 }
 
-fn read(path: &Path) -> Result<ApplicationPreferences, AppError> {
+fn read(path: &Path) -> Result<LoadedApplicationPreferences, AppError> {
     if !path.exists() {
-        return Ok(ApplicationPreferences::default());
+        return Ok(LoadedApplicationPreferences {
+            preferences: ApplicationPreferences::default(),
+            should_persist: false,
+        });
     }
 
     let metadata = fs::metadata(path).map_err(|error| {
@@ -136,13 +206,78 @@ fn read(path: &Path) -> Result<ApplicationPreferences, AppError> {
     let source = fs::read_to_string(path).map_err(|error| {
         AppError::Storage(format!("could not read {}: {error}", path.display()))
     })?;
-    serde_json::from_str::<ApplicationPreferences>(&source)
-        .map_err(|error| {
-            AppError::Protocol(format!(
-                "invalid application preferences JSON structure: {error}"
-            ))
-        })?
-        .validate()
+    parse(&source)
+}
+
+fn parse(source: &str) -> Result<LoadedApplicationPreferences, AppError> {
+    let version = serde_json::from_str::<ApplicationPreferencesVersion>(source)
+        .map_err(invalid_preferences_error)?;
+
+    match version.schema_version {
+        APPLICATION_PREFERENCES_SCHEMA_VERSION => {
+            let preferences = serde_json::from_str::<ApplicationPreferences>(source)
+                .map_err(invalid_preferences_error)?
+                .validate()?;
+            Ok(LoadedApplicationPreferences {
+                preferences,
+                should_persist: false,
+            })
+        }
+        LEGACY_APPLICATION_PREFERENCES_SCHEMA_VERSION => {
+            let preferences = serde_json::from_str::<LegacyApplicationPreferences>(source)
+                .map_err(invalid_preferences_error)?
+                .migrate()?;
+            Ok(LoadedApplicationPreferences {
+                preferences,
+                should_persist: true,
+            })
+        }
+        schema_version => Err(AppError::Protocol(format!(
+            "application preferences schema version {schema_version} is unsupported"
+        ))),
+    }
+}
+
+fn invalid_preferences_error(error: impl std::fmt::Display) -> AppError {
+    AppError::Protocol(format!(
+        "invalid application preferences JSON structure: {error}"
+    ))
+}
+
+fn persist(path: &Path, preferences: &ApplicationPreferences) -> Result<(), AppError> {
+    PreparedPreferencesWrite::prepare(path.to_path_buf(), preferences)?.commit()
+}
+
+fn quarantine_invalid_preferences(path: &Path) -> Result<(), AppError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Storage(format!("{} has no parent directory", path.display())))?;
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| AppError::Storage(format!("{} has no file name", path.display())))?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+
+    for attempt in 0..100u16 {
+        let backup = parent.join(format!("{file_name}.invalid-{timestamp}-{attempt}"));
+        match fs::rename(path, &backup) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(AppError::Storage(format!(
+                    "could not preserve invalid application preferences as {}: {error}",
+                    backup.display()
+                )));
+            }
+        }
+    }
+
+    Err(AppError::Storage(
+        "could not find a unique backup path for invalid application preferences".to_string(),
+    ))
 }
 
 struct PreparedPreferencesWrite {
@@ -217,7 +352,7 @@ fn application_preferences_path(app: &AppHandle) -> Result<PathBuf, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{APPLICATION_PREFERENCES_SCHEMA_VERSION, ApplicationPreferences};
+    use super::{APPLICATION_PREFERENCES_SCHEMA_VERSION, ApplicationPreferences, parse};
 
     #[test]
     fn defaults_keep_background_behaviors_disabled() {
@@ -226,6 +361,56 @@ mod tests {
         assert!(!preferences.start_with_windows);
         assert!(!preferences.start_minimized);
         assert!(!preferences.close_to_tray);
+    }
+
+    #[test]
+    fn current_preferences_do_not_require_migration() {
+        let source = r#"{
+            "schemaVersion": 1,
+            "startWithWindows": true,
+            "startMinimized": true,
+            "closeToTray": false
+        }"#;
+
+        let loaded = parse(source).expect("current preferences should parse");
+
+        assert_eq!(
+            loaded.preferences,
+            ApplicationPreferences {
+                schema_version: APPLICATION_PREFERENCES_SCHEMA_VERSION,
+                start_with_windows: true,
+                start_minimized: true,
+                close_to_tray: false,
+            }
+        );
+        assert!(!loaded.should_persist);
+    }
+
+    #[test]
+    fn legacy_notification_preferences_are_migrated_without_losing_supported_settings() {
+        let source = r#"{
+            "schemaVersion": 2,
+            "startWithWindows": true,
+            "startMinimized": true,
+            "closeToTray": true,
+            "notifications": {
+                "enabled": true,
+                "transientPosition": "bottomRight"
+            }
+        }"#;
+
+        let loaded = parse(source).expect("legacy preferences should migrate");
+
+        assert_eq!(
+            loaded.preferences,
+            ApplicationPreferences {
+                schema_version: APPLICATION_PREFERENCES_SCHEMA_VERSION,
+                start_with_windows: true,
+                start_minimized: true,
+                close_to_tray: true,
+            }
+        );
+        assert!(loaded.should_persist);
     }
 
     #[test]
