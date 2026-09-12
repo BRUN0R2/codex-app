@@ -296,9 +296,9 @@ not alter the engine capability gate.
 
 | Check | Result |
 | --- | ---: |
-| encoding | 520 valid UTF-8 files |
+| encoding | 521 valid UTF-8 files |
 | frontend | 118 files; 617 passing tests |
-| main JavaScript bundle | 453.78 kB; 134.20 kB gzip |
+| main JavaScript bundle | 453.79 kB; 134.20 kB gzip |
 | CSS | 152.01 kB; 27.10 kB gzip |
 | visual QA | 152/153 cases; the 1920x1080 expanded 100k timeline exceeded the P99 frame-work paint guard (13.40 ms vs 12 ms) while application work stayed within contract; the pre-change baseline measured 13.60 ms under the same conditions |
 | Rust | 540 passing; 18 ignored checks; no failures |
