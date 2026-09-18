@@ -100,10 +100,12 @@ path without a shell. Global `PATH` is never modified.
 
 The application enables V8's sandbox with `v8` 152.2.0, so the Windows build
 uses the crate's source path instead of an unchecked prebuilt library. The
-bootstrap script obtains the exact Chromium Rust vendor archive required by that
-crate and copies the locked ICU data from `deno_core_icudata` 0.78.0. Both
-archives and the installed files are SHA-256 validated before the compiler can
-use them.
+bootstrap script obtains the Chromium Rust vendor tree required by that crate
+and copies the locked ICU data from `deno_core_icudata` 0.78.0.
+`scripts/v8-source-manifest.json` pins the crate version, git commit, ICU
+digest, and a canonical digest of the extracted vendor tree. Gitiles `+archive`
+tarballs are a transport only: their gzip bytes are not bit-stable, so bootstrap
+never hashes the download envelope.
 
 The source build requires a real Python 3 interpreter and the Windows `tar`
 command. `scripts/native-build.ps1` puts Cargo's target directory on the same
@@ -114,8 +116,9 @@ are rejected. Native commands should be invoked through `pnpm native:cargo` or
 `pnpm tauri` so this policy is applied consistently.
 
 The V8 source uses Chromium Rust commit
-`afbc96607d0e659715d803cc099607dd1737fc41`; the downloaded archive hash is
-`369d588b75b4f4e5d9321e80d782b30637e52bbecf92778a71c54d2469d3d2b1`.
+`afbc96607d0e659715d803cc099607dd1737fc41`. The installed `chromium_crates_io`
+tree digest is
+`17251aed8caf354c98f15f6da4520566077d3e4e92d03efe235438dfb97ed53f`.
 
 ## Update policy
 

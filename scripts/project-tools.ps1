@@ -188,13 +188,84 @@ function Install-ProjectRipgrep {
   }
 }
 
-function Get-ProjectV8SourcePath {
+function Get-ProjectV8SourceManifest {
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  $manifestPath = Join-Path $ProjectRoot "scripts\v8-source-manifest.json"
+  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "Missing V8 source manifest: $manifestPath"
+  }
+  $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
+    ConvertFrom-Json -Depth 10
+  $rust = $manifest.chromiumRust
+  if ($manifest.schemaVersion -ne 1 -or
+    [string]::IsNullOrWhiteSpace($manifest.crateVersion) -or
+    [string]::IsNullOrWhiteSpace($manifest.icuDataPackage) -or
+    [string]::IsNullOrWhiteSpace($manifest.icuDataSha256) -or
+    $null -eq $rust -or
+    [string]::IsNullOrWhiteSpace($rust.repository) -or
+    [string]::IsNullOrWhiteSpace($rust.commit) -or
+    [string]::IsNullOrWhiteSpace($rust.archiveUrl) -or
+    [string]::IsNullOrWhiteSpace($rust.vendorDirectory) -or
+    [string]::IsNullOrWhiteSpace($rust.manifestSha256) -or
+    [string]::IsNullOrWhiteSpace($rust.markerPath) -or
+    [string]::IsNullOrWhiteSpace($rust.treeSha256)) {
+    throw "Invalid V8 source manifest: $manifestPath"
+  }
+  if ($rust.archiveUrl -notlike "*$($rust.commit)*") {
+    throw "The Chromium Rust archive URL does not pin commit $($rust.commit)."
+  }
+  return $manifest
+}
+
+function Get-ProjectCanonicalTreeSha256 {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Path
+  )
+
+  $root = [System.IO.Path]::GetFullPath($Path).TrimEnd([char[]]@("\", "/"))
+  if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+    throw "Cannot hash missing directory: $root"
+  }
+
+  $files = @(Get-ChildItem -LiteralPath $root -Recurse -File)
+  $lines = [System.Collections.Generic.List[string]]::new()
+  foreach ($file in $files) {
+    $relative = $file.FullName.Substring($root.Length).TrimStart("\").Replace("\", "/")
+    $lines.Add("$relative`n$(Get-ProjectToolSha256 -Path $file.FullName)")
+  }
+  $lines.Sort([System.StringComparer]::Ordinal)
+  $catalog = if ($lines.Count -eq 0) {
+    ""
+  } else {
+    [string]::Join("`n", $lines) + "`n"
+  }
+
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    return ([System.BitConverter]::ToString(
+      $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($catalog))
+    )).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $sha256.Dispose()
+  }
+}
+
+function Get-ProjectV8PackagePath {
+  param(
+    [Parameter(Mandatory)]
+    [string]$PackageName
+  )
+
   $registrySource = Join-Path (Get-ProjectCargoHome) "registry\src"
   if (-not (Test-Path -LiteralPath $registrySource -PathType Container)) {
     throw "Cargo registry source is unavailable: $registrySource. Run 'cargo fetch' first."
   }
 
-  $packageName = "v8-152.2.0"
   $candidates = @(
     foreach ($index in Get-ChildItem -LiteralPath $registrySource -Directory) {
       $package = Join-Path $index.FullName $packageName
@@ -212,37 +283,86 @@ function Get-ProjectV8SourcePath {
   return $candidates[0]
 }
 
+function Get-ProjectV8SourcePath {
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  $manifest = Get-ProjectV8SourceManifest -ProjectRoot $ProjectRoot
+  return Get-ProjectV8PackagePath -PackageName "v8-$($manifest.crateVersion)"
+}
+
 function Get-ProjectV8IcuDataPath {
-  return Join-Path (Get-ProjectV8SourcePath) "third_party\icu\common\icudtl.dat"
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  return Join-Path (Get-ProjectV8SourcePath -ProjectRoot $ProjectRoot) "third_party\icu\common\icudtl.dat"
 }
 
 function Get-ProjectV8RustVendorPath {
-  return Join-Path (Get-ProjectV8SourcePath) "third_party\rust\chromium_crates_io"
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  $manifest = Get-ProjectV8SourceManifest -ProjectRoot $ProjectRoot
+  return Join-Path (Get-ProjectV8SourcePath -ProjectRoot $ProjectRoot) (
+    Join-Path "third_party\rust" $manifest.chromiumRust.vendorDirectory
+  )
 }
 
 function Get-ProjectV8RustVendorMarkerPath {
-  return Join-Path (Get-ProjectV8RustVendorPath) "vendor\icu_calendar_data-v2\build.rs"
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  $manifest = Get-ProjectV8SourceManifest -ProjectRoot $ProjectRoot
+  $path = Get-ProjectV8RustVendorPath -ProjectRoot $ProjectRoot
+  foreach ($part in @($manifest.chromiumRust.markerPath -split "/")) {
+    $path = Join-Path $path $part
+  }
+  return $path
 }
 
 function Get-ProjectV8RustVendorManifestPath {
-  return Join-Path (Get-ProjectV8RustVendorPath) "Cargo.toml"
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  return Join-Path (Get-ProjectV8RustVendorPath -ProjectRoot $ProjectRoot) "Cargo.toml"
 }
 
 function Get-ProjectIcuDataSourcePath {
-  $registrySource = Join-Path (Get-ProjectCargoHome) "registry\src"
-  $packageName = "deno_core_icudata-0.78.0"
-  $candidates = @(
-    foreach ($index in Get-ChildItem -LiteralPath $registrySource -Directory) {
-      $package = Join-Path $index.FullName $packageName
-      if (Test-Path -LiteralPath $package -PathType Container) {
-        Join-Path $package "src\icudtl.dat"
-      }
-    }
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
   )
-  if ($candidates.Count -ne 1 -or -not (Test-Path -LiteralPath $candidates[0] -PathType Leaf)) {
-    throw "Cargo registry does not contain the exact ICU data package $packageName. Run 'cargo fetch' first."
+
+  $manifest = Get-ProjectV8SourceManifest -ProjectRoot $ProjectRoot
+  $package = Get-ProjectV8PackagePath -PackageName $manifest.icuDataPackage
+  $dataPath = Join-Path $package "src\icudtl.dat"
+  if (-not (Test-Path -LiteralPath $dataPath -PathType Leaf)) {
+    throw "Cargo registry does not contain the exact ICU data package $($manifest.icuDataPackage). Run 'cargo fetch' first."
   }
-  return $candidates[0]
+  return $dataPath
+}
+
+function Test-ProjectV8Vendor {
+  param(
+    [Parameter(Mandatory)]
+    [string]$ProjectRoot
+  )
+
+  $manifest = Get-ProjectV8SourceManifest -ProjectRoot $ProjectRoot
+  $vendorManifest = Get-ProjectV8RustVendorManifestPath -ProjectRoot $ProjectRoot
+  return (Test-Path -LiteralPath $vendorManifest -PathType Leaf) -and
+    (Get-ProjectToolSha256 -Path $vendorManifest) -eq $manifest.chromiumRust.manifestSha256 -and
+    (Test-Path -LiteralPath (Get-ProjectV8RustVendorMarkerPath -ProjectRoot $ProjectRoot) -PathType Leaf)
 }
 
 function Test-ProjectV8 {
@@ -251,30 +371,26 @@ function Test-ProjectV8 {
     [string]$ProjectRoot
   )
 
-  $dataPath = Get-ProjectV8IcuDataPath
+  $manifest = Get-ProjectV8SourceManifest -ProjectRoot $ProjectRoot
+  $dataPath = Get-ProjectV8IcuDataPath -ProjectRoot $ProjectRoot
   $dataValid = (Test-Path -LiteralPath $dataPath -PathType Leaf) -and
-    (Get-ProjectToolSha256 -Path $dataPath) -eq
-    "9f48c7f9c7c94d516a14870707e910ab94d75ae640ff6842c4af53276cd26ebe"
-  $vendorManifest = Get-ProjectV8RustVendorManifestPath
-  $vendorValid = (Test-Path -LiteralPath $vendorManifest -PathType Leaf) -and
-    (Get-ProjectToolSha256 -Path $vendorManifest) -eq
-    "5a8e0f8077bbe0b9914b5dbe7d9eb61d6f80404a60754b3d5a03479f328fa8db"
-  return $dataValid -and $vendorValid -and
-    (Test-Path -LiteralPath (Get-ProjectV8RustVendorMarkerPath) -PathType Leaf)
+    (Get-ProjectToolSha256 -Path $dataPath) -eq $manifest.icuDataSha256
+  return $dataValid -and (Test-ProjectV8Vendor -ProjectRoot $ProjectRoot)
 }
 
 function Install-ProjectV8RustVendor {
   param(
     [Parameter(Mandatory)]
-    [string]$DestinationRoot
+    [string]$ProjectRoot
   )
 
-  $archiveUrl = "https://chromium.googlesource.com/chromium/src/third_party/rust/+archive/afbc96607d0e659715d803cc099607dd1737fc41.tar.gz"
-  $expectedArchiveSha256 = "369d588b75b4f4e5d9321e80d782b30637e52bbecf92778a71c54d2469d3d2b1"
+  $manifest = Get-ProjectV8SourceManifest -ProjectRoot $ProjectRoot
+  $rust = $manifest.chromiumRust
   $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("codex-v8-rust-{0}" -f [System.Guid]::NewGuid().ToString("N"))
   $archivePath = Join-Path $stagingDirectory "chromium-rust.tar.gz"
   $extractDirectory = Join-Path $stagingDirectory "extract"
-  $destination = Join-Path $DestinationRoot "chromium_crates_io"
+  $destination = Get-ProjectV8RustVendorPath -ProjectRoot $ProjectRoot
+  $destinationRoot = Split-Path -Parent $destination
   $backupDirectory = $null
 
   New-Item -ItemType Directory -Path $extractDirectory -Force | Out-Null
@@ -282,40 +398,45 @@ function Install-ProjectV8RustVendor {
     $previousProgressPreference = $ProgressPreference
     try {
       $ProgressPreference = "SilentlyContinue"
-      Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath -ErrorAction Stop
+      Invoke-WebRequest -Uri $rust.archiveUrl -OutFile $archivePath -ErrorAction Stop
     } finally {
       $ProgressPreference = $previousProgressPreference
     }
 
-    $archiveSha256 = Get-ProjectToolSha256 -Path $archivePath
-    if ($archiveSha256 -ne $expectedArchiveSha256) {
-      throw "Invalid SHA-256 for the Chromium Rust archive: expected $expectedArchiveSha256, received $archiveSha256."
-    }
-
+    # Gitiles +archive tarballs are not bit-stable across regenerations. Integrity
+    # is the pinned git commit in the URL plus the extracted vendor tree digest.
     $tar = Get-Command tar -ErrorAction Stop
     & $tar.Source -xzf $archivePath -C $extractDirectory
     if ($LASTEXITCODE -ne 0) {
       throw "The Chromium Rust archive could not be extracted."
     }
-    $extractedVendor = Join-Path $extractDirectory "chromium_crates_io"
+    $extractedVendor = Join-Path $extractDirectory $rust.vendorDirectory
     $extractedManifest = Join-Path $extractedVendor "Cargo.toml"
-    if (-not (Test-Path -LiteralPath (Join-Path $extractedVendor "vendor\icu_calendar_data-v2\build.rs") -PathType Leaf) -or
+    $extractedMarker = $extractedVendor
+    foreach ($part in @($rust.markerPath -split "/")) {
+      $extractedMarker = Join-Path $extractedMarker $part
+    }
+    if (-not (Test-Path -LiteralPath $extractedMarker -PathType Leaf) -or
       -not (Test-Path -LiteralPath $extractedManifest -PathType Leaf) -or
-      (Get-ProjectToolSha256 -Path $extractedManifest) -ne
-      "5a8e0f8077bbe0b9914b5dbe7d9eb61d6f80404a60754b3d5a03479f328fa8db") {
+      (Get-ProjectToolSha256 -Path $extractedManifest) -ne $rust.manifestSha256) {
       throw "The Chromium Rust archive does not contain the expected vendored crates."
     }
+    $treeSha256 = Get-ProjectCanonicalTreeSha256 -Path $extractedVendor
+    if ($treeSha256 -ne $rust.treeSha256) {
+      throw "Invalid Chromium Rust vendor tree: expected $($rust.treeSha256), received $treeSha256."
+    }
 
-    New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $destinationRoot -Force | Out-Null
     if (Test-Path -LiteralPath $destination) {
       $backupDirectory = "$destination.invalid-$([System.Guid]::NewGuid().ToString("N"))"
       Move-Item -LiteralPath $destination -Destination $backupDirectory
     }
     try {
       Move-Item -LiteralPath $extractedVendor -Destination $destination
-      if (-not (Test-Path -LiteralPath (Join-Path $destination "vendor\icu_calendar_data-v2\build.rs") -PathType Leaf) -or
-        (Get-ProjectToolSha256 -Path (Join-Path $destination "Cargo.toml")) -ne
-        "5a8e0f8077bbe0b9914b5dbe7d9eb61d6f80404a60754b3d5a03479f328fa8db") {
+      if (-not (Test-Path -LiteralPath (Get-ProjectV8RustVendorMarkerPath -ProjectRoot $ProjectRoot) -PathType Leaf) -or
+        (Get-ProjectToolSha256 -Path (Get-ProjectV8RustVendorManifestPath -ProjectRoot $ProjectRoot)) -ne
+        $rust.manifestSha256 -or
+        (Get-ProjectCanonicalTreeSha256 -Path $destination) -ne $rust.treeSha256) {
         throw "The completed Chromium Rust source installation failed validation."
       }
       if ($null -ne $backupDirectory -and (Test-Path -LiteralPath $backupDirectory)) {
@@ -343,18 +464,17 @@ function Install-ProjectV8 {
     [string]$ProjectRoot
   )
 
-  $dataPath = Get-ProjectV8IcuDataPath
-  $vendorPath = Get-ProjectV8RustVendorPath
+  $manifest = Get-ProjectV8SourceManifest -ProjectRoot $ProjectRoot
+  $dataPath = Get-ProjectV8IcuDataPath -ProjectRoot $ProjectRoot
   if (-not (Test-ProjectV8 -ProjectRoot $ProjectRoot)) {
-    if (-not (Test-Path -LiteralPath (Get-ProjectV8RustVendorMarkerPath) -PathType Leaf)) {
-      Install-ProjectV8RustVendor -DestinationRoot (Split-Path -Parent $vendorPath)
+    if (-not (Test-ProjectV8Vendor -ProjectRoot $ProjectRoot)) {
+      Install-ProjectV8RustVendor -ProjectRoot $ProjectRoot
     }
 
-    $sourcePath = Get-ProjectIcuDataSourcePath
+    $sourcePath = Get-ProjectIcuDataSourcePath -ProjectRoot $ProjectRoot
     $sourceSha256 = Get-ProjectToolSha256 -Path $sourcePath
-    $expectedSha256 = "9f48c7f9c7c94d516a14870707e910ab94d75ae640ff6842c4af53276cd26ebe"
-    if ($sourceSha256 -ne $expectedSha256) {
-      throw "Invalid SHA-256 for $sourcePath`: expected $expectedSha256, received $sourceSha256."
+    if ($sourceSha256 -ne $manifest.icuDataSha256) {
+      throw "Invalid SHA-256 for $sourcePath`: expected $($manifest.icuDataSha256), received $sourceSha256."
     }
     New-Item -ItemType Directory -Path (Split-Path -Parent $dataPath) -Force | Out-Null
     Copy-Item -LiteralPath $sourcePath -Destination $dataPath -Force

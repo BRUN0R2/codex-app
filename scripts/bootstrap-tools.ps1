@@ -33,7 +33,7 @@ if ($CheckOnly) {
   }
   $ripgrepPath = Get-ProjectRipgrepPath -ProjectRoot $projectRoot
   Write-Host "Valid local ripgrep: $ripgrepPath"
-  Write-Host "Valid V8 source ICU data: $(Get-ProjectV8IcuDataPath)"
+  Write-Host "Valid V8 source ICU data: $(Get-ProjectV8IcuDataPath -ProjectRoot $projectRoot)"
   exit 0
 }
 

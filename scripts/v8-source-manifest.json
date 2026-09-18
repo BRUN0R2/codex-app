@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "crateVersion": "152.2.0",
+  "icuDataPackage": "deno_core_icudata-0.78.0",
+  "icuDataSha256": "9f48c7f9c7c94d516a14870707e910ab94d75ae640ff6842c4af53276cd26ebe",
+  "chromiumRust": {
+    "repository": "https://chromium.googlesource.com/chromium/src/third_party/rust",
+    "commit": "afbc96607d0e659715d803cc099607dd1737fc41",
+    "archiveUrl": "https://chromium.googlesource.com/chromium/src/third_party/rust/+archive/afbc96607d0e659715d803cc099607dd1737fc41.tar.gz",
+    "vendorDirectory": "chromium_crates_io",
+    "manifestSha256": "5a8e0f8077bbe0b9914b5dbe7d9eb61d6f80404a60754b3d5a03479f328fa8db",
+    "markerPath": "vendor/icu_calendar_data-v2/build.rs",
+    "treeSha256": "17251aed8caf354c98f15f6da4520566077d3e4e92d03efe235438dfb97ed53f"
+  }
+}
