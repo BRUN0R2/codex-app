@@ -9014,7 +9014,7 @@ function validateUsageSettingsMetrics(metrics, viewport) {
   const expectedPrice = `${formatPlanPriceAmount(previewCurrentPlanPrice(), "pt-BR")} / mês`;
   assert(
     compactVisibleText(metrics.planText).includes(compactVisibleText(expectedPrice)),
-    "the localized monthly price was not displayed",
+    `the localized monthly price was not displayed (expected ${expectedPrice}, planText=${metrics.planText})`,
   );
   assert(
     metrics.autoTopUpText.includes("Até 40% de desconto"),

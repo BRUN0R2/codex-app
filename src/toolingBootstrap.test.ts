@@ -110,7 +110,7 @@ describe("tooling bootstrap contract", () => {
     expect(frontendJob).not.toContain("Install Rust toolchain");
     expect(frontendJob).not.toContain("verify:benchmarks");
     expect(frontendJob).not.toContain("native:cargo");
-    expect(nativeJob).toContain("timeout-minutes: 120");
+    expect(nativeJob).toContain("timeout-minutes: 360");
     expect(nativeJob).toContain("Install Rust toolchain");
     expect(nativeJob).toContain("pnpm verify:benchmarks");
     expect(nativeJob).toContain("pnpm native:cargo check");
