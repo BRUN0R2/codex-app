@@ -145,7 +145,7 @@ describe("tooling bootstrap contract", () => {
   });
 
   it("audits usage settings against the preview plan price formatter", () => {
-    expect(visualAuditScript).toContain("planPriceLabel");
+    expect(visualAuditScript).toContain("formatPlanPriceAmount");
     expect(visualAuditScript).toContain("previewCurrentPlanPrice");
     expect(visualAuditScript).toContain("compactVisibleText");
     expect(visualAuditScript).not.toContain("525,00");

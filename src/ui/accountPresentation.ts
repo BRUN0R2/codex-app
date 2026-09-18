@@ -1,5 +1,6 @@
 import type { AccountPlanType, PlanPriceSnapshot } from "../contracts/types";
 import { formatMessage, type TranslationMessages } from "../i18n/messages";
+import { formatPlanPriceAmount } from "./planPriceFormat";
 
 export function accountPlanName(
   planType: AccountPlanType | null,
@@ -51,10 +52,7 @@ export function planPriceLabel(
   if (price === null) {
     return null;
   }
-  const amount = price.amount / 10 ** price.minorUnitExponent;
-  const formattedPrice = new Intl.NumberFormat(locale, {
-    style: "currency",
-    currency: price.currency,
-  }).format(amount);
-  return formatMessage(messages.perMonth, { price: formattedPrice });
+  return formatMessage(messages.perMonth, {
+    price: formatPlanPriceAmount(price, locale),
+  });
 }
