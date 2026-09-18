@@ -42,7 +42,7 @@ Manifests and lockfiles define the exact versions and dependency graph. See
 - Windows 10 or 11 with WebView2;
 - a ChatGPT account with access to the features in use;
 - PowerShell 7 (`pwsh`);
-- Node.js 26 or later and pnpm 12.4.1 or later;
+- Node.js 26 or later and pnpm 12.4.2 or later;
 - Rust 1.98.0 with the MSVC toolchain.
 - Python 3 and the Windows `tar` command for the sandboxed V8 source build.
 

@@ -4,10 +4,10 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "packageManager": "pnpm@12.4.1",
+  "packageManager": "pnpm@12.4.2",
   "engines": {
     "node": ">=26.0.0",
-    "pnpm": ">=12.4.1"
+    "pnpm": ">=12.4.2"
   },
   "scripts": {
     "dev": "pnpm tools:bootstrap && pwsh -File scripts\\dev-check.ps1",

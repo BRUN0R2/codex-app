@@ -4,7 +4,7 @@
 dependencies. `pnpm-lock.yaml` and `src-tauri/Cargo.lock` lock their complete
 resolution. This document records only purpose and maintenance exceptions.
 
-The JavaScript package manager is pnpm 12.4.1. Node.js 26 and Rust 1.98.0 are
+The JavaScript package manager is pnpm 12.4.2. Node.js 26 and Rust 1.98.0 are
 the supported toolchain baselines used by CI and local verification.
 
 ## Frontend
