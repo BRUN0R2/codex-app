@@ -68,15 +68,15 @@ export function ContextWindowIndicator(props: ContextWindowIndicatorProps): JSX.
             <div class="context-window-popover-percent">{statusLabel()}</div>
             <div class="context-window-popover-tokens">
               {formatMessage(messages().tokensUsed, {
-                used: formatContextTokens(current().usedTokens),
-                total: formatContextTokens(current().usableContextWindow),
+                used: formatContextTokens(current().usedTokens, i18n.locale()),
+                total: formatContextTokens(current().usableContextWindow, i18n.locale()),
               })}
             </div>
             <Show when={current().cachedInputTokens > 0}>
               <div class="context-window-popover-cache">
                 {formatMessage(messages().cacheHit, {
                   percent: Math.round(current().cachedPercent),
-                  cached: formatContextTokens(current().cachedInputTokens),
+                  cached: formatContextTokens(current().cachedInputTokens, i18n.locale()),
                 })}
               </div>
             </Show>

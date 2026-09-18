@@ -13,12 +13,19 @@ param(
   [int]$SettleSeconds = 3,
 
   [Parameter()]
-  [string]$Executable = (Join-Path $PSScriptRoot "..\src-tauri\target\release\codex-desktop-next.exe")
+  [string]$Executable = $null
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "native-build.ps1")
+Initialize-ProjectNativeBuild | Out-Null
+if (-not $PSBoundParameters.ContainsKey("Executable")) {
+  $Executable = Get-ProjectNativeExecutablePath -Profile "release"
+} elseif ([string]::IsNullOrWhiteSpace($Executable)) {
+  throw "Executable must identify an existing release executable."
+}
 $resolvedExecutable = (Resolve-Path -LiteralPath $Executable).Path
 $executableName = [IO.Path]::GetFileNameWithoutExtension($resolvedExecutable)
 $existingProcesses = @(

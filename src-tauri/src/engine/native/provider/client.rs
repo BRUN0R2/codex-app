@@ -258,9 +258,17 @@ impl ProviderResponseSession {
         }
     }
 
-    async fn take_completed_response(&mut self) -> Option<CompletedWebSocketResponse> {
-        let receiver = self.last_response.take()?;
-        receiver.await.ok()
+    async fn take_completed_response(
+        &mut self,
+    ) -> Result<Option<CompletedWebSocketResponse>, AppError> {
+        let Some(receiver) = self.last_response.take() else {
+            return Ok(None);
+        };
+        receiver.await.map(Some).map_err(|_| {
+            AppError::State(
+                "the previous Responses WebSocket response ended before completion".into(),
+            )
+        })
     }
 
     fn reset_websocket_state(&mut self) {
@@ -563,7 +571,7 @@ impl ProviderClient {
         }
 
         let previous_request = session.last_request.take();
-        let previous_response = session.take_completed_response().await;
+        let previous_response = session.take_completed_response().await?;
         let prepared = match continuation {
             ContinuationPolicy::Preserve => request.prepare_websocket_request(
                 previous_request,

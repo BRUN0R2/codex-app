@@ -7,6 +7,7 @@ mod websocket;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tokio::sync::{Mutex, RwLock};
@@ -17,6 +18,7 @@ use self::client::{ContinuationPolicy, ProviderClient};
 pub(crate) use self::models::ModelCatalog;
 pub(crate) use self::models::ModelToolMode;
 use super::auth::{AuthSession, ChatGptAuth};
+use super::diagnostics::RuntimeDiagnostics;
 use crate::engine::AccountPlanType;
 use crate::engine::AccountRateLimitsResponse;
 use crate::engine::AutoTopUpSettingsSnapshot;
@@ -27,6 +29,7 @@ use crate::engine::PlanPriceSnapshot;
 use crate::engine::RateLimitReachedType;
 use crate::engine::RateLimitSnapshot;
 use crate::engine::RateLimitWindow;
+use crate::engine::RuntimeDiagnosticSubsystem;
 use crate::engine::SpendControlLimitSnapshot;
 use crate::engine::UsageResetCredit;
 use crate::engine::UsageResetCreditsResponse;
@@ -97,6 +100,11 @@ pub struct ChatGptCodexProvider {
     catalog: RwLock<Option<CachedModelCatalog>>,
     luna_reserve_available: RwLock<bool>,
     refresh_gate: Mutex<()>,
+}
+
+struct OptionalPlanPriceResolution {
+    plan_prices: Vec<PlanPriceSnapshot>,
+    diagnostic: Option<String>,
 }
 
 struct CachedModelCatalog {
@@ -247,6 +255,7 @@ impl ChatGptCodexProvider {
         &self,
         app: &AppHandle,
         auth: &ChatGptAuth,
+        diagnostics: &RuntimeDiagnostics,
     ) -> Result<AccountRateLimitsResponse, AppError> {
         let session = auth.session(app).await?;
         let payload: UsagePayload = self
@@ -254,13 +263,17 @@ impl ChatGptCodexProvider {
             .get_luna_reserve_usage_json(&session, RATE_LIMIT_BODY_MAX_BYTES)
             .await?;
         let luna_reserve_available = payload.luna_reserve_available(session.account_id())?;
-        let plan_type = payload.plan_type;
         let mut response = payload.into_domain(luna_reserve_available)?;
-        response.plan_price = self
-            .read_plan_price(&session, session.account_id(), plan_type)
-            .await
-            .ok()
-            .flatten();
+        let OptionalPlanPriceResolution {
+            plan_prices,
+            diagnostic,
+        } = resolve_optional_plan_price(
+            self.read_plan_prices(&session, session.account_id()).await,
+        );
+        if let Some(message) = diagnostic {
+            diagnostics.emit(app, RuntimeDiagnosticSubsystem::Provider, message);
+        }
+        response.plan_prices = plan_prices;
         *self.luna_reserve_available.write().await = luna_reserve_available;
         Ok(response)
     }
@@ -331,9 +344,8 @@ impl ChatGptCodexProvider {
                 "credit discount offer",
                 CREDIT_DISCOUNT_OFFER_BODY_MAX_BYTES,
             )
-            .await
-            .ok()
-            .and_then(|offer| offer.maximum_auto_reload_discount_percent());
+            .await?
+            .maximum_auto_reload_discount_percent();
         settings.into_domain(discount)
     }
 
@@ -354,15 +366,12 @@ impl ChatGptCodexProvider {
                 "credit discount offer",
                 CREDIT_DISCOUNT_OFFER_BODY_MAX_BYTES,
             )
-            .await
-            .ok();
+            .await?;
         let body = AutoTopUpEnableWire {
             recharge_threshold,
             recharge_target,
             recharge_monthly_limit,
-            enroll_in_auto_reload_discount: discount_offer
-                .as_ref()
-                .is_some_and(CreditDiscountOfferEnvelopeWire::has_auto_reload_offer),
+            enroll_in_auto_reload_discount: discount_offer.has_auto_reload_offer(),
         };
         let payload: AutoTopUpSettingsWire = self
             .client
@@ -374,11 +383,7 @@ impl ChatGptCodexProvider {
                 AUTO_TOP_UP_SETTINGS_BODY_MAX_BYTES,
             )
             .await?;
-        payload.into_domain(
-            discount_offer
-                .as_ref()
-                .and_then(CreditDiscountOfferEnvelopeWire::maximum_auto_reload_discount_percent),
-        )
+        payload.into_domain(discount_offer.maximum_auto_reload_discount_percent())
     }
 
     pub async fn update_auto_top_up(
@@ -452,12 +457,11 @@ impl ChatGptCodexProvider {
         payload.into_domain(None)
     }
 
-    async fn read_plan_price(
+    async fn read_plan_prices(
         &self,
         session: &AuthSession,
         account_id: &str,
-        plan_type: AccountPlanTypeWire,
-    ) -> Result<Option<PlanPriceSnapshot>, AppError> {
+    ) -> Result<Vec<PlanPriceSnapshot>, AppError> {
         let account_check: AccountsCheckWire = self
             .client
             .get_json(
@@ -480,7 +484,7 @@ impl ChatGptCodexProvider {
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
             })
         else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         let url = format!("{CHECKOUT_PRICING_CONFIG_BASE_URL}/{billing_country}");
         let pricing: CheckoutPricingConfigWire = self
@@ -492,7 +496,7 @@ impl ChatGptCodexProvider {
                 PLAN_PRICE_BODY_MAX_BYTES,
             )
             .await?;
-        pricing.into_plan_price(plan_type)
+        pricing.into_plan_prices()
     }
 
     async fn catalog(
@@ -528,6 +532,23 @@ impl ChatGptCodexProvider {
             fetched_at: Instant::now(),
         });
         Ok(catalog)
+    }
+}
+
+fn resolve_optional_plan_price(
+    result: Result<Vec<PlanPriceSnapshot>, AppError>,
+) -> OptionalPlanPriceResolution {
+    match result {
+        Ok(plan_prices) => OptionalPlanPriceResolution {
+            plan_prices,
+            diagnostic: None,
+        },
+        Err(error) => OptionalPlanPriceResolution {
+            plan_prices: Vec::new(),
+            diagnostic: Some(format!(
+                "optional localized plan pricing failed; usage limits remain available: {error}"
+            )),
+        },
     }
 }
 
@@ -654,7 +675,7 @@ impl UsagePayload {
         Ok(AccountRateLimitsResponse {
             general_rate_limit,
             additional_rate_limits_by_limit_id,
-            plan_price: None,
+            plan_prices: Vec::new(),
             luna_reserve_available,
         })
     }
@@ -1136,53 +1157,108 @@ struct AccountEntitlementWire {
     billing_currency: Option<String>,
 }
 
+/// JSON numbers have no distinct integer type. Provider payloads encode whole
+/// exponents as either `0` or `0.0`; only exact integers are kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WholeJsonInteger(i64);
+
+impl WholeJsonInteger {
+    const fn get(self) -> i64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WholeJsonInteger {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let number = serde_json::Number::deserialize(deserializer)?;
+        whole_i64_from_json_number(&number)
+            .map(Self)
+            .ok_or_else(|| de::Error::custom("expected a whole JSON number"))
+    }
+}
+
+fn whole_i64_from_json_number(number: &serde_json::Number) -> Option<i64> {
+    if let Some(value) = number.as_i64() {
+        return Some(value);
+    }
+    if let Some(value) = number.as_u64() {
+        return i64::try_from(value).ok();
+    }
+    scale_major_decimal(&number.to_string(), 0)
+}
+
+/// Checkout amounts are major currency units. Scale them into integer minor units
+/// using the currency exponent so `39.99` with exponent 2 becomes 3999.
+fn json_number_to_minor_units(number: &serde_json::Number, exponent: u8) -> Option<i64> {
+    if let Some(major) = number.as_i64() {
+        return scale_major_integer(major, exponent);
+    }
+    if let Some(major) = number.as_u64() {
+        return i64::try_from(major)
+            .ok()
+            .and_then(|major| scale_major_integer(major, exponent));
+    }
+    scale_major_decimal(&number.to_string(), exponent)
+}
+
+fn scale_major_integer(major: i64, exponent: u8) -> Option<i64> {
+    if major < 0 {
+        return None;
+    }
+    let scale = 10i64.checked_pow(u32::from(exponent))?;
+    major.checked_mul(scale)
+}
+
+fn scale_major_decimal(text: &str, exponent: u8) -> Option<i64> {
+    let text = text.strip_prefix('+').unwrap_or(text);
+    if text.starts_with('-') || text.is_empty() {
+        return None;
+    }
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if whole.is_empty() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let scale_digits = usize::from(exponent);
+    if fraction.len() > scale_digits && !fraction[scale_digits..].bytes().all(|byte| byte == b'0') {
+        return None;
+    }
+    let mut fraction = fraction.to_owned();
+    if fraction.len() > scale_digits {
+        fraction.truncate(scale_digits);
+    } else {
+        while fraction.len() < scale_digits {
+            fraction.push('0');
+        }
+    }
+    let major: i64 = whole.parse().ok()?;
+    let fraction_part: i64 = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse().ok()?
+    };
+    scale_major_integer(major, exponent)?.checked_add(fraction_part)
+}
+
 #[derive(Debug, Deserialize)]
 struct CheckoutPricingConfigWire {
     currency_config: Option<PricingCurrencyWire>,
 }
 
 impl CheckoutPricingConfigWire {
-    fn into_plan_price(
-        self,
-        plan_type: AccountPlanTypeWire,
-    ) -> Result<Option<PlanPriceSnapshot>, AppError> {
+    fn into_plan_prices(self) -> Result<Vec<PlanPriceSnapshot>, AppError> {
         let Some(config) = self.currency_config else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
-        let plan = match plan_type {
-            AccountPlanTypeWire::Free => config.free,
-            AccountPlanTypeWire::Go => config.go,
-            AccountPlanTypeWire::Plus => config.plus,
-            AccountPlanTypeWire::Prolite => config.prolite,
-            AccountPlanTypeWire::Pro => config.pro,
-            AccountPlanTypeWire::Team
-            | AccountPlanTypeWire::SelfServeBusinessProlite
-            | AccountPlanTypeWire::SelfServeBusinessUsageBased
-            | AccountPlanTypeWire::Business
-            | AccountPlanTypeWire::Ent26
-            | AccountPlanTypeWire::EnterpriseCbpUsageBased
-            | AccountPlanTypeWire::Enterprise
-            | AccountPlanTypeWire::Edu => None,
-        };
-        let Some(amount) = plan
-            .and_then(|plan| plan.month)
-            .and_then(|monthly| monthly.amount)
-            .filter(|amount| *amount > 0)
-        else {
-            return Ok(None);
-        };
-        let currency = config
-            .symbol_code
-            .as_deref()
-            .map(str::trim)
-            .filter(|currency| {
-                currency.len() == 3 && currency.bytes().all(|byte| byte.is_ascii_alphabetic())
-            })
-            .map(str::to_uppercase)
-            .ok_or_else(|| {
-                AppError::Provider("the plan pricing response contains an invalid currency".into())
-            })?;
-        let exponent = config.minor_unit_exponent.unwrap_or(2);
+        let exponent = config
+            .minor_unit_exponent
+            .map(WholeJsonInteger::get)
+            .unwrap_or(2);
         let minor_unit_exponent = u8::try_from(exponent)
             .ok()
             .filter(|value| *value <= 6)
@@ -1191,18 +1267,53 @@ impl CheckoutPricingConfigWire {
                     "the plan pricing response contains an invalid currency exponent".into(),
                 )
             })?;
-        Ok(Some(PlanPriceSnapshot {
-            amount,
-            currency,
-            minor_unit_exponent,
-        }))
+        let currency = config
+            .symbol_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|code| code.len() == 3 && code.bytes().all(|byte| byte.is_ascii_alphabetic()))
+            .map(str::to_uppercase)
+            .ok_or_else(|| {
+                AppError::Provider("the plan pricing response contains an invalid currency".into())
+            })?;
+        let mut prices = Vec::new();
+        for (plan_type, plan) in [
+            (AccountPlanTypeWire::Free, config.free),
+            (AccountPlanTypeWire::Go, config.go),
+            (AccountPlanTypeWire::Plus, config.plus),
+            (AccountPlanTypeWire::Prolite, config.prolite),
+            (AccountPlanTypeWire::Pro, config.pro),
+        ] {
+            let Some(raw_amount) = plan
+                .and_then(|plan| plan.month)
+                .and_then(|monthly| monthly.amount)
+            else {
+                continue;
+            };
+            let amount =
+                json_number_to_minor_units(&raw_amount, minor_unit_exponent).ok_or_else(|| {
+                    AppError::Provider(
+                        "the plan pricing response contains an invalid amount".into(),
+                    )
+                })?;
+            if amount <= 0 {
+                continue;
+            }
+            prices.push(PlanPriceSnapshot {
+                plan_type: plan_type.into_domain(),
+                amount,
+                currency: currency.clone(),
+                minor_unit_exponent,
+            });
+        }
+        Ok(prices)
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct PricingCurrencyWire {
     symbol_code: Option<String>,
-    minor_unit_exponent: Option<i64>,
+    minor_unit_exponent: Option<WholeJsonInteger>,
     free: Option<PlanPricingWire>,
     go: Option<PlanPricingWire>,
     plus: Option<PlanPricingWire>,
@@ -1217,7 +1328,7 @@ struct PlanPricingWire {
 
 #[derive(Debug, Deserialize)]
 struct PlanMonthlyPriceWire {
-    amount: Option<i64>,
+    amount: Option<serde_json::Number>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1263,11 +1374,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        AccountPlanTypeWire, AutoTopUpSettingsWire, CheckoutPricingConfigWire, UsagePayload,
-        UsageResetConsumeWire, UsageResetCreditsWire, model_catalog_cache_is_fresh,
-        model_catalog_etag_changed,
+        AutoTopUpSettingsWire, CheckoutPricingConfigWire, UsagePayload, UsageResetConsumeWire,
+        UsageResetCreditsWire, model_catalog_cache_is_fresh, model_catalog_etag_changed,
+        resolve_optional_plan_price,
     };
-    use crate::engine::contracts::RateLimitReachedType;
+    use crate::engine::contracts::{AccountPlanType, RateLimitReachedType};
+    use crate::error::AppError;
 
     #[test]
     fn rejects_unknown_plan_values_instead_of_falling_back() {
@@ -1596,21 +1708,120 @@ mod tests {
         let payload = serde_json::from_str::<CheckoutPricingConfigWire>(
             r#"{
                 "currency_config": {
-                    "symbol_code": "BRL",
+                    "symbol_code": "USD",
                     "minor_unit_exponent": 2,
-                    "pro": {"month": {"amount": 52500}}
+                    "plus": {"month": {"amount": 20, "tax": "exclusive"}}
                 }
             }"#,
         )
         .expect("pricing payload should decode");
 
-        let price = payload
-            .into_plan_price(AccountPlanTypeWire::Pro)
-            .expect("pricing payload should validate")
-            .expect("Pro price should exist");
+        let prices = payload
+            .into_plan_prices()
+            .expect("pricing payload should validate");
+        assert_eq!(prices.len(), 1);
+        assert_eq!(prices[0].plan_type, AccountPlanType::Plus);
+        assert_eq!(prices[0].amount, 2_000);
+        assert_eq!(prices[0].currency, "USD");
+        assert_eq!(prices[0].minor_unit_exponent, 2);
+    }
 
-        assert_eq!(price.amount, 52_500);
-        assert_eq!(price.currency, "BRL");
-        assert_eq!(price.minor_unit_exponent, 2);
+    #[test]
+    fn converts_provider_major_unit_decimals_for_every_consumer_plan() {
+        let payload = serde_json::from_str::<CheckoutPricingConfigWire>(
+            r#"{"country_code":"BR","currency_config":{"free":{"month":{"tax":"inclusive","amount":0.0}},"go":{"month":{"amount":39.99,"tax":"exclusive"}},"plus":{"month":{"amount":99.9,"tax":"exclusive"},"year":{"amount":83.25,"tax":"exclusive"}},"pro":{"month":{"amount":999.9,"tax":"exclusive"}},"prolite":{"month":{"amount":525.0,"tax":"inclusive"}},"symbol_code":"BRL","minor_unit_exponent":2}}"#,
+        )
+        .expect("Brazil pricing payload should decode");
+
+        let prices = payload
+            .into_plan_prices()
+            .expect("Brazil pricing payload should validate");
+        assert_eq!(
+            prices
+                .iter()
+                .map(|price| (price.plan_type, price.amount))
+                .collect::<Vec<_>>(),
+            [
+                (AccountPlanType::Go, 3_999),
+                (AccountPlanType::Plus, 9_990),
+                (AccountPlanType::Prolite, 52_500),
+                (AccountPlanType::Pro, 99_990),
+            ]
+        );
+        assert_eq!(prices[0].currency, "BRL");
+        assert_eq!(prices[0].minor_unit_exponent, 2);
+    }
+
+    #[test]
+    fn omits_free_plan_price_when_amount_is_zero_float() {
+        let payload = serde_json::from_str::<CheckoutPricingConfigWire>(
+            r#"{
+                "currency_config": {
+                    "symbol_code": "USD",
+                    "minor_unit_exponent": 2,
+                    "free": {"month": {"amount": 0.0}}
+                }
+            }"#,
+        )
+        .expect("zero free-plan amount should decode");
+
+        let prices = payload
+            .into_plan_prices()
+            .expect("zero free-plan amount should be valid");
+        assert!(prices.is_empty());
+    }
+
+    #[test]
+    fn accepts_zero_minor_unit_exponent_encoded_as_a_whole_float() {
+        let payload = serde_json::from_str::<CheckoutPricingConfigWire>(
+            r#"{
+                "currency_config": {
+                    "symbol_code": "JPY",
+                    "minor_unit_exponent": 0.0,
+                    "plus": {"month": {"amount": 3000}}
+                }
+            }"#,
+        )
+        .expect("zero-exponent currency should decode");
+
+        let prices = payload
+            .into_plan_prices()
+            .expect("zero-exponent currency should validate");
+        assert_eq!(prices.len(), 1);
+        assert_eq!(prices[0].amount, 3_000);
+        assert_eq!(prices[0].currency, "JPY");
+        assert_eq!(prices[0].minor_unit_exponent, 0);
+    }
+
+    #[test]
+    fn rejects_amounts_with_more_fractional_digits_than_the_exponent() {
+        let payload = serde_json::from_str::<CheckoutPricingConfigWire>(
+            r#"{
+                "currency_config": {
+                    "symbol_code": "USD",
+                    "minor_unit_exponent": 2,
+                    "plus": {"month": {"amount": 20.991}}
+                }
+            }"#,
+        )
+        .expect("over-precise amount should still decode as JSON");
+
+        let error = payload
+            .into_plan_prices()
+            .expect_err("over-precise amounts must not be rounded");
+        assert!(error.to_string().contains("invalid amount"));
+    }
+
+    #[test]
+    fn keeps_usage_available_when_optional_plan_pricing_fails() {
+        let resolution = resolve_optional_plan_price(Err(AppError::Provider("HTTP 404".into())));
+
+        assert!(resolution.plan_prices.is_empty());
+        assert_eq!(
+            resolution.diagnostic.as_deref(),
+            Some(
+                "optional localized plan pricing failed; usage limits remain available: provider request failed: HTTP 404"
+            )
+        );
     }
 }

@@ -26,6 +26,7 @@ import {
   upsertAutomationRun,
 } from "./automations";
 import type { SessionControllerHost } from "./controllerSupport";
+import { uiError } from "./uiError";
 
 export interface AutomationSessionController {
   readonly automations: Accessor<readonly Automation[]>;
@@ -166,7 +167,7 @@ export function createAutomationSessionController(
   async function deleteAutomationOnce(automationId: string): Promise<boolean> {
     const automation = automations().find((entry) => entry.id === automationId);
     if (automation === undefined) {
-      host.setError("The automation to delete is no longer available.");
+      host.setError(uiError("automationUnavailable"));
       return false;
     }
     const hasActiveRun = automationRuns().some(
@@ -174,7 +175,7 @@ export function createAutomationSessionController(
         run.automationId === automationId && (run.status === "queued" || run.status === "running"),
     );
     if (hasActiveRun) {
-      host.setError("Wait for the active run to finish before deleting this automation.");
+      host.setError(uiError("automationActiveRun"));
       return false;
     }
     try {

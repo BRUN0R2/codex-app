@@ -148,9 +148,10 @@ impl TerminalStreamNormalizer {
         if self.utf8.len() < self.utf8_expected {
             return Ok(());
         }
-        let character = std::str::from_utf8(&self.utf8)
-            .ok()
-            .and_then(|value| value.chars().next());
+        let character = match std::str::from_utf8(&self.utf8) {
+            Ok(value) => value.chars().next(),
+            Err(_) => return self.reject_invalid_utf8(),
+        };
         self.utf8.clear();
         self.utf8_expected = 0;
         match character {

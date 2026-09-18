@@ -823,7 +823,7 @@ async fn execute_locked(
             Ok(action_outcome(manager, context, "wait"))
         }
         BrowserToolOperation::Metrics { limit } => {
-            let metrics = manager.recent_metrics(context.thread_id);
+            let metrics = manager.recent_metrics(context.thread_id)?;
             let output = render_metrics(metrics.into_iter().rev().take(*limit).collect());
             Ok(BrowserOutcome {
                 execution: BrowserToolExecution {

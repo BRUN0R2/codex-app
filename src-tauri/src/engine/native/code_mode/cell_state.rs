@@ -1,7 +1,8 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use tokio::sync::{oneshot, watch};
 
 use super::types::{CellId, CodeModeError, RuntimeResponse};
@@ -224,10 +225,8 @@ impl CellState {
         self.cancellation.send_replace(true);
     }
 
-    fn lock_phase(&self) -> std::sync::MutexGuard<'_, CellPhase> {
-        self.phase
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn lock_phase(&self) -> parking_lot::MutexGuard<'_, CellPhase> {
+        self.phase.lock()
     }
 }
 

@@ -48,7 +48,7 @@ describe("native notification overlay presentation", () => {
           case "plugin:window|monitor_from_point":
             return minimized ? null : secondaryMonitor;
           case "plugin:window|current_monitor":
-            return args !== undefined && "label" in args && args["label"] === "main"
+            return args !== undefined && Reflect.get(args, "label") === "main"
               ? secondaryMonitor
               : primaryMonitor;
           case "plugin:window|is_minimized":

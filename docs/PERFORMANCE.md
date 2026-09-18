@@ -98,6 +98,11 @@ coverage above the composer, expanded contents, retained element identities,
 reversal, resizing, and anchor drift. Each case writes its metrics and screenshot
 to `.artifacts/visual-audit` after measurement.
 
+Before timing, each timeline returns to scroll origin and settles for two animation
+frames after the correctness probes. This keeps pending virtualization work from
+being charged to the measured interval while retaining the complete rendering and
+long-task limits for the controlled scroll.
+
 Navigation probes cover existing and live user messages, both motion
 preferences, manual cancellation, and one-pixel target accuracy. Fractional
 and compressed coordinates also have 100,000-position numerical regressions.

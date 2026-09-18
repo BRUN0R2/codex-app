@@ -49,8 +49,10 @@ describe("context window metrics", () => {
   });
 
   it("keeps useful precision for small token totals without cluttering the model limit", () => {
-    expect(formatContextTokens(8_500)).toBe("8,5k");
-    expect(formatContextTokens(258_400)).toBe("258k");
+    expect(formatContextTokens(8_500, "en")).toBe("8.5k");
+    expect(formatContextTokens(8_500, "pt-BR")).toBe("8,5k");
+    expect(formatContextTokens(258_400, "en")).toBe("258k");
+    expect(formatContextTokens(258_400, "pt-BR")).toBe("258k");
   });
 });
 

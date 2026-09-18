@@ -15,6 +15,7 @@ import { isBrowserPreview } from "../platform/desktopRuntime";
 import type { AppController } from "../state/appController";
 import { createBrowserController } from "../state/browserController";
 import { generalRateLimitSnapshot } from "../state/rateLimits";
+import { formatUiError } from "../state/uiError";
 import { AgentTabs } from "./AgentTabs";
 import { ApprovalCard } from "./ApprovalCard";
 import { applyDesktopAppearance } from "./appearance";
@@ -846,7 +847,7 @@ export function AppShell(props: { readonly controller: AppController }) {
       <Show when={props.controller.error()}>
         {(message) => (
           <div class="error-toast" role="alert">
-            <span>{message()}</span>
+            <span>{formatUiError(message(), i18n.messages().errors)}</span>
             <button
               aria-label={messages().closeError}
               onClick={props.controller.clearError}

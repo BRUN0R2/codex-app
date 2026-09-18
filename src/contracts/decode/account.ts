@@ -255,7 +255,7 @@ export function decodeAccountRateLimitsResponse(value: unknown): AccountRateLimi
     "additionalRateLimitsByLimitId",
     "generalRateLimit",
     "lunaReserveAvailable",
-    "planPrice",
+    "planPrices",
   ]);
   const byId = record(object.additionalRateLimitsByLimitId, "$.additionalRateLimitsByLimitId");
   const additionalRateLimitsByLimitId: Record<string, RateLimitSnapshot> = {};
@@ -283,8 +283,7 @@ export function decodeAccountRateLimitsResponse(value: unknown): AccountRateLimi
     generalRateLimit,
     additionalRateLimitsByLimitId,
     lunaReserveAvailable: booleanValue(object.lunaReserveAvailable, "$.lunaReserveAvailable"),
-    planPrice:
-      object.planPrice === null ? null : decodePlanPriceSnapshot(object.planPrice, "$.planPrice"),
+    planPrices: array(object.planPrices, "$.planPrices", decodePlanPriceSnapshot, 16),
   };
 }
 
@@ -442,12 +441,13 @@ export function decodeRateLimitWindow(value: unknown, path: string): RateLimitWi
 }
 
 export function decodePlanPriceSnapshot(value: unknown, path: string): PlanPriceSnapshot {
-  const object = exactRecord(value, path, ["amount", "currency", "minorUnitExponent"]);
+  const object = exactRecord(value, path, ["amount", "currency", "minorUnitExponent", "planType"]);
   const currency = text(object.currency, `${path}.currency`, 3);
   if (!/^[A-Z]{3}$/u.test(currency)) {
     throw new ContractError(`${path}.currency`, "must be a three-letter ISO currency code");
   }
   return {
+    planType: literal(object.planType, `${path}.planType`, PLAN_TYPES),
     amount: integer(object.amount, `${path}.amount`, 1, Number.MAX_SAFE_INTEGER),
     currency,
     minorUnitExponent: integer(object.minorUnitExponent, `${path}.minorUnitExponent`, 0, 6),

@@ -42,6 +42,7 @@ import {
   saveProjects,
   updateProject as updateProjectRecord,
 } from "./projects";
+import { uiError } from "./uiError";
 
 export interface NavigationSessionController {
   readonly chatGptMode: Accessor<ChatGptMode>;
@@ -257,7 +258,7 @@ export function createNavigationSessionController(
 
   function togglePinnedProject(path: string): void {
     if (!projects().some((project) => pathsEqual(project.path, path))) {
-      setError("The project must be available before it can be pinned.");
+      setError(uiError("projectUnavailable"));
       return;
     }
     try {

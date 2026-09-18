@@ -32,7 +32,7 @@ pub(crate) struct CodeModeSession {
 struct SessionInner {
     stored_values: Mutex<HashMap<String, Value>>,
     cells: Mutex<HashMap<CellId, CellHandle>>,
-    tasks: Mutex<Vec<JoinHandle<()>>>,
+    tasks: Mutex<Vec<JoinHandle<Result<(), CodeModeError>>>>,
     slots: Arc<Semaphore>,
     shutdown: watch::Sender<bool>,
     next_cell_id: AtomicU64,
@@ -106,7 +106,7 @@ impl CodeModeSession {
         }) {
             terminate_runtime(&runtime);
             let RuntimeHandle { thread, .. } = runtime;
-            let _ = tokio::task::spawn_blocking(move || thread.join()).await;
+            join_runtime_thread(thread).await?;
             return Err(error);
         }
 
@@ -178,7 +178,7 @@ impl CodeModeSession {
         handle.state.request_termination().await
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<(), CodeModeError> {
         self.inner.shutdown.send_replace(true);
         let handles = self
             .inner
@@ -193,17 +193,34 @@ impl CodeModeSession {
         }
         let all_slots = Arc::clone(&self.inner.slots)
             .acquire_many_owned(MAX_ACTIVE_CELLS as u32)
-            .await
-            .ok();
+            .await;
         let tasks = std::mem::take(&mut *self.inner.tasks.lock().await);
+        let mut task_error = None;
         for task in tasks {
-            let _ = task.await;
+            if let Err(error) = task.await
+                && task_error.is_none()
+            {
+                task_error = Some(if error.is_cancelled() {
+                    CodeModeError::Runtime(
+                        "Code Mode cell task was canceled during shutdown".into(),
+                    )
+                } else {
+                    CodeModeError::Runtime(format!(
+                        "Code Mode cell task failed during shutdown: {error}"
+                    ))
+                });
+            }
         }
         self.inner.cells.lock().await.clear();
-        drop(all_slots);
+        if let Some(error) = task_error {
+            return Err(error);
+        }
+        all_slots
+            .map(|_| ())
+            .map_err(|_| CodeModeError::Runtime("Code Mode slot semaphore was closed".into()))
     }
 
-    pub async fn cancel_owner(&self, owner_id: &str) {
+    pub async fn cancel_owner(&self, owner_id: &str) -> Result<(), CodeModeError> {
         let handles = self
             .inner
             .cells
@@ -218,9 +235,14 @@ impl CodeModeSession {
         }
         for mut handle in handles {
             if !*handle.closed.borrow() {
-                let _ = handle.closed.changed().await;
+                handle.closed.changed().await.map_err(|_| {
+                    CodeModeError::Runtime(format!(
+                        "Code Mode cell for owner {owner_id} closed without publishing its terminal state"
+                    ))
+                })?;
             }
         }
+        Ok(())
     }
 
     fn ensure_running(&self) -> Result<(), CodeModeError> {
@@ -322,7 +344,7 @@ impl CellCallbacks {
     }
 }
 
-async fn run_cell(mut actor: CellActor) {
+async fn run_cell(mut actor: CellActor) -> Result<(), CodeModeError> {
     let mut callbacks = CellCallbacks::new();
     let mut content = Vec::new();
     let mut content_bytes = 0usize;
@@ -635,11 +657,12 @@ async fn run_cell(mut actor: CellActor) {
     actor.state.tombstone();
     terminate_runtime(&actor.runtime);
     let RuntimeHandle { thread, .. } = actor.runtime;
-    let _ = tokio::task::spawn_blocking(move || thread.join()).await;
+    let thread_result = join_runtime_thread(thread).await;
     if let Some(session) = actor.session.upgrade() {
         session.cells.lock().await.remove(&actor.cell_id);
     }
     actor.closed.send_replace(true);
+    thread_result
 }
 
 async fn complete_cell(
@@ -844,6 +867,13 @@ fn terminate_runtime(runtime: &RuntimeHandle) {
     let _ = runtime.commands.send(RuntimeCommand::Terminate);
     let _ = runtime.control.send(RuntimeControlCommand::Terminate);
     let _ = runtime.isolate.terminate_execution();
+}
+
+async fn join_runtime_thread(thread: std::thread::JoinHandle<()>) -> Result<(), CodeModeError> {
+    tokio::task::spawn_blocking(move || thread.join())
+        .await
+        .map_err(|error| CodeModeError::Runtime(format!("V8 thread join task failed: {error}")))?
+        .map_err(|_| CodeModeError::Runtime("V8 runtime thread panicked during shutdown".into()))
 }
 
 async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {

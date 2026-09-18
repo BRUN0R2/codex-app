@@ -25,7 +25,12 @@ const projectToolsScript = readFileSync(
   new URL("../scripts/project-tools.ps1", import.meta.url),
   "utf8",
 );
-const v8Manifest = readFileSync(new URL("../scripts/v8-manifest.json", import.meta.url), "utf8");
+const documentShell = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+const defaultCatalog = JSON.parse(
+  readFileSync(new URL("./i18n/locales/en.json", import.meta.url), "utf8"),
+) as { locale?: unknown };
+const typeConfiguration = readFileSync(new URL("../tsconfig.json", import.meta.url), "utf8");
+const formatterConfiguration = readFileSync(new URL("../biome.json", import.meta.url), "utf8");
 
 describe("tooling bootstrap contract", () => {
   it("prepares bundled tools before benchmarks can invoke Cargo", () => {
@@ -37,15 +42,27 @@ describe("tooling bootstrap contract", () => {
     expect(benchmarkCommand).toContain("pnpm measure:background-command");
   });
 
-  it("selects matching V8 archives and bindings for native or cross targets", () => {
-    expect(projectToolsScript).toContain('GetEnvironmentVariable("CARGO_BUILD_TARGET")');
-    expect(projectToolsScript).toContain("$targetDefinition.bindingAssetName");
-    expect(v8Manifest).toContain(
-      '"bindingAssetName": "src_binding_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.rs"',
+  it("prepares the exact ICU data required by the sandboxed V8 source build", () => {
+    expect(projectToolsScript).toContain('"v8-152.2.0"');
+    expect(projectToolsScript).toContain('"deno_core_icudata-0.78.0"');
+    expect(projectToolsScript).toContain("icudtl.dat");
+    expect(projectToolsScript).toContain("afbc96607d0e659715d803cc099607dd1737fc41");
+    expect(projectToolsScript).toContain(
+      "369d588b75b4f4e5d9321e80d782b30637e52bbecf92778a71c54d2469d3d2b1",
     );
-    expect(v8Manifest).toContain(
-      '"bindingAssetName": "src_binding_ptrcomp_sandbox_release_aarch64-pc-windows-msvc.rs"',
+    expect(projectToolsScript).toContain(
+      "5a8e0f8077bbe0b9914b5dbe7d9eb61d6f80404a60754b3d5a03479f328fa8db",
     );
+    expect(projectToolsScript).toContain(
+      "9f48c7f9c7c94d516a14870707e910ab94d75ae640ff6842c4af53276cd26ebe",
+    );
+    const nativeBuildScript = readFileSync(
+      new URL("../scripts/native-build.ps1", import.meta.url),
+      "utf8",
+    );
+    expect(nativeBuildScript).toContain("CODEX_NATIVE_BUILD_JOBS");
+    expect(nativeBuildScript).toContain("CARGO_BUILD_JOBS");
+    expect(nativeBuildScript).toContain("Math]::Min(8");
   });
 
   it("does not duplicate push and pull-request checks for feature branches", () => {
@@ -93,5 +110,24 @@ describe("tooling bootstrap contract", () => {
     expect(visualAuditScript).not.toContain(
       "the rapid test did not compare any summary identity between consecutive frames",
     );
+  });
+
+  it("fails native entrypoints when the bundled search tool is unavailable", () => {
+    expect(projectToolsScript).toContain(
+      "throw \"Local ripgrep is missing or invalid. Run 'pnpm tools:bootstrap'.\"",
+    );
+    expect(projectToolsScript).not.toContain("[switch]$Required");
+  });
+
+  it("matches the static document language to the canonical translation catalog", () => {
+    expect(defaultCatalog.locale).toBe("en");
+    expect(documentShell).toContain('<html lang="en">');
+  });
+
+  it("keeps lint and typing gates covering benchmark scripts", () => {
+    const lintKey = "lint";
+    expect(packageManifest.scripts?.[lintKey]).toContain("scripts");
+    expect(typeConfiguration).toContain('"scripts"');
+    expect(formatterConfiguration).toContain("scripts/**/*.ts");
   });
 });

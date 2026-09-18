@@ -7352,7 +7352,7 @@ pre {
 
 .usage-meter-copy,
 .usage-credits > span,
-.usage-plan > span {
+.usage-plan-copy {
   min-width: 0;
 }
 
@@ -7412,8 +7412,62 @@ pre {
 
 .usage-limit-group:last-child .usage-meter-row:last-child,
 .settings-card > .usage-credits:last-child,
-.settings-card > .usage-plan:last-child {
+.settings-card > .usage-plan:last-child,
+.settings-card > .usage-plan-catalog:last-child {
   border-bottom: 0;
+}
+
+.usage-plan-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.usage-plan-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.usage-plan-toggle:hover {
+  color: var(--text);
+}
+
+.usage-plan-catalog {
+  margin: 0;
+  padding: 4px 0 8px;
+  list-style: none;
+}
+
+.usage-plan-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 16px;
+  color: var(--text);
+  font-size: 0.81rem;
+}
+
+.usage-plan-option-name {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.usage-plan-option-name svg {
+  flex-shrink: 0;
+  color: #c6ff00;
+}
+
+.usage-plan-option-price {
+  color: var(--muted);
+  text-align: right;
 }
 
 .usage-meter-status {

@@ -720,6 +720,7 @@ export interface RateLimitSnapshot {
 export type RateLimitUpdateSnapshot = RateLimitSnapshot & { readonly limitId: string };
 
 export interface PlanPriceSnapshot {
+  readonly planType: AccountPlanType;
   readonly amount: number;
   readonly currency: string;
   readonly minorUnitExponent: number;
@@ -728,7 +729,7 @@ export interface PlanPriceSnapshot {
 export interface AccountRateLimitsResponse {
   readonly generalRateLimit: RateLimitSnapshot;
   readonly additionalRateLimitsByLimitId: Readonly<Record<string, RateLimitSnapshot>>;
-  readonly planPrice: PlanPriceSnapshot | null;
+  readonly planPrices: readonly PlanPriceSnapshot[];
   readonly lunaReserveAvailable: boolean;
 }
 

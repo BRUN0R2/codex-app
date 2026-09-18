@@ -42,8 +42,9 @@ Manifests and lockfiles define the exact versions and dependency graph. See
 - Windows 10 or 11 with WebView2;
 - a ChatGPT account with access to the features in use;
 - PowerShell 7 (`pwsh`);
-- Node.js 26 or later and pnpm 11.22 or later;
+- Node.js 26 or later and pnpm 12.4.1 or later;
 - Rust 1.98.0 with the MSVC toolchain.
+- Python 3 and the Windows `tar` command for the sandboxed V8 source build.
 
 The Codex CLI is not required.
 
@@ -61,6 +62,11 @@ On Windows, `codex-app.bat` exposes the debug and release flows. Its preflight
 requires pnpm on `PATH`, installs the locked graph when needed, and repairs
 missing local package commands. PowerShell, Rust, and Tauri remain owned by the
 respective scripts and toolchains.
+
+Native Cargo and Tauri commands run through the project wrappers. They place the
+native target under `CARGO_HOME` by default, normalize paths for the Windows V8
+build, and cap native compilation at eight jobs unless `CODEX_NATIVE_BUILD_JOBS`
+or `CARGO_BUILD_JOBS` explicitly requests another value.
 
 To work on the interface only:
 

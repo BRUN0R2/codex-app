@@ -62,12 +62,12 @@ jobs:
       - name: Verify transitive dependency exception
         run: pnpm verify:transitive
       - name: Check formatting
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+        run: pnpm native:cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
       - name: Check native code
-        run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+        run: pnpm native:cargo check --locked --manifest-path src-tauri/Cargo.toml
       - name: Run Clippy
-        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: pnpm native:cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -CargoTrailingArguments "--deny warnings"
       - name: Test native code
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
+        run: pnpm native:cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
       - name: Build desktop executable
         run: pnpm tauri build --debug --no-bundle

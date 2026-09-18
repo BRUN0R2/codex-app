@@ -31,7 +31,7 @@ function response(
     additionalRateLimitsByLimitId: {
       base_model_inference: reserve,
     },
-    planPrice: null,
+    planPrices: [],
     lunaReserveAvailable,
   };
 }

@@ -22,7 +22,7 @@ function response(usedPercent: number, resetsAt: number): AccountRateLimitsRespo
   return {
     generalRateLimit: rateLimits,
     additionalRateLimitsByLimitId: {},
-    planPrice: null,
+    planPrices: [],
     lunaReserveAvailable: false,
   };
 }

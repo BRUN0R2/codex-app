@@ -3,6 +3,7 @@ import { createI18nController, I18nProvider, useI18n } from "./i18n/context";
 import { shouldRenderWindowChrome } from "./platform/desktopRuntime";
 import { createApplicationWindowController } from "./state/applicationWindowController";
 import { createAppController } from "./state/createAppController";
+import { formatUiError } from "./state/uiError";
 import { AppShell } from "./ui/AppShell";
 import { CodexGlyph } from "./ui/CodexGlyph";
 import { ContentResourceReaderProvider } from "./ui/ContentResourceReader";
@@ -35,6 +36,10 @@ function Application() {
     readThreadOutput: controller.readThreadOutput,
   };
   const windowController = createApplicationWindowController(controller.reportError);
+  const initializationError = () => {
+    const error = controller.error();
+    return error === null ? null : formatUiError(error, i18n.messages().errors);
+  };
 
   return (
     <ExternalNavigationProvider open={controller.openExternalUrl}>
@@ -55,11 +60,7 @@ function Application() {
                     </span>
                     <p class="eyebrow">{i18n.messages().app.initializationEyebrow}</p>
                     <h1>{i18n.messages().app.initializationTitle}</h1>
-                    <p>
-                      {controller.runtimeStatus().message ??
-                        controller.error() ??
-                        i18n.messages().app.missingDiagnostic}
-                    </p>
+                    <p>{initializationError() ?? i18n.messages().app.missingDiagnostic}</p>
                     <button
                       class="primary-button"
                       onClick={() => controller.retryInitialization()}
