@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 interface PackageManifest {
-  scripts?: Record<string, string>;
+  scripts?: {
+    verify?: string;
+  } & Record<string, string>;
 }
 
 const packageManifest = JSON.parse(
@@ -36,7 +38,7 @@ describe("tooling bootstrap contract", () => {
   it("prepares bundled tools before benchmarks can invoke Cargo", () => {
     const benchmarkCommand = packageManifest.scripts?.["verify:benchmarks"];
     const frontendCommand = packageManifest.scripts?.["verify:frontend"];
-    const verifyCommand = packageManifest.scripts?.["verify"];
+    const verifyCommand = packageManifest.scripts?.verify;
 
     expect(benchmarkCommand).toBeDefined();
     expect(benchmarkCommand).toMatch(/^pnpm tools:bootstrap && /);

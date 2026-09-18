@@ -13,6 +13,7 @@ describe("desktop runtime decoders", () => {
     expect(decodeDesktopDialogSelection(["C:\\one", "C:\\two"])).toEqual(["C:\\one", "C:\\two"]);
     expect(decodeDesktopDialogSelection(null)).toBeNull();
     expect(() => decodeDesktopDialogSelection({ path: "C:\\workspace" })).toThrow();
+    expect(() => decodeDesktopDialogSelection([123])).toThrow();
   });
 
   it("rejects malformed boolean, button, and unit responses", () => {

@@ -698,7 +698,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       if (selection === null) {
         return null;
       }
-      if (Array.isArray(selection)) {
+      if (typeof selection !== "string") {
         throw new Error("The picker returned multiple directories for a single selection.");
       }
       return selectProject(selection) ? selection : null;

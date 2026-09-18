@@ -36,6 +36,7 @@ export {
   decodeTurnStartResponse,
 } from "./decode/conversation";
 export {
+  type DesktopDialogSelection,
   decodeDesktopBoolean,
   decodeDesktopDialogButton,
   decodeDesktopDialogSelection,

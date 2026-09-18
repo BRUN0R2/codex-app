@@ -3,7 +3,7 @@ import { array, ContractError, text } from "./primitives";
 const DESKTOP_PATH_MAXIMUM_BYTES = 32 * 1_024;
 const DESKTOP_DIALOG_SELECTION_MAXIMUM_ENTRIES = 1_024;
 
-export type DesktopDialogSelection = string | string[] | null;
+export type DesktopDialogSelection = string | readonly string[] | null;
 
 export function decodeDesktopDialogSelection(value: unknown): DesktopDialogSelection {
   if (value === null) {
@@ -13,14 +13,12 @@ export function decodeDesktopDialogSelection(value: unknown): DesktopDialogSelec
     return text(value, "$", DESKTOP_PATH_MAXIMUM_BYTES);
   }
   if (Array.isArray(value)) {
-    return [
-      ...array(
-        value,
-        "$",
-        (entry, path) => text(entry, path, DESKTOP_PATH_MAXIMUM_BYTES),
-        DESKTOP_DIALOG_SELECTION_MAXIMUM_ENTRIES,
-      ),
-    ];
+    return array(
+      value,
+      "$",
+      (entry, path) => text(entry, path, DESKTOP_PATH_MAXIMUM_BYTES),
+      DESKTOP_DIALOG_SELECTION_MAXIMUM_ENTRIES,
+    );
   }
   throw new ContractError("$", "expected a dialog path, path list, or null");
 }

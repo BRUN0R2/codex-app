@@ -3,6 +3,7 @@ import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
+  type DesktopDialogSelection,
   decodeAccountProfileResponse,
   decodeAccountRateLimitsResponse,
   decodeAccountReadResponse,
@@ -470,7 +471,7 @@ export function openExternalUrl(url: string): Promise<void> {
 export function openDesktopDialog(options: {
   readonly directory: boolean;
   readonly multiple: boolean;
-}): Promise<string | string[] | null> {
+}): Promise<DesktopDialogSelection> {
   if (hasBrowserPreviewRuntime()) {
     return invoke("plugin:dialog|open", { options }).then(decodeDesktopDialogSelection);
   }
