@@ -589,7 +589,7 @@ export function Sidebar(props: SidebarProps) {
               >
                 <div class="account-menu-identity" role="presentation">
                   <AccountAvatar account={props.controller.account()?.account} />
-                  <strong>{accountLabel(props.controller)}</strong>
+                  <strong>{accountLabel(props.controller, i18n.messages().account.default)}</strong>
                 </div>
                 <hr class="account-menu-separator" />
                 <button
@@ -656,7 +656,7 @@ export function Sidebar(props: SidebarProps) {
               <AccountAvatar account={props.controller.account()?.account} />
               <Show when={!props.collapsed}>
                 <span class="account-label">
-                  <strong>{accountLabel(props.controller)}</strong>
+                  <strong>{accountLabel(props.controller, i18n.messages().account.default)}</strong>
                 </span>
               </Show>
             </button>
@@ -1135,8 +1135,8 @@ function matchesThread(
     .includes(query);
 }
 
-function accountLabel(controller: SidebarController): string {
-  return accountDisplayName(controller.account()?.account);
+function accountLabel(controller: SidebarController, fallbackLabel: string): string {
+  return accountDisplayName(controller.account()?.account, fallbackLabel);
 }
 
 function remainingUsageLabel(controller: SidebarController): string {

@@ -24,5 +24,7 @@ if (disclosures.countOpenDescendants(parent) !== DISCLOSURE_COUNT) {
 }
 console.log(JSON.stringify({ disclosureCount: DISCLOSURE_COUNT, retainedBytes }));
 if (retainedBytes > MAXIMUM_RETAINED_BYTES) {
-  throw new Error(`Disclosure state retained ${retainedBytes} bytes, above ${MAXIMUM_RETAINED_BYTES}.`);
+  throw new Error(
+    `Disclosure state retained ${retainedBytes} bytes, above ${MAXIMUM_RETAINED_BYTES}.`,
+  );
 }

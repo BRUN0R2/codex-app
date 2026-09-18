@@ -142,5 +142,8 @@ async fn code_mode_executes_a_multi_file_patch_and_dependent_patch_in_one_cell()
             expected
         );
     }
-    runtime.shutdown().await;
+    runtime
+        .shutdown()
+        .await
+        .expect("Code Mode shutdown should settle every cell");
 }

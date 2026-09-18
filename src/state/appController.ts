@@ -38,6 +38,7 @@ import type {
 } from "../contracts/types";
 import type { ApplicationPreferencesPatch } from "./applicationPreferences";
 import type { QueuedMessage } from "./messageQueue";
+import type { UiError } from "./uiError";
 import type { VisibleThreadTurn, VisibleTurnSequence } from "./visibleTurnSequence";
 
 export interface DiagnosticEntry extends RuntimeDiagnostic {
@@ -60,13 +61,17 @@ export interface ApplicationShellActionRequest {
 
 export type AttachmentSelectionResult =
   | { readonly type: "cancelled" }
-  | { readonly type: "failed"; readonly message: string }
+  | { readonly type: "failed"; readonly error: UiError }
   | { readonly type: "selected"; readonly attachments: readonly Attachment[] };
+
+export type ClipboardImageResult =
+  | { readonly type: "failed"; readonly error: UiError }
+  | { readonly type: "saved"; readonly attachment: Attachment };
 
 export interface AppController {
   readonly account: Accessor<AccountReadResponse | undefined>;
   readonly accountProfile: Accessor<AccountProfileResponse | null>;
-  readonly accountProfileError: Accessor<string | null>;
+  readonly accountProfileError: Accessor<UiError | null>;
   readonly accountProfileLoading: Accessor<boolean>;
   readonly activeTurnId: Accessor<string | null>;
   readonly activeTaskRootId: Accessor<string | null>;
@@ -74,7 +79,7 @@ export interface AppController {
   readonly activePlan: Accessor<PlanItem | null>;
   readonly approvals: Accessor<readonly EngineServerRequest[]>;
   readonly applicationPreferences: Accessor<ApplicationPreferences>;
-  readonly applicationPreferencesError: Accessor<string | null>;
+  readonly applicationPreferencesError: Accessor<UiError | null>;
   readonly applicationPreferencesLoaded: Accessor<boolean>;
   readonly applicationPreferencesSaving: Accessor<boolean>;
   readonly applicationShellActionRequest: Accessor<ApplicationShellActionRequest | null>;
@@ -97,7 +102,7 @@ export interface AppController {
   readonly conversationMode: Accessor<ConversationMode>;
   readonly diagnostics: Accessor<readonly DiagnosticEntry[]>;
   readonly engine: Accessor<EngineStartResponse | null>;
-  readonly error: Accessor<string | null>;
+  readonly error: Accessor<UiError | null>;
   readonly lastTurnFailure: Accessor<string | null>;
   readonly loginPending: Accessor<boolean>;
   readonly models: Accessor<readonly CodexModel[]>;
@@ -111,15 +116,15 @@ export interface AppController {
   readonly projects: Accessor<readonly ProjectRecord[]>;
   readonly queuedMessages: Accessor<readonly QueuedMessage[]>;
   readonly rateLimits: Accessor<AccountRateLimitsResponse | null>;
-  readonly rateLimitsError: Accessor<string | null>;
+  readonly rateLimitsError: Accessor<UiError | null>;
   readonly rateLimitsLoading: Accessor<boolean>;
   readonly usageResets: Accessor<UsageResetCreditsResponse | null>;
-  readonly usageResetsError: Accessor<string | null>;
+  readonly usageResetsError: Accessor<UiError | null>;
   readonly usageResetsLoading: Accessor<boolean>;
   readonly usageResetRedeemingId: Accessor<string | null>;
   readonly notificationUsageSettingsRequest: Accessor<number>;
   readonly autoTopUpSettings: Accessor<AutoTopUpSettingsSnapshot | null>;
-  readonly autoTopUpError: Accessor<string | null>;
+  readonly autoTopUpError: Accessor<UiError | null>;
   readonly autoTopUpLoading: Accessor<boolean>;
   readonly runtimeStatus: Accessor<RuntimeStatus>;
   readonly signedIn: Accessor<boolean>;
@@ -191,7 +196,7 @@ export interface AppController {
   readonly respondToApproval: (requestId: string, decision: ApprovalDecision) => Promise<boolean>;
   readonly runAutomationNow: (automationId: string) => Promise<boolean>;
   readonly saveSetting: (update: ConfigUpdate) => Promise<boolean>;
-  readonly saveClipboardImage: (dataBase64: string) => Promise<Attachment | null>;
+  readonly saveClipboardImage: (dataBase64: string) => Promise<ClipboardImageResult>;
   readonly selectProject: (path: string) => boolean;
   readonly selectProduct: (product: AppProduct) => Promise<boolean>;
   readonly selectChatGptMode: (mode: ChatGptMode) => Promise<boolean>;

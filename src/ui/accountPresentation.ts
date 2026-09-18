@@ -1,5 +1,6 @@
-import type { AccountPlanType } from "../contracts/types";
+import type { AccountPlanType, PlanPriceSnapshot } from "../contracts/types";
 import { formatMessage, type TranslationMessages } from "../i18n/messages";
+import { formatPlanPriceAmount } from "./planPriceFormat";
 
 export function accountPlanName(
   planType: AccountPlanType | null,
@@ -9,30 +10,30 @@ export function accountPlanName(
     case "free":
       return messages.free;
     case "go":
-      return "Go";
+      return messages.go;
     case "plus":
-      return "Plus";
+      return messages.plus;
     case "pro":
-      return "Pro";
+      return messages.pro;
     case "prolite":
-      return "Pro Lite";
+      return messages.prolite;
     case "team":
-      return "Team";
+      return messages.team;
     case "business":
-      return "Business";
+      return messages.business;
     case "edu":
-      return "Education";
+      return messages.education;
     case "ent26":
     case "enterprise":
-      return "Enterprise";
+      return messages.enterprise;
     case "enterprise_cbp_usage_based":
       return messages.enterpriseCredits;
     case "self_serve_business_prolite":
-      return "Business Pro Lite";
+      return messages.businessProLite;
     case "self_serve_business_usage_based":
       return messages.businessCredits;
     case null:
-      return "ChatGPT";
+      return messages.chatgpt;
   }
 }
 
@@ -41,4 +42,17 @@ export function accountPlanLabel(
   messages: TranslationMessages["account"],
 ): string {
   return formatMessage(messages.plan, { name: accountPlanName(planType, messages) });
+}
+
+export function planPriceLabel(
+  price: PlanPriceSnapshot | null,
+  locale: string,
+  messages: Pick<TranslationMessages["settings"], "perMonth">,
+): string | null {
+  if (price === null) {
+    return null;
+  }
+  return formatMessage(messages.perMonth, {
+    price: formatPlanPriceAmount(price, locale),
+  });
 }

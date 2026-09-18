@@ -23,7 +23,7 @@ function response(): AccountRateLimitsResponse {
   return {
     generalRateLimit: primary,
     additionalRateLimitsByLimitId: {},
-    planPrice: { amount: 2000, currency: "USD", minorUnitExponent: 2 },
+    planPrices: [{ planType: "pro", amount: 2000, currency: "USD", minorUnitExponent: 2 }],
     lunaReserveAvailable: false,
   };
 }
@@ -52,7 +52,7 @@ describe("atualizações incrementais de limite de uso", () => {
       ...primary,
       primary: update.primary,
     });
-    expect(merged.planPrice).toEqual(response().planPrice);
+    expect(merged.planPrices).toEqual(response().planPrices);
   });
 
   it("insere um novo bucket sem substituir o limite principal", () => {

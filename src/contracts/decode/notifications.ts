@@ -23,6 +23,8 @@ import {
   text,
 } from "./primitives";
 
+const MAX_LOGIN_ERROR_BYTES = 4 * 1_024;
+
 export function decodeEngineNotification(value: unknown): EngineNotification {
   const root = exactRecord(value, "$", ["method", "params"]);
   const method = text(root.method, "$.method", 128);
@@ -35,7 +37,7 @@ export function decodeEngineNotification(value: unknown): EngineNotification {
         params: {
           loginId: identifier(params.loginId, "$.params.loginId"),
           success: booleanValue(params.success, "$.params.success"),
-          error: nullableText(params.error, "$.params.error"),
+          error: nullableText(params.error, "$.params.error", MAX_LOGIN_ERROR_BYTES),
         },
       };
     }

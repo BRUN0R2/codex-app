@@ -1220,7 +1220,7 @@ pub struct SpendControlLimitSnapshot {
     pub resets_at: i64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountPlanType {
     Free,
@@ -1267,13 +1267,14 @@ pub struct RateLimitSnapshot {
 pub struct AccountRateLimitsResponse {
     pub general_rate_limit: RateLimitSnapshot,
     pub additional_rate_limits_by_limit_id: BTreeMap<String, RateLimitSnapshot>,
-    pub plan_price: Option<PlanPriceSnapshot>,
+    pub plan_prices: Vec<PlanPriceSnapshot>,
     pub luna_reserve_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanPriceSnapshot {
+    pub plan_type: AccountPlanType,
     pub amount: i64,
     pub currency: String,
     pub minor_unit_exponent: u8,

@@ -8,7 +8,21 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+. (Join-Path $PSScriptRoot "native-build.ps1")
 . (Join-Path $PSScriptRoot "project-tools.ps1")
+Initialize-ProjectNativeBuild | Out-Null
+
+if (-not $CheckOnly) {
+  Push-Location $projectRoot
+  try {
+    & cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+    if ($LASTEXITCODE -ne 0) {
+      throw "cargo fetch failed with exit code $LASTEXITCODE."
+    }
+  } finally {
+    Pop-Location
+  }
+}
 
 if ($CheckOnly) {
   if (-not (Test-ProjectRipgrep -ProjectRoot $projectRoot)) {

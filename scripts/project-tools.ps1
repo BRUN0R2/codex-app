@@ -306,6 +306,7 @@ function Install-ProjectV8 {
       throw "Invalid SHA-256 for $($definition.BindingAssetName): expected $($definition.BindingSha256), received $bindingSha256."
     }
 
+    New-Item -ItemType Directory -Path $toolsRoot -Force | Out-Null
     if (Test-Path -LiteralPath $paths.Root) {
       $backupDirectory = "$($paths.Root).invalid-$([System.Guid]::NewGuid().ToString("N"))"
       Move-Item -LiteralPath $paths.Root -Destination $backupDirectory
@@ -338,20 +339,12 @@ function Install-ProjectV8 {
 function Enable-ProjectTools {
   param(
     [Parameter(Mandatory)]
-    [string]$ProjectRoot,
-
-    [Parameter()]
-    [switch]$Required
+    [string]$ProjectRoot
   )
 
   $resolvedProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
   if (-not (Test-ProjectRipgrep -ProjectRoot $resolvedProjectRoot)) {
-    $message = "Local ripgrep is missing or invalid. Run 'pnpm tools:bootstrap'."
-    if ($Required) {
-      throw $message
-    }
-    Write-Host $message
-    return $null
+    throw "Local ripgrep is missing or invalid. Run 'pnpm tools:bootstrap'."
   }
 
   $executablePath = Get-ProjectRipgrepPath -ProjectRoot $resolvedProjectRoot

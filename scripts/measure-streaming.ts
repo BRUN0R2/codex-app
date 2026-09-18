@@ -11,6 +11,7 @@ const COMMAND_DELTA_COUNT: number = 128;
 const SAMPLE_COUNT: number = 7;
 const TARGET_ITEM_ID = `message-${ITEM_COUNT - 1}`;
 const TARGET_COMMAND_ID = "command-live-output";
+const TARGET_TURN_ID = "benchmark-turn";
 
 const initialItems: readonly VisibleThreadItem[] = Array.from(
   { length: ITEM_COUNT },
@@ -21,12 +22,16 @@ const initialItems: readonly VisibleThreadItem[] = Array.from(
     phase: null,
   }),
 );
-const deltas: readonly StreamDelta[] = Array.from({ length: DELTA_COUNT }, () => ({
-  kind: "agentText",
-  threadId: "benchmark-thread",
-  itemId: TARGET_ITEM_ID,
-  delta: "x",
-}));
+const deltas: readonly Extract<StreamDelta, { kind: "agentText" }>[] = Array.from(
+  { length: DELTA_COUNT },
+  () => ({
+    kind: "agentText",
+    threadId: "benchmark-thread",
+    turnId: TARGET_TURN_ID,
+    itemId: TARGET_ITEM_ID,
+    delta: "x",
+  }),
+);
 const commandInitialItems: readonly VisibleThreadItem[] = [
   ...initialItems.slice(0, -1),
   {
@@ -45,11 +50,12 @@ const commandInitialItems: readonly VisibleThreadItem[] = [
   },
 ];
 const commandChunk = "x".repeat(COMMAND_DELTA_BYTES);
-const commandDeltas: readonly StreamDelta[] = Array.from(
+const commandDeltas: readonly Extract<StreamDelta, { kind: "commandOutput" }>[] = Array.from(
   { length: COMMAND_DELTA_COUNT },
   () => ({
     kind: "commandOutput",
     threadId: "benchmark-thread",
+    turnId: TARGET_TURN_ID,
     itemId: TARGET_COMMAND_ID,
     stream: "stdout",
     operation: { type: "append", delta: commandChunk },
@@ -92,8 +98,7 @@ const commandFramed = measure(() => {
   ]);
   return readCommandLength(items);
 }, COMMAND_DELTA_BYTES * COMMAND_DELTA_COUNT);
-const commandSpeedup =
-  commandSequential.medianMilliseconds / commandFramed.medianMilliseconds;
+const commandSpeedup = commandSequential.medianMilliseconds / commandFramed.medianMilliseconds;
 
 if (speedup < 2) {
   throw new Error(
@@ -131,7 +136,10 @@ process.stdout.write(
   )}\n`,
 );
 
-function measure(operation: () => number, expectedChecksumPerRun: number): {
+function measure(
+  operation: () => number,
+  expectedChecksumPerRun: number,
+): {
   readonly medianMilliseconds: number;
 } {
   const durations: number[] = [];

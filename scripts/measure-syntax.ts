@@ -1,8 +1,7 @@
 import { performance } from "node:perf_hooks";
-
-import type { SyntaxLanguage } from "../src/ui/syntax/contracts.ts";
 import { createDiffDocument } from "../src/ui/diffDocument.ts";
 import { calculateDiffVirtualRange, DIFF_ROW_HEIGHT_PX } from "../src/ui/diffViewport.ts";
+import type { SyntaxLanguage } from "../src/ui/syntax/contracts.ts";
 import { DiffSyntaxHighlighter } from "../src/ui/syntax/diffHighlighter.ts";
 import { highlightCodeToHtml } from "../src/ui/syntax/render.ts";
 import { MARKDOWN_SYNTAX_LIMITS, tokenizeSyntaxBlock } from "../src/ui/syntax/tokenizer.ts";
@@ -41,9 +40,7 @@ const REPRESENTATIVE_CASES: readonly {
   { language: "yaml", code: "service:\n  enabled: true\n  image: codex:latest" },
 ];
 
-const RUST_REPRESENTATIVE_CASE = REPRESENTATIVE_CASES.find(
-  (sample) => sample.language === "rust",
-);
+const RUST_REPRESENTATIVE_CASE = REPRESENTATIVE_CASES.find((sample) => sample.language === "rust");
 if (!RUST_REPRESENTATIVE_CASE) {
   throw new Error("The representative case set must include a Rust sample.");
 }
