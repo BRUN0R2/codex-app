@@ -40,7 +40,7 @@ const WINDOWS_POWERSHELL_SESSION_SETUP: &str = concat!(
 );
 
 #[cfg(windows)]
-static POWERSHELL_VERSION: OnceCell<String> = OnceCell::const_new();
+static POWERSHELL_VERSION: OnceCell<Option<String>> = OnceCell::const_new();
 
 #[derive(Clone, Copy)]
 pub(crate) enum ShellProfile {
@@ -60,15 +60,13 @@ pub(crate) const fn shell_name() -> &'static str {
 }
 
 #[cfg(windows)]
-pub(crate) async fn shell_version() -> Result<Option<String>, AppError> {
-    cached_powershell_version(&POWERSHELL_VERSION, detect_powershell_version)
-        .await
-        .map(Some)
+pub(crate) async fn shell_version() -> Option<String> {
+    cached_powershell_version(&POWERSHELL_VERSION, detect_powershell_version).await
 }
 
 #[cfg(not(windows))]
-pub(crate) async fn shell_version() -> Result<Option<String>, AppError> {
-    Ok(None)
+pub(crate) async fn shell_version() -> Option<String> {
+    None
 }
 
 #[cfg(windows)]
@@ -102,14 +100,17 @@ async fn detect_powershell_version() -> Result<String, AppError> {
 
 #[cfg(windows)]
 async fn cached_powershell_version<F, Fut>(
-    cache: &OnceCell<String>,
+    cache: &OnceCell<Option<String>>,
     detect: F,
-) -> Result<String, AppError>
+) -> Option<String>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<String, AppError>>,
 {
-    cache.get_or_try_init(detect).await.cloned()
+    cache
+        .get_or_init(|| async { detect().await.ok() })
+        .await
+        .clone()
 }
 
 #[cfg(windows)]
@@ -166,8 +167,8 @@ mod tests {
 
     #[cfg(windows)]
     use super::{
-        ShellProfile, cached_powershell_version, headless_shell_command, parse_powershell_version,
-        shell_version,
+        ShellProfile, cached_powershell_version, detect_powershell_version, headless_shell_command,
+        parse_powershell_version,
     };
 
     #[cfg(windows)]
@@ -183,32 +184,45 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn powershell_version_cache_retries_transient_detection_failure() {
+    async fn powershell_version_cache_records_a_failed_detection_without_retrying() {
         let cache = OnceCell::new();
         let attempts = AtomicUsize::new(0);
 
-        let first_error = cached_powershell_version(&cache, || async {
-            attempts.fetch_add(1, Ordering::Relaxed);
-            Err(crate::error::AppError::Tool(
-                "temporary PowerShell failure".into(),
-            ))
-        })
-        .await
-        .expect_err("the first PowerShell detection should fail");
-        assert!(matches!(
-            first_error,
-            crate::error::AppError::Tool(message)
-                if message == "temporary PowerShell failure"
-        ));
+        assert_eq!(
+            cached_powershell_version(&cache, || async {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                Err(crate::error::AppError::Tool(
+                    "temporary PowerShell failure".into(),
+                ))
+            })
+            .await,
+            None
+        );
+        assert_eq!(
+            cached_powershell_version(&cache, || async {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                Ok("7.6".into())
+            })
+            .await,
+            None
+        );
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn powershell_version_cache_keeps_a_successful_detection() {
+        let cache = OnceCell::new();
+        let attempts = AtomicUsize::new(0);
+
         assert_eq!(
             cached_powershell_version(&cache, || async {
                 attempts.fetch_add(1, Ordering::Relaxed);
                 Ok("7.6".into())
             })
             .await
-            .expect("the retry should succeed")
-            .as_str(),
-            "7.6"
+            .as_deref(),
+            Some("7.6")
         );
         assert_eq!(
             cached_powershell_version(&cache, || async {
@@ -216,20 +230,18 @@ mod tests {
                 Ok("unexpected".into())
             })
             .await
-            .expect("the cached value should be returned")
-            .as_str(),
-            "7.6"
+            .as_deref(),
+            Some("7.6")
         );
-        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
     }
 
     #[cfg(windows)]
     #[tokio::test]
     async fn reports_the_actual_powershell_major_and_minor_version() {
-        let version = shell_version()
+        let version = detect_powershell_version()
             .await
-            .expect("PowerShell version detection should succeed")
-            .expect("the configured PowerShell host should report a version");
+            .expect("PowerShell version detection should succeed");
         let (major, minor) = version
             .split_once('.')
             .expect("the version should contain major and minor components");

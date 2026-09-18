@@ -321,15 +321,15 @@ impl NativeEngine {
         let inner = Arc::clone(&self.inner);
         let app_handle = app.clone();
         self.inner.tasks.lock().await.spawn(async move {
-            let (shell_result, auth_result) = tokio::join!(
+            let (shell_version, auth_result) = tokio::join!(
                 crate::process::shell_version(),
                 inner.auth.prewarm(&app_handle),
             );
-            if let Err(error) = shell_result {
+            if shell_version.is_none() {
                 inner.emit_diagnostic(
                     &app_handle,
                     DiagnosticStream::Runtime,
-                    format!("could not detect the shell version: {error}"),
+                    "could not detect the shell version".to_string(),
                 );
             }
             if let Err(error) = auth_result {

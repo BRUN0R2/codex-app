@@ -96,7 +96,7 @@ pub(super) async fn compose_prompt_context(
             )?;
         }
     }
-    let shell_version = crate::process::shell_version().await?;
+    let shell_version = crate::process::shell_version().await;
     builder.push(
         ResponseInputRole::User,
         environment_context(
