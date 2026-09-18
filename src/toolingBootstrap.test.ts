@@ -50,44 +50,30 @@ describe("tooling bootstrap contract", () => {
     );
   });
 
-  it("prepares the exact ICU data required by the sandboxed V8 source build", () => {
-    const v8SourceManifest = JSON.parse(
-      readFileSync(new URL("../scripts/v8-source-manifest.json", import.meta.url), "utf8"),
+  it("pins hashed sandboxed V8 prebuilts instead of compiling V8 from source", () => {
+    const v8Manifest = JSON.parse(
+      readFileSync(new URL("../scripts/v8-manifest.json", import.meta.url), "utf8"),
     ) as {
       schemaVersion?: unknown;
-      crateVersion?: unknown;
-      icuDataPackage?: unknown;
-      icuDataSha256?: unknown;
-      chromiumRust?: {
-        commit?: unknown;
-        archiveUrl?: unknown;
-        manifestSha256?: unknown;
-        treeSha256?: unknown;
-      };
+      version?: unknown;
+      releaseBaseUrl?: unknown;
+      targets?: Record<string, { archiveAssetName?: unknown; archiveSha256?: unknown }>;
     };
+    const cargoConfig = readFileSync(new URL("../.cargo/config.toml", import.meta.url), "utf8");
 
-    expect(v8SourceManifest.schemaVersion).toBe(1);
-    expect(v8SourceManifest.crateVersion).toBe("152.2.0");
-    expect(v8SourceManifest.icuDataPackage).toBe("deno_core_icudata-0.78.0");
-    expect(v8SourceManifest.icuDataSha256).toBe(
-      "9f48c7f9c7c94d516a14870707e910ab94d75ae640ff6842c4af53276cd26ebe",
+    expect(v8Manifest.schemaVersion).toBe(1);
+    expect(v8Manifest.version).toBe("152.2.0");
+    expect(String(v8Manifest.releaseBaseUrl ?? "")).toContain("rusty-v8-v152.2.0");
+    expect(v8Manifest.targets?.["x86_64-pc-windows-msvc"]?.archiveAssetName).toContain(
+      "ptrcomp_sandbox",
     );
-    expect(v8SourceManifest.chromiumRust?.commit).toBe("afbc96607d0e659715d803cc099607dd1737fc41");
-    expect(String(v8SourceManifest.chromiumRust?.archiveUrl ?? "")).toContain(
-      String(v8SourceManifest.chromiumRust?.commit ?? ""),
+    expect(String(v8Manifest.targets?.["x86_64-pc-windows-msvc"]?.archiveSha256 ?? "")).toMatch(
+      /^[0-9a-f]{64}$/u,
     );
-    expect(v8SourceManifest.chromiumRust?.manifestSha256).toBe(
-      "5a8e0f8077bbe0b9914b5dbe7d9eb61d6f80404a60754b3d5a03479f328fa8db",
-    );
-    expect(v8SourceManifest.chromiumRust?.treeSha256).toBe(
-      "17251aed8caf354c98f15f6da4520566077d3e4e92d03efe235438dfb97ed53f",
-    );
-    expect(projectToolsScript).toContain("v8-source-manifest.json");
-    expect(projectToolsScript).toContain("Get-ProjectCanonicalTreeSha256");
-    expect(projectToolsScript).toContain("icudtl.dat");
-    expect(projectToolsScript).not.toContain(
-      "369d588b75b4f4e5d9321e80d782b30637e52bbecf92778a71c54d2469d3d2b1",
-    );
+    expect(projectToolsScript).toContain("v8-manifest.json");
+    expect(projectToolsScript).toContain(".tools\\v8\\current");
+    expect(cargoConfig).toContain("RUSTY_V8_ARCHIVE");
+    expect(cargoConfig).not.toContain("V8_FROM_SOURCE");
     const nativeBuildScript = readFileSync(
       new URL("../scripts/native-build.ps1", import.meta.url),
       "utf8",
@@ -110,7 +96,7 @@ describe("tooling bootstrap contract", () => {
     expect(frontendJob).not.toContain("Install Rust toolchain");
     expect(frontendJob).not.toContain("verify:benchmarks");
     expect(frontendJob).not.toContain("native:cargo");
-    expect(nativeJob).toContain("timeout-minutes: 360");
+    expect(nativeJob).toContain("timeout-minutes: 60");
     expect(nativeJob).toContain("Install Rust toolchain");
     expect(nativeJob).toContain("pnpm verify:benchmarks");
     expect(nativeJob).toContain("pnpm native:cargo check");

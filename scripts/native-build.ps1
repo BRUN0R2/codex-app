@@ -125,8 +125,12 @@ function Get-ProjectNativeBuildJobs {
 function Initialize-ProjectNativeBuild {
   $targetDirectory = Get-ProjectNativeTargetDirectory
   $env:CARGO_TARGET_DIR = $targetDirectory
-  $env:PYTHON = Get-ProjectPythonExecutable
   $env:CARGO_BUILD_JOBS = "$(Get-ProjectNativeBuildJobs)"
+  try {
+    $env:PYTHON = Get-ProjectPythonExecutable
+  } catch {
+    Remove-Item Env:PYTHON -ErrorAction SilentlyContinue
+  }
   return $targetDirectory
 }
 

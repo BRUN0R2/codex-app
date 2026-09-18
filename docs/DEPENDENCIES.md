@@ -96,29 +96,22 @@ Bootstrap, build, and runtime validate the version and SHA-256. The executable
 lives in `.tools/ripgrep`, is bundled as a sidecar, and is invoked by absolute
 path without a shell. Global `PATH` is never modified.
 
-## Sandboxed V8 source build
+## Sandboxed V8 prebuilts
 
-The application enables V8's sandbox with `v8` 152.2.0, so the Windows build
-uses the crate's source path instead of an unchecked prebuilt library. The
-bootstrap script obtains the Chromium Rust vendor tree required by that crate
-and copies the locked ICU data from `deno_core_icudata` 0.78.0.
-`scripts/v8-source-manifest.json` pins the crate version, git commit, ICU
-digest, and a canonical digest of the extracted vendor tree. Gitiles `+archive`
-tarballs are a transport only: their gzip bytes are not bit-stable, so bootstrap
-never hashes the download envelope.
+The application enables V8's sandbox with `v8` 152.2.0. Upstream rusty_v8 does
+not publish sandbox archives, so compiling from source on every machine would
+take about two hours. Bootstrap instead downloads the hashed
+`ptrcomp_sandbox_release` Windows archives published by the Codex
+`rusty-v8-v152.2.0` release. `scripts/v8-manifest.json` pins the URL, asset
+names, and SHA-256 of the static library and generated bindings.
+`.cargo/config.toml` points the crate at `.tools/v8/current`.
 
-The source build requires a real Python 3 interpreter and the Windows `tar`
-command. `scripts/native-build.ps1` puts Cargo's target directory on the same
-volume as `CARGO_HOME`, removes whitespace from the compiler path, and sets a
-bounded `CARGO_BUILD_JOBS` value. The default is eight jobs; a caller may set
-`CODEX_NATIVE_BUILD_JOBS` explicitly, but conflicting project and Cargo values
-are rejected. Native commands should be invoked through `pnpm native:cargo` or
-`pnpm tauri` so this policy is applied consistently.
-
-The V8 source uses Chromium Rust commit
-`afbc96607d0e659715d803cc099607dd1737fc41`. The installed `chromium_crates_io`
-tree digest is
-`17251aed8caf354c98f15f6da4520566077d3e4e92d03efe235438dfb97ed53f`.
+`scripts/native-build.ps1` still places Cargo's target directory on the same
+volume as `CARGO_HOME` and sets a bounded `CARGO_BUILD_JOBS` value. The default
+is eight jobs; a caller may set `CODEX_NATIVE_BUILD_JOBS` explicitly, but
+conflicting project and Cargo values are rejected. Native commands should be
+invoked through `pnpm native:cargo` or `pnpm tauri` so this policy is applied
+consistently.
 
 ## Update policy
 

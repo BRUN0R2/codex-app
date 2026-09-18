@@ -13,6 +13,10 @@ concurrency:
   group: verify-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: pwsh
+
 jobs:
   frontend:
     name: Frontend
@@ -38,8 +42,7 @@ jobs:
   native:
     name: Native Windows
     runs-on: windows-latest
-    # First sandboxed V8 source compile is ~110 minutes on windows-latest.
-    timeout-minutes: 360
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

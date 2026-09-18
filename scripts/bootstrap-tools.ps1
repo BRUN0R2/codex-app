@@ -29,16 +29,18 @@ if ($CheckOnly) {
     throw "Local ripgrep is missing or invalid. Run 'pnpm tools:bootstrap'."
   }
   if (-not (Test-ProjectV8 -ProjectRoot $projectRoot)) {
-    throw "The V8 source ICU data is missing or invalid. Run 'pnpm tools:bootstrap'."
+    throw "The local V8 runtime is missing or invalid. Run 'pnpm tools:bootstrap'."
   }
   $ripgrepPath = Get-ProjectRipgrepPath -ProjectRoot $projectRoot
+  $v8Paths = Get-ProjectV8Paths -ProjectRoot $projectRoot
   Write-Host "Valid local ripgrep: $ripgrepPath"
-  Write-Host "Valid V8 source ICU data: $(Get-ProjectV8IcuDataPath -ProjectRoot $projectRoot)"
+  Write-Host "Valid local V8 runtime: $($v8Paths.Root)"
   exit 0
 }
 
 $ripgrepPath = Install-ProjectRipgrep -ProjectRoot $projectRoot
 $definition = Get-ProjectRipgrepDefinition -ProjectRoot $projectRoot
-$v8IcuDataPath = Install-ProjectV8 -ProjectRoot $projectRoot
+$v8Paths = Install-ProjectV8 -ProjectRoot $projectRoot
+$v8Definition = Get-ProjectV8Definition -ProjectRoot $projectRoot
 Write-Host "ripgrep $($definition.Version) is available at $ripgrepPath"
-Write-Host "V8 source ICU data is available at $v8IcuDataPath"
+Write-Host "V8 runtime $($v8Definition.Version) is available at $($v8Paths.Root)"
