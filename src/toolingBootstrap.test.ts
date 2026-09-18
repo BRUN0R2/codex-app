@@ -35,11 +35,19 @@ const formatterConfiguration = readFileSync(new URL("../biome.json", import.meta
 describe("tooling bootstrap contract", () => {
   it("prepares bundled tools before benchmarks can invoke Cargo", () => {
     const benchmarkCommand = packageManifest.scripts?.["verify:benchmarks"];
+    const frontendCommand = packageManifest.scripts?.["verify:frontend"];
+    const verifyCommand = packageManifest.scripts?.["verify"];
 
     expect(benchmarkCommand).toBeDefined();
     expect(benchmarkCommand).toMatch(/^pnpm tools:bootstrap && /);
     expect(benchmarkCommand).toContain("pnpm measure:command-stream");
     expect(benchmarkCommand).toContain("pnpm measure:background-command");
+    expect(frontendCommand).toContain("pnpm verify:visual");
+    expect(frontendCommand).not.toContain("verify:benchmarks");
+    expect(frontendCommand).not.toContain("native:cargo");
+    expect(verifyCommand).toBe(
+      "pnpm verify:frontend && pnpm verify:native && pnpm verify:benchmarks",
+    );
   });
 
   it("prepares the exact ICU data required by the sandboxed V8 source build", () => {
@@ -91,6 +99,22 @@ describe("tooling bootstrap contract", () => {
 
   it("does not duplicate push and pull-request checks for feature branches", () => {
     expect(verifyWorkflow).toMatch(/push:\r?\n {4}branches:\r?\n {6}- main/u);
+  });
+
+  it("keeps the frontend verify job free of the sandboxed V8 compile", () => {
+    const frontendJob = verifyWorkflow.split("name: Native Windows")[0] ?? "";
+    const nativeJob = verifyWorkflow.split("name: Native Windows")[1] ?? "";
+
+    expect(frontendJob).toContain("timeout-minutes: 20");
+    expect(frontendJob).toContain("pnpm verify:frontend");
+    expect(frontendJob).not.toContain("Install Rust toolchain");
+    expect(frontendJob).not.toContain("verify:benchmarks");
+    expect(frontendJob).not.toContain("native:cargo");
+    expect(nativeJob).toContain("timeout-minutes: 120");
+    expect(nativeJob).toContain("Install Rust toolchain");
+    expect(nativeJob).toContain("pnpm verify:benchmarks");
+    expect(nativeJob).toContain("pnpm native:cargo check");
+    expect(nativeJob).toContain("~/.cargo/target/codex-desktop-next");
   });
 
   it("normalizes native and page motion for deterministic visual checks", () => {

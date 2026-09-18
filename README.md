@@ -98,9 +98,10 @@ user-facing interface copy belongs in translation catalogs.
 pnpm verify
 ```
 
-This is the complete gate: encoding, lint, type checking, tests, regression
-benchmarks, visual QA, production build, transitive dependencies, `cargo check`,
-formatting, Clippy, and Rust tests.
+This is the complete gate: encoding, lint, type checking, tests, visual QA,
+production build, transitive dependencies, `cargo check`, formatting, Clippy,
+Rust tests, and regression benchmarks. Native Cargo work, including the
+sandboxed V8 source compile, stays out of the frontend gate.
 
 Useful commands:
 
