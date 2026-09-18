@@ -144,6 +144,13 @@ describe("tooling bootstrap contract", () => {
     expect(visualAuditScript).not.toContain("allowExited");
   });
 
+  it("audits usage settings against the preview plan price formatter", () => {
+    expect(visualAuditScript).toContain("planPriceLabel");
+    expect(visualAuditScript).toContain("previewCurrentPlanPrice");
+    expect(visualAuditScript).toContain("compactVisibleText");
+    expect(visualAuditScript).not.toContain("525,00");
+  });
+
   it("lets the in-process visual preview server own an ephemeral port", () => {
     expect(visualAuditScript).toContain('import { createServer } from "vite"');
     expect(visualAuditScript).toContain("loopbackHttpOrigin");

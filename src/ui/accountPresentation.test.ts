@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { findCatalog, translationCatalogs } from "../i18n/catalog";
+import { previewCurrentPlanPrice } from "../preview/accountUsageFixtures";
 import { planPriceLabel } from "./accountPresentation";
 
 const english = findCatalog(translationCatalogs, "en")?.messages.settings;
@@ -24,5 +25,12 @@ describe("plan price labels", () => {
     expect(planPriceLabel(plus, "en", english)).toContain("99.90");
     expect(planPriceLabel(plus, "pt-BR", portuguese)).toContain("99,90");
     expect(planPriceLabel(null, "en", english)).toBeNull();
+  });
+
+  it("formats the preview current plan with the Portuguese monthly suffix", () => {
+    const label = planPriceLabel(previewCurrentPlanPrice(), "pt-BR", portuguese);
+    expect(label).toContain("999,90");
+    expect(label?.endsWith(" / mês")).toBe(true);
+    expect(portuguese.perMonth).toBe("{price} / mês");
   });
 });

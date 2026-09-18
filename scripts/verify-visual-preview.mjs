@@ -20,6 +20,8 @@ import {
   settleTimelineScrollBeforeMeasurement,
 } from "../src/tooling/timelineScrollAudit.ts";
 import { PROFILE_STORAGE_KEYS } from "../src/state/profileStorage.ts";
+import { previewCurrentPlanPrice } from "../src/preview/accountUsageFixtures.ts";
+import { planPriceLabel } from "../src/ui/accountPresentation.ts";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PREVIEW_PLACEHOLDER_ORIGIN = "http://127.0.0.1";
@@ -8989,6 +8991,10 @@ function validatePersonalizationSaveFeedbackMetrics(metrics) {
   assert(metrics.checkIconCount === 1, "the save action lost its confirmation icon");
 }
 
+function compactVisibleText(value) {
+  return String(value).replace(/[\u00a0\u202f\u2007\s]/gu, "");
+}
+
 function validateUsageSettingsMetrics(metrics, viewport) {
   const tolerance = 1;
   assert(metrics.horizontalOverflow <= tolerance, "Usage and billing created horizontal overflow");
@@ -9005,7 +9011,14 @@ function validateUsageSettingsMetrics(metrics, viewport) {
   assert(metrics.reset.right <= viewport.width + tolerance, "the reset section exceeds the screen");
   assert(metrics.cardCount >= 5, "functional Usage and billing sections are missing");
   assert(metrics.meterCount >= 4, "general or GPT-5.3-Codex-Spark limits are missing");
-  assert(metrics.planText.includes("R$ 525,00/mês"), "the localized monthly price was not displayed");
+  const expectedPrice = planPriceLabel(previewCurrentPlanPrice(), "pt-BR", {
+    perMonth: "{price} / mês",
+  });
+  assert(
+    expectedPrice !== null &&
+      compactVisibleText(metrics.planText).includes(compactVisibleText(expectedPrice)),
+    "the localized monthly price was not displayed",
+  );
   assert(
     metrics.autoTopUpText.includes("Até 40% de desconto"),
     "the automatic top-up offer was not displayed",

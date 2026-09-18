@@ -33,6 +33,7 @@ import {
 } from "../infrastructure/runtimeBridge";
 import { saveProjects } from "../state/projects";
 import { utf8ByteLength } from "../utf8";
+import { PREVIEW_PLAN_PRICES, PREVIEW_PLAN_TYPE } from "./accountUsageFixtures";
 import { updatePreviewConfig } from "./previewConfig";
 
 const PREVIEW_PERMISSION_PROFILE = {
@@ -141,7 +142,7 @@ const PREVIEW_ACCOUNT = {
     name: "Ada",
     picture:
       "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23546673'/%3E%3Ccircle cx='32' cy='25' r='14' fill='%23f0c6a7'/%3E%3Cpath d='M8 64c3-17 13-25 24-25s21 8 24 25' fill='%23c03f77'/%3E%3Cpath d='M18 24c1-14 26-18 30 1-10-4-18-9-30-1' fill='%23302028'/%3E%3C/svg%3E",
-    planType: "pro",
+    planType: PREVIEW_PLAN_TYPE,
   },
   requiresOpenaiAuth: true,
   refresh: { status: "notRequired", error: null },
@@ -1338,7 +1339,7 @@ const PREVIEW_GENERAL_RATE_LIMIT = {
   credits: { hasCredits: true, unlimited: false, balance: "R$ 0" },
   individualLimit: null,
   spendControlReached: null,
-  planType: "pro",
+  planType: PREVIEW_PLAN_TYPE,
   rateLimitReachedType: null,
 } as const satisfies RateLimitSnapshot;
 
@@ -1361,7 +1362,7 @@ const PREVIEW_RATE_LIMITS = {
       credits: null,
       individualLimit: null,
       spendControlReached: null,
-      planType: "pro",
+      planType: PREVIEW_PLAN_TYPE,
       rateLimitReachedType: null,
     },
     base_model_inference: {
@@ -1376,16 +1377,11 @@ const PREVIEW_RATE_LIMITS = {
       credits: null,
       individualLimit: null,
       spendControlReached: null,
-      planType: "pro",
+      planType: PREVIEW_PLAN_TYPE,
       rateLimitReachedType: null,
     },
   },
-  planPrices: [
-    { planType: "go", amount: 3_999, currency: "BRL", minorUnitExponent: 2 },
-    { planType: "plus", amount: 9_990, currency: "BRL", minorUnitExponent: 2 },
-    { planType: "prolite", amount: 52_500, currency: "BRL", minorUnitExponent: 2 },
-    { planType: "pro", amount: 99_990, currency: "BRL", minorUnitExponent: 2 },
-  ],
+  planPrices: PREVIEW_PLAN_PRICES,
   lunaReserveAvailable: true,
 } as const satisfies AccountRateLimitsResponse;
 
