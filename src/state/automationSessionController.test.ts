@@ -128,9 +128,7 @@ describe("automation session controller", () => {
       runs: [run({ status: "running" })],
     });
     await expect(controller.deleteAutomation("automation-1")).resolves.toBe(false);
-    expect(setError).toHaveBeenCalledWith(
-      "Wait for the active run to finish before deleting this automation.",
-    );
+    expect(setError).toHaveBeenCalledWith({ key: "automationActiveRun" });
     expect(client.deleteAutomation).not.toHaveBeenCalled();
     dispose();
   });

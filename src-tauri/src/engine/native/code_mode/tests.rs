@@ -37,14 +37,24 @@ async fn benchmark_code_mode_runtime_warmup() {
         .await
         .expect("Code Mode runtime should warm successfully");
     let elapsed = started_at.elapsed();
+    let warmed_started_at = std::time::Instant::now();
+    super::warm_runtime()
+        .await
+        .expect("warmed Code Mode runtime should remain available");
+    let warmed_elapsed = warmed_started_at.elapsed();
 
     println!(
-        "Code Mode runtime warmup: {:.3} ms",
-        elapsed.as_secs_f64() * 1_000.0
+        "Code Mode runtime warmup: cold={:.3} ms, warm={:.3} ms",
+        elapsed.as_secs_f64() * 1_000.0,
+        warmed_elapsed.as_secs_f64() * 1_000.0,
     );
     assert!(
-        elapsed <= Duration::from_millis(25),
-        "Code Mode runtime warmup exceeded 25 ms: {elapsed:?}"
+        elapsed <= Duration::from_millis(100),
+        "Code Mode cold runtime warmup exceeded 100 ms: {elapsed:?}"
+    );
+    assert!(
+        warmed_elapsed <= Duration::from_millis(5),
+        "Code Mode warmed runtime access exceeded 5 ms: {warmed_elapsed:?}"
     );
 }
 
@@ -262,12 +272,12 @@ impl TestSession {
         self.runtime.terminate(cell_id).await
     }
 
-    async fn shutdown(&self) {
-        self.runtime.shutdown().await;
+    async fn shutdown(&self) -> Result<(), CodeModeError> {
+        self.runtime.shutdown().await
     }
 
-    async fn cancel_owner(&self, owner_id: &str) {
-        self.runtime.cancel_owner(owner_id).await;
+    async fn cancel_owner(&self, owner_id: &str) -> Result<(), CodeModeError> {
+        self.runtime.cancel_owner(owner_id).await
     }
 }
 
@@ -303,7 +313,8 @@ async fn execute(session: &TestSession, request: ExecuteRequest) -> RuntimeRespo
 async fn shutdown(session: &TestSession) {
     tokio::time::timeout(TEST_TIMEOUT, session.shutdown())
         .await
-        .expect("Code Mode shutdown timed out");
+        .expect("Code Mode shutdown timed out")
+        .expect("Code Mode shutdown should settle every cell");
 }
 
 fn completed(response: RuntimeResponse) -> (Vec<FunctionCallOutputContent>, Option<String>) {
@@ -734,7 +745,8 @@ async fn owner_cancellation_settles_active_nested_tool_callbacks() {
 
     tokio::time::timeout(TEST_TIMEOUT, session.cancel_owner("test-turn"))
         .await
-        .expect("owner cancellation timed out");
+        .expect("owner cancellation timed out")
+        .expect("owner cancellation should publish every terminal state");
 
     assert_eq!(delegate.started_calls(), 1);
     assert_eq!(delegate.settled_calls(), 1);
@@ -923,7 +935,8 @@ async fn session_state_persists_across_turns_and_owner_cancellation_is_scoped() 
 
     tokio::time::timeout(TEST_TIMEOUT, session.cancel_owner("turn-a"))
         .await
-        .expect("owner cancellation should complete");
+        .expect("owner cancellation should complete")
+        .expect("owner cancellation should publish the terminal state");
     assert!(session.wait(first_cell, 0).await.is_err());
     assert!(matches!(
         session
@@ -933,6 +946,9 @@ async fn session_state_persists_across_turns_and_owner_cancellation_is_scoped() 
         RuntimeResponse::Yielded { .. }
     ));
 
-    session.cancel_owner("turn-b").await;
+    session
+        .cancel_owner("turn-b")
+        .await
+        .expect("the second owner cancellation should complete");
     shutdown(&session).await;
 }

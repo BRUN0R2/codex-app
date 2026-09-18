@@ -11,6 +11,8 @@ use tokio::process::Command;
 #[cfg(windows)]
 use tokio::sync::OnceCell;
 
+use crate::error::AppError;
+
 #[cfg(windows)]
 mod windows_environment;
 #[cfg(windows)]
@@ -58,42 +60,56 @@ pub(crate) const fn shell_name() -> &'static str {
 }
 
 #[cfg(windows)]
-pub(crate) async fn shell_version() -> Option<String> {
-    cached_powershell_version(&POWERSHELL_VERSION, detect_powershell_version).await
+pub(crate) async fn shell_version() -> Result<Option<String>, AppError> {
+    cached_powershell_version(&POWERSHELL_VERSION, detect_powershell_version)
+        .await
+        .map(Some)
 }
 
 #[cfg(not(windows))]
-pub(crate) async fn shell_version() -> Option<String> {
-    None
+pub(crate) async fn shell_version() -> Result<Option<String>, AppError> {
+    Ok(None)
 }
 
 #[cfg(windows)]
-async fn detect_powershell_version() -> Option<String> {
+async fn detect_powershell_version() -> Result<String, AppError> {
     let mut command =
-        headless_shell_command("$PSVersionTable.PSVersion.ToString()", ShellProfile::Skip).ok()?;
+        headless_shell_command("$PSVersionTable.PSVersion.ToString()", ShellProfile::Skip)
+            .map_err(|error| {
+                AppError::Tool(format!(
+                    "could not prepare PowerShell version query: {error}"
+                ))
+            })?;
     command
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    tokio::time::timeout(POWERSHELL_VERSION_TIMEOUT, command.output())
+    let output = tokio::time::timeout(POWERSHELL_VERSION_TIMEOUT, command.output())
         .await
-        .ok()
-        .and_then(Result::ok)
-        .filter(|output| output.status.success())
-        .and_then(|output| parse_powershell_version(&output.stdout))
+        .map_err(|_| AppError::Timeout {
+            operation: "PowerShell version detection",
+        })?
+        .map_err(|error| AppError::Tool(format!("PowerShell version query failed: {error}")))?;
+    if !output.status.success() {
+        return Err(AppError::Tool(format!(
+            "PowerShell version query exited with {}",
+            output.status
+        )));
+    }
+    parse_powershell_version(&output.stdout)
+        .ok_or_else(|| AppError::Protocol("PowerShell returned an invalid version string".into()))
 }
 
 #[cfg(windows)]
-async fn cached_powershell_version<F, Fut>(cache: &OnceCell<String>, detect: F) -> Option<String>
+async fn cached_powershell_version<F, Fut>(
+    cache: &OnceCell<String>,
+    detect: F,
+) -> Result<String, AppError>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Option<String>>,
+    Fut: Future<Output = Result<String, AppError>>,
 {
-    cache
-        .get_or_try_init(|| async { detect().await.ok_or(()) })
-        .await
-        .ok()
-        .cloned()
+    cache.get_or_try_init(detect).await.cloned()
 }
 
 #[cfg(windows)]
@@ -142,7 +158,6 @@ mod tests {
     #[cfg(windows)]
     use std::path::Path;
     #[cfg(windows)]
-    #[cfg(windows)]
     use std::sync::atomic::{AtomicUsize, Ordering};
     #[cfg(windows)]
     use std::time::{Duration, Instant};
@@ -172,31 +187,38 @@ mod tests {
         let cache = OnceCell::new();
         let attempts = AtomicUsize::new(0);
 
+        let first_error = cached_powershell_version(&cache, || async {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            Err(crate::error::AppError::Tool(
+                "temporary PowerShell failure".into(),
+            ))
+        })
+        .await
+        .expect_err("the first PowerShell detection should fail");
+        assert!(matches!(
+            first_error,
+            crate::error::AppError::Tool(message)
+                if message == "temporary PowerShell failure"
+        ));
         assert_eq!(
             cached_powershell_version(&cache, || async {
                 attempts.fetch_add(1, Ordering::Relaxed);
-                None
+                Ok("7.6".into())
             })
-            .await,
-            None
+            .await
+            .expect("the retry should succeed")
+            .as_str(),
+            "7.6"
         );
         assert_eq!(
             cached_powershell_version(&cache, || async {
                 attempts.fetch_add(1, Ordering::Relaxed);
-                Some("7.6".into())
+                Ok("unexpected".into())
             })
             .await
-            .as_deref(),
-            Some("7.6")
-        );
-        assert_eq!(
-            cached_powershell_version(&cache, || async {
-                attempts.fetch_add(1, Ordering::Relaxed);
-                Some("unexpected".into())
-            })
-            .await
-            .as_deref(),
-            Some("7.6")
+            .expect("the cached value should be returned")
+            .as_str(),
+            "7.6"
         );
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
     }
@@ -206,6 +228,7 @@ mod tests {
     async fn reports_the_actual_powershell_major_and_minor_version() {
         let version = shell_version()
             .await
+            .expect("PowerShell version detection should succeed")
             .expect("the configured PowerShell host should report a version");
         let (major, minor) = version
             .split_once('.')

@@ -14,12 +14,12 @@ pub(super) fn ensure_v8_initialized() -> Result<(), String> {
 }
 
 fn initialize_v8() -> Result<V8Initialization, String> {
-    v8::icu::set_common_data_77(deno_core_icudata::ICU_DATA)
+    v8::icu::set_common_data_78(deno_core_icudata::ICU_DATA)
         .map_err(|code| format!("failed to initialize V8 ICU data: {code}"))?;
     let platform = v8::new_default_platform(0, false).make_shared();
     v8::V8::initialize_platform(platform.clone());
     v8::V8::initialize();
-    // V8 150 initializes the sandbox-backed ArrayBuffer allocator lazily from the first
+    // V8 initializes the sandbox-backed ArrayBuffer allocator lazily from the first
     // isolate. That initializer is process-global but is not internally synchronized, so two
     // first-use isolates can both attempt to configure the same PartitionAlloc pool and abort
     // the process. Warm it while this function is still protected by `V8_INITIALIZATION`.

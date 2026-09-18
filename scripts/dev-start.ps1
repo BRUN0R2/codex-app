@@ -9,10 +9,12 @@ $devIdentifier = "dev.codexapp.desktop.dev"
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot ".." )).Path
 $tauriConfigPath = Join-Path $projectRoot "src-tauri\tauri.conf.json"
-$debugExecutablePath = Join-Path $projectRoot "src-tauri\target\debug\codex-desktop-next.exe"
 $tempConfigPath = Join-Path $env:TEMP ("codex-tauri-dev-{0}.json" -f ([System.Guid]::NewGuid().ToString("N")))
 . (Join-Path $PSScriptRoot "runtime-profile.ps1")
+. (Join-Path $PSScriptRoot "native-build.ps1")
 . (Join-Path $PSScriptRoot "project-tools.ps1")
+Initialize-ProjectNativeBuild | Out-Null
+$debugExecutablePath = Get-ProjectNativeExecutablePath -Profile "debug"
 Enable-ProjectTools -ProjectRoot $projectRoot | Out-Null
 
 $requestedPort = $defaultPort

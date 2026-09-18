@@ -85,7 +85,7 @@ export async function listenBrowserState(
   onState: (snapshot: BrowserTabSnapshot) => void,
   onError: (reason: unknown) => void,
 ): Promise<UnlistenFn> {
-  return listen<unknown>(BROWSER_STATE_EVENT, (event) => {
+  return listen(BROWSER_STATE_EVENT, (event) => {
     try {
       onState(decodeBrowserTabSnapshot(event.payload));
     } catch (reason) {
@@ -98,7 +98,7 @@ export async function listenBrowserNewWindow(
   onRequest: (request: BrowserNewWindowNotification) => void,
   onError: (reason: unknown) => void,
 ): Promise<UnlistenFn> {
-  return listen<unknown>(BROWSER_NEW_WINDOW_EVENT, (event) => {
+  return listen(BROWSER_NEW_WINDOW_EVENT, (event) => {
     try {
       onRequest(decodeBrowserNewWindowNotification(event.payload));
     } catch (reason) {
@@ -111,7 +111,7 @@ export async function listenBrowserAgentActivity(
   onActivity: (activity: BrowserAgentActivityNotification) => void,
   onError: (reason: unknown) => void,
 ): Promise<UnlistenFn> {
-  return listen<unknown>(BROWSER_AGENT_ACTIVITY_EVENT, (event) => {
+  return listen(BROWSER_AGENT_ACTIVITY_EVENT, (event) => {
     try {
       onActivity(decodeBrowserAgentActivityNotification(event.payload));
     } catch (reason) {
@@ -124,7 +124,7 @@ export async function listenBrowserMetric(
   onMetric: (metric: BrowserActionMetric) => void,
   onError: (reason: unknown) => void,
 ): Promise<UnlistenFn> {
-  return listen<unknown>(BROWSER_METRIC_EVENT, (event) => {
+  return listen(BROWSER_METRIC_EVENT, (event) => {
     try {
       onMetric(decodeBrowserActionMetric(event.payload));
     } catch (reason) {
@@ -149,5 +149,5 @@ async function invokeDecoded<T>(
   decode: (value: unknown) => T,
   args: Record<string, unknown>,
 ): Promise<T> {
-  return decode(await invoke<unknown>(command, args));
+  return decode(await invoke(command, args));
 }

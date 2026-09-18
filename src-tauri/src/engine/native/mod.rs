@@ -261,6 +261,10 @@ impl NativeEngine {
         }
     }
 
+    /// Reports whether any turn currently owns execution. Uses a non-blocking lock because
+    /// this runs on synchronous IPC paths where awaiting could deadlock. Lock contention
+    /// fail-closes to `true` so window close and sign-out keep the safe behavior (treat as
+    /// busy) instead of proceeding while ownership is undetermined.
     pub fn has_active_turns(&self) -> bool {
         self.inner
             .active_turns
@@ -317,10 +321,17 @@ impl NativeEngine {
         let inner = Arc::clone(&self.inner);
         let app_handle = app.clone();
         self.inner.tasks.lock().await.spawn(async move {
-            let (_, auth_result) = tokio::join!(
+            let (shell_result, auth_result) = tokio::join!(
                 crate::process::shell_version(),
                 inner.auth.prewarm(&app_handle),
             );
+            if let Err(error) = shell_result {
+                inner.emit_diagnostic(
+                    &app_handle,
+                    DiagnosticStream::Runtime,
+                    format!("could not detect the shell version: {error}"),
+                );
+            }
             if let Err(error) = auth_result {
                 inner.emit_diagnostic(
                     &app_handle,
@@ -743,7 +754,7 @@ impl NativeEngine {
         self.ensure_started()?;
         self.inner
             .provider
-            .read_rate_limits(app, &self.inner.auth)
+            .read_rate_limits(app, &self.inner.auth, &self.inner.diagnostics)
             .await
     }
 
@@ -985,7 +996,15 @@ impl NativeEngine {
             ));
         }
         let response = self.inner.storage.archive_thread(thread_id.clone()).await?;
-        self.inner.code_mode_sessions.close(&thread_id).await;
+        self.inner
+            .code_mode_sessions
+            .close(&thread_id)
+            .await
+            .map_err(|error| {
+                AppError::State(format!(
+                    "could not close Code Mode for archived thread: {error}"
+                ))
+            })?;
         self.inner.provider.close_response_session(&thread_id);
         self.inner.emit_notification(
             app,
@@ -1638,7 +1657,13 @@ impl NativeEngine {
         for cancellation in cancellations {
             cancellation.send_replace(true);
         }
-        self.inner.code_mode_sessions.shutdown().await;
+        if let Err(error) = self.inner.code_mode_sessions.shutdown().await {
+            self.inner.emit_diagnostic(
+                app,
+                DiagnosticStream::Runtime,
+                format!("could not shut down all Code Mode sessions: {error}"),
+            );
+        }
         self.inner.provider.shutdown_response_sessions();
         match self.inner.command_sessions.shutdown().await {
             Ok(settlement) if settlement.forced_abort_count() > 0 => self.inner.emit_diagnostic(
@@ -1731,7 +1756,14 @@ impl NativeEngineInner {
         deletion: ThreadDeletion,
     ) -> Result<OperationAck, AppError> {
         for thread_id in &deletion.thread_ids {
-            self.code_mode_sessions.close(thread_id).await;
+            self.code_mode_sessions
+                .close(thread_id)
+                .await
+                .map_err(|error| {
+                    AppError::State(format!(
+                        "could not close Code Mode for deleted thread: {error}"
+                    ))
+                })?;
             self.provider.close_response_session(thread_id);
         }
         self.multi_agents.forget_threads(&deletion.thread_ids).await;

@@ -1,6 +1,7 @@
 import { describeError } from "../infrastructure/codexClient";
-import { InitializationTimeoutError } from "./initializationRetry";
+import { InitializationTimeoutError } from "./initializationTimeout";
 import type { SingleFlightOperations } from "./singleFlightOperations";
+import type { UiError } from "./uiError";
 
 export type CapturedInitialization<T> =
   | { readonly value: T; readonly failure: undefined }
@@ -42,7 +43,7 @@ export function withBootTimeout<T>(
 export interface SessionControllerHost {
   readonly isDisposed: () => boolean;
   readonly reportError: (reason: unknown) => void;
-  readonly setError: (message: string | null) => void;
+  readonly setError: (error: UiError | null) => void;
   readonly singleFlight: SingleFlightOperations<string, boolean>;
   readonly withPending: <T>(operation: () => Promise<T>) => Promise<T>;
 }

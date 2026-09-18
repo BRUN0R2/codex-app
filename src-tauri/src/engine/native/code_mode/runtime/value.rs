@@ -245,10 +245,12 @@ pub(super) fn v8_value_to_json(
 pub(super) fn json_to_v8<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     value: &Value,
-) -> Option<v8::Local<'s, v8::Value>> {
-    let json = serde_json::to_string(value).ok()?;
-    let json = v8::String::new(scope, &json)?;
-    v8::json::parse(scope, json)
+) -> Result<v8::Local<'s, v8::Value>, String> {
+    let json = serde_json::to_string(value)
+        .map_err(|error| format!("failed to serialize JSON value for V8: {error}"))?;
+    let json = v8::String::new(scope, &json)
+        .ok_or_else(|| "failed to allocate JSON value for V8".to_string())?;
+    v8::json::parse(scope, json).ok_or_else(|| "failed to parse JSON value in V8".to_string())
 }
 
 pub(super) fn value_to_error_text(

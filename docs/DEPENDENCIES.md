@@ -4,6 +4,9 @@
 dependencies. `pnpm-lock.yaml` and `src-tauri/Cargo.lock` lock their complete
 resolution. This document records only purpose and maintenance exceptions.
 
+The JavaScript package manager is pnpm 12.4.1. Node.js 26 and Rust 1.98.0 are
+the supported toolchain baselines used by CI and local verification.
+
 ## Frontend
 
 | Dependency | Purpose |
@@ -18,6 +21,11 @@ resolution. This document records only purpose and maintenance exceptions.
 Vite, TypeScript, Biome, Vitest, and the Tauri CLI are development and build
 dependencies only. Translation discovery uses Vite's native
 `import.meta.glob`; it adds no runtime dependency.
+
+Vitest remains on 4.1.11 while Vite is on 8.3.0. Vitest 5.0.0 is newer, but
+its published declarations do not type-check against that Vite 8 graph; the
+project keeps the newest compatible Vitest line until that upstream contract is
+fixed. No local declaration patch or compatibility shim is used.
 
 ## Backend
 
@@ -36,6 +44,13 @@ dependencies only. Translation discovery uses Vite's native
 `webview2-com` and `windows` are direct dependencies because the code names
 and tests specific APIs. No COM object or generic CDP command crosses the agent
 contract.
+
+`tauri-plugin-dialog` and `tauri-plugin-opener` are kept at the current releases
+in both manifests. The Rust `webview2-com` 0.38.2 and `windows` 0.61.3 pins are
+intentional: Tauri 2.11.5 still exposes those versions in its Windows runtime
+graph, while newer direct versions produce incompatible COM and Windows API
+types. They must be revisited together with a Tauri release that updates that
+graph.
 
 ## Rust
 
@@ -80,6 +95,27 @@ pnpm rg -- -n "text" src src-tauri/src
 Bootstrap, build, and runtime validate the version and SHA-256. The executable
 lives in `.tools/ripgrep`, is bundled as a sidecar, and is invoked by absolute
 path without a shell. Global `PATH` is never modified.
+
+## Sandboxed V8 source build
+
+The application enables V8's sandbox with `v8` 152.2.0, so the Windows build
+uses the crate's source path instead of an unchecked prebuilt library. The
+bootstrap script obtains the exact Chromium Rust vendor archive required by that
+crate and copies the locked ICU data from `deno_core_icudata` 0.78.0. Both
+archives and the installed files are SHA-256 validated before the compiler can
+use them.
+
+The source build requires a real Python 3 interpreter and the Windows `tar`
+command. `scripts/native-build.ps1` puts Cargo's target directory on the same
+volume as `CARGO_HOME`, removes whitespace from the compiler path, and sets a
+bounded `CARGO_BUILD_JOBS` value. The default is eight jobs; a caller may set
+`CODEX_NATIVE_BUILD_JOBS` explicitly, but conflicting project and Cargo values
+are rejected. Native commands should be invoked through `pnpm native:cargo` or
+`pnpm tauri` so this policy is applied consistently.
+
+The V8 source uses Chromium Rust commit
+`afbc96607d0e659715d803cc099607dd1737fc41`; the downloaded archive hash is
+`369d588b75b4f4e5d9321e80d782b30637e52bbecf92778a71c54d2469d3d2b1`.
 
 ## Update policy
 

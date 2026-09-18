@@ -18,6 +18,9 @@ import {
   decodeChatModelListResponse,
   decodeConfigUpdate,
   decodeConfigUpdateResponse,
+  decodeDesktopBoolean,
+  decodeDesktopDialogButton,
+  decodeDesktopDialogSelection,
   decodeEngineNotification,
   decodeEngineServerRequest,
   decodeEngineStartResponse,
@@ -107,17 +110,17 @@ export async function subscribeToEvents(handlers: EventHandlers): Promise<() => 
       await listenEngineNotifications(handlers.onNotification, handlers.onContractError),
     );
     unlisteners.push(
-      await listen<unknown>(SERVER_REQUEST_EVENT, (event) => {
+      await listen(SERVER_REQUEST_EVENT, (event) => {
         decodeEvent(event.payload, decodeEngineServerRequest, handlers.onServerRequest, handlers);
       }),
     );
     unlisteners.push(
-      await listen<unknown>(RUNTIME_DIAGNOSTIC_EVENT, (event) => {
+      await listen(RUNTIME_DIAGNOSTIC_EVENT, (event) => {
         decodeEvent(event.payload, decodeRuntimeDiagnostic, handlers.onDiagnostic, handlers);
       }),
     );
     unlisteners.push(
-      await listen<unknown>(RUNTIME_STATUS_EVENT, (event) => {
+      await listen(RUNTIME_STATUS_EVENT, (event) => {
         decodeEvent(event.payload, decodeRuntimeStatus, handlers.onStatus, handlers);
       }),
     );
@@ -139,7 +142,7 @@ export async function listenEngineNotifications(
   onError: (error: Error) => void,
 ): Promise<UnlistenFn> {
   try {
-    return await listen<unknown>(NOTIFICATION_EVENT, (event) => {
+    return await listen(NOTIFICATION_EVENT, (event) => {
       try {
         onNotification(decodeEngineNotification(event.payload));
       } catch (reason) {
@@ -469,9 +472,9 @@ export function openDesktopDialog(options: {
   readonly multiple: boolean;
 }): Promise<string | string[] | null> {
   if (hasBrowserPreviewRuntime()) {
-    return invoke<string | string[] | null>("plugin:dialog|open", { options });
+    return invoke("plugin:dialog|open", { options }).then(decodeDesktopDialogSelection);
   }
-  return open(options);
+  return open(options).then(decodeDesktopDialogSelection);
 }
 
 export async function confirmDesktopDialog(
@@ -484,15 +487,15 @@ export async function confirmDesktopDialog(
   },
 ): Promise<boolean> {
   if (!hasBrowserPreviewRuntime()) {
-    return confirm(message, options);
+    return confirm(message, options).then(decodeDesktopBoolean);
   }
-  const result = await invoke<string>("plugin:dialog|message", {
+  const result = await invoke("plugin:dialog|message", {
     buttons: { cancel: options.cancelLabel, ok: options.okLabel },
     kind: options.kind,
     message,
     title: options.title,
   });
-  return result === options.okLabel;
+  return decodeDesktopDialogButton(result) === options.okLabel;
 }
 
 export function openWorkspaceDirectory(path: string): Promise<OperationAck> {
@@ -506,7 +509,7 @@ async function invokeDecoded<T>(
   decoder: Decoder<T>,
   argumentsValue?: Record<string, unknown>,
 ): Promise<T> {
-  const response = await invoke<unknown>(command, argumentsValue);
+  const response = await invoke(command, argumentsValue);
   return decoder(response);
 }
 

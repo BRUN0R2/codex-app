@@ -9,6 +9,7 @@ import type {
 import { useI18n } from "../i18n/context";
 import { formatMessage, type TranslationMessages } from "../i18n/messages";
 import type { AppController } from "../state/appController";
+import { formatUiError, type UiError } from "../state/uiError";
 import { AccountAvatar, accountDisplayName } from "./AccountAvatar";
 import { accountPlanName } from "./accountPresentation";
 import { Icon } from "./Icon";
@@ -73,7 +74,10 @@ export function ProfileView(props: {
               <>
                 <header class="profile-identity">
                   <AccountAvatar account={account()} size="profile" />
-                  <h1>{loadedProfile().displayName ?? accountDisplayName(account())}</h1>
+                  <h1>
+                    {loadedProfile().displayName ??
+                      accountDisplayName(account(), i18n.messages().account.default)}
+                  </h1>
                   <div class="profile-identity-meta">
                     <Show when={loadedProfile().username}>
                       {(username) => <span>@{username()}</span>}
@@ -110,7 +114,7 @@ export function ProfileView(props: {
 }
 
 function ProfileInitialState(props: {
-  readonly error: string | null;
+  readonly error: UiError | null;
   readonly loading: boolean;
   readonly onRetry: () => void;
 }) {
@@ -120,7 +124,7 @@ function ProfileInitialState(props: {
       <div class="profile-load-error" role="alert">
         <Icon name="helpCircle" size={20} />
         <strong>{i18n.messages().profile.loadFailure}</strong>
-        <p>{props.error}</p>
+        <p>{props.error === null ? null : formatUiError(props.error, i18n.messages().errors)}</p>
         <button onClick={props.onRetry} type="button">
           {i18n.messages().common.tryAgain}
         </button>

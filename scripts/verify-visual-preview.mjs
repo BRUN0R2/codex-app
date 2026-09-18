@@ -14,7 +14,11 @@ import {
   waitForDevToolsEndpoint,
   withAuditTarget,
 } from "../src/tooling/visualAuditRuntime.ts";
-import { observeTimelineScrollWork, probeTimelineScrollCommit } from "../src/tooling/timelineScrollAudit.ts";
+import {
+  observeTimelineScrollWork,
+  probeTimelineScrollCommit,
+  settleTimelineScrollBeforeMeasurement,
+} from "../src/tooling/timelineScrollAudit.ts";
 import { PROFILE_STORAGE_KEYS } from "../src/state/profileStorage.ts";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -4174,6 +4178,7 @@ function timelinePerformanceStressPrepareExpression() {
           previousProbeSummaries = currentProbeSummaries;
         }
 
+        await (${settleTimelineScrollBeforeMeasurement.toString()})(timeline);
         const scrollWork = (${observeTimelineScrollWork.toString()})(timeline);
         const frameIntervals = [];
         const animationWorkByFrame = new Map();
@@ -5431,6 +5436,7 @@ function timelineExtremeFilesPrepareExpression(expanded = false, measuredViewpor
           previousProbe = current;
         }
 
+        await (${settleTimelineScrollBeforeMeasurement.toString()})(timeline);
         const scrollWork = (${observeTimelineScrollWork.toString()})(timeline);
         const frameIntervals = [];
         const animationWorkByFrame = new Map();

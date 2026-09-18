@@ -21,6 +21,7 @@ pub(super) use spec::exec_definition;
 pub(super) use spec::parse_exec_source;
 pub(super) use spec::wait_definition;
 pub(super) use types::CellId;
+use types::CodeModeError;
 pub(super) use types::DEFAULT_MAX_OUTPUT_TOKENS;
 pub(super) use types::DEFAULT_WAIT_YIELD_TIME_MS;
 pub(super) use types::DelegateFuture;
@@ -55,17 +56,25 @@ impl CodeModeSessionRegistry {
             .clone()
     }
 
-    pub async fn close(&self, thread_id: &str) {
-        let session = self.sessions.lock().await.remove(thread_id);
+    pub async fn close(&self, thread_id: &str) -> Result<(), CodeModeError> {
+        let session = self.sessions.lock().await.get(thread_id).cloned();
         if let Some(session) = session {
-            session.shutdown().await;
+            session.shutdown().await?;
+            self.sessions.lock().await.remove(thread_id);
         }
+        Ok(())
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<(), CodeModeError> {
         let sessions = std::mem::take(&mut *self.sessions.lock().await);
+        let mut first_error = None;
         for session in sessions.into_values() {
-            session.shutdown().await;
+            if let Err(error) = session.shutdown().await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
         }
+        first_error.map_or(Ok(()), Err)
     }
 }

@@ -88,6 +88,7 @@ import {
   applyTurnItem,
   applyTurnStarted,
 } from "./turnCompletion";
+import { uiError } from "./uiError";
 import type { VisibleThreadTurn, VisibleTurnSequence } from "./visibleTurnSequence";
 
 const THREAD_PAGE_CACHE_CAPACITY = 8;
@@ -459,7 +460,7 @@ export function createTaskSessionController(
 
   async function renameThreadOnce(threadId: string, name: string): Promise<boolean> {
     if (name.trim().length === 0) {
-      setError("The task name cannot be empty.");
+      setError(uiError("taskNameEmpty"));
       return false;
     }
     try {
@@ -527,7 +528,7 @@ export function createTaskSessionController(
       (entry) => entry.id === threadId,
     );
     if (thread === undefined) {
-      setError("The task to delete is no longer available.");
+      setError(uiError("taskUnavailable"));
       return false;
     }
     try {
@@ -662,7 +663,7 @@ export function createTaskSessionController(
     if (runningTurnId !== null) {
       const thread = currentThread();
       if (thread === null) {
-        setError("The active turn is not associated with an open task.");
+        setError(uiError("activeTurnWithoutTask"));
         return false;
       }
       try {
@@ -714,7 +715,7 @@ export function createTaskSessionController(
     }
     const thread = currentThread();
     if (thread === null) {
-      setError("Open a task before adding messages to the queue.");
+      setError(uiError("queueTaskRequired"));
       return false;
     }
     const message: QueuedMessage = {
@@ -1249,7 +1250,7 @@ export function createTaskSessionController(
               currentThread()?.id === notification.params.threadId &&
               notification.params.error !== null
             ) {
-              setError(notification.params.error.message);
+              setError(uiError("turnFailed"));
             }
           });
           if (completedActiveTurn && notification.params.turn.status === "completed") {

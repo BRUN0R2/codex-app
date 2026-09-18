@@ -1,4 +1,4 @@
-import { type Accessor, createEffect } from "solid-js";
+import { type Accessor, createEffect, createRoot } from "solid-js";
 
 import type {
   ConfigurableNotificationEventKind,
@@ -22,6 +22,7 @@ import { notificationTaskLabel } from "./notificationTransitions";
 type TurnCompletedNotification = Extract<EngineNotification, { readonly method: "turn.completed" }>;
 
 export interface NotificationSessionController {
+  readonly dispose: () => void;
   readonly priority: AppNotificationLane;
   readonly transient: AppNotificationLane;
   readonly approvalFor: (notificationId: string) => EngineServerRequest | null;
@@ -56,8 +57,11 @@ export function createNotificationSessionController(
     return applicationPreferencesLoaded() && center.enqueue(input);
   }
 
-  createEffect(() => {
-    if (!applicationPreferences().notifications.enabled) center.clear();
+  const dispose = createRoot((release) => {
+    createEffect(() => {
+      if (!applicationPreferences().notifications.enabled) center.clear();
+    });
+    return release;
   });
 
   function notifySettingsSaved(): void {
@@ -124,6 +128,10 @@ export function createNotificationSessionController(
 
   return {
     approvalFor: center.approvalFor,
+    dispose: () => {
+      dispose();
+      center.dispose();
+    },
     dismiss: center.dismiss,
     enqueue,
     notifyApprovalRequired,

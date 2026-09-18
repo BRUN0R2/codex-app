@@ -15,21 +15,17 @@ async function runIndependentCommand(index: number): Promise<string> {
   const expected = `command-${index}`;
   const script = `Start-Sleep -Milliseconds ${COMMAND_DELAY_MILLISECONDS}; [Console]::Out.Write('${expected}')`;
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      "pwsh",
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-      {
-        env: {
-          ...process.env,
-          CLICOLOR: "0",
-          FORCE_COLOR: "0",
-          NO_COLOR: "1",
-          TERM: "dumb",
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
+    const child = spawn("pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+      env: {
+        ...process.env,
+        CLICOLOR: "0",
+        FORCE_COLOR: "0",
+        NO_COLOR: "1",
+        TERM: "dumb",
       },
-    );
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
@@ -76,7 +72,10 @@ async function measureParallel(): Promise<number> {
 
 function assertProviderOrder(outputs: readonly string[]): void {
   const expected = Array.from({ length: COMMAND_COUNT }, (_, index) => `command-${index}`);
-  if (outputs.length !== expected.length || outputs.some((output, index) => output !== expected[index])) {
+  if (
+    outputs.length !== expected.length ||
+    outputs.some((output, index) => output !== expected[index])
+  ) {
     throw new Error(
       `Concurrent command outputs lost provider order: ${JSON.stringify({ expected, outputs })}`,
     );

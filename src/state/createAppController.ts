@@ -12,7 +12,6 @@ import type {
   AccountProfileResponse,
   AccountReadResponse,
   AppProduct,
-  Attachment,
   ChatGptMode,
   ConfigReadResponse,
   ConfigUpdate,
@@ -53,17 +52,13 @@ import type {
   AppController,
   ApplicationShellActionRequest,
   AttachmentSelectionResult,
+  ClipboardImageResult,
   DiagnosticEntry,
 } from "./appController";
 import { createApplicationPreferencesController } from "./applicationPreferencesController";
 import { assertNever } from "./assertNever";
 import { createAutomationSessionController } from "./automationSessionController";
 import { type SessionControllerHost, settledQueueTail, withBootTimeout } from "./controllerSupport";
-import {
-  type InitializationStage,
-  initializationRetryDelay,
-  isRetryableInitializationFailure,
-} from "./initializationRetry";
 import { createModelCatalogController } from "./modelCatalogController";
 import { createNavigationSessionController } from "./navigationSessionController";
 import { createNotificationOverlayBridge } from "./notificationOverlayBridge";
@@ -77,6 +72,7 @@ import {
 import { pathsEqual } from "./projects";
 import { SingleFlightOperations } from "./singleFlightOperations";
 import { createTaskSessionController } from "./taskSessionController";
+import { type UiError, uiError } from "./uiError";
 
 const MAX_DIAGNOSTICS = 50;
 const EVENT_SUBSCRIPTION_TIMEOUT_MS = 15_000;
@@ -100,7 +96,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
   const [applicationShellActionRequest, setApplicationShellActionRequest] =
     createSignal<ApplicationShellActionRequest | null>(null);
   const [diagnostics, setDiagnostics] = createSignal<readonly DiagnosticEntry[]>([]);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createSignal<UiError | null>(null);
   const [pendingOperations, setPendingOperations] = createSignal(0);
   let diagnosticSequence = 0;
   let disposed = false;
@@ -116,19 +112,23 @@ export function createAppController(localization: AppControllerLocalization): Ap
     setDiagnostics((current) => [...current.slice(-(MAX_DIAGNOSTICS - 1)), entry]);
   }
 
-  function reportError(reason: unknown): void {
-    const message = describeError(reason);
-    const diagnostic = describeDiagnosticError(reason);
-    setError(message);
-    addDiagnostic({ stream: "runtime", message: diagnostic });
+  function recordDiagnostic(message: string): void {
+    addDiagnostic({ stream: "runtime", message });
     if (engine() !== null) {
-      void reportFrontendDiagnostic(diagnostic).catch((persistenceFailure: unknown) => {
+      void reportFrontendDiagnostic(message).catch((persistenceFailure: unknown) => {
         addDiagnostic({
           stream: "runtime",
           message: `Failed to persist frontend diagnostic: ${describeError(persistenceFailure)}`,
         });
       });
     }
+  }
+
+  function reportError(reason: unknown): void {
+    const message = describeError(reason);
+    const diagnostic = describeDiagnosticError(reason);
+    setError(uiError("unexpected", message));
+    recordDiagnostic(diagnostic);
   }
 
   async function withPending<T>(operation: () => Promise<T>): Promise<T> {
@@ -157,7 +157,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
   let unsubscribeFromMenu: (() => void) | null = null;
   let applicationShellActionSequence = 0;
   let initializationRevision = 0;
-  let initializationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let configQueue: Promise<void> = Promise.resolve();
   let authenticationSync: {
     readonly expectedSignedIn: boolean;
@@ -293,12 +292,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
   onCleanup(() => {
     disposed = true;
     initializationRevision += 1;
-    if (initializationRetryTimer !== null) {
-      clearTimeout(initializationRetryTimer);
-      initializationRetryTimer = null;
-    }
     accountUsage.dispose();
     tasks.dispose();
+    notifications.dispose();
     unsubscribe?.();
     unsubscribe = null;
     unsubscribeFromMenu?.();
@@ -309,32 +305,39 @@ export function createAppController(localization: AppControllerLocalization): Ap
     if (disposed) {
       return;
     }
-    if (initializationRetryTimer !== null) {
-      clearTimeout(initializationRetryTimer);
-      initializationRetryTimer = null;
-    }
     const revision = ++initializationRevision;
-    void initialize(revision, 0);
+    void initialize(revision);
   }
 
-  async function initialize(revision: number, attempt: number): Promise<void> {
+  async function initialize(revision: number): Promise<void> {
     if (!isCurrentInitialization(revision)) {
       return;
     }
     unsubscribe?.();
     unsubscribe = null;
-    let stage: InitializationStage = "events";
+    let acceptingEvents = true;
+    const acceptsEvent = () => acceptingEvents && isCurrentInitialization(revision);
     const subscription = subscribeToEvents({
-      onContractError: reportError,
-      onDiagnostic: addDiagnostic,
-      onNotification: handleNotification,
-      onServerRequest: handleServerRequest,
-      onStatus: handleRuntimeStatus,
+      onContractError: (reason) => {
+        if (acceptsEvent()) reportError(reason);
+      },
+      onDiagnostic: (diagnostic) => {
+        if (acceptsEvent()) addDiagnostic(diagnostic);
+      },
+      onNotification: (notification) => {
+        if (acceptsEvent()) handleNotification(notification);
+      },
+      onServerRequest: (request) => {
+        if (acceptsEvent()) handleServerRequest(request);
+      },
+      onStatus: (status) => {
+        if (acceptsEvent()) handleRuntimeStatus(status);
+      },
     });
     let releaseEvents: (() => void) | null = null;
     try {
       const release = await withBootTimeout(
-        "registrar os eventos do engine",
+        "register engine events",
         EVENT_SUBSCRIPTION_TIMEOUT_MS,
         () => subscription,
       );
@@ -345,7 +348,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
       }
       releaseEvents = release;
       unsubscribe = release;
-      stage = "engine";
       const started = await withBootTimeout("start the engine", ENGINE_START_TIMEOUT_MS, () =>
         startEngine(),
       );
@@ -357,9 +359,8 @@ export function createAppController(localization: AppControllerLocalization): Ap
         setConfig(started.config);
         setRuntimeStatus({ state: "ready", message: null });
       });
-      stage = "account";
       const currentAccount = await withBootTimeout(
-        "ler a conta conectada",
+        "read the signed-in account",
         ACCOUNT_READ_TIMEOUT_MS,
         () => readAccount(),
       );
@@ -369,7 +370,6 @@ export function createAppController(localization: AppControllerLocalization): Ap
       applyAccountSession(currentAccount);
       if (currentAccount.account !== null) {
         void accountUsage.refreshAccountProfile();
-        stage = "authenticatedState";
         await loadAuthenticatedState();
       }
     } catch (reason) {
@@ -381,39 +381,27 @@ export function createAppController(localization: AppControllerLocalization): Ap
       modelCatalog.invalidateCatalogs();
       accountUsage.invalidateProfileSession();
       accountUsage.invalidateUsageSession();
-      if (isRetryableInitializationFailure(reason, stage)) {
-        const delay = initializationRetryDelay(attempt);
-        batch(() => {
-          setEngine(null);
-          setAccount(undefined);
-          setConfig(null);
-          accountUsage.applySignedOut();
-          setError(null);
-          setRuntimeStatus({
-            state: "starting",
-            message: `${message} Retrying automatically in ${delay / 1000}s.`,
-          });
-        });
-        initializationRetryTimer = setTimeout(() => {
-          if (!isCurrentInitialization(revision)) {
-            return;
-          }
-          initializationRetryTimer = null;
-          void initialize(revision, attempt + 1);
-        }, delay);
-      } else {
-        batch(() => {
-          setEngine(null);
-          setAccount(undefined);
-          setConfig(null);
-          accountUsage.applySignedOut();
-          setError(message);
-          setRuntimeStatus({ state: "failed", message });
-        });
+      acceptingEvents = false;
+      if (releaseEvents !== null && unsubscribe === releaseEvents) {
+        unsubscribe = null;
+        releaseEvents();
       }
+      recordDiagnostic(describeDiagnosticError(reason));
+      batch(() => {
+        setEngine(null);
+        setAccount(undefined);
+        setConfig(null);
+        accountUsage.applySignedOut();
+        setError(uiError("unexpected", message));
+        setRuntimeStatus({ state: "failed", message });
+      });
     } finally {
       if (releaseEvents === null) {
-        void subscription.then((release) => release()).catch(reportError);
+        acceptingEvents = false;
+        void subscription.then(
+          (release) => release(),
+          () => undefined,
+        );
       }
     }
   }
@@ -427,7 +415,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
     }
     setAccount(currentAccount);
     if (currentAccount.refresh.status === "failed") {
-      setError(currentAccount.refresh.error ?? "The ChatGPT session refresh failed.");
+      const detail = currentAccount.refresh.error ?? undefined;
+      setError(uiError("unexpected", detail));
+      recordDiagnostic(detail ?? "The ChatGPT session refresh failed.");
     }
   }
 
@@ -542,7 +532,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
         loginId = null;
         setLoginPending(false);
         if (!notification.params.success) {
-          setError(notification.params.error ?? "The ChatGPT login did not complete.");
+          const detail = notification.params.error ?? undefined;
+          setError(uiError("loginFailed", detail));
+          recordDiagnostic(detail ?? "The ChatGPT login did not complete.");
           return;
         }
         void synchronizeAuthentication(true);
@@ -685,10 +677,9 @@ export function createAppController(localization: AppControllerLocalization): Ap
         accountUsage.applySignedOut();
       });
       if (response.remoteRevocation === "failed") {
-        setError(
-          response.remoteRevocationError ??
-            "The local session was removed, but remote revocation failed.",
-        );
+        const detail = response.remoteRevocationError ?? undefined;
+        setError(uiError("remoteRevocationFailed", detail));
+        recordDiagnostic(detail ?? "Remote ChatGPT session revocation failed.");
       }
       return true;
     } catch (reason) {
@@ -699,7 +690,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
 
   async function chooseWorkspace(): Promise<string | null> {
     if (navigation.conversationMode() === "chat") {
-      setError("Chat conversations cannot access local projects. Switch to Work or Codex.");
+      setError(uiError("chatProjectsUnsupported"));
       return null;
     }
     try {
@@ -759,7 +750,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
 
   function selectProject(path: string): boolean {
     if (navigation.conversationMode() === "chat") {
-      setError("Chat does not associate conversations with local projects.");
+      setError(uiError("chatProjectsAssociation"));
       return false;
     }
     const thread = tasks.currentThread();
@@ -779,7 +770,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
 
   function togglePinnedThread(threadId: string): void {
     if (!tasks.threads().some((thread) => thread.id === threadId)) {
-      setError("The task must be available before it can be pinned.");
+      setError(uiError("taskUnavailable"));
       return;
     }
     navigation.togglePinnedThread(threadId);
@@ -810,7 +801,8 @@ export function createAppController(localization: AppControllerLocalization): Ap
     const operation = configQueue.then(async () => {
       const current = config();
       if (current === null) {
-        throw new Error("The configuration has not loaded yet.");
+        setError(uiError("configurationNotLoaded"));
+        return;
       }
       const response = await updateConfig(current.version, update);
       setConfig(response);
@@ -863,12 +855,12 @@ export function createAppController(localization: AppControllerLocalization): Ap
     return readOutputCommand(outputId, cursor);
   }
 
-  async function saveClipboard(dataBase64: string): Promise<Attachment | null> {
+  async function saveClipboard(dataBase64: string): Promise<ClipboardImageResult> {
     try {
-      return await savePastedImage(dataBase64);
+      return { attachment: await savePastedImage(dataBase64), type: "saved" };
     } catch (reason) {
       reportError(reason);
-      return null;
+      return { error: uiError("imageUnavailable"), type: "failed" };
     }
   }
 
@@ -883,7 +875,7 @@ export function createAppController(localization: AppControllerLocalization): Ap
       return { type: "selected", attachments: await inspectAttachments(paths) };
     } catch (reason) {
       reportError(reason);
-      return { type: "failed", message: describeError(reason) };
+      return { type: "failed", error: uiError("attachmentSelectionFailed") };
     }
   }
 

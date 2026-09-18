@@ -1380,7 +1380,12 @@ const PREVIEW_RATE_LIMITS = {
       rateLimitReachedType: null,
     },
   },
-  planPrice: { amount: 52_500, currency: "BRL", minorUnitExponent: 2 },
+  planPrices: [
+    { planType: "go", amount: 3_999, currency: "BRL", minorUnitExponent: 2 },
+    { planType: "plus", amount: 9_990, currency: "BRL", minorUnitExponent: 2 },
+    { planType: "prolite", amount: 52_500, currency: "BRL", minorUnitExponent: 2 },
+    { planType: "pro", amount: 99_990, currency: "BRL", minorUnitExponent: 2 },
+  ],
   lunaReserveAvailable: true,
 } as const satisfies AccountRateLimitsResponse;
 
@@ -1797,6 +1802,8 @@ export function setupBrowserPreview(): void {
         return previewAutoTopUpSettings;
       case "application_preferences_read":
         return previewApplicationPreferences;
+      case "application_menu_update":
+        return null;
       case "application_preferences_update": {
         const preferences = (args as { preferences?: ApplicationPreferences }).preferences;
         if (preferences === undefined) {

@@ -61,7 +61,7 @@ pub(super) fn resolve_tool(
     let settled = match result {
         Ok(value) => {
             let value = json_to_v8(scope, &value)
-                .ok_or_else(|| "failed to deserialize nested tool output".to_string())?;
+                .map_err(|error| format!("failed to deserialize nested tool output: {error}"))?;
             resolver.resolve(scope, value)
         }
         Err(error) => {
