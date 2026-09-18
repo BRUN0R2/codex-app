@@ -130,6 +130,15 @@ describe("tooling bootstrap contract", () => {
     expect(visualAuditScript).not.toContain("allowExited");
   });
 
+  it("does not fail 100,000-file scrolling on CI paint-work noise", () => {
+    const extremeValidator = visualAuditScript.slice(
+      visualAuditScript.indexOf("function validateTimelineExtremeFilesMetrics"),
+    );
+    expect(extremeValidator).toContain("rapidP99ApplicationWorkMs <= 8");
+    expect(extremeValidator).toContain("rapidP99FrameWorkMs <= 20");
+    expect(extremeValidator).not.toContain("rapidP99FrameWorkMs <= 12");
+  });
+
   it("audits usage settings against the preview plan price formatter", () => {
     expect(visualAuditScript).toContain("formatPlanPriceAmount");
     expect(visualAuditScript).toContain("previewCurrentPlanPrice");
