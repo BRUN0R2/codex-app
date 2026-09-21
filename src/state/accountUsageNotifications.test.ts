@@ -45,7 +45,7 @@ function limits(usedPercent: number, resetsAt: number): AccountRateLimitsRespons
       rateLimitReachedType: null,
     },
     additionalRateLimitsByLimitId: {},
-    planPrice: null,
+    planPrices: [],
     lunaReserveAvailable: false,
   };
 }

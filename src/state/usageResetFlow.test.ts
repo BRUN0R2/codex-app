@@ -135,7 +135,7 @@ describe("usage reset flow", () => {
       code: "no_credits_available",
       creditId: null,
     });
-    expect(controller.usageResetsError()).toBe("No reset is available to use.");
+    expect(controller.usageResetsError()).toEqual({ key: "usageResetUnavailable" });
     expect(controller.rateLimits()).toEqual(after);
   });
 
@@ -167,6 +167,17 @@ describe("usage reset flow", () => {
     pendingLimits.resolve(resetLimits(beforeLimits));
     pendingCredits.resolve({ ...beforeCredits, credits: [], availableCount: 0 });
     await vi.waitFor(() => expect(controller.usageResetRedeemingId()).toBeNull());
+  });
+
+  it("returns an explicit failure when a pasted image cannot be persisted", async () => {
+    const controller = await startController();
+    vi.spyOn(client, "savePastedImage").mockRejectedValue(new Error("image storage unavailable"));
+
+    await expect(controller.saveClipboardImage("encoded-image")).resolves.toEqual({
+      error: { key: "imageUnavailable" },
+      type: "failed",
+    });
+    expect(controller.error()).toEqual({ key: "unexpected", detail: "image storage unavailable" });
   });
 
   it.each(["before", "after"])(
@@ -230,7 +241,10 @@ describe("usage reset flow", () => {
           operation === "readRateLimits"
             ? controller.rateLimitsError()
             : controller.usageResetsError(),
-        ).toContain("Post-reset read failed.");
+        ).toEqual({
+          key: operation === "readRateLimits" ? "rateLimitsLoad" : "usageResetsLoad",
+          detail: "Post-reset read failed.",
+        });
         expect(controller.usageResetRedeemingId()).toBeNull();
       });
     },
@@ -262,7 +276,10 @@ describe("usage reset flow", () => {
     expect(redeem).toHaveBeenCalledTimes(1);
     pending.reject(new Error("Connection interrupted."));
     await expect(first).resolves.toBeNull();
-    expect(controller.usageResetsError()).toContain("Connection interrupted.");
+    expect(controller.usageResetsError()).toEqual({
+      key: "usageResetFailed",
+      detail: "Connection interrupted.",
+    });
     expect(controller.usageResetRedeemingId()).toBeNull();
     expect(controller.usageResets()?.availableCount).toBe(1);
 

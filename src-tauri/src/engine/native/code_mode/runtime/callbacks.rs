@@ -276,9 +276,15 @@ pub(super) fn load_callback(
         retval.set(v8::undefined(scope).into());
         return;
     };
-    let Some(value) = json_to_v8(scope, &value) else {
-        throw_type_error(scope, "failed to deserialize stored value");
-        return;
+    let value = match json_to_v8(scope, &value) {
+        Ok(value) => value,
+        Err(error) => {
+            throw_type_error(
+                scope,
+                &format!("failed to deserialize stored value: {error}"),
+            );
+            return;
+        }
     };
     retval.set(value);
 }

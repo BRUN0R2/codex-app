@@ -11,8 +11,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot ".." )).Path
-$exePath = Join-Path $projectRoot "src-tauri\target\release\codex-desktop-next.exe"
 . (Join-Path $PSScriptRoot "runtime-profile.ps1")
+. (Join-Path $PSScriptRoot "native-build.ps1")
+Initialize-ProjectNativeBuild | Out-Null
+$exePath = Get-ProjectNativeExecutablePath -Profile "release"
 
 $existingProcesses = @(Get-ProcessesByExecutablePath -ExecutablePath $exePath)
 

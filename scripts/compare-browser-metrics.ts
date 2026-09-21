@@ -67,8 +67,7 @@ console.log(
           candidateSummary.averageScreenshotMs,
           baselineSummary.averageScreenshotMs,
         ),
-        failurePercentagePoints:
-          candidateSummary.failurePercent - baselineSummary.failurePercent,
+        failurePercentagePoints: candidateSummary.failurePercent - baselineSummary.failurePercent,
       },
     },
     null,
@@ -139,20 +138,24 @@ function decodeMetric(value: unknown, source: string): BrowserMetric {
     throw new Error(`${source} must contain an object`);
   }
   const object = value as Record<string, unknown>;
-  const status = object.status;
+  const status = field(object, "status");
   if (status !== "completed" && status !== "declined" && status !== "failed") {
     throw new Error(`${source}.status is invalid`);
   }
   return {
-    action: requiredString(object.action, `${source}.action`),
+    action: requiredString(field(object, "action"), `${source}.action`),
     status,
-    totalMs: requiredDuration(object.totalMs, `${source}.totalMs`),
-    queueMs: requiredDuration(object.queueMs, `${source}.queueMs`),
-    actionMs: requiredDuration(object.actionMs, `${source}.actionMs`),
-    loadMs: requiredDuration(object.loadMs, `${source}.loadMs`),
-    snapshotMs: requiredDuration(object.snapshotMs, `${source}.snapshotMs`),
-    screenshotMs: requiredDuration(object.screenshotMs, `${source}.screenshotMs`),
+    totalMs: requiredDuration(field(object, "totalMs"), `${source}.totalMs`),
+    queueMs: requiredDuration(field(object, "queueMs"), `${source}.queueMs`),
+    actionMs: requiredDuration(field(object, "actionMs"), `${source}.actionMs`),
+    loadMs: requiredDuration(field(object, "loadMs"), `${source}.loadMs`),
+    snapshotMs: requiredDuration(field(object, "snapshotMs"), `${source}.snapshotMs`),
+    screenshotMs: requiredDuration(field(object, "screenshotMs"), `${source}.screenshotMs`),
   };
+}
+
+function field(object: Record<string, unknown>, key: string): unknown {
+  return object[key];
 }
 
 function requiredString(value: unknown, source: string): string {
@@ -200,7 +203,10 @@ function percentile(sorted: readonly number[], quantile: number): number {
   return value;
 }
 
-function delta(candidate: number, baseline: number): {
+function delta(
+  candidate: number,
+  baseline: number,
+): {
   readonly absolute: number;
   readonly percent: number | null;
 } {

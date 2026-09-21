@@ -1,4 +1,11 @@
-import { type Accessor, createMemo, createSignal } from "solid-js";
+import {
+  type Accessor,
+  createMemo,
+  createRoot,
+  createSignal,
+  getOwner,
+  runWithOwner,
+} from "solid-js";
 import type {
   AppNotification,
   ConfigurableNotificationEventKind,
@@ -30,6 +37,7 @@ export interface AppNotificationInput {
 }
 
 export interface AppNotificationCenter {
+  readonly dispose: () => void;
   readonly approvalFor: (notificationId: string) => EngineServerRequest | null;
   readonly priority: AppNotificationLane;
   readonly transient: AppNotificationLane;
@@ -53,12 +61,19 @@ export function createAppNotificationCenter(
   preferences: Accessor<NotificationPreferences>,
   now: () => number = Date.now,
 ): AppNotificationCenter {
+  const lifecycle = createRoot((dispose) => ({ dispose, owner: getOwner() }));
   const [priorityQueue, setPriorityQueue] = createSignal<readonly AppNotification[]>([]);
   const [transientQueue, setTransientQueue] = createSignal<readonly AppNotification[]>([]);
   const rememberedIds = new Set<string>();
   const rememberedOrder: string[] = [];
-  const priority = createNotificationLane(priorityQueue);
-  const transient = createNotificationLane(transientQueue);
+  const priority = runWithOwner(lifecycle.owner, () => createNotificationLane(priorityQueue));
+  const transient = runWithOwner(lifecycle.owner, () => createNotificationLane(transientQueue));
+  if (priority === undefined || transient === undefined) {
+    lifecycle.dispose();
+    throw new Error("Notification center could not establish its reactive owner.");
+  }
+  const priorityLane = priority;
+  const transientLane = transient;
 
   function enqueue(input: AppNotificationInput): boolean {
     const currentPreferences = preferences();
@@ -116,11 +131,11 @@ export function createAppNotificationCenter(
   }
 
   function dismiss(notificationId: string): boolean {
-    if (priority.active()?.id === notificationId) {
+    if (priorityLane.active()?.id === notificationId) {
       setPriorityQueue((current) => current.slice(1));
       return true;
     }
-    if (transient.active()?.id === notificationId) {
+    if (transientLane.active()?.id === notificationId) {
       setTransientQueue((current) => current.slice(1));
       return true;
     }
@@ -128,12 +143,12 @@ export function createAppNotificationCenter(
   }
 
   function targetFor(notificationId: string): NotificationTarget | null {
-    const notification = activeNotification(notificationId, priority, transient);
+    const notification = activeNotification(notificationId, priorityLane, transientLane);
     return notification?.target ?? null;
   }
 
   function approvalFor(notificationId: string): EngineServerRequest | null {
-    const notification = activeNotification(notificationId, priority, transient);
+    const notification = activeNotification(notificationId, priorityLane, transientLane);
     return notification?.approval ?? null;
   }
 
@@ -147,8 +162,9 @@ export function createAppNotificationCenter(
 
   return {
     approvalFor,
-    priority,
-    transient,
+    dispose: lifecycle.dispose,
+    priority: priorityLane,
+    transient: transientLane,
     clear: () => {
       setPriorityQueue([]);
       setTransientQueue([]);

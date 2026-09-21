@@ -53,7 +53,7 @@ function formatDiagnosticReason(reason: unknown, ancestors: Set<Error>, depth: n
     return describeError(reason);
   }
   if (ancestors.has(reason)) {
-    return "[causa circular omitida]";
+    return "[circular cause omitted]";
   }
 
   const detail =
@@ -65,5 +65,5 @@ function formatDiagnosticReason(reason: unknown, ancestors: Set<Error>, depth: n
 
   const nextAncestors = new Set(ancestors);
   nextAncestors.add(reason);
-  return `${detail}\nCausado por:\n${formatDiagnosticReason(reason.cause, nextAncestors, depth + 1)}`;
+  return `${detail}\nCaused by:\n${formatDiagnosticReason(reason.cause, nextAncestors, depth + 1)}`;
 }

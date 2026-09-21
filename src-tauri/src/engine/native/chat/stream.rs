@@ -215,10 +215,11 @@ impl PayloadDecoder {
     ) -> Result<(), AppError> {
         match event {
             Some("delta_encoding") => {
-                let encoding = serde_json::from_str::<Value>(data)
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_string))
-                    .unwrap_or_else(|| data.trim_matches('"').to_string());
+                let encoding = serde_json::from_str::<String>(data).map_err(|error| {
+                    AppError::Provider(format!(
+                        "ChatGPT returned an invalid delta encoding declaration: {error}"
+                    ))
+                })?;
                 if encoding != "v1" {
                     return Err(AppError::Provider(format!(
                         "ChatGPT selected unknown delta encoding `{encoding}`"
@@ -498,7 +499,8 @@ fn empty_for(segment: &PathSegment) -> Value {
 fn append_value(target: &mut Value, value: &Value) -> Result<(), AppError> {
     match target {
         Value::String(current) => {
-            current.push_str(value.as_str().unwrap_or(&value.to_string()));
+            let value = value.as_str().ok_or_else(delta_error)?;
+            current.push_str(value);
             Ok(())
         }
         Value::Array(current) => {
@@ -759,7 +761,7 @@ mod tests {
     use tokio::sync::watch;
     use tokio::time::Instant;
 
-    use super::{ChatSseParser, ChatStream, ChatStreamEvent, decode_payload};
+    use super::{ChatSseParser, ChatStream, ChatStreamEvent, append_value, decode_payload};
 
     #[test]
     fn decodes_v1_delta_updates_without_cloning_the_accumulated_message() {
@@ -807,6 +809,33 @@ mod tests {
             )
             .expect_err("stream should be rejected");
         assert!(error.to_string().contains("before declaring"));
+    }
+
+    #[test]
+    fn rejects_an_invalid_delta_encoding_declaration() {
+        let mut parser = ChatSseParser::default();
+        let mut events = VecDeque::new();
+        let error = parser
+            .push(b"event: delta_encoding\ndata: v1\n\n", &mut events)
+            .expect_err("the encoding declaration must be JSON string data");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid delta encoding declaration")
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn rejects_non_string_values_when_appending_to_text() {
+        let mut target = serde_json::json!("prefix");
+
+        let error = append_value(&mut target, &serde_json::json!({"unexpected": true}))
+            .expect_err("text deltas must append only strings");
+
+        assert!(error.to_string().contains("invalid v1 delta payload"));
+        assert_eq!(target, serde_json::json!("prefix"));
     }
 
     #[test]

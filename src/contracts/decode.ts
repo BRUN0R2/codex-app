@@ -35,6 +35,13 @@ export {
   decodeThreadUnarchiveResponse,
   decodeTurnStartResponse,
 } from "./decode/conversation";
+export {
+  type DesktopDialogSelection,
+  decodeDesktopBoolean,
+  decodeDesktopDialogButton,
+  decodeDesktopDialogSelection,
+  decodeRuntimeUnit,
+} from "./decode/desktop";
 export { decodeChatModelListResponse, decodeModelListResponse } from "./decode/models";
 export {
   decodeEngineNotification,

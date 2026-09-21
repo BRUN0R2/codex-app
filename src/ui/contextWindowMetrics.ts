@@ -51,8 +51,8 @@ export function calculateContextWindowMetrics(
   };
 }
 
-export function formatContextTokens(tokens: number): string {
-  const formatted = new Intl.NumberFormat("pt-BR", {
+export function formatContextTokens(tokens: number, locale: string): string {
+  const formatted = new Intl.NumberFormat(locale, {
     maximumFractionDigits:
       tokens < COMPACT_TOKEN_THRESHOLD && tokens % THOUSAND_DIVISOR !== 0 ? 1 : 0,
   }).format(tokens / THOUSAND_DIVISOR);

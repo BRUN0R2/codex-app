@@ -1,6 +1,7 @@
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import { decodeDesktopBoolean, decodeRuntimeUnit } from "../contracts/decode";
 import type { TranslationMessages } from "../i18n/messages";
 import { invokeRuntime, listenRuntime as listen } from "./runtimeBridge";
 
@@ -49,18 +50,20 @@ export function synchronizeApplicationMenu(
   translation: TranslationMessages["nativeMenu"],
 ): Promise<void> {
   const operation = menuUpdateQueue.then(() =>
-    invokeRuntime<void>("application_menu_update", { translation }),
+    invokeRuntime("application_menu_update", { translation }).then((value) => {
+      decodeRuntimeUnit(value);
+    }),
   );
   menuUpdateQueue = operation.catch(() => undefined);
   return operation;
 }
 
 export async function isMainWindowMaximized(): Promise<boolean> {
-  return getCurrentWindow().isMaximized();
+  return decodeDesktopBoolean(await getCurrentWindow().isMaximized());
 }
 
 export function onMainWindowFocusChanged(handler: (focused: boolean) => void): Promise<() => void> {
-  return getCurrentWindow().onFocusChanged(({ payload: focused }) => handler(focused));
+  return getCurrentWindow().onFocusChanged(({ payload }) => handler(decodeDesktopBoolean(payload)));
 }
 
 export async function minimizeMainWindow(): Promise<void> {

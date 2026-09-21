@@ -9,8 +9,9 @@ import type {
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
 import { generalRateLimitSnapshot } from "../state/rateLimits";
+import { formatUiError, type UiError } from "../state/uiError";
 
-import { accountPlanLabel } from "./accountPresentation";
+import { accountPlanLabel, accountPlanName, planPriceLabel } from "./accountPresentation";
 import { formatShortDate, formatShortDateWithTimeZone } from "./dateFormat";
 import { useExternalNavigation } from "./ExternalNavigation";
 import { Icon } from "./Icon";
@@ -30,6 +31,8 @@ export function UsageSettings(props: { readonly controller: SettingsDialogContro
   const rateLimits = () => props.controller.rateLimits();
   const snapshot = () => generalRateLimitSnapshot(rateLimits());
   const autoTopUp = () => props.controller.autoTopUpSettings();
+  const formatOptionalError = (error: UiError | null): string | null =>
+    error === null ? null : formatUiError(error, i18n.messages().errors);
   const [autoTopUpEditing, setAutoTopUpEditing] = createSignal(false);
   const [rechargeThreshold, setRechargeThreshold] = createSignal(
     AUTO_TOP_UP_DEFAULT_RECHARGE_THRESHOLD,
@@ -41,6 +44,7 @@ export function UsageSettings(props: { readonly controller: SettingsDialogContro
     readonly requestId: string;
   } | null>(null);
   const [resetSuccess, setResetSuccess] = createSignal<string | null>(null);
+  const [planCatalogOpen, setPlanCatalogOpen] = createSignal(false);
 
   onMount(() => {
     void Promise.all([
@@ -61,7 +65,9 @@ export function UsageSettings(props: { readonly controller: SettingsDialogContro
 
   const limitGroups = () => presentUsageLimits(rateLimits(), messages(), i18n.locale());
   const credits = () => snapshot()?.credits ?? null;
-  const planPrice = () => rateLimits()?.planPrice ?? null;
+  const planPrices = () => rateLimits()?.planPrices ?? [];
+  const currentPlanPrice = () =>
+    planPrices().find((price) => price.planType === snapshot()?.planType) ?? null;
   const spendControl = () => snapshot()?.individualLimit ?? null;
   const availableResetCredits = () =>
     props.controller.usageResets()?.credits.filter((credit) => credit.status === "available") ?? [];
@@ -130,11 +136,30 @@ export function UsageSettings(props: { readonly controller: SettingsDialogContro
         {(current) => (
           <SettingsSection title={messages().yourPlan}>
             <div class="usage-plan">
-              <span>
-                <strong>{accountPlanLabel(current().planType, i18n.messages().account)}</strong>
-                <small>
-                  {planPriceLabel(planPrice(), i18n.locale(), messages()) ?? messages().currentPlan}
-                </small>
+              <span class="usage-plan-copy">
+                <span>
+                  <strong>{accountPlanLabel(current().planType, i18n.messages().account)}</strong>
+                  <small>
+                    {planPriceLabel(currentPlanPrice(), i18n.locale(), messages()) ??
+                      messages().currentPlan}
+                  </small>
+                </span>
+                <Show when={planPrices().length > 0}>
+                  <button
+                    aria-controls="usage-plan-catalog"
+                    aria-expanded={planCatalogOpen()}
+                    aria-label={
+                      planCatalogOpen()
+                        ? messages().collapsePlanCatalog
+                        : messages().expandPlanCatalog
+                    }
+                    class="usage-plan-toggle"
+                    onClick={() => setPlanCatalogOpen(!planCatalogOpen())}
+                    type="button"
+                  >
+                    <Icon name={planCatalogOpen() ? "chevronDown" : "chevronRight"} size={14} />
+                  </button>
+                </Show>
               </span>
               <button
                 class="usage-credits-button"
@@ -144,6 +169,28 @@ export function UsageSettings(props: { readonly controller: SettingsDialogContro
                 {messages().viewPlans}
               </button>
             </div>
+            <Show when={planCatalogOpen() && planPrices().length > 0}>
+              <ul class="usage-plan-catalog" id="usage-plan-catalog">
+                <For each={planPrices()}>
+                  {(price) => (
+                    <li
+                      aria-current={price.planType === current().planType ? "true" : undefined}
+                      class="usage-plan-option"
+                    >
+                      <span class="usage-plan-option-name">
+                        {accountPlanName(price.planType, i18n.messages().account)}
+                        <Show when={price.planType === current().planType}>
+                          <Icon name="check" size={14} strokeWidth={2.75} />
+                        </Show>
+                      </span>
+                      <span class="usage-plan-option-price">
+                        {planPriceLabel(price, i18n.locale(), messages())}
+                      </span>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
           </SettingsSection>
         )}
       </Show>
@@ -176,7 +223,9 @@ export function UsageSettings(props: { readonly controller: SettingsDialogContro
                 <span>
                   {props.controller.autoTopUpLoading()
                     ? messages().loadingAutoTopUp
-                    : (props.controller.autoTopUpError() ?? messages().autoTopUpUnavailable)}
+                    : props.controller.autoTopUpError() === null
+                      ? messages().autoTopUpUnavailable
+                      : formatOptionalError(props.controller.autoTopUpError())}
                 </span>
                 <Show when={!props.controller.autoTopUpLoading()}>
                   <button
@@ -283,7 +332,11 @@ export function UsageSettings(props: { readonly controller: SettingsDialogContro
                   </form>
                 </Show>
                 <Show when={props.controller.autoTopUpError()}>
-                  {(message) => <p class="usage-inline-error">{message()}</p>}
+                  {(message) => (
+                    <p class="usage-inline-error">
+                      {formatUiError(message(), i18n.messages().errors)}
+                    </p>
+                  )}
                 </Show>
               </>
             )}
@@ -319,7 +372,9 @@ export function UsageSettings(props: { readonly controller: SettingsDialogContro
                 <p>
                   {props.controller.rateLimitsLoading()
                     ? messages().usageDetailsWait
-                    : (props.controller.rateLimitsError() ?? messages().usageDetailsRefresh)}
+                    : props.controller.rateLimitsError() === null
+                      ? messages().usageDetailsRefresh
+                      : formatOptionalError(props.controller.rateLimitsError())}
                 </p>
               </div>
             </div>
@@ -377,7 +432,7 @@ export function UsageSettings(props: { readonly controller: SettingsDialogContro
             when={props.controller.usageResetsError() === null || resetRows().length > 0}
             fallback={
               <div class="usage-reset-state">
-                <span>{props.controller.usageResetsError()}</span>
+                <span>{formatOptionalError(props.controller.usageResetsError())}</span>
                 <button
                   class="usage-inline-action"
                   onClick={() => void props.controller.refreshUsageResets()}
@@ -440,7 +495,9 @@ export function UsageSettings(props: { readonly controller: SettingsDialogContro
           {(message) => <p class="usage-inline-success">{message()}</p>}
         </Show>
         <Show when={props.controller.usageResetsError() !== null && resetRows().length > 0}>
-          <p class="usage-inline-error">{props.controller.usageResetsError()}</p>
+          <p class="usage-inline-error">
+            {formatOptionalError(props.controller.usageResetsError())}
+          </p>
         </Show>
         <Show when={props.controller.usageResets()?.immediateResetPurchaseEligible}>
           <button
@@ -459,22 +516,6 @@ export function UsageSettings(props: { readonly controller: SettingsDialogContro
 export function normalizedOptionalCreditValue(value: string): string | null {
   const normalized = value.trim();
   return normalized.length === 0 ? null : normalized;
-}
-
-export function planPriceLabel(
-  price: NonNullable<ReturnType<SettingsDialogController["rateLimits"]>>["planPrice"],
-  locale: string,
-  messages: SettingsMessages,
-): string | null {
-  if (price === null) {
-    return null;
-  }
-  const amount = price.amount / 10 ** price.minorUnitExponent;
-  const formattedPrice = new Intl.NumberFormat(locale, {
-    style: "currency",
-    currency: price.currency,
-  }).format(amount);
-  return formatMessage(messages.perMonth, { price: formattedPrice });
 }
 
 export function autoTopUpDescription(

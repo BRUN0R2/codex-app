@@ -1639,7 +1639,7 @@ impl SseParser {
 struct StreamEventWire {
     #[serde(rename = "type")]
     kind: String,
-    #[serde(default, alias = "status_code")]
+    #[serde(default)]
     status: Option<u16>,
     #[serde(default)]
     headers: Option<Value>,

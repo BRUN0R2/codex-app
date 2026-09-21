@@ -10,6 +10,6 @@ $ripgrepArguments = @($args)
 if ($ripgrepArguments.Count -gt 0 -and $ripgrepArguments[0] -eq "--") {
   $ripgrepArguments = @($ripgrepArguments | Select-Object -Skip 1)
 }
-$ripgrepPath = Enable-ProjectTools -ProjectRoot $projectRoot -Required
+$ripgrepPath = Enable-ProjectTools -ProjectRoot $projectRoot
 & $ripgrepPath @RipgrepArguments
 exit $LASTEXITCODE

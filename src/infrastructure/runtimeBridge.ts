@@ -37,29 +37,29 @@ export function hasBrowserPreviewRuntime(): boolean {
   return browserPreviewRuntime !== null;
 }
 
-export async function invokeRuntime<T>(
+export async function invokeRuntime(
   command: string,
   args?: Record<string, unknown>,
-): Promise<T> {
+): Promise<unknown> {
   const preview = browserPreviewRuntime;
   if (preview !== null) {
-    return (await preview.handler(command, args)) as T;
+    return preview.handler(command, args);
   }
-  return invokeTauri<T>(command, args);
+  return invokeTauri(command, args);
 }
 
-export function listenRuntime<T>(
+export function listenRuntime(
   event: string,
-  receive: (event: RuntimeEvent<T>) => void,
+  receive: (event: RuntimeEvent<unknown>) => void,
 ): Promise<UnlistenFn> {
   const preview = browserPreviewRuntime;
   if (preview === null) {
-    return listenTauri<T>(event, receive);
+    return listenTauri(event, receive);
   }
   preview.listenerSequence += 1;
   const listener: BrowserPreviewListener = {
     id: preview.listenerSequence,
-    receive: receive as (event: RuntimeEvent<unknown>) => void,
+    receive,
   };
   const listeners = preview.listeners.get(event);
   if (listeners === undefined) {

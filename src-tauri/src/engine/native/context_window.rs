@@ -55,8 +55,42 @@ struct OriginalImageEstimate {
     tokens: Option<u64>,
 }
 
-static ORIGINAL_IMAGE_ESTIMATE_CACHE: LazyLock<Mutex<VecDeque<OriginalImageEstimate>>> =
-    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE)));
+/// Owner: `context_window` module.
+///
+/// Process-scoped memo for `decode_original_image_tokens`. Justification: the estimate is a
+/// deterministic function of the image URL, shared across turns to avoid repeated base64
+/// decoding and dimension sniffing. Entries are content-addressed by SHA-256, bounded to
+/// `ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE` with most-recently-used eviction, so memory stays
+/// predictable. No lifecycle or shutdown handling is required; entries remain valid for the
+/// process lifetime. `parking_lot::Mutex` keeps locking deterministic without poisoning.
+struct OriginalImageEstimateCache {
+    entries: VecDeque<OriginalImageEstimate>,
+}
+
+impl OriginalImageEstimateCache {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::with_capacity(ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE),
+        }
+    }
+
+    fn get(&mut self, key: &[u8; 32]) -> Option<Option<u64>> {
+        let index = self.entries.iter().position(|entry| &entry.key == key)?;
+        let entry = self.entries.remove(index)?;
+        let estimate = entry.tokens;
+        self.entries.push_front(entry);
+        Some(estimate)
+    }
+
+    fn insert(&mut self, key: [u8; 32], tokens: Option<u64>) {
+        self.entries
+            .push_front(OriginalImageEstimate { key, tokens });
+        self.entries.truncate(ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE);
+    }
+}
+
+static ORIGINAL_IMAGE_ESTIMATE_CACHE: LazyLock<Mutex<OriginalImageEstimateCache>> =
+    LazyLock::new(|| Mutex::new(OriginalImageEstimateCache::new()));
 
 pub(super) struct ContextWindowEvaluation<'a> {
     pub model_id: &'a str,
@@ -635,23 +669,12 @@ fn estimate_image_tokens(image_url: &str, detail: Option<ImageDetail>) -> u64 {
 
 fn estimate_original_image_tokens(image_url: &str) -> Option<u64> {
     let key: [u8; 32] = Sha256::digest(image_url.as_bytes()).into();
-    {
-        let mut cache = ORIGINAL_IMAGE_ESTIMATE_CACHE.lock();
-        if let Some(index) = cache.iter().position(|candidate| candidate.key == key) {
-            let entry = cache.remove(index)?;
-            let estimate = entry.tokens;
-            cache.push_front(entry);
-            return estimate;
-        }
+    if let Some(cached) = ORIGINAL_IMAGE_ESTIMATE_CACHE.lock().get(&key) {
+        return cached;
     }
 
     let estimate = decode_original_image_tokens(image_url);
-    let mut cache = ORIGINAL_IMAGE_ESTIMATE_CACHE.lock();
-    cache.push_front(OriginalImageEstimate {
-        key,
-        tokens: estimate,
-    });
-    cache.truncate(ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE);
+    ORIGINAL_IMAGE_ESTIMATE_CACHE.lock().insert(key, estimate);
     estimate
 }
 
@@ -1394,5 +1417,26 @@ mod tests {
             compaction_elapsed.as_secs_f64() * 1_000.0,
             eager_elapsed.as_secs_f64() * 1_000.0,
         );
+    }
+
+    #[test]
+    fn original_image_estimate_cache_returns_hits_and_evicts_oldest() {
+        let mut cache = OriginalImageEstimateCache::new();
+        let first = [1u8; 32];
+        let second = [2u8; 32];
+
+        assert_eq!(cache.get(&first), None);
+        cache.insert(first, Some(7));
+        assert_eq!(cache.get(&first), Some(Some(7)));
+
+        for index in 0..ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE {
+            let mut key = [0u8; 32];
+            key[0] = index as u8;
+            key[1] = 9u8;
+            cache.insert(key, Some(index as u64));
+        }
+        cache.insert(second, Some(99));
+        assert_eq!(cache.get(&second), Some(Some(99)));
+        assert!(cache.entries.len() <= ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE);
     }
 }

@@ -4,6 +4,7 @@ import type { ModelVerbosity, Personality, WebSearchMode } from "../contracts/ty
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
 import { isBrowserPreview, isDesktopRuntime } from "../platform/desktopRuntime";
+import { formatUiError } from "../state/uiError";
 
 import { Icon, type IconName } from "./Icon";
 import { outputDetailLabel, outputDetailOptions } from "./outputDetail";
@@ -63,7 +64,8 @@ export function ApplicationPreferencesSettings(props: {
   const status = () => {
     if (!desktopRuntime) return messages().desktopOnly;
     if (!props.controller.applicationPreferencesLoaded()) return messages().loadingAppPreferences;
-    return props.controller.applicationPreferencesError() ?? "";
+    const error = props.controller.applicationPreferencesError();
+    return error === null ? "" : formatUiError(error, i18n.messages().errors);
   };
 
   return (

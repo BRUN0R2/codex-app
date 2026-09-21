@@ -939,7 +939,9 @@ pub(super) async fn run_turn(
     .await;
     let flush_result = stream_deltas.flush().await;
     if let Some(session) = code_mode_session.as_ref() {
-        session.cancel_owner(&run.turn_id).await;
+        session.cancel_owner(&run.turn_id).await.map_err(|error| {
+            AppError::State(format!("could not cancel Code Mode callbacks: {error}"))
+        })?;
     }
     flush_result?;
     result
@@ -1721,7 +1723,7 @@ fn web_search_activity_detail(action: Option<&WebSearchAction>) -> String {
         }
         None => None,
     };
-    detail.unwrap_or_else(|| "Pesquisa na web".into())
+    detail.unwrap_or_else(|| "Web search".into())
 }
 
 fn required_visible_item_id(item: &ResponseItem) -> Result<String, AppError> {
@@ -2249,7 +2251,7 @@ mod tests {
             web_search_activity_detail(Some(&page)),
             "https://developers.openai.com/codex/app/"
         );
-        assert_eq!(web_search_activity_detail(None), "Pesquisa na web");
+        assert_eq!(web_search_activity_detail(None), "Web search");
     }
 
     #[test]

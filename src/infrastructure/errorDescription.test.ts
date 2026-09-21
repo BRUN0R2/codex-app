@@ -31,17 +31,27 @@ describe("error descriptions", () => {
     const diagnostic = describeDiagnosticError(wrapped);
 
     expect(diagnostic).toContain("failed to render the turn");
-    expect(diagnostic).toContain("Causado por:");
+    expect(diagnostic).toContain("Caused by:");
     expect(diagnostic).toContain("original failure");
   });
 
-  it("bounds diagnostics and terminates circular causes", () => {
+  it("bounds diagnostics without throwing", () => {
     const error = new Error("x".repeat(5_000));
-    Object.defineProperty(error, "cause", { value: error });
 
     const diagnostic = describeDiagnosticError(error);
 
     expect(diagnostic.length).toBeLessThanOrEqual(4_000);
+    expect(() => describeDiagnosticError(error)).not.toThrow();
+  });
+
+  it("terminates circular causes with an English marker", () => {
+    const error = new Error("circular failure");
+    Object.defineProperty(error, "cause", { value: error });
+
+    const diagnostic = describeDiagnosticError(error);
+
+    expect(diagnostic).toContain("Caused by:");
+    expect(diagnostic).toContain("[circular cause omitted]");
     expect(() => describeDiagnosticError(error)).not.toThrow();
   });
 });

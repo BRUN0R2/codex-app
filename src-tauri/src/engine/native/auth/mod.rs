@@ -332,7 +332,7 @@ impl AuthInner {
             return Err(AuthError::AlreadyAuthenticated);
         }
 
-        let callback = CallbackServer::bind().await?;
+        let callback = CallbackServer::bind()?;
         let pkce = generate_pkce();
         let state = generate_state();
         let login_id = Uuid::now_v7().to_string();

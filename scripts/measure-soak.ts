@@ -76,20 +76,19 @@ const activitySource = {
   },
 } as const;
 const activitySessions = new ActivityVirtualizerStore(COLLAPSED_ACTIVITY_HEIGHT, 2);
-let collapsedActivityVirtualizer: VariableSizeVirtualizer | undefined;
-const collapsedActivityBuildMilliseconds = duration(() => {
-  collapsedActivityVirtualizer = activitySessions.activateSource(
-    "thread:activity-files",
-    activitySource,
-    "1280:14:unified",
-    0,
-    COLLAPSED_ACTIVITY_HEIGHT,
-  ).virtualizer;
-});
+const collapsedActivityBuild = durationValue(
+  () =>
+    activitySessions.activateSource(
+      "thread:activity-files",
+      activitySource,
+      "1280:14:unified",
+      0,
+      COLLAPSED_ACTIVITY_HEIGHT,
+    ).virtualizer,
+);
+const collapsedActivityVirtualizer = collapsedActivityBuild.value;
+const collapsedActivityBuildMilliseconds = collapsedActivityBuild.milliseconds;
 const collapsedActivityBuildKeyReads = activityKeyReads;
-if (collapsedActivityVirtualizer === undefined) {
-  throw new Error("Activity soak benchmark did not create its collapsed virtualizer.");
-}
 let maximumCollapsedActivities = 0;
 let collapsedActivityRangeChecksum = 0;
 const collapsedActivityQueryMilliseconds = duration(() => {
@@ -112,35 +111,28 @@ const collapsedActivityQueryMilliseconds = duration(() => {
       ACTIVITY_VIEWPORT_SIZE,
       ACTIVITY_VIEWPORT_SIZE,
     );
-    maximumCollapsedActivities = Math.max(
-      maximumCollapsedActivities,
-      range.end - range.start,
-    );
+    maximumCollapsedActivities = Math.max(maximumCollapsedActivities, range.end - range.start);
     collapsedActivityRangeChecksum +=
       range.start +
       range.end +
       Math.round(
-        projectVirtualLogicalOffset(
-          viewport,
-          collapsedActivityVirtualizer.offsetOf(range.start),
-        ),
+        projectVirtualLogicalOffset(viewport, collapsedActivityVirtualizer.offsetOf(range.start)),
       );
   }
 });
 
-let expandedActivityVirtualizer: VariableSizeVirtualizer | undefined;
-const expandedActivityBuildMilliseconds = duration(() => {
-  expandedActivityVirtualizer = activitySessions.activateSource(
-    "thread:activity-files",
-    activitySource,
-    "1280:14:unified",
-    1,
-    EXPANDED_ACTIVITY_HEIGHT,
-  ).virtualizer;
-});
-if (expandedActivityVirtualizer === undefined) {
-  throw new Error("Activity soak benchmark did not create its expanded virtualizer.");
-}
+const expandedActivityBuild = durationValue(
+  () =>
+    activitySessions.activateSource(
+      "thread:activity-files",
+      activitySource,
+      "1280:14:unified",
+      1,
+      EXPANDED_ACTIVITY_HEIGHT,
+    ).virtualizer,
+);
+const expandedActivityVirtualizer = expandedActivityBuild.value;
+const expandedActivityBuildMilliseconds = expandedActivityBuild.milliseconds;
 const expandedLogicalTotalSize = expandedActivityVirtualizer.totalSize();
 const expandedGeometry = resolveBoundedVirtualViewport({
   logicalTotalSize: expandedLogicalTotalSize,
@@ -171,10 +163,7 @@ const expandedActivityQueryMilliseconds = duration(() => {
       range.start +
       range.end +
       Math.round(
-        projectVirtualLogicalOffset(
-          viewport,
-          expandedActivityVirtualizer.offsetOf(range.start),
-        ),
+        projectVirtualLogicalOffset(viewport, expandedActivityVirtualizer.offsetOf(range.start)),
       );
   }
 });
@@ -245,11 +234,10 @@ const timelineSessions = new TimelineThreadSessionStore(
   () => new VariableSizeVirtualizer(ESTIMATED_TURN_HEIGHT),
   16,
 );
-const timelineSessionTurns = Array.from({ length: TIMELINE_SESSION_COUNT }, (_, sessionIndex) =>
-  Array.from(
-    { length: TIMELINE_SESSION_TURN_COUNT },
-    (_, turnIndex) => ({ id: `turn-${turnIndex}` }),
-  ),
+const timelineSessionTurns = Array.from({ length: TIMELINE_SESSION_COUNT }, () =>
+  Array.from({ length: TIMELINE_SESSION_TURN_COUNT }, (_, turnIndex) => ({
+    id: `turn-${turnIndex}`,
+  })),
 );
 for (let sessionIndex = 0; sessionIndex < TIMELINE_SESSION_COUNT; sessionIndex += 1) {
   const threadId = `thread-${sessionIndex}`;
@@ -332,9 +320,11 @@ const projectionActivities = Array.from(
     command: `command ${index}`,
     cwd: ".",
     processId: null,
+    startedAt: index,
     source: "agent",
     status: "completed",
     aggregatedOutput: null,
+    liveOutput: null,
     exitCode: 0,
     durationMs: index,
   }),
@@ -464,9 +454,16 @@ process.stdout.write(
 );
 
 function duration(operation: () => void): number {
+  return durationValue(operation).milliseconds;
+}
+
+function durationValue<T>(operation: () => T): {
+  readonly milliseconds: number;
+  readonly value: T;
+} {
   const startedAt = performance.now();
-  operation();
-  return performance.now() - startedAt;
+  const value = operation();
+  return { milliseconds: performance.now() - startedAt, value };
 }
 
 function roundMilliseconds(value: number): number {

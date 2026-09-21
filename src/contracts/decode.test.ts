@@ -607,6 +607,39 @@ describe("decodificação dos contratos nativos", () => {
     ).toThrow(ContractError);
   });
 
+  it("preserva o diagnóstico emitido quando o login nativo falha", () => {
+    expect(
+      decodeEngineNotification({
+        method: "auth.loginCompleted",
+        params: {
+          loginId: "login-1",
+          success: false,
+          error: "the local OAuth callback is unavailable on ports 1455 and 1457",
+        },
+      }),
+    ).toEqual({
+      method: "auth.loginCompleted",
+      params: {
+        loginId: "login-1",
+        success: false,
+        error: "the local OAuth callback is unavailable on ports 1455 and 1457",
+      },
+    });
+  });
+
+  it("limita o detalhe operacional da falha de login", () => {
+    expect(() =>
+      decodeEngineNotification({
+        method: "auth.loginCompleted",
+        params: {
+          loginId: "login-1",
+          success: false,
+          error: "x".repeat(4 * 1_024 + 1),
+        },
+      }),
+    ).toThrow(ContractError);
+  });
+
   it("limita a prévia combinada de stdout e stderr do comando ativo", () => {
     const notification = (liveOutput: unknown) => ({
       method: "item.started",
@@ -968,7 +1001,7 @@ describe("decodificação dos contratos nativos", () => {
     };
     const payload = {
       lunaReserveAvailable: true,
-      planPrice: null,
+      planPrices: [],
       generalRateLimit: reserve,
       additionalRateLimitsByLimitId: { base_model_inference: reserve },
     };
@@ -1002,7 +1035,7 @@ describe("decodificação dos contratos nativos", () => {
       generalRateLimit: general,
       additionalRateLimitsByLimitId: { base_model_inference: reserve },
       lunaReserveAvailable: true,
-      planPrice: null,
+      planPrices: [],
     });
 
     expect(decoded.generalRateLimit.primary?.usedPercent).toBe(62);

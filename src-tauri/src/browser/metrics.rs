@@ -188,7 +188,10 @@ impl BrowserMetrics {
         Ok(metric)
     }
 
-    pub(crate) fn recent(&self, conversation_id: &str) -> Vec<BrowserActionMetric> {
+    pub(crate) fn recent(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<BrowserActionMetric>, AppError> {
         self.state
             .lock()
             .map(|state| {
@@ -199,7 +202,7 @@ impl BrowserMetrics {
                     .cloned()
                     .collect()
             })
-            .unwrap_or_default()
+            .map_err(|_| AppError::State("browser metrics ownership was poisoned".into()))
     }
 }
 
@@ -327,7 +330,13 @@ mod tests {
                 })
                 .expect("metric should persist");
         }
-        assert_eq!(metrics.recent("thread").len(), super::MAX_RECENT_METRICS);
+        assert_eq!(
+            metrics
+                .recent("thread")
+                .expect("recent metrics should be readable")
+                .len(),
+            super::MAX_RECENT_METRICS
+        );
         if let Some(path) = metrics.state.lock().expect("metrics state").path.clone() {
             let _ = fs::remove_file(path);
         }

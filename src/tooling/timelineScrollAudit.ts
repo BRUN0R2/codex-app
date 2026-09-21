@@ -100,3 +100,11 @@ export async function probeTimelineScrollCommit(timeline: HTMLElement): Promise<
     clearTimeout(timeout);
   }
 }
+
+/** Establishes a settled origin before frame-interval instrumentation begins. */
+export async function settleTimelineScrollBeforeMeasurement(timeline: HTMLElement): Promise<void> {
+  const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  timeline.scrollTop = 0;
+  await frame();
+  await frame();
+}

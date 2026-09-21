@@ -1,10 +1,6 @@
 import { performance } from "node:perf_hooks";
 
-import {
-  countDiffDisplayRows,
-  createDiffDocument,
-  summarizeDiff,
-} from "../src/ui/diffDocument.ts";
+import { countDiffDisplayRows, createDiffDocument, summarizeDiff } from "../src/ui/diffDocument.ts";
 import { calculateDiffVirtualRange, DIFF_ROW_HEIGHT_PX } from "../src/ui/diffViewport.ts";
 import type { SyntaxBlock, SyntaxLimits } from "../src/ui/syntax/contracts.ts";
 import { DiffSyntaxHighlighter } from "../src/ui/syntax/diffHighlighter.ts";
@@ -37,10 +33,7 @@ const fullHighlightMilliseconds = duration(() => {
 let maximumMountedRows = 0;
 let viewportChecksum = 0;
 const viewportQueriesMilliseconds = duration(() => {
-  const maximumScrollTop = Math.max(
-    1,
-    document.unifiedRows.length * DIFF_ROW_HEIGHT_PX - 900,
-  );
+  const maximumScrollTop = Math.max(1, document.unifiedRows.length * DIFF_ROW_HEIGHT_PX - 900);
   for (let query = 0; query < VIEWPORT_QUERY_COUNT; query += 1) {
     const scrollTop = (query * 104_729) % maximumScrollTop;
     const range = calculateDiffVirtualRange({
@@ -150,9 +143,7 @@ process.stdout.write(
   )}\n`,
 );
 
-function tokenCount(
-  result: ReturnType<typeof tokenizeSyntaxBlock>,
-): number {
+function tokenCount(result: ReturnType<typeof tokenizeSyntaxBlock>): number {
   if (result.kind !== "highlighted") {
     return 0;
   }

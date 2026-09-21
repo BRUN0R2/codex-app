@@ -31,6 +31,18 @@ arbitrary JSON path.
 | browser | `browser_tab_create`, `browser_tab_navigate`, `browser_tab_back`, `browser_tab_forward`, `browser_tab_reload`, `browser_tab_close`, `browser_viewport_set`, `browser_surface_sync` |
 | desktop | `application_menu_update`, `application_preferences_read`, `application_preferences_update`, `application_workspace_open` |
 
+ChatGPT OAuth reserves the first available callback port from `1455` and
+`1457`. The Rust callback server binds the selected port on both
+`127.0.0.1` and `::1` when the address families are available, while the
+registered redirect remains `http://localhost:<port>/auth/callback`. A port
+is considered unavailable when one supported loopback family cannot be
+reserved, so the browser cannot resolve `localhost` to an address that the
+server does not accept. Native login failures include their bounded
+operational detail in `auth.loginCompleted`; the interface keeps the
+translated message and renders that detail separately. The external OAuth URL
+uses the opener plugin's `Promise<void>` contract directly; its JavaScript
+wrapper resolves `undefined`, so it is not decoded as a raw native `null` unit.
+
 `application_workspace_open` accepts only an existing, canonicalized absolute
 directory. The WebView cannot open paths directly.
 
@@ -77,7 +89,7 @@ Golden fixtures in `src/contracts/fixtures` lock Rust and TypeScript together.
 Regenerate them only intentionally:
 
 ```powershell
-cargo test --locked --manifest-path src-tauri/Cargo.toml engine::contracts_fixtures::tests::regenerate_golden_contract_fixtures -- --ignored
+pnpm native:cargo test --locked --manifest-path src-tauri/Cargo.toml engine::contracts_fixtures::tests::regenerate_golden_contract_fixtures -CargoTrailingArguments "--ignored"
 ```
 
 Account usage preserves the provider's additional limit buckets. The
@@ -98,6 +110,17 @@ credit reads and starts fresh reads before announcing success. Late responses
 cannot restore consumed credits or pre-reset limits; failed refreshes remain
 visible. Percentages always come from the provider. The browser preview models
 credit consumption and updated general/Spark windows for local integration tests.
+
+The authenticated `wham/usage` response is the required source for account limits.
+Localized plan pricing is optional enrichment: a failure in the account-billing or
+checkout-pricing endpoints cannot invalidate the usage response. The native engine
+returns the limits with an empty `planPrices` catalog and records the enrichment
+failure in the provider diagnostics, keeping the failure observable without
+withholding usable quota data. Checkout-pricing amounts are major currency units
+encoded as JSON numbers, including values such as `39.99`. The native engine
+converts every priced consumer plan (Go, Plus, Pro Lite, Pro) to integer minor
+units with `minor_unit_exponent` before the interface formats them. Exponents are
+whole JSON numbers, including `0.0`.
 
 The sidebar width is a local layout preference, bounded so the main panel
 retains its minimum width and adjustable with the keyboard or pointer divider.

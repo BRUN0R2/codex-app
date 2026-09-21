@@ -330,7 +330,10 @@ impl BrowserManager {
         }
     }
 
-    pub(crate) fn recent_metrics(&self, conversation_id: &str) -> Vec<BrowserActionMetric> {
+    pub(crate) fn recent_metrics(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<BrowserActionMetric>, AppError> {
         self.metrics.recent(conversation_id)
     }
 

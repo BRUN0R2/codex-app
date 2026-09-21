@@ -2,6 +2,7 @@ import { Show } from "solid-js";
 
 import { useI18n } from "../i18n/context";
 import type { AppController } from "../state/appController";
+import { formatUiError } from "../state/uiError";
 
 type LoginScreenController = Pick<
   AppController,
@@ -58,7 +59,7 @@ export function LoginScreen(props: { readonly controller: LoginScreenController 
       <Show when={props.controller.error()}>
         {(message) => (
           <p class="login-error" role="alert">
-            {message()}
+            {formatUiError(message(), i18n.messages().errors)}
           </p>
         )}
       </Show>

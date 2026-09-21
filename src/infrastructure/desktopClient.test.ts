@@ -25,7 +25,7 @@ describe("desktop client", () => {
     installBrowserPreviewRuntime(async (command, args) => {
       calls.push({ args, command });
       if (calls.length === 1) await firstGate;
-      return undefined;
+      return null;
     });
 
     const first = synchronizeApplicationMenu(english.messages.nativeMenu);

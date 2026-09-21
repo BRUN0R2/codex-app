@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
-  "version": "150.4.0",
-  "releaseBaseUrl": "https://github.com/openai/codex/releases/download/rusty-v8-v150.4.0",
+  "version": "152.2.0",
+  "releaseBaseUrl": "https://github.com/openai/codex/releases/download/rusty-v8-v152.2.0",
   "targets": {
     "x86_64-pc-windows-msvc": {
       "archiveAssetName": "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz",
-      "archiveSha256": "732ec5da4243aa166799780c8519a5eea6f32f6e47657a323342794dc3c239d6",
+      "archiveSha256": "cd829415695b30ad61b306b23a381e11276f14bb0b46815ac5ed8b96711d002d",
       "bindingAssetName": "src_binding_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.rs",
-      "bindingSha256": "dabf78ba1faac127660db9862b1d0354175c71b8db2d4fcb5bacbd9c93576b16"
+      "bindingSha256": "572ed16ff09bb7944f4b35c659ff62dcd3faf43a0351e3f94f011e01b2f92a62"
     },
     "aarch64-pc-windows-msvc": {
       "archiveAssetName": "rusty_v8_ptrcomp_sandbox_release_aarch64-pc-windows-msvc.lib.gz",
-      "archiveSha256": "54722842af36b74248c403ff531254efac6ff65d281198bab0c6350fc1188ad4",
+      "archiveSha256": "daf327876f7753a94b3b05d6d64776258def3ae67503ac75db9c35c6deaa28a5",
       "bindingAssetName": "src_binding_ptrcomp_sandbox_release_aarch64-pc-windows-msvc.rs",
-      "bindingSha256": "dabf78ba1faac127660db9862b1d0354175c71b8db2d4fcb5bacbd9c93576b16"
+      "bindingSha256": "572ed16ff09bb7944f4b35c659ff62dcd3faf43a0351e3f94f011e01b2f92a62"
     }
   }
 }

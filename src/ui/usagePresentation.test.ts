@@ -29,7 +29,7 @@ function response(
   return {
     generalRateLimit: primary,
     additionalRateLimitsByLimitId: additional,
-    planPrice: null,
+    planPrices: [],
     lunaReserveAvailable: false,
   };
 }

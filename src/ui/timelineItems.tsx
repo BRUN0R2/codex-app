@@ -1,20 +1,9 @@
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  Match,
-  onCleanup,
-  Show,
-  Switch,
-  untrack,
-} from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from "solid-js";
 
 import type { FileChange, ThreadItem, VisibleThreadItem } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
 
-import { projectName } from "../state/projects";
 import type { VisibleThreadTurn } from "../state/visibleTurnSequence";
 import { activityContentProjectionCache } from "./activityContentProjectionCache";
 import { fileName, isFileReadTool, toolIconName, toolLabel } from "./activityLabels";
@@ -40,6 +29,7 @@ import {
 } from "./agentActivityPresentation";
 import { CodexGlyph } from "./CodexGlyph";
 import { DiffView } from "./DiffView";
+import { emptyConversationTitle } from "./emptyConversation";
 import { fileChangeLineStats } from "./fileChangeStats";
 import { frontendFailureMessage, useFrontendFailureReporter } from "./frontendFailure";
 import { Icon, type IconName } from "./Icon";
@@ -391,6 +381,7 @@ export function EmptyConversation(props: {
 }) {
   const i18n = useI18n();
   const messages = () => i18n.messages().timeline;
+  const title = () => emptyConversationTitle(props.mode, props.workspace, messages());
   const suggestions = () => starterSuggestions(messages());
   return (
     <section aria-labelledby="empty-conversation-title" class="empty-conversation">
@@ -399,19 +390,7 @@ export function EmptyConversation(props: {
           <CodexGlyph />
         </div>
       </Show>
-      <h2 id="empty-conversation-title">
-        <Switch>
-          <Match when={props.mode === "chat"}>{messages().ready}</Match>
-          <Match when={props.mode === "work"}>{messages().workQuestion}</Match>
-          <Match when={props.mode === "codex"}>
-            <Show when={props.workspace} fallback={messages().todayQuestion}>
-              {(workspace) =>
-                formatMessage(messages().projectQuestion, { project: projectName(workspace()) })
-              }
-            </Show>
-          </Match>
-        </Switch>
-      </h2>
+      <h2 id="empty-conversation-title">{title()}</h2>
       <Show when={props.mode === "codex" && props.workspace !== null}>
         <fieldset class="starter-suggestions">
           <legend class="visually-hidden">{messages().starterSuggestions}</legend>

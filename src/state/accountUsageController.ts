@@ -31,20 +31,21 @@ import type { AppNotificationInput } from "./appNotifications";
 import type { SessionControllerHost } from "./controllerSupport";
 import { findUsageLimitReset } from "./notificationTransitions";
 import { mergeRateLimitUpdate } from "./rateLimits";
+import { type UiError, uiError } from "./uiError";
 
 export interface AccountUsageController {
   readonly accountProfile: Accessor<AccountProfileResponse | null>;
-  readonly accountProfileError: Accessor<string | null>;
+  readonly accountProfileError: Accessor<UiError | null>;
   readonly accountProfileLoading: Accessor<boolean>;
-  readonly autoTopUpError: Accessor<string | null>;
+  readonly autoTopUpError: Accessor<UiError | null>;
   readonly autoTopUpLoading: Accessor<boolean>;
   readonly autoTopUpSettings: Accessor<AutoTopUpSettingsSnapshot | null>;
   readonly rateLimits: Accessor<AccountRateLimitsResponse | null>;
-  readonly rateLimitsError: Accessor<string | null>;
+  readonly rateLimitsError: Accessor<UiError | null>;
   readonly rateLimitsLoading: Accessor<boolean>;
   readonly usageResetRedeemingId: Accessor<string | null>;
   readonly usageResets: Accessor<UsageResetCreditsResponse | null>;
-  readonly usageResetsError: Accessor<string | null>;
+  readonly usageResetsError: Accessor<UiError | null>;
   readonly usageResetsLoading: Accessor<boolean>;
   readonly applyRateLimitNotification: (rateLimits: RateLimitUpdateSnapshot) => void;
   readonly applySignedOut: () => void;
@@ -103,19 +104,19 @@ export function createAccountUsageController(
   } = dependencies;
 
   const [accountProfile, setAccountProfile] = createSignal<AccountProfileResponse | null>(null);
-  const [accountProfileError, setAccountProfileError] = createSignal<string | null>(null);
+  const [accountProfileError, setAccountProfileError] = createSignal<UiError | null>(null);
   const [accountProfileLoading, setAccountProfileLoading] = createSignal(false);
   const [rateLimits, setRateLimits] = createSignal<AccountRateLimitsResponse | null>(null);
-  const [rateLimitsError, setRateLimitsError] = createSignal<string | null>(null);
+  const [rateLimitsError, setRateLimitsError] = createSignal<UiError | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = createSignal(false);
   const [usageResets, setUsageResets] = createSignal<UsageResetCreditsResponse | null>(null);
-  const [usageResetsError, setUsageResetsError] = createSignal<string | null>(null);
+  const [usageResetsError, setUsageResetsError] = createSignal<UiError | null>(null);
   const [usageResetsLoading, setUsageResetsLoading] = createSignal(false);
   const [usageResetRedeemingId, setUsageResetRedeemingId] = createSignal<string | null>(null);
   const [autoTopUpSettings, setAutoTopUpSettings] = createSignal<AutoTopUpSettingsSnapshot | null>(
     null,
   );
-  const [autoTopUpError, setAutoTopUpError] = createSignal<string | null>(null);
+  const [autoTopUpError, setAutoTopUpError] = createSignal<UiError | null>(null);
   const [autoTopUpLoading, setAutoTopUpLoading] = createSignal(false);
 
   let pendingAccountProfileReads = 0;
@@ -147,8 +148,9 @@ export function createAccountUsageController(
     apply: applyRateLimits,
     setLoading: setRateLimitsLoading,
     reportError: (reason) => {
-      setRateLimitsError(describeError(reason));
-      addDiagnostic({ stream: "runtime", message: describeError(reason) });
+      const message = describeError(reason);
+      setRateLimitsError(uiError("rateLimitsLoad", message));
+      addDiagnostic({ stream: "runtime", message });
     },
     host: refreshHost,
   });
@@ -163,7 +165,7 @@ export function createAccountUsageController(
     setLoading: setUsageResetsLoading,
     reportError: (reason) => {
       const message = describeError(reason);
-      setUsageResetsError(message);
+      setUsageResetsError(uiError("usageResetsLoad", message));
       addDiagnostic({ stream: "runtime", message });
     },
     host: refreshHost,
@@ -179,7 +181,7 @@ export function createAccountUsageController(
     },
     reportError: (reason) => {
       const message = describeError(reason);
-      setAccountProfileError(message);
+      setAccountProfileError(uiError("accountProfileLoad", message));
       addDiagnostic({ stream: "runtime", message });
     },
   });
@@ -354,7 +356,7 @@ export function createAccountUsageController(
     } catch (reason) {
       if (!isCurrentSession()) return null;
       const message = describeError(reason);
-      setUsageResetsError(message);
+      setUsageResetsError(uiError("usageResetFailed", message));
       addDiagnostic({ stream: "runtime", message });
       return null;
     } finally {
@@ -373,7 +375,7 @@ export function createAccountUsageController(
       return true;
     } catch (reason) {
       const message = describeError(reason);
-      setAutoTopUpError(message);
+      setAutoTopUpError(uiError("autoTopUpFailed", message));
       addDiagnostic({ stream: "runtime", message });
       return false;
     } finally {
@@ -419,7 +421,7 @@ export function createAccountUsageController(
       return true;
     } catch (reason) {
       const message = describeError(reason);
-      setAutoTopUpError(message);
+      setAutoTopUpError(uiError("autoTopUpFailed", message));
       addDiagnostic({ stream: "runtime", message });
       return false;
     } finally {
@@ -474,18 +476,18 @@ function accountSessionKey(value: AccountReadResponse | undefined): string | nul
     : (currentAccount.email ?? "chatgpt");
 }
 
-function usageResetRedemptionError(code: string): string {
+function usageResetRedemptionError(code: string): UiError {
   switch (code) {
     case "expired":
     case "credit_expired":
-      return "This reset has expired and can no longer be used.";
+      return uiError("usageResetExpired");
     case "not_available":
     case "no_credits_available":
-      return "No reset is available to use.";
+      return uiError("usageResetUnavailable");
     case "ineligible":
     case "not_eligible":
-      return "This account is not eligible to use the reset.";
+      return uiError("usageResetIneligible");
     default:
-      return `The account reset could not be used (${code}).`;
+      return uiError("usageResetFailed");
   }
 }

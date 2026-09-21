@@ -58,7 +58,7 @@ function option(
   };
 }
 
-describe("seleção de inteligência do Chat", () => {
+describe("Chat intelligence selection", () => {
   beforeEach(() => {
     Object.defineProperty(globalThis, "localStorage", {
       configurable: true,
@@ -66,7 +66,7 @@ describe("seleção de inteligência do Chat", () => {
     });
   });
 
-  it("deriva o padrão do catálogo consumidor sem persistir override", () => {
+  it("derives the consumer catalog default without persisting an override", () => {
     const options = [
       option("instant", "Instantâneo"),
       option("thinking", "Pensamento", { isDefault: true, thinkingEffort: "standard" }),
@@ -80,7 +80,7 @@ describe("seleção de inteligência do Chat", () => {
     expect(localStorage.length).toBe(0);
   });
 
-  it("persiste somente a opção explícita e permite voltar ao padrão", () => {
+  it("persists only the explicit option and allows returning to the default", () => {
     const selection = { version: 2, optionId: "gpt-5.6-pro#pro#max" } as const;
 
     saveChatIntelligenceSelection(selection);
@@ -90,7 +90,7 @@ describe("seleção de inteligência do Chat", () => {
     expect(loadChatIntelligenceSelection()).toBeNull();
   });
 
-  it("representa Pro como preset oficial com modelo e thinking_effort próprios", () => {
+  it("represents Pro as an official preset with its own model and thinking effort", () => {
     const pro = option("gpt-5.6-pro#pro#max", "Pro", {
       model: "gpt-5.6-pro",
       lane: "pro",
@@ -105,7 +105,7 @@ describe("seleção de inteligência do Chat", () => {
     expect(chatOptionLabel(pro)).toBe("GPT-5.6 Pro");
   });
 
-  it("torna explícita uma opção removida do catálogo atual", () => {
+  it("exposes a removed option from the current catalog explicitly", () => {
     const current = option("current", "Atual", { isDefault: true });
 
     expect(
@@ -116,7 +116,7 @@ describe("seleção de inteligência do Chat", () => {
     ).toMatchObject({ option: { id: "current" }, source: "selectionUnavailable" });
   });
 
-  it("distingue catálogo ainda indisponível de uma seleção removida", () => {
+  it("distinguishes an unavailable catalog from a removed selection", () => {
     expect(
       resolveChatIntelligence([], {
         version: 2,
@@ -125,7 +125,7 @@ describe("seleção de inteligência do Chat", () => {
     ).toEqual({ option: undefined, source: "catalogUnavailable" });
   });
 
-  it("rejeita preferência incompatível sem mutação silenciosa", () => {
+  it("rejects an incompatible preference without silent mutation", () => {
     localStorage.setItem(
       PROFILE_STORAGE_KEYS.chatIntelligence,
       JSON.stringify({
@@ -140,7 +140,7 @@ describe("seleção de inteligência do Chat", () => {
     expect(localStorage.length).toBe(1);
   });
 
-  it("não lê nem remove a preferência do perfil anterior", () => {
+  it("does not read or remove the previous profile preference", () => {
     localStorage.setItem("chatgpt-last-selected-model-v1", JSON.stringify({ version: 2 }));
 
     expect(loadChatIntelligenceSelection()).toBeNull();

@@ -20,13 +20,14 @@ import type {
 } from "../contracts/types";
 import { useI18n } from "../i18n/context";
 import { formatMessage, type TranslationMessages } from "../i18n/messages";
-import type { AppController } from "../state/appController";
+import type { AppController, ClipboardImageResult } from "../state/appController";
 import {
   type ComposerDraftState,
   ComposerDraftStore,
   composerDraftKey,
   sameComposerDraft,
 } from "../state/composerDrafts";
+import { formatUiError, type UiError, uiError } from "../state/uiError";
 
 type ComposerController = Pick<
   AppController,
@@ -45,6 +46,7 @@ type ComposerController = Pick<
   | "models"
   | "pendingOperations"
   | "queuedMessages"
+  | "reportError"
   | "saveClipboardImage"
   | "sendMessage"
   | "sendQueuedMessageNow"
@@ -69,6 +71,7 @@ import {
   saveQueueingEnabled,
 } from "../state/messageQueue";
 import { ContextWindowIndicator } from "./ContextWindowIndicator";
+import { COMPOSER_ATTACHMENT_MAXIMUM_COUNT, mergeComposerAttachments } from "./composerAttachments";
 import { composerControlAvailability } from "./composerControlAvailability";
 import { canSubmitComposerMessage, shouldWarmComposerModelCatalog } from "./composerSubmission";
 import { Icon } from "./Icon";
@@ -89,7 +92,6 @@ import {
 import { presentServiceTier, selectedServiceTierLabel } from "./serviceTierPresentation";
 
 const COMPOSER_MESSAGE_MAXIMUM_CHARACTERS: number = 1_048_576;
-const COMPOSER_ATTACHMENT_MAXIMUM_COUNT: number = 12;
 
 export interface ComposerProps {
   readonly controller: ComposerController;
@@ -111,16 +113,16 @@ export function Composer(props: ComposerProps) {
   const messages = () => i18n.messages().composer;
   let initialChatSelection: ChatIntelligenceSelection | null = null;
   let initialQueueingEnabled = true;
-  let initialPreferenceError: string | null = null;
+  let initialPreferenceError: UiError | null = null;
   try {
     initialChatSelection = loadChatIntelligenceSelection();
-  } catch (reason) {
-    initialPreferenceError = errorMessage(reason);
+  } catch {
+    initialPreferenceError = uiError("composerPreferenceLoad");
   }
   try {
     initialQueueingEnabled = loadQueueingEnabled();
-  } catch (reason) {
-    initialPreferenceError = errorMessage(reason);
+  } catch {
+    initialPreferenceError = uiError("composerPreferenceLoad");
   }
   const mode = () => props.controller.conversationMode();
   const [text, setText] = createSignal("");
@@ -133,7 +135,7 @@ export function Composer(props: ComposerProps) {
   );
   const [sending, setSending] = createSignal(false);
   const [queueingEnabled, setQueueingEnabled] = createSignal(initialQueueingEnabled);
-  const [attachmentError, setAttachmentError] = createSignal<string | null>(initialPreferenceError);
+  const [composerError, setComposerError] = createSignal<UiError | null>(initialPreferenceError);
   const [modelMenuOpen, setModelMenuOpen] = createSignal(false);
   const [modelMenuSection, setModelMenuSection] = createSignal<ModelMenuSection | null>(null);
   const [permissionMenuOpen, setPermissionMenuOpen] = createSignal(false);
@@ -221,8 +223,8 @@ export function Composer(props: ComposerProps) {
     try {
       clearChatIntelligenceSelection();
       setChatSelection(null);
-    } catch (reason) {
-      setAttachmentError(errorMessage(reason));
+    } catch {
+      setComposerError(uiError("composerPreferenceSave"));
     }
   });
 
@@ -255,7 +257,7 @@ export function Composer(props: ComposerProps) {
         const nextDraft = draftStore.read(nextDraftKey);
         setText(nextDraft.text);
         setAttachments(nextDraft.attachments);
-        setAttachmentError(null);
+        setComposerError(null);
       },
       { defer: true },
     ),
@@ -313,9 +315,9 @@ export function Composer(props: ComposerProps) {
     try {
       saveChatIntelligenceSelection(selection);
       setChatSelection(selection);
-      setAttachmentError(null);
-    } catch (reason) {
-      setAttachmentError(errorMessage(reason));
+      setComposerError(null);
+    } catch {
+      setComposerError(uiError("composerPreferenceSave"));
     }
   }
 
@@ -323,9 +325,9 @@ export function Composer(props: ComposerProps) {
     try {
       clearChatIntelligenceSelection();
       setChatSelection(null);
-      setAttachmentError(null);
-    } catch (reason) {
-      setAttachmentError(errorMessage(reason));
+      setComposerError(null);
+    } catch {
+      setComposerError(uiError("composerPreferenceSave"));
     }
   }
 
@@ -423,11 +425,16 @@ export function Composer(props: ComposerProps) {
     const result = await props.controller.chooseAttachments();
     if (result.type === "cancelled") return;
     if (result.type === "failed") {
-      setAttachmentError(result.message);
+      setComposerError(result.error);
       return;
     }
-    setAttachments(mergeAttachments(attachments(), result.attachments));
-    setAttachmentError(null);
+    const merged = mergeComposerAttachments(attachments(), result.attachments);
+    if (!merged.ok) {
+      setComposerError(uiError("attachmentLimitReached"));
+      return;
+    }
+    setAttachments(merged.attachments);
+    setComposerError(null);
   }
 
   async function send(): Promise<void> {
@@ -495,7 +502,7 @@ export function Composer(props: ComposerProps) {
     }
     setText("");
     setAttachments([]);
-    setAttachmentError(null);
+    setComposerError(null);
   }
 
   function currentDraft(): ComposerDraftState {
@@ -531,7 +538,7 @@ export function Composer(props: ComposerProps) {
     } else {
       applyCodexSelection(message.model, message.effort, message.serviceTier);
     }
-    setAttachmentError(null);
+    setComposerError(null);
     queueMicrotask(() => {
       textArea?.focus();
       textArea?.setSelectionRange(message.text.length, message.text.length);
@@ -543,8 +550,8 @@ export function Composer(props: ComposerProps) {
     try {
       saveQueueingEnabled(next);
       setQueueingEnabled(next);
-    } catch (reason) {
-      setAttachmentError(errorMessage(reason));
+    } catch {
+      setComposerError(uiError("composerPreferenceSave"));
     }
   }
 
@@ -558,13 +565,21 @@ export function Composer(props: ComposerProps) {
     event.preventDefault();
     try {
       const encoded = arrayBufferToBase64(await image.arrayBuffer());
-      const attachment = await props.controller.saveClipboardImage(encoded);
-      if (attachment !== null) {
-        setAttachments(mergeAttachments(attachments(), [attachment]));
-        setAttachmentError(null);
+      const result: ClipboardImageResult = await props.controller.saveClipboardImage(encoded);
+      if (result.type === "failed") {
+        setComposerError(result.error);
+        return;
       }
+      const merged = mergeComposerAttachments(attachments(), [result.attachment]);
+      if (!merged.ok) {
+        setComposerError(uiError("attachmentLimitReached"));
+        return;
+      }
+      setAttachments(merged.attachments);
+      setComposerError(null);
     } catch (reason) {
-      setAttachmentError(errorMessage(reason));
+      props.controller.reportError(reason);
+      setComposerError(uiError("imageUnavailable"));
     }
   }
 
@@ -1042,10 +1057,10 @@ export function Composer(props: ComposerProps) {
           </div>
         </div>
       </form>
-      <Show when={attachmentError()}>
-        {(message) => (
+      <Show when={composerError()}>
+        {(error) => (
           <p class="composer-input-error" role="alert">
-            {message()}
+            {formatUiError(error(), i18n.messages().errors)}
           </p>
         )}
       </Show>
@@ -1336,29 +1351,6 @@ function modelMenuSectionLabel(section: ModelMenuSection, messages: ComposerMess
     case "serviceTier":
       return messages.speed;
   }
-}
-
-function mergeAttachments(
-  current: readonly Attachment[],
-  incoming: readonly Attachment[],
-): readonly Attachment[] {
-  const paths = new Set(current.map((attachment) => attachment.path.toLocaleLowerCase("en-US")));
-  const result = [...current];
-  for (const attachment of incoming) {
-    const key = attachment.path.toLocaleLowerCase("en-US");
-    if (!paths.has(key)) {
-      result.push(attachment);
-      paths.add(key);
-    }
-  }
-  if (result.length > COMPOSER_ATTACHMENT_MAXIMUM_COUNT) {
-    throw new Error("A message accepts at most 12 attachments.");
-  }
-  return result;
-}
-
-function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "The attachments could not be processed.";
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {

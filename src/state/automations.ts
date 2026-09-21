@@ -89,7 +89,7 @@ function sortAutomations(automations: Automation[]): readonly Automation[] {
     const rightNext = right.nextRunAt ?? Number.MAX_SAFE_INTEGER;
     return (
       leftNext - rightNext ||
-      left.name.localeCompare(right.name, "pt-BR", { sensitivity: "base" }) ||
+      left.name.localeCompare(right.name, "en-US", { sensitivity: "base" }) ||
       left.id.localeCompare(right.id)
     );
   });

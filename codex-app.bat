@@ -112,7 +112,7 @@ where pnpm.exe >nul 2>nul
 if not errorlevel 1 exit /b 0
 
 echo pnpm was not found on PATH.
-echo Install pnpm 11.22.0 and make the command available on PATH.
+echo Install pnpm 12.4.1 or newer and make the command available on PATH.
 exit /b 1
 
 :failure

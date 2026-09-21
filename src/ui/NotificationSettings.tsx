@@ -14,6 +14,7 @@ import { useI18n } from "../i18n/context";
 import { formatMessage } from "../i18n/messages";
 import type { AppController } from "../state/appController";
 import type { NotificationEventPreferencePatch } from "../state/applicationPreferences";
+import { formatUiError } from "../state/uiError";
 import { Icon } from "./Icon";
 import {
   PreferenceCheckbox,
@@ -218,7 +219,7 @@ export function NotificationSettings(props: {
       <Show when={props.controller.applicationPreferencesError()}>
         {(error) => (
           <p aria-live="polite" class="application-preferences-status error">
-            {error()}
+            {formatUiError(error(), i18n.messages().errors)}
           </p>
         )}
       </Show>

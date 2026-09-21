@@ -1,9 +1,14 @@
 use std::io;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpListener;
+use tokio::net::TcpSocket;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use url::form_urlencoded;
@@ -19,6 +24,7 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CALLBACK_CONNECTIONS: usize = 32;
 const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
+const CALLBACK_LISTENER_BACKLOG: u32 = 128;
 
 const SUCCESS_HTML: &str = r#"<!doctype html>
 <html lang="en">
@@ -55,8 +61,18 @@ const ERROR_HTML: &str = r#"<!doctype html>
 </html>"#;
 
 pub(super) struct CallbackServer {
-    listener: TcpListener,
+    listeners: CallbackListeners,
     redirect_uri: String,
+}
+
+struct CallbackListeners {
+    ipv4: Option<TcpListener>,
+    ipv6: Option<TcpListener>,
+}
+
+enum CallbackBindError {
+    PortInUse,
+    System(io::Error),
 }
 
 pub(super) struct AuthorizationCallback {
@@ -65,24 +81,72 @@ pub(super) struct AuthorizationCallback {
 }
 
 impl CallbackServer {
-    pub async fn bind() -> Result<Self, AuthError> {
+    pub fn bind() -> Result<Self, AuthError> {
         for port in CALLBACK_PORTS {
-            match TcpListener::bind(("127.0.0.1", port)).await {
-                Ok(listener) => {
-                    return Ok(Self {
-                        listener,
-                        redirect_uri: format!("http://localhost:{port}{CALLBACK_PATH}"),
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,
-                Err(error) => {
+            match Self::bind_port(port) {
+                Ok(server) => return Ok(server),
+                Err(CallbackBindError::PortInUse) => continue,
+                Err(CallbackBindError::System(error)) => {
                     return Err(AuthError::InvalidCallback(format!(
-                        "could not bind port {port}: {error}"
+                        "could not bind local callback port {port}: {error}"
                     )));
                 }
             }
         }
         Err(AuthError::CallbackUnavailable)
+    }
+
+    fn bind_port(port: u16) -> Result<Self, CallbackBindError> {
+        let ipv4 = match bind_loopback_v4(port) {
+            Ok(listener) => Some(listener),
+            Err(error) if is_address_family_unavailable(&error) => None,
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                return Err(CallbackBindError::PortInUse);
+            }
+            Err(error) => return Err(CallbackBindError::System(error)),
+        };
+        let selected_port = match ipv4.as_ref() {
+            Some(listener) => listener
+                .local_addr()
+                .map_err(CallbackBindError::System)?
+                .port(),
+            None => port,
+        };
+
+        let ipv6 = match bind_loopback_v6(selected_port) {
+            Ok(listener) => Some(listener),
+            Err(error) if is_address_family_unavailable(&error) => None,
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                return Err(CallbackBindError::PortInUse);
+            }
+            Err(error) => return Err(CallbackBindError::System(error)),
+        };
+
+        if ipv4.is_none() && ipv6.is_none() {
+            return Err(CallbackBindError::System(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "neither IPv4 nor IPv6 loopback is available",
+            )));
+        }
+
+        let port = match (selected_port, ipv6.as_ref()) {
+            (0, Some(listener)) => listener
+                .local_addr()
+                .map_err(CallbackBindError::System)?
+                .port(),
+            (port, _) => port,
+        };
+        if port == 0 {
+            return Err(CallbackBindError::System(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "the callback listener did not receive a port",
+            )));
+        }
+
+        Ok(Self {
+            listeners: CallbackListeners { ipv4, ipv6 },
+            redirect_uri: format!("http://localhost:{port}{CALLBACK_PATH}"),
+        })
     }
 
     pub fn redirect_uri(&self) -> &str {
@@ -107,7 +171,7 @@ impl CallbackServer {
     ) -> Result<AuthorizationCallback, AuthError> {
         for _ in 0..MAX_CALLBACK_CONNECTIONS {
             let (mut connection, _) = self
-                .listener
+                .listeners
                 .accept()
                 .await
                 .map_err(|error| AuthError::InvalidCallback(error.to_string()))?;
@@ -151,6 +215,44 @@ impl CallbackServer {
             "too many invalid callback requests".into(),
         ))
     }
+}
+
+impl CallbackListeners {
+    async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+        match (self.ipv4.as_ref(), self.ipv6.as_ref()) {
+            (Some(ipv4), Some(ipv6)) => {
+                tokio::select! {
+                    result = ipv4.accept() => result,
+                    result = ipv6.accept() => result,
+                }
+            }
+            (Some(ipv4), None) => ipv4.accept().await,
+            (None, Some(ipv6)) => ipv6.accept().await,
+            (None, None) => Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "callback listener has no bound loopback socket",
+            )),
+        }
+    }
+}
+
+fn bind_loopback_v4(port: u16) -> io::Result<TcpListener> {
+    let socket = TcpSocket::new_v4()?;
+    socket.bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))?;
+    socket.listen(CALLBACK_LISTENER_BACKLOG)
+}
+
+fn bind_loopback_v6(port: u16) -> io::Result<TcpListener> {
+    let socket = TcpSocket::new_v6()?;
+    socket.bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port))?;
+    socket.listen(CALLBACK_LISTENER_BACKLOG)
+}
+
+fn is_address_family_unavailable(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::AddrNotAvailable | io::ErrorKind::Unsupported
+    )
 }
 
 impl AuthorizationCallback {
@@ -337,6 +439,16 @@ fn sanitize_callback_error(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+    use std::net::Ipv6Addr;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    use tokio::io::AsyncWriteExt as _;
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+
+    use super::CallbackServer;
     use super::ParsedCallback;
     use super::parse_callback_target;
     use crate::engine::native::auth::token::SecretString;
@@ -366,5 +478,43 @@ mod tests {
             panic!("callback should be authorized");
         };
         assert_eq!(code.expose(), "code/with+characters");
+    }
+
+    #[tokio::test]
+    async fn callback_server_accepts_ipv4_and_ipv6_loopback_requests() {
+        for address in [
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+        ] {
+            let server = CallbackServer::bind_port(0)
+                .unwrap_or_else(|_| panic!("callback server should bind {address:?}"));
+            let port = url::Url::parse(&server.redirect_uri)
+                .unwrap_or_else(|error| panic!("callback redirect should parse: {error}"))
+                .port()
+                .unwrap_or_else(|| panic!("callback redirect should contain a port"));
+            let expected_state = SecretString::from("expected".to_owned());
+            let wait =
+                tokio::spawn(async move { server.wait_for_authorization(&expected_state).await });
+            let mut browser = TcpStream::connect(SocketAddr::new(address.ip(), port))
+                .await
+                .unwrap_or_else(|error| panic!("callback should accept {address:?}: {error}"));
+            browser
+                .write_all(
+                    b"GET /auth/callback?code=authorization-code&state=expected HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                )
+                .await
+                .unwrap_or_else(|error| panic!("callback request should be sent: {error}"));
+
+            let callback = timeout(Duration::from_secs(2), wait)
+                .await
+                .unwrap_or_else(|error| panic!("callback should complete: {error}"))
+                .unwrap_or_else(|error| panic!("callback task should complete: {error}"))
+                .unwrap_or_else(|error| panic!("callback should be authorized: {error}"));
+            assert_eq!(callback.code.expose(), "authorization-code");
+            callback
+                .respond_success()
+                .await
+                .unwrap_or_else(|error| panic!("callback response should be sent: {error}"));
+        }
     }
 }

@@ -57,7 +57,7 @@ export function subscribeToNotificationOverlay(
 ): Promise<() => void> {
   return subscribeAtomically([
     () =>
-      listenRuntime<unknown>(ACTION_EVENT, ({ payload }) => {
+      listenRuntime(ACTION_EVENT, ({ payload }) => {
         try {
           onAction(decodeNotificationOverlayAction(payload));
         } catch (reason) {
@@ -65,7 +65,7 @@ export function subscribeToNotificationOverlay(
         }
       }),
     () =>
-      listenRuntime<unknown>(READY_EVENT, ({ payload }) => {
+      listenRuntime(READY_EVENT, ({ payload }) => {
         try {
           onReady(decodeReadyPayload(payload).channel);
         } catch (reason) {
@@ -84,7 +84,7 @@ export function subscribeToNotificationOverlaySurface(
   const events = NOTIFICATION_OVERLAY_CHANNEL_EVENTS[channel];
   return subscribeAtomically([
     () =>
-      listenRuntime<unknown>(events.presentation, ({ payload }) => {
+      listenRuntime(events.presentation, ({ payload }) => {
         try {
           onPresentation(decodeNotificationOverlayPayload(payload));
         } catch (reason) {
@@ -92,7 +92,7 @@ export function subscribeToNotificationOverlaySurface(
         }
       }),
     () =>
-      listenRuntime<unknown>(events.approvalResult, ({ payload }) => {
+      listenRuntime(events.approvalResult, ({ payload }) => {
         try {
           onApprovalResult(decodeNotificationOverlayApprovalResult(payload));
         } catch (reason) {
@@ -184,7 +184,7 @@ export async function restoreMainApplicationWindow(): Promise<void> {
 
 async function mainWindowMonitor(): Promise<Monitor> {
   // Target the main window explicitly: this code runs in the overlay webview.
-  const monitor = await invokeRuntime<unknown>("plugin:window|current_monitor", {
+  const monitor = await invokeRuntime("plugin:window|current_monitor", {
     label: MAIN_WINDOW_LABEL,
   });
   if (monitor === null) throw new Error("The monitor containing the main window is unavailable.");

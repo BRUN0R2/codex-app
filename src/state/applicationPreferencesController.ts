@@ -2,7 +2,6 @@ import { type Accessor, batch, createSignal } from "solid-js";
 
 import type { ApplicationPreferences } from "../contracts/types";
 import {
-  describeError,
   readApplicationPreferences,
   updateApplicationPreferences as updateApplicationPreferencesCommand,
 } from "../infrastructure/codexClient";
@@ -13,12 +12,13 @@ import {
   mergeApplicationPreferences,
 } from "./applicationPreferences";
 import { settledQueueTail, withBootTimeout } from "./controllerSupport";
+import { type UiError, uiError } from "./uiError";
 
 const APPLICATION_PREFERENCES_READ_TIMEOUT_MS = 15_000;
 
 export interface ApplicationPreferencesController {
   readonly applicationPreferences: Accessor<ApplicationPreferences>;
-  readonly applicationPreferencesError: Accessor<string | null>;
+  readonly applicationPreferencesError: Accessor<UiError | null>;
   readonly applicationPreferencesLoaded: Accessor<boolean>;
   readonly applicationPreferencesSaving: Accessor<boolean>;
   readonly loadApplicationPreferences: () => Promise<void>;
@@ -38,9 +38,8 @@ export function createApplicationPreferencesController(
   const [applicationPreferences, setApplicationPreferences] = createSignal<ApplicationPreferences>(
     DEFAULT_APPLICATION_PREFERENCES,
   );
-  const [applicationPreferencesError, setApplicationPreferencesError] = createSignal<string | null>(
-    null,
-  );
+  const [applicationPreferencesError, setApplicationPreferencesError] =
+    createSignal<UiError | null>(null);
   const [applicationPreferencesLoaded, setApplicationPreferencesLoaded] = createSignal(false);
   const [applicationPreferencesSaving, setApplicationPreferencesSaving] = createSignal(false);
   let applicationPreferencesQueue: Promise<void> = Promise.resolve();
@@ -62,7 +61,7 @@ export function createApplicationPreferencesController(
       setApplicationPreferences(stored);
       setApplicationPreferencesLoaded(true);
     } catch (reason) {
-      setApplicationPreferencesError(describeError(reason));
+      setApplicationPreferencesError(uiError("applicationPreferencesLoad"));
       reportError(reason);
     }
   }
@@ -97,7 +96,7 @@ export function createApplicationPreferencesController(
       if (!isDisposed() && revision === applicationPreferencesRevision) {
         batch(() => {
           setApplicationPreferences(confirmedApplicationPreferences);
-          setApplicationPreferencesError(describeError(reason));
+          setApplicationPreferencesError(uiError("applicationPreferencesSave"));
         });
       }
       reportError(reason);

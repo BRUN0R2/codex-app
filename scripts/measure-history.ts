@@ -16,26 +16,16 @@ const fullJson = JSON.stringify(fullResponse);
 const initialJson = JSON.stringify(initialResponse);
 
 assertConversationShape(fullResponse, TURN_COUNT, ITEM_COUNT);
-assertConversationShape(
-  initialResponse,
-  initialResponse.thread.turns.length,
-  INITIAL_PAGE_ITEMS,
-);
+assertConversationShape(initialResponse, initialResponse.thread.turns.length, INITIAL_PAGE_ITEMS);
 
-const fullDecode = measure(
-  "full contract decode",
-  FULL_SAMPLES,
-  () => countItems(decodeThreadResumeResponse(fullResponse)),
+const fullDecode = measure("full contract decode", FULL_SAMPLES, () =>
+  countItems(decodeThreadResumeResponse(fullResponse)),
 );
-const initialDecode = measure(
-  "initial-page contract decode",
-  PAGE_SAMPLES,
-  () => countItems(decodeThreadResumeResponse(initialResponse)),
+const initialDecode = measure("initial-page contract decode", PAGE_SAMPLES, () =>
+  countItems(decodeThreadResumeResponse(initialResponse)),
 );
-const fullParseAndDecode = measure(
-  "full JSON parse and contract decode",
-  FULL_SAMPLES,
-  () => countItems(decodeThreadResumeResponse(JSON.parse(fullJson))),
+const fullParseAndDecode = measure("full JSON parse and contract decode", FULL_SAMPLES, () =>
+  countItems(decodeThreadResumeResponse(JSON.parse(fullJson))),
 );
 const initialParseAndDecode = measure(
   "initial-page JSON parse and contract decode",
@@ -43,11 +33,7 @@ const initialParseAndDecode = measure(
   () => countItems(decodeThreadResumeResponse(JSON.parse(initialJson))),
 );
 const fullRetainedHeap = measureRetainedHeap(fullJson, ITEM_COUNT, FULL_SAMPLES);
-const initialRetainedHeap = measureRetainedHeap(
-  initialJson,
-  INITIAL_PAGE_ITEMS,
-  PAGE_SAMPLES,
-);
+const initialRetainedHeap = measureRetainedHeap(initialJson, INITIAL_PAGE_ITEMS, PAGE_SAMPLES);
 
 const fullJsonBytes = Buffer.byteLength(fullJson);
 const initialJsonBytes = Buffer.byteLength(initialJson);
@@ -108,7 +94,8 @@ function createConversation() {
   const largerText = `${baseText}x`;
   let nextItem = 0;
   const turns = Array.from({ length: TURN_COUNT }, (_, turnIndex) => {
-    const itemsInTurn = Math.floor(ITEM_COUNT / TURN_COUNT) + (turnIndex < ITEM_COUNT % TURN_COUNT ? 1 : 0);
+    const itemsInTurn =
+      Math.floor(ITEM_COUNT / TURN_COUNT) + (turnIndex < ITEM_COUNT % TURN_COUNT ? 1 : 0);
     const items = Array.from({ length: itemsInTurn }, (_, itemIndex) => {
       const itemNumber = nextItem;
       nextItem += 1;
@@ -141,7 +128,7 @@ function createConversation() {
   }
   return {
     cwd: "D:\\benchmark",
-    nextCursor: null,
+    nextCursor: null as string | null,
     thread: {
       id: "benchmark-thread",
       mode: "codex",
@@ -238,14 +225,11 @@ function measure(
 }
 
 function assertConversationShape(
-  response: ReturnType<typeof createConversation>,
+  response: ConversationShape,
   expectedTurns: number,
   expectedItems: number,
 ): void {
-  if (
-    response.thread.turns.length !== expectedTurns ||
-    countItems(response) !== expectedItems
-  ) {
+  if (response.thread.turns.length !== expectedTurns || countItems(response) !== expectedItems) {
     throw new Error("History benchmark generated an invalid conversation.");
   }
 }
@@ -274,8 +258,14 @@ function measureRetainedHeap(
   return { medianBytes: median };
 }
 
-function countItems(response: ReturnType<typeof createConversation>): number {
+function countItems(response: ConversationShape): number {
   return response.thread.turns.reduce((total, turn) => total + turn.items.length, 0);
+}
+
+interface ConversationShape {
+  readonly thread: {
+    readonly turns: readonly { readonly items: readonly unknown[] }[];
+  };
 }
 
 function round(value: number): number {

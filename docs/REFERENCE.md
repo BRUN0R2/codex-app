@@ -295,6 +295,25 @@ payload alone cannot prove a cache hit or lower billable usage. Only confirmed
 provider usage establishes those results. The native transport preserves
 reasoning effort, encrypted context, tools, and output verbosity.
 
+## RTK reference
+
+The latest RTK release audited for this project is
+[`v0.49.0`](https://github.com/rtk-ai/rtk/releases/tag/v0.49.0), published
+2026-09-11. Its useful ideas are command-family filtering, bounded output with
+an explicit hidden tail, content-addressed recall, and per-filter telemetry.
+
+The local implementation already applies the relevant safety properties at the
+native tool boundary: output is spooled, incrementally readable, compacted with
+head/tail and priority coverage, marked when incomplete, and searchable without
+loading the complete result into model context. Command sessions, process trees,
+cancellation, and permissions remain owned by Rust.
+
+RTK is not added as a shell proxy or runtime dependency. Rewriting arbitrary
+shell commands would bypass the typed tool registry and permission contract;
+RTK's recall database would also duplicate the existing bounded output store and
+SQLite history. Future filtering improvements must therefore be implemented as
+typed native operations with explicit limits and regression coverage.
+
 The stable source contains an experimental `concurrent_reasoning_summaries`
 flag, disabled by default and marked `UnderDevelopment`. Its
 `sequential_cutoff` delivery changes summary event handling. This audit does
